@@ -227,6 +227,36 @@ pub fn activate(project_dir: &Path, home: &Path, proposal: &Proposal) -> String 
                 Err(err) => format!("memory append failed: {err}"),
             }
         }
+        "skill" => {
+            let slug = proposal
+                .payload
+                .get("slug")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let scope = proposal
+                .payload
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .unwrap_or("project");
+            let activated = crate::skill_federation::activate_skill(project_dir, home, scope, slug)
+                .unwrap_or(false)
+                || crate::skill_federation::activate_skill(
+                    project_dir,
+                    home,
+                    if scope == "project" {
+                        "user"
+                    } else {
+                        "project"
+                    },
+                    slug,
+                )
+                .unwrap_or(false);
+            if activated {
+                format!("skill {slug} activated — projects to harness roots on the next sync")
+            } else {
+                format!("skill {slug} has no canonical package — nothing activated")
+            }
+        }
         _ => format!(
             "activation for kind '{}' lands in M4 — recorded as approved intent",
             proposal.kind

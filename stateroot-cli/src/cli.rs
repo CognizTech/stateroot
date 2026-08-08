@@ -58,6 +58,8 @@ pub enum Command {
     Uninstall,
     /// Guided local setup (harnesses, skills).
     Setup(SetupArgs),
+    /// Local stdio MCP server (line-delimited JSON-RPC; W8 tools, local stores).
+    McpStdio,
     /// Canonical soul, overlay, projections (all local).
     Soul(SoulArgs),
     /// Local proposals (the shared approval gate).
@@ -230,6 +232,15 @@ pub enum SkillAction {
         #[arg(long)]
         json: bool,
     },
+    /// Open a proposal to activate a quarantined skill (approve projects it
+    /// into harness roots).
+    Promote {
+        /// Skill slug.
+        slug: String,
+        /// Optional rationale.
+        #[arg(long)]
+        rationale: Option<String>,
+    },
     /// Diagnose skill federation (registry, roots, counts).
     Doctor,
 }
@@ -265,6 +276,8 @@ pub enum McpAction {
     },
     /// Diagnose collisions and projection conflicts.
     Doctor,
+    /// List the local stdio MCP server's tool surface (W8 tools).
+    Tools,
     /// Remove a server from the canonical store(s) and projection ledger.
     Remove {
         /// Canonical server name to remove.

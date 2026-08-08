@@ -97,3 +97,8 @@ Read as needed:
 - `references/harnesses.md` — per-harness install layout
 - `assets/` — harness stub templates used by `stateroot skill install`
 - `scripts/` — thin wrappers: `resume.sh`, `checkpoint.sh`, `handoff.sh`, `search.sh`
+
+## Self-improvement (shared)
+
+When the user corrects you, call `learn_record`; when a fact is durable, call `memory_save`; when a procedure worked end-to-end, propose it with `skill_propose` (via the `stateroot` MCP tools where registered).
+Writes from harnesses stay quarantined (session-candidate/private) until a human approves them — never present your own proposals as already active.

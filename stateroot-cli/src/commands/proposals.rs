@@ -63,6 +63,32 @@ pub fn approve(ctx: &Ctx, id_prefix: &str, edit: Option<&str>) -> Result<()> {
     if decided.kind == "soul" {
         super::soul::refresh_persona_cache_pub(ctx);
     }
+    if decided.kind == "skill" {
+        // M4: activation → projection to harness roots (push sync, local).
+        // Pull+push: the portable → harness-roots projection runs in the
+        // engine's pull loop.
+        let options = stateroot_core::skill_federation::SyncOptions {
+            dry_run: false,
+            push: true,
+            pull: true,
+            cmd_probe: None,
+        };
+        let actions = if stateroot_core::local_store::is_stateroot_dir(&ctx.cwd) {
+            stateroot_core::skill_federation::sync_project(&ctx.cwd, &options, Some(&home))
+        } else {
+            stateroot_core::skill_federation::sync_global(&home, &options)
+        };
+        match actions {
+            Ok(actions) => {
+                for action in actions.iter().filter(|a| {
+                    a.action == "projected" || a.action == "updated" || a.action == "unchanged"
+                }) {
+                    println!("  [{}] {} — {}", action.action, action.slug, action.detail);
+                }
+            }
+            Err(err) => super::note!("warning: projection sync after activation failed: {err}"),
+        }
+    }
     Ok(())
 }
 

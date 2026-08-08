@@ -24,6 +24,7 @@ pub mod learn;
 pub mod learnings;
 pub mod learnings_reader;
 pub mod mcp;
+pub mod mcp_stdio;
 pub mod persona;
 pub mod proposals;
 pub mod resume;

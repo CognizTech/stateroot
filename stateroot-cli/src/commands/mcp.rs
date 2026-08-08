@@ -148,6 +148,17 @@ pub fn accept_theirs(ctx: &Ctx, name: &str, from: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// `stateroot mcp tools` — the local stdio MCP server's tool surface (M4).
+pub fn tools(ctx: &Ctx) -> Result<()> {
+    let _ = ctx;
+    println!("local MCP tools (via `stateroot mcp-stdio`):");
+    for (name, description, _) in super::mcp_stdio::TOOL_DEFS {
+        let first = description.split('.').next().unwrap_or(description);
+        println!("  {name} — {first}.");
+    }
+    Ok(())
+}
+
 /// `stateroot mcp doctor`
 pub fn doctor(ctx: &Ctx) -> Result<()> {
     let home = stateroot_core::harness_install::home_dir().map_err(|e| anyhow!(e))?;

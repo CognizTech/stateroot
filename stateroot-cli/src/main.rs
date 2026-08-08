@@ -141,6 +141,7 @@ async fn main() -> anyhow::Result<()> {
             LearnAction::Record { note } => commands::learn::record(&ctx, &note)?,
         },
         Command::Synthesize { force } => commands::synthesize::run(&ctx, force).await?,
+        Command::McpStdio => commands::mcp_stdio::run(&ctx).await?,
         Command::Skill(args) => match args.action {
             SkillAction::Install => commands::skill::install(&ctx)?,
             SkillAction::List => commands::skill::list(&ctx).await?,
@@ -152,6 +153,9 @@ async fn main() -> anyhow::Result<()> {
                 push,
             } => commands::skill::sync(&ctx, dry_run, pull, push).await?,
             SkillAction::Status { json } => commands::skill::status(&ctx, json)?,
+            SkillAction::Promote { slug, rationale } => {
+                commands::skill::promote(&ctx, &slug, rationale.as_deref()).await?
+            }
             SkillAction::Doctor => commands::skill::doctor(&ctx)?,
         },
         Command::Mcp(args) => match args.action {
@@ -163,6 +167,7 @@ async fn main() -> anyhow::Result<()> {
             } => commands::mcp::sync(&ctx, dry_run, pull, push)?,
             McpAction::Status { json } => commands::mcp::status(&ctx, json)?,
             McpAction::Doctor => commands::mcp::doctor(&ctx)?,
+            McpAction::Tools => commands::mcp::tools(&ctx)?,
             McpAction::Remove { name } => commands::mcp::remove(&ctx, &name)?,
             McpAction::AcceptTheirs { name, from } => {
                 commands::mcp::accept_theirs(&ctx, &name, from.as_deref())?

@@ -157,6 +157,28 @@ pub async fn show(ctx: &Ctx, slug: &str) -> Result<()> {
     anyhow::bail!("skill '{slug}' not found locally");
 }
 
+/// `stateroot skill promote <slug>` — open a proposal to activate a
+/// quarantined skill package (M4). Nothing projects until
+/// `stateroot proposals approve` activates it.
+pub async fn promote(ctx: &Ctx, slug: &str, rationale: Option<&str>) -> Result<()> {
+    ctx.require_project()?;
+    let proposal = stateroot_core::proposals::create(
+        &ctx.cwd,
+        "skill",
+        &format!("activate skill {slug}"),
+        rationale.unwrap_or("stateroot skill promote"),
+        serde_json::json!({"slug": slug, "scope": "project"}),
+        serde_json::json!({"route": "skill promote"}),
+    )
+    .map_err(|e| anyhow!(e))?;
+    println!("proposal {} created (pending)", &proposal.id[..8]);
+    println!(
+        "approve with: stateroot proposals approve {} — then the next `skill sync` projects it",
+        &proposal.id[..8]
+    );
+    Ok(())
+}
+
 /// `stateroot skill scan` — discover packages across all registered harnesses.
 pub fn scan(ctx: &Ctx, json: bool) -> Result<()> {
     let found =
