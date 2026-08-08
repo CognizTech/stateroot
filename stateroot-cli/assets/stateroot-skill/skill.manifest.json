@@ -1,0 +1,27 @@
+{
+  "schema_version": "agent.native_skill.v1",
+  "input_types": [
+    "text",
+    "filesystem_path"
+  ],
+  "output_types": [
+    "text",
+    "filesystem_mutation"
+  ],
+  "execution_locality": "client_local",
+  "profile_family": "general",
+  "required_binaries": [
+    "stateroot"
+  ],
+  "required_python_packages": [],
+  "required_node_packages": [],
+  "allowed_network": "none",
+  "workspace_io_mode": "none",
+  "persistent_state_mode": "none",
+  "artifact_outputs": [],
+  "install_strategy": "first_party_bootstrap",
+  "risk_level": "trusted",
+  "adaptation_status": "native",
+  "last_validation_status": "pending",
+  "execution_profile_hint": "none"
+}

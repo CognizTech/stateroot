@@ -1,0 +1,18 @@
+{
+  "file_manifest": {
+    "docs/handoff-notes.md": 3,
+    "src/auth/session.py": 12,
+    "src/main.py": 41,
+    "tests/test_session.py": 2
+  },
+  "objective": "implement cross-harness handoffs",
+  "parent_hashes": [
+    "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  ],
+  "state_manifest": {
+    "coolapp/.stateroot/handoffs/current.json": 2,
+    "coolapp/.stateroot/project/state.json": 7,
+    "coolapp/.stateroot/soul/SOUL.md": 1
+  },
+  "watermark_seq": 421
+}

@@ -1,0 +1,27 @@
+[package]
+name = "stateroot-core"
+description = "Local-first StateRoot engine: continuity, federation, harness integration (no server)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+toml.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+directories.workspace = true
+ignore.workspace = true
+sha2.workspace = true
+base64.workspace = true
+rusqlite.workspace = true
+async-trait.workspace = true
+git2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

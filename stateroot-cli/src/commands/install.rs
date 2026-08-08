@@ -1,0 +1,305 @@
+//! `stateroot install` / `stateroot uninstall` — CLI wrapper over
+//! `stateroot_core::harness_install` (the machinery moved into the core
+//! crate so other frontends, e.g. a GUI setup app, can share it).
+//!
+//! Home resolution: `STATEROOT_TEST_HOME` wins (tests), otherwise `$HOME`.
+//! Every write is either an idempotent marked block or a read-merge-write
+//! JSON merge with a `.bak` backup — foreign config is never clobbered.
+
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+use anyhow::Result;
+use include_dir::{include_dir, Dir};
+use stateroot_core::harness_install::{self as core, SkillBundle};
+
+use super::{note, Ctx};
+
+#[allow(unused_imports)]
+pub use stateroot_core::harness_install::{
+    all_specs, home_dir, spec_exists, HarnessSpec, InstallToggles, ENV_TEST_HOME,
+};
+
+static ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/assets/stateroot-skill");
+
+/// The one-agent block template (a CLI-managed asset, intentionally outside
+/// the drift-guarded canonical skill bundle).
+const ONE_AGENT_BLOCK_TEMPLATE: &str = include_str!("../../assets/one-agent-block.md");
+
+/// Project-local AGENTS.md block: portable protocol without a session-start
+/// resume instruction (resume lives only on harness-specific surfaces).
+const AGENTS_BLOCK_TEMPLATE: &str =
+    include_str!("../../assets/stateroot-skill/assets/agents-block.md");
+
+/// Render the one-agent block with an optional persona section and a
+/// harness-specific resume command (`stateroot resume --harness <id>`).
+pub fn render_one_agent_block(persona: Option<&str>, harness_id: &str) -> String {
+    let persona_section = match persona {
+        Some(p) if !p.trim().is_empty() => {
+            let body = p.trim();
+            if body.to_ascii_lowercase().contains("working relationship") {
+                body.to_string()
+            } else {
+                format!("### Working relationship\n\n{body}")
+            }
+        }
+        _ => "_(no working relationship synced yet — run `stateroot persona sync`)_".to_string(),
+    };
+    let resume = super::harness_display::resume_command(harness_id);
+    ONE_AGENT_BLOCK_TEMPLATE
+        .replace("{{PERSONA}}", &persona_section)
+        .replace("{{RESUME_CMD}}", &resume)
+}
+
+/// Project AGENTS.md convenience block — checkpoint/handoff rules only.
+pub fn render_project_agents_block() -> String {
+    AGENTS_BLOCK_TEMPLATE.to_string()
+}
+
+/// The embedded skill bundle, converted once into the core `SkillBundle`
+/// shape (paths relative to the bundle root).
+fn bundle() -> &'static SkillBundle {
+    static BUNDLE: OnceLock<SkillBundle> = OnceLock::new();
+    BUNDLE.get_or_init(|| {
+        let mut files = Vec::new();
+        collect_dir(&ASSETS, Path::new(""), &mut files);
+        let claude_command_md = ASSETS
+            .get_file("assets/claude-command.md")
+            .map(|f| f.contents().to_vec());
+        SkillBundle {
+            files,
+            claude_command_md,
+        }
+    })
+}
+
+fn collect_dir(dir: &Dir<'_>, prefix: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+    for entry in dir.entries() {
+        match entry {
+            include_dir::DirEntry::Dir(subdir) => {
+                let name = subdir
+                    .path()
+                    .file_name()
+                    .unwrap_or_else(|| subdir.path().as_os_str());
+                collect_dir(subdir, &prefix.join(name), out);
+            }
+            include_dir::DirEntry::File(file) => {
+                let name = file
+                    .path()
+                    .file_name()
+                    .unwrap_or_else(|| file.path().as_os_str());
+                out.push((prefix.join(name), file.contents().to_vec()));
+            }
+        }
+    }
+}
+
+/// Embedded product skill files for portable seeding (relative POSIX paths).
+pub fn product_skill_files() -> Vec<(String, Vec<u8>)> {
+    bundle()
+        .files
+        .iter()
+        .map(|(path, bytes)| (path.to_string_lossy().replace('\\', "/"), bytes.clone()))
+        .collect()
+}
+
+/// Seed/update `~/.stateroot/skills/stateroot` from the embedded product bundle.
+pub fn seed_product_skill(home: &Path) -> Result<stateroot_core::skill_federation::SyncAction> {
+    let files = product_skill_files();
+    stateroot_core::skill_federation::ensure_product_skill_package(home, &files)
+        .map_err(|err| anyhow::anyhow!(err))
+}
+
+/// Install one harness spec with the CLI's embedded bundle (signature kept
+/// stable for the setup wizard).
+pub(crate) fn install_spec(
+    home: &Path,
+    spec: &HarnessSpec,
+    block: &str,
+    toggles: InstallToggles,
+) -> Vec<String> {
+    core::install_spec(home, spec, block, toggles, Some(bundle()))
+}
+
+/// `stateroot install` — machine-level integration.
+pub async fn install(ctx: &Ctx) -> Result<()> {
+    let home = home_dir()?;
+    let specs: Vec<HarnessSpec> = all_specs(&home)
+        .into_iter()
+        .filter(|spec| spec_exists(&home, spec.id))
+        .collect();
+    if specs.is_empty() {
+        println!(
+            "no harness roots found under {} — nothing to do",
+            home.display()
+        );
+        return Ok(());
+    }
+
+    // Persona first: the one-agent block embeds it. Resume command is
+    // harness-specific so each integration surface invokes resume once with
+    // the correct `--harness` id.
+    let persona = super::persona::sync_best_effort(ctx).await;
+
+    let mut installed: Vec<String> = Vec::new();
+    println!("Installing stateroot globally (home: {}):", home.display());
+    for spec in &specs {
+        // Wave-2: each harness gets its own projection of the same soul.
+        let persona_h = super::persona::for_harness(ctx, spec.id, persona.as_deref()).await;
+        let block = render_one_agent_block(persona_h.as_deref(), spec.id);
+        let actions = install_spec(&home, spec, &block, InstallToggles::default());
+        for action in &actions {
+            println!("  {}: {action}", spec.id);
+        }
+        if actions.is_empty() {
+            println!("  {}: detected", spec.id);
+        }
+        if let Some(guidance) = spec.guidance {
+            println!("  note: {guidance}");
+        }
+        installed.push(spec.id.to_string());
+    }
+
+    // Second pass: non-legacy registry rows, grouped by tier.
+    install_registry_tiers(ctx, &home, persona.as_deref(), &mut installed).await;
+
+    match seed_product_skill(&home) {
+        Ok(action) => println!("  product skill: {} — {}", action.action, action.detail),
+        Err(err) => note!("warning: product skill seed failed ({err:#})"),
+    }
+    if let Err(err) = stateroot_core::skill_federation::refresh_product_projections(&home, None) {
+        note!("warning: product projection refresh failed ({err})");
+    }
+
+    // Record for `init`'s one-time global install + `uninstall`.
+    let mut config = ctx.config.clone();
+    config.installed_harnesses = installed.clone();
+    stateroot_core::config::save_config(&ctx.config_dir, &config)?;
+    println!();
+    println!("Installed for: {}", installed.join(", "));
+    Ok(())
+}
+
+/// Install detected non-legacy registry harnesses via `install_quirk_full`
+/// (instruction block + MCP + tier installer: Tier A hooks, Tier B plugin,
+/// Tier C MCP, managed placeholders), printing tier-grouped output.
+async fn install_registry_tiers(
+    ctx: &Ctx,
+    home: &Path,
+    persona: Option<&str>,
+    installed: &mut Vec<String>,
+) {
+    use stateroot_core::harness_install::registry::{adapters, quirk_detected, Tier};
+
+    let legacy: Vec<&str> = adapters().iter().filter_map(|q| q.legacy_id).collect();
+    let rows: Vec<_> = adapters()
+        .iter()
+        .filter(|q| !legacy.contains(&q.id))
+        .filter(|q| quirk_detected(home, q))
+        .collect();
+    if rows.is_empty() {
+        return;
+    }
+    for (tier, label) in [
+        (Tier::A, "tier A (native hooks)"),
+        (Tier::B, "tier B (generated plugin)"),
+        (Tier::C, "tier C (MCP / managed)"),
+    ] {
+        let group: Vec<_> = rows.iter().filter(|q| q.tier == tier).collect();
+        if group.is_empty() {
+            continue;
+        }
+        println!("  {label}:");
+        for quirk in group {
+            let persona_h = super::persona::for_harness(ctx, quirk.id, persona).await;
+            let block = render_one_agent_block(persona_h.as_deref(), quirk.id);
+            for action in stateroot_core::harness_install::install_quirk_full(home, quirk, &block) {
+                println!("    {}: {action}", quirk.id);
+            }
+            installed.push(quirk.id.to_string());
+        }
+    }
+}
+
+/// `stateroot uninstall` — remove stateroot-managed content only.
+pub fn uninstall(ctx: &Ctx) -> Result<()> {
+    let home = home_dir()?;
+    println!(
+        "Removing stateroot global integration (home: {}):",
+        home.display()
+    );
+    for spec in all_specs(&home) {
+        let mut actions: Vec<String> = Vec::new();
+        if let Some(file) = &spec.instruction_file {
+            match core::remove_marked_block(file) {
+                Ok(true) => actions.push(format!("block removed ({})", file.display())),
+                Ok(false) => {}
+                Err(err) => note!("  ! {} block removal failed: {err:#}", spec.id),
+            }
+        }
+        for mcp_file in &spec.mcp_files {
+            match core::uninstall_mcp_entry(mcp_file) {
+                Ok(true) => {
+                    actions.push(format!("MCP registration removed ({})", mcp_file.display()))
+                }
+                Ok(false) => {}
+                Err(err) => note!("  ! {} MCP removal failed: {err:#}", spec.id),
+            }
+        }
+        if spec.claude_extras {
+            for path in [
+                home.join(".claude/skills/stateroot"),
+                home.join(".claude/commands/stateroot.md"),
+            ] {
+                let removed = if path.is_dir() {
+                    std::fs::remove_dir_all(&path).is_ok()
+                } else if path.is_file() {
+                    std::fs::remove_file(&path).is_ok()
+                } else {
+                    false
+                };
+                if removed {
+                    actions.push(format!("removed {}", path.display()));
+                }
+            }
+        }
+        for action in &actions {
+            println!("  {}: {action}", spec.id);
+        }
+    }
+    let mut config = ctx.config.clone();
+    config.installed_harnesses = Vec::new();
+    stateroot_core::config::save_config(&ctx.config_dir, &config)?;
+    println!("Done. Project-level files (AGENTS.md blocks, .stateroot/) are untouched.");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_one_agent_block;
+
+    #[test]
+    fn one_agent_block_uses_working_relationship() {
+        let block = render_one_agent_block(
+            Some("## Working relationship\n\nBe direct. Disagree once with evidence.\n"),
+            "codex",
+        );
+        assert!(
+            block.contains("### Working relationship") || block.contains("## Working relationship")
+        );
+        assert!(block.contains("Be direct."));
+        assert!(!block.contains("### Persona\n"));
+        assert!(block.contains("stateroot resume --harness codex"));
+        assert!(block.contains("auto-injected") || block.contains("Never run resume twice"));
+        assert!(!block.contains("{{RESUME_CMD}}"));
+    }
+
+    #[test]
+    fn one_agent_block_is_harness_specific() {
+        let cursor = render_one_agent_block(None, "cursor");
+        let codex = render_one_agent_block(None, "codex");
+        assert!(cursor.contains("stateroot resume --harness cursor"));
+        assert!(codex.contains("stateroot resume --harness codex"));
+        assert!(!cursor.contains("stateroot resume --harness codex"));
+    }
+}

@@ -1,0 +1,1278 @@
+{
+  "schema_version": "stateroot.harness_registry.v1",
+  "native_harness_id": "skillsagent",
+  "product_skills": [
+    "stateroot",
+    "stateroot-skill-router"
+  ],
+  "harnesses": [
+    {
+      "id": "skillsagent",
+      "display": "StateSmith",
+      "aliases": [
+        "statesmith",
+        "skills-agent",
+        "skillsagent"
+      ],
+      "framing": "StateSmith native harness: full project state for cloud execution.",
+      "tier": "A",
+      "detect": [],
+      "detect_cmds": [],
+      "skill_source_roots": {
+        "global": [
+          ".stateroot/skills"
+        ],
+        "project": [
+          ".stateroot/skills",
+          ".agents/skills"
+        ]
+      },
+      "builtin_policy": "shareable",
+      "builtin_roots": [],
+      "projection_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills",
+          ".stateroot/skills"
+        ]
+      },
+      "delegation": {
+        "mode": "native",
+        "command": null,
+        "pty": false,
+        "print_mode": false,
+        "handoff_only": false
+      },
+      "reload": "runtime",
+      "capabilities": [
+        "skills",
+        "mcp",
+        "delegation",
+        "cloud_vm"
+      ],
+      "mcp_config": {
+        "global": [
+          {
+            "path": ".stateroot/tools/mcp.cloud.json",
+            "shape": "mcpServers"
+          }
+        ],
+        "project": [
+          {
+            "path": ".stateroot/tools/mcp.cloud.json",
+            "shape": "mcpServers"
+          }
+        ]
+      }
+    },
+    {
+      "id": "planner",
+      "display": "Planner",
+      "aliases": [
+        "planner"
+      ],
+      "framing": "Planning harness: emphasize objectives, phases, risks, and next harness routing.",
+      "tier": "C",
+      "detect": [],
+      "detect_cmds": [],
+      "skill_source_roots": {
+        "global": [],
+        "project": []
+      },
+      "builtin_policy": "none",
+      "builtin_roots": [],
+      "projection_roots": {
+        "global": [],
+        "project": []
+      },
+      "delegation": {
+        "mode": "handoff_only",
+        "command": null,
+        "pty": false,
+        "print_mode": false,
+        "handoff_only": true
+      },
+      "reload": "none",
+      "capabilities": [
+        "planning"
+      ],
+      "mcp_config": {
+        "global": [],
+        "project": []
+      }
+    },
+    {
+      "id": "cursor",
+      "display": "Cursor",
+      "aliases": [
+        "cursor"
+      ],
+      "framing": "Cursor IDE harness: emphasize changed files, tests, and actionable next edits.",
+      "tier": "A",
+      "detect": [
+        ".cursor"
+      ],
+      "detect_cmds": [
+        "cursor"
+      ],
+      "skill_source_roots": {
+        "global": [
+          ".cursor/skills",
+          ".agents/skills"
+        ],
+        "project": [
+          ".cursor/skills",
+          ".agents/skills"
+        ]
+      },
+      "builtin_policy": "reference_only",
+      "builtin_roots": [
+        ".cursor/skills-cursor"
+      ],
+      "projection_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills",
+          ".cursor/skills"
+        ]
+      },
+      "delegation": {
+        "mode": "handoff_only",
+        "command": "cursor",
+        "pty": false,
+        "print_mode": false,
+        "handoff_only": true
+      },
+      "reload": "session",
+      "capabilities": [
+        "skills",
+        "hooks",
+        "mcp",
+        "gui"
+      ],
+      "mcp_config": {
+        "global": [
+          {
+            "path": ".cursor/mcp.json",
+            "shape": "mcpServers"
+          }
+        ],
+        "project": []
+      }
+    },
+    {
+      "id": "codex",
+      "display": "Codex",
+      "aliases": [
+        "codex"
+      ],
+      "framing": "Codex harness: emphasize implementation status, decisions, and verification steps.",
+      "tier": "A",
+      "detect": [
+        ".codex"
+      ],
+      "detect_cmds": [
+        "codex"
+      ],
+      "skill_source_roots": {
+        "global": [
+          ".agents/skills",
+          ".codex/skills"
+        ],
+        "project": [
+          ".agents/skills",
+          ".codex/skills"
+        ]
+      },
+      "builtin_policy": "reference_only",
+      "builtin_roots": [
+        ".codex/.system",
+        ".codex/skills/.system"
+      ],
+      "projection_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "delegation": {
+        "mode": "cli",
+        "command": "codex",
+        "pty": true,
+        "print_mode": false,
+        "handoff_only": false,
+        "argv": [
+          "exec",
+          "--skip-git-repo-check",
+          "{prompt}"
+        ]
+      },
+      "reload": "session",
+      "capabilities": [
+        "skills",
+        "hooks",
+        "delegation",
+        "pty"
+      ],
+      "mcp_config": {
+        "global": [],
+        "project": []
+      }
+    },
+    {
+      "id": "claude",
+      "display": "Claude Code",
+      "aliases": [
+        "claude",
+        "claude-code"
+      ],
+      "framing": "Claude Code harness: emphasize tool results, compaction boundaries, and next edits.",
+      "tier": "A",
+      "detect": [
+        ".claude",
+        ".claude.json"
+      ],
+      "detect_cmds": [
+        "claude"
+      ],
+      "skill_source_roots": {
+        "global": [
+          ".claude/skills",
+          ".agents/skills"
+        ],
+        "project": [
+          ".claude/skills",
+          ".agents/skills"
+        ]
+      },
+      "builtin_policy": "reference_only",
+      "builtin_roots": [],
+      "projection_roots": {
+        "global": [
+          ".agents/skills",
+          ".claude/skills"
+        ],
+        "project": [
+          ".agents/skills",
+          ".claude/skills"
+        ]
+      },
+      "delegation": {
+        "mode": "cli",
+        "command": "claude",
+        "pty": false,
+        "print_mode": true,
+        "handoff_only": false,
+        "argv": [
+          "--print",
+          "--permission-mode",
+          "bypassPermissions",
+          "{prompt}"
+        ]
+      },
+      "reload": "session",
+      "capabilities": [
+        "skills",
+        "hooks",
+        "mcp",
+        "delegation"
+      ],
+      "mcp_config": {
+        "global": [
+          {
+            "path": ".claude.json",
+            "shape": "mcpServers"
+          }
+        ],
+        "project": []
+      }
+    },
+    {
+      "id": "kimi",
+      "display": "Kimi",
+      "aliases": [
+        "kimi",
+        "kimi-code"
+      ],
+      "framing": "Kimi harness: concise task summary with blockers and next actions.",
+      "tier": "A",
+      "detect": [
+        ".kimi",
+        ".kimi-code"
+      ],
+      "detect_cmds": [
+        "kimi"
+      ],
+      "skill_source_roots": {
+        "global": [
+          ".agents/skills",
+          ".kimi/skills",
+          ".kimi-code/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "builtin_policy": "reference_only",
+      "builtin_roots": [],
+      "projection_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "delegation": {
+        "mode": "cli",
+        "command": "kimi",
+        "pty": true,
+        "print_mode": false,
+        "handoff_only": false,
+        "argv": [
+          "{prompt}"
+        ]
+      },
+      "reload": "session",
+      "capabilities": [
+        "skills",
+        "hooks",
+        "mcp",
+        "delegation"
+      ],
+      "mcp_config": {
+        "global": [
+          {
+            "path": ".kimi/mcp.json",
+            "shape": "mcpServers"
+          },
+          {
+            "path": ".kimi-code/mcp.json",
+            "shape": "mcpServers"
+          }
+        ],
+        "project": []
+      }
+    },
+    {
+      "id": "opencode",
+      "display": "OpenCode",
+      "aliases": [
+        "opencode"
+      ],
+      "framing": "OpenCode harness: tool-policy aware summary with environment constraints.",
+      "tier": "B",
+      "detect": [
+        ".config/opencode"
+      ],
+      "detect_cmds": [
+        "opencode"
+      ],
+      "skill_source_roots": {
+        "global": [
+          ".config/opencode/skills",
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills",
+          ".opencode/skills"
+        ]
+      },
+      "builtin_policy": "shareable",
+      "builtin_roots": [],
+      "projection_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "delegation": {
+        "mode": "cli",
+        "command": "opencode",
+        "pty": true,
+        "print_mode": false,
+        "handoff_only": false,
+        "argv": [
+          "run",
+          "{prompt}"
+        ]
+      },
+      "reload": "session",
+      "capabilities": [
+        "skills",
+        "mcp",
+        "delegation",
+        "pty"
+      ],
+      "mcp_config": {
+        "global": [
+          {
+            "path": ".config/opencode/opencode.json",
+            "shape": "mcpServers"
+          }
+        ],
+        "project": []
+      }
+    },
+    {
+      "id": "hermes",
+      "display": "Hermes Agent",
+      "aliases": [
+        "hermes",
+        "hermes-agent"
+      ],
+      "framing": "Hermes harness: agent loop context with trace references and skill hints.",
+      "tier": "A",
+      "detect": [
+        ".hermes"
+      ],
+      "detect_cmds": [
+        "hermes"
+      ],
+      "skill_source_roots": {
+        "global": [
+          ".hermes/skills"
+        ],
+        "project": [
+          ".hermes/skills",
+          ".agents/skills"
+        ]
+      },
+      "builtin_policy": "shareable",
+      "builtin_roots": [],
+      "projection_roots": {
+        "global": [
+          ".hermes/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "delegation": {
+        "mode": "cli",
+        "command": "hermes",
+        "pty": false,
+        "print_mode": false,
+        "handoff_only": false,
+        "argv": [
+          "{prompt}"
+        ]
+      },
+      "reload": "config",
+      "capabilities": [
+        "skills",
+        "mcp",
+        "delegation",
+        "external_llp"
+      ],
+      "mcp_config": {
+        "global": [
+          {
+            "path": ".hermes/config.yaml",
+            "shape": "mcp_servers"
+          }
+        ],
+        "project": []
+      }
+    },
+    {
+      "id": "openclaw",
+      "display": "OpenClaw",
+      "aliases": [
+        "openclaw"
+      ],
+      "framing": "OpenClaw harness: local-first execution notes and filesystem deltas.",
+      "tier": "A",
+      "detect": [
+        ".openclaw"
+      ],
+      "detect_cmds": [
+        "openclaw"
+      ],
+      "skill_source_roots": {
+        "global": [
+          ".openclaw/skills",
+          ".openclaw/plugin-skills",
+          ".openclaw/workspace/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "builtin_policy": "shareable",
+      "builtin_roots": [
+        ".openclaw/skills/managed"
+      ],
+      "projection_roots": {
+        "global": [
+          ".openclaw/skills/managed"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "delegation": {
+        "mode": "cli",
+        "command": "openclaw",
+        "pty": false,
+        "print_mode": false,
+        "handoff_only": false,
+        "argv": [
+          "agent",
+          "--message",
+          "{prompt}"
+        ]
+      },
+      "reload": "plugin",
+      "capabilities": [
+        "skills",
+        "hooks",
+        "delegation",
+        "external_llp"
+      ],
+      "mcp_config": {
+        "global": [],
+        "project": []
+      }
+    },
+    {
+      "id": "gemini",
+      "display": "Gemini CLI",
+      "aliases": [
+        "gemini",
+        "gemini-cli"
+      ],
+      "framing": "Gemini CLI harness: concise verification and next-tool guidance.",
+      "tier": "A",
+      "detect": [
+        ".gemini"
+      ],
+      "detect_cmds": [
+        "gemini"
+      ],
+      "skill_source_roots": {
+        "global": [
+          ".gemini/skills",
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "builtin_policy": "reference_only",
+      "builtin_roots": [],
+      "projection_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "delegation": {
+        "mode": "cli",
+        "command": "gemini",
+        "pty": true,
+        "print_mode": false,
+        "handoff_only": false,
+        "argv": [
+          "-p",
+          "{prompt}"
+        ]
+      },
+      "reload": "session",
+      "capabilities": [
+        "skills",
+        "hooks",
+        "delegation"
+      ],
+      "mcp_config": {
+        "global": [],
+        "project": []
+      }
+    },
+    {
+      "id": "pi",
+      "display": "pi",
+      "aliases": [
+        "pi"
+      ],
+      "framing": "pi harness: local coding agent with PTY-friendly CLI delegation.",
+      "tier": "B",
+      "detect": [
+        ".pi"
+      ],
+      "detect_cmds": [
+        "pi"
+      ],
+      "skill_source_roots": {
+        "global": [
+          ".pi/skills",
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "builtin_policy": "shareable",
+      "builtin_roots": [],
+      "projection_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "delegation": {
+        "mode": "cli",
+        "command": "pi",
+        "pty": true,
+        "print_mode": false,
+        "handoff_only": false,
+        "argv": [
+          "-p",
+          "{prompt}"
+        ]
+      },
+      "reload": "session",
+      "capabilities": [
+        "skills",
+        "delegation",
+        "pty"
+      ],
+      "mcp_config": {
+        "global": [],
+        "project": []
+      }
+    },
+    {
+      "id": "devin",
+      "display": "Devin CLI",
+      "aliases": [
+        "devin"
+      ],
+      "framing": "Devin CLI harness: emphasize objective status and verification.",
+      "tier": "A",
+      "detect": [
+        ".devin"
+      ],
+      "detect_cmds": [
+        "devin"
+      ],
+      "skill_source_roots": {
+        "global": [
+          ".devin/skills",
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "builtin_policy": "reference_only",
+      "builtin_roots": [],
+      "projection_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "delegation": {
+        "mode": "cli",
+        "command": "devin",
+        "pty": false,
+        "print_mode": false,
+        "handoff_only": false,
+        "argv": [
+          "{prompt}"
+        ]
+      },
+      "reload": "session",
+      "capabilities": [
+        "skills",
+        "hooks",
+        "delegation"
+      ],
+      "mcp_config": {
+        "global": [],
+        "project": []
+      }
+    },
+    {
+      "id": "crush",
+      "display": "Crush",
+      "aliases": [
+        "crush"
+      ],
+      "framing": "Crush harness: MCP/handoff oriented; limited native skill hooks.",
+      "tier": "C",
+      "detect": [
+        ".config/crush"
+      ],
+      "detect_cmds": [
+        "crush"
+      ],
+      "skill_source_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "builtin_policy": "none",
+      "builtin_roots": [],
+      "projection_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "delegation": {
+        "mode": "handoff_only",
+        "command": "crush",
+        "pty": false,
+        "print_mode": false,
+        "handoff_only": true
+      },
+      "reload": "none",
+      "capabilities": [
+        "skills"
+      ],
+      "mcp_config": {
+        "global": [],
+        "project": []
+      }
+    },
+    {
+      "id": "grok",
+      "display": "Grok Build CLI",
+      "aliases": [
+        "grok"
+      ],
+      "framing": "Grok harness: MCP-pull resume with skill inventory awareness.",
+      "tier": "A",
+      "detect": [
+        ".grok"
+      ],
+      "detect_cmds": [
+        "grok"
+      ],
+      "skill_source_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "builtin_policy": "reference_only",
+      "builtin_roots": [],
+      "projection_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "delegation": {
+        "mode": "cli",
+        "command": "grok",
+        "pty": false,
+        "print_mode": false,
+        "handoff_only": false,
+        "argv": [
+          "{prompt}"
+        ]
+      },
+      "reload": "session",
+      "capabilities": [
+        "skills",
+        "hooks",
+        "delegation"
+      ],
+      "mcp_config": {
+        "global": [],
+        "project": []
+      }
+    },
+    {
+      "id": "amp",
+      "display": "Amp",
+      "aliases": [
+        "amp"
+      ],
+      "framing": "Amp harness: handoff-oriented coding assistant.",
+      "tier": "C",
+      "detect": [
+        ".amp"
+      ],
+      "detect_cmds": [
+        "amp"
+      ],
+      "skill_source_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "builtin_policy": "none",
+      "builtin_roots": [],
+      "projection_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "delegation": {
+        "mode": "handoff_only",
+        "command": null,
+        "pty": false,
+        "print_mode": false,
+        "handoff_only": true
+      },
+      "reload": "none",
+      "capabilities": [
+        "skills"
+      ],
+      "mcp_config": {
+        "global": [],
+        "project": []
+      }
+    },
+    {
+      "id": "factory",
+      "display": "Factory",
+      "aliases": [
+        "factory"
+      ],
+      "framing": "Factory harness: handoff-oriented coding assistant.",
+      "tier": "C",
+      "detect": [
+        ".factory"
+      ],
+      "detect_cmds": [],
+      "skill_source_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "builtin_policy": "none",
+      "builtin_roots": [],
+      "projection_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "delegation": {
+        "mode": "handoff_only",
+        "command": null,
+        "pty": false,
+        "print_mode": false,
+        "handoff_only": true
+      },
+      "reload": "none",
+      "capabilities": [
+        "skills"
+      ],
+      "mcp_config": {
+        "global": [],
+        "project": []
+      }
+    },
+    {
+      "id": "trae",
+      "display": "Trae",
+      "aliases": [
+        "trae"
+      ],
+      "framing": "Trae harness: handoff-oriented coding assistant.",
+      "tier": "C",
+      "detect": [
+        ".trae"
+      ],
+      "detect_cmds": [],
+      "skill_source_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "builtin_policy": "none",
+      "builtin_roots": [],
+      "projection_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "delegation": {
+        "mode": "handoff_only",
+        "command": null,
+        "pty": false,
+        "print_mode": false,
+        "handoff_only": true
+      },
+      "reload": "none",
+      "capabilities": [
+        "skills"
+      ],
+      "mcp_config": {
+        "global": [],
+        "project": []
+      }
+    },
+    {
+      "id": "windsurf",
+      "display": "Windsurf",
+      "aliases": [
+        "windsurf"
+      ],
+      "framing": "Windsurf harness: GUI coding assistant with handoff fallback.",
+      "tier": "C",
+      "detect": [
+        ".windsurf",
+        ".codeium"
+      ],
+      "detect_cmds": [
+        "windsurf"
+      ],
+      "skill_source_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "builtin_policy": "reference_only",
+      "builtin_roots": [],
+      "projection_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "delegation": {
+        "mode": "handoff_only",
+        "command": null,
+        "pty": false,
+        "print_mode": false,
+        "handoff_only": true
+      },
+      "reload": "none",
+      "capabilities": [
+        "skills",
+        "gui"
+      ],
+      "mcp_config": {
+        "global": [],
+        "project": []
+      }
+    },
+    {
+      "id": "vs_code",
+      "display": "VS Code",
+      "aliases": [
+        "vs_code",
+        "vscode",
+        "vs-code"
+      ],
+      "framing": "VS Code harness: editor surface with MCP/handoff bridge.",
+      "tier": "C",
+      "detect": [
+        ".vscode"
+      ],
+      "detect_cmds": [
+        "code"
+      ],
+      "skill_source_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "builtin_policy": "none",
+      "builtin_roots": [],
+      "projection_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "delegation": {
+        "mode": "handoff_only",
+        "command": "code",
+        "pty": false,
+        "print_mode": false,
+        "handoff_only": true
+      },
+      "reload": "none",
+      "capabilities": [
+        "skills",
+        "mcp",
+        "gui"
+      ],
+      "mcp_config": {
+        "global": [],
+        "project": [
+          {
+            "path": ".vscode/mcp.json",
+            "shape": "servers"
+          }
+        ]
+      }
+    },
+    {
+      "id": "github_copilot",
+      "display": "GitHub Copilot",
+      "aliases": [
+        "github_copilot",
+        "github-copilot",
+        "vscode-copilot",
+        "copilot"
+      ],
+      "framing": "GitHub Copilot harness: MCP/handoff oriented coding assistant.",
+      "tier": "C",
+      "detect": [
+        ".vscode"
+      ],
+      "detect_cmds": [
+        "code"
+      ],
+      "skill_source_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "builtin_policy": "reference_only",
+      "builtin_roots": [],
+      "projection_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "delegation": {
+        "mode": "handoff_only",
+        "command": null,
+        "pty": false,
+        "print_mode": false,
+        "handoff_only": true
+      },
+      "reload": "none",
+      "capabilities": [
+        "skills",
+        "mcp",
+        "gui"
+      ],
+      "mcp_config": {
+        "global": [],
+        "project": [
+          {
+            "path": ".vscode/mcp.json",
+            "shape": "servers"
+          }
+        ]
+      }
+    },
+    {
+      "id": "zero",
+      "display": "Zero",
+      "aliases": [
+        "zero"
+      ],
+      "framing": "Zero harness: MCP-pull resume with skill inventory.",
+      "tier": "A",
+      "detect": [
+        ".config/zero"
+      ],
+      "detect_cmds": [
+        "zero"
+      ],
+      "skill_source_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "builtin_policy": "none",
+      "builtin_roots": [],
+      "projection_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "delegation": {
+        "mode": "cli",
+        "command": "zero",
+        "pty": false,
+        "print_mode": false,
+        "handoff_only": false,
+        "argv": [
+          "{prompt}"
+        ]
+      },
+      "reload": "session",
+      "capabilities": [
+        "skills",
+        "hooks",
+        "delegation"
+      ],
+      "mcp_config": {
+        "global": [],
+        "project": []
+      }
+    },
+    {
+      "id": "antigravity",
+      "display": "Antigravity CLI",
+      "aliases": [
+        "antigravity",
+        "agy"
+      ],
+      "framing": "Antigravity harness: stdout-text resume with skill inventory.",
+      "tier": "A",
+      "detect": [
+        ".gemini/config"
+      ],
+      "detect_cmds": [
+        "antigravity",
+        "agy"
+      ],
+      "skill_source_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "builtin_policy": "none",
+      "builtin_roots": [],
+      "projection_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "delegation": {
+        "mode": "cli",
+        "command": "antigravity",
+        "pty": false,
+        "print_mode": false,
+        "handoff_only": false,
+        "argv": [
+          "{prompt}"
+        ]
+      },
+      "reload": "session",
+      "capabilities": [
+        "skills",
+        "hooks",
+        "delegation"
+      ],
+      "mcp_config": {
+        "global": [],
+        "project": []
+      }
+    },
+    {
+      "id": "omp",
+      "display": "omp",
+      "aliases": [
+        "omp"
+      ],
+      "framing": "omp harness: local agent with Agent Skills projection.",
+      "tier": "B",
+      "detect": [
+        ".omp"
+      ],
+      "detect_cmds": [
+        "omp"
+      ],
+      "skill_source_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "builtin_policy": "shareable",
+      "builtin_roots": [],
+      "projection_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "delegation": {
+        "mode": "cli",
+        "command": "omp",
+        "pty": false,
+        "print_mode": false,
+        "handoff_only": false,
+        "argv": [
+          "{prompt}"
+        ]
+      },
+      "reload": "session",
+      "capabilities": [
+        "skills",
+        "delegation"
+      ],
+      "mcp_config": {
+        "global": [],
+        "project": []
+      }
+    }
+  ]
+}

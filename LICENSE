@@ -1,0 +1,94 @@
+Business Source License 1.1
+
+Licensor:                  StateRoot (the StateSmith project)
+Licensed Work:             StateRoot, including the software in this
+                           repository and any associated documentation.
+Change Date:               The second anniversary of the first public
+                           release of each version of the Licensed Work.
+Change License:            Apache License, Version 2.0
+
+-------------------------------------------------------------------------------
+
+The Licensor hereby grants you the right to copy, modify, create derivative
+works, redistribute, and make non-production use of the Licensed Work. The
+Licensor may make an Additional Use Grant, above, permitting limited
+production use.
+
+Effective on the Change Date, or the fourth anniversary of the first publicly
+available distribution of a specific version of the Licensed Work under this
+License, whichever comes first, the Licensor hereby grants you rights under
+the terms of the Change License, and the rights granted in the paragraph
+above terminate.
+
+If your use of the Licensed Work does not comply with the requirements
+currently in effect as described in this License, you must purchase a
+commercial license from the Licensor, its affiliates, or its authorized
+resellers, or you must refrain from using the Licensed Work.
+
+Terms and Conditions
+
+1. Definitions.
+
+   "Licensor" means the individual or entity that offers the Licensed Work
+   under the terms of this License, as identified above.
+
+   "Licensed Work" means the work offered under this License, as identified
+   above, including any source code, object code, and documentation.
+
+   "Change Date" means the date identified above, or such later date as the
+   Licensor may specify in writing.
+
+   "Change License" means the license identified above, or such later license
+   as the Licensor may specify in writing.
+
+2. Grant of Rights. Subject to the terms and conditions of this License, the
+   Licensor hereby grants you a non-exclusive, worldwide, non-transferable,
+   royalty-free license to use, copy, modify, and distribute the Licensed
+   Work, for any purpose other than a Production Use (as defined below).
+
+3. Production Use. A "Production Use" means use of the Licensed Work in
+   providing a commercial product or service to third parties, whether or not
+   for a fee, where the product or service derives its value substantially
+   from the Licensed Work.
+
+4. Additional Use Grant. The Licensor may grant additional rights to use the
+   Licensed Work for a Production Use, as set forth above (if any).
+
+5. Change License. On the Change Date, this License converts to the Change
+   License with respect to the version of the Licensed Work then in effect,
+   and the terms of this License terminate as to that version. If the
+   Licensor specifies an earlier Change Date or a different Change License
+   for a version of the Licensed Work, that earlier date or different license
+   applies to that version.
+
+6. No Trademark License. This License does not grant you any rights to use
+   the Licensor's trademarks, service marks, or logos, except as required for
+   reasonable and customary use in describing the origin of the Licensed Work
+   and reproducing the content of the NOTICE file (if any).
+
+7. No Warranty. THE LICENSED WORK IS PROVIDED "AS IS" AND THE LICENSOR MAKES
+   NO WARRANTIES, EXPRESS OR IMPLIED, WITH RESPECT TO THE LICENSED WORK,
+   INCLUDING WITHOUT LIMITATION ANY WARRANTIES OF MERCHANTABILITY, FITNESS
+   FOR A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT. You use the
+   Licensed Work at your own risk.
+
+8. Limitation of Liability. IN NO EVENT WILL THE LICENSOR BE LIABLE FOR ANY
+   DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+   (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+   SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+   CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+   LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+   OUT OF THE USE OF THE LICENSED WORK, EVEN IF ADVISED OF THE POSSIBILITY OF
+   SUCH DAMAGE.
+
+9. Miscellaneous. If any provision of this License is held unenforceable,
+   the remainder of this License continues in full force and effect. This
+   License is governed by the laws of the jurisdiction of the Licensor,
+   without regard to conflict-of-laws principles.
+
+-------------------------------------------------------------------------------
+
+Notice: on the Change Date for each version of the Licensed Work, that
+version automatically becomes available under the Change License (Apache
+License, Version 2.0). You may obtain a copy of the Apache License, Version
+2.0 at http://www.apache.org/licenses/LICENSE-2.0.

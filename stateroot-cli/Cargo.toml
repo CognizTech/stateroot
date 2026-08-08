@@ -1,0 +1,36 @@
+[package]
+name = "stateroot-cli"
+description = "The `stateroot` binary — local-first StateRoot CLI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "stateroot"
+path = "src/main.rs"
+
+[dependencies]
+stateroot-core = { path = "../stateroot-core" }
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+toml.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+dialoguer.workspace = true
+console.workspace = true
+include_dir.workspace = true
+sha2.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+assert_cmd.workspace = true
+predicates.workspace = true

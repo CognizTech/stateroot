@@ -1,0 +1,44 @@
+# StateRoot — the local-first, open-source StateRoot variant.
+# Self-contained workspace: no path deps outside this tree (subtree-split-ready).
+
+[workspace]
+resolver = "2"
+members = ["stateroot-core", "stateroot-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "BUSL-1.1"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+toml = "0.9"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+uuid = { version = "1", features = ["v4", "v7"] }
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+directories = "6"
+ignore = "0.4"
+sha2 = "0.10"
+base64 = "0.22"
+rusqlite = { version = "0.32", features = ["bundled"] }
+async-trait = "0.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std"] }
+tempfile = "3"
+clap = { version = "4", features = ["derive", "cargo"] }
+dialoguer = "0.12"
+console = "0.15"
+include_dir = "0.7"
+assert_cmd = "2"
+predicates = "3"
+# M2 wires git roots on plumbing (never porcelain). Declared now, unused in M1.
+git2 = { version = "0.20", default-features = false }
+
+[profile.release]
+lto = true
+codegen-units = 1
