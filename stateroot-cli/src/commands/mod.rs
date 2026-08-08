@@ -20,14 +20,19 @@ pub mod hook;
 pub mod import;
 pub mod init;
 pub mod install;
+pub mod learn;
+pub mod learnings;
 pub mod learnings_reader;
 pub mod mcp;
 pub mod persona;
+pub mod proposals;
 pub mod resume;
 pub mod roots;
 pub mod setup;
 pub mod skill;
+pub mod soul;
 pub mod status;
+pub mod synthesize;
 
 /// Shared context built once per command invocation.
 #[derive(Clone)]

@@ -76,21 +76,47 @@ pub struct FireDrillRecord {
 }
 
 /// Synthesis layer configuration (`[synthesis]` in config.toml).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct SynthesisConfig {
     /// Master switch for the LLM synthesis pass (import + manual synthesize).
     pub enabled: bool,
+    /// OpenAI-compatible API key (empty = unavailable; env
+    /// `STATEROOT_SYNTHESIS_API_KEY` wins when set).
+    pub api_key: String,
+    /// Base URL of the OpenAI-compatible endpoint (`{base_url}/chat/completions`
+    /// is called — DeepSeek/OpenAI/Ollama/litellm all work).
+    pub base_url: String,
+    /// Alias for `base_url` (either may be set; base_url wins).
+    pub api_url: String,
+    /// Model name sent in the request body.
+    pub model: String,
+    /// Extra request-body fields merged verbatim (non-thinking passthrough,
+    /// vendor flags, temperature, …).
+    pub extra_body: serde_json::Value,
+    /// Minimum seconds between synthesis runs (governance).
+    pub min_interval_seconds: i64,
+    /// Maximum synthesis runs per day (governance).
+    pub daily_cap: i64,
 }
 
 impl Default for SynthesisConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            api_key: String::new(),
+            base_url: "https://api.openai.com/v1".into(),
+            api_url: String::new(),
+            model: "gpt-4o-mini".into(),
+            extra_body: serde_json::Value::Object(serde_json::Map::new()),
+            min_interval_seconds: 600,
+            daily_cap: 20,
+        }
     }
 }
 
 /// Service endpoint configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct AppConfig {
     /// SkillsAgent base URL (stateroot REST).

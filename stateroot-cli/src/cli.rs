@@ -58,6 +58,20 @@ pub enum Command {
     Uninstall,
     /// Guided local setup (harnesses, skills).
     Setup(SetupArgs),
+    /// Canonical soul, overlay, projections (all local).
+    Soul(SoulArgs),
+    /// Local proposals (the shared approval gate).
+    Proposals(ProposalsArgs),
+    /// Scoped learnings: list/accept/reject/edit/distill.
+    Learnings(LearningsArgs),
+    /// Record a note into the review loop (classify → proposal).
+    Learn(LearnArgs),
+    /// Local LLM synthesis over transcript bundles (own provider key).
+    Synthesize {
+        /// Re-run even when the bundle hash is unchanged.
+        #[arg(long)]
+        force: bool,
+    },
     /// Skill listing, inspection, and federation sync.
     Skill(SkillArgs),
     /// MCP server discovery and federation sync.
@@ -300,4 +314,130 @@ pub struct ForkArgs {
     /// Branch name (default: fork-<hash8>).
     #[arg(long)]
     pub branch: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct SoulArgs {
+    #[command(subcommand)]
+    pub action: SoulAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SoulAction {
+    /// Show canonical soul, project overlay, and projection.
+    Show {
+        /// Render the harness-appropriate projection (per registry framing).
+        #[arg(long)]
+        harness: Option<String>,
+    },
+    /// Edit the canonical soul in $EDITOR (user-authoring, with snapshot).
+    Edit,
+    /// Import a soul from openclaw, hermes, or a file path.
+    Import {
+        /// `openclaw` | `hermes` | a file path.
+        #[arg(long)]
+        from: String,
+    },
+    /// Deterministic Q&A draft (zero model calls by default).
+    Generate {
+        /// Write via direct canonical update (user-authoring).
+        #[arg(long)]
+        apply: bool,
+        /// Accept Q&A defaults without prompting.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Propose a soul change through the gated proposals flow.
+    Propose {
+        /// Markdown file to propose.
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
+        /// Read content from stdin.
+        #[arg(long)]
+        stdin: bool,
+        /// Optional rationale recorded on the proposal.
+        #[arg(long)]
+        rationale: Option<String>,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct ProposalsArgs {
+    #[command(subcommand)]
+    pub action: ProposalsAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProposalsAction {
+    /// List proposals (optionally by status).
+    List {
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Show one proposal by id (prefix allowed).
+    Show { id: String },
+    /// Approve a proposal and activate its change.
+    Approve {
+        id: String,
+        /// Replace the payload with edited JSON before activating.
+        #[arg(long)]
+        edit: Option<String>,
+    },
+    /// Reject a proposal (kept for audit).
+    Reject { id: String },
+}
+
+#[derive(Debug, Args)]
+pub struct LearningsArgs {
+    #[command(subcommand)]
+    pub action: LearningsAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LearningsAction {
+    /// List learnings (project scope by default).
+    List {
+        /// User-global scope (~/.stateroot/learnings).
+        #[arg(long)]
+        user: bool,
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Promote a candidate to active (user approval).
+    Accept {
+        id: String,
+        #[arg(long)]
+        user: bool,
+    },
+    /// Reject a candidate (archived for audit).
+    Reject {
+        id: String,
+        #[arg(long)]
+        user: bool,
+    },
+    /// Edit a learning's statement in place.
+    Edit {
+        id: String,
+        #[arg(long)]
+        statement: String,
+        #[arg(long)]
+        user: bool,
+    },
+    /// Mine episodic + spool for new candidates (→ proposals).
+    Distill,
+}
+
+#[derive(Debug, Args)]
+pub struct LearnArgs {
+    #[command(subcommand)]
+    pub action: LearnAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LearnAction {
+    /// Classify a note and file it as a proposal (never a direct write).
+    Record {
+        /// The note to record.
+        note: String,
+    },
 }

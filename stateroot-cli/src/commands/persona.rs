@@ -12,7 +12,8 @@ pub fn cache_path(config_dir: &std::path::Path) -> PathBuf {
     config_dir.join(PERSONA_CACHE_FILE)
 }
 
-/// Read the cached persona, if any.
+/// Read the persona: config-dir cache first, then the canonical soul
+/// (`~/.stateroot/soul/SOUL.md`, projected) as the M3 source of truth.
 pub fn read_cache(config_dir: &std::path::Path) -> Option<String> {
     let text = std::fs::read_to_string(cache_path(config_dir)).ok()?;
     let text = text.trim().to_string();
@@ -27,7 +28,7 @@ pub fn read_cache(config_dir: &std::path::Path) -> Option<String> {
 /// profile to fetch (M3 adds the local soul service). Name kept from the
 /// monorepo so install/init call sites stay stable.
 pub async fn sync_best_effort(ctx: &super::Ctx) -> Option<String> {
-    read_cache(&ctx.config_dir)
+    resolve(&ctx.config_dir)
 }
 
 /// Persona text for one harness's integration block. The fork has no
@@ -40,5 +41,16 @@ pub async fn for_harness(
 ) -> Option<String> {
     fallback
         .map(str::to_string)
-        .or_else(|| read_cache(&ctx.config_dir))
+        .or_else(|| resolve(&ctx.config_dir))
+}
+
+/// Persona resolution used everywhere: cache → canonical soul projection.
+pub fn resolve(config_dir: &std::path::Path) -> Option<String> {
+    if let Some(cached) = read_cache(config_dir) {
+        return Some(cached);
+    }
+    let home = stateroot_core::harness_install::home_dir().ok()?;
+    let soul = stateroot_core::soul::read_canonical(&home)?;
+    let projection = stateroot_core::soul::render_projection(&soul, None);
+    (!projection.trim().is_empty()).then_some(projection)
 }

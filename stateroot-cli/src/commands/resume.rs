@@ -534,14 +534,16 @@ skipping duplicate. Pass --force to reprint.)\n\n{NO_REFETCH_FOOTER}"
     out.push_str(&format!("# StateRoot Resume — {name}\n\n"));
 
     // Persona (local cache).
-    if let Some(persona) = super::persona::read_cache(&ctx.config_dir) {
+    if let Some(persona) = super::persona::resolve(&ctx.config_dir) {
         out.push_str(&persona);
         out.push_str("\n\n---\n\n");
     }
 
     // Durable preferences from the local learnings files (confidence ≥
     // threshold) — propagated into the digest AND used to dedupe sections.
-    let durable: Vec<super::learnings_reader::Learning> =
+    // Durable preferences: project + user scopes (user scope landed with
+    // M3's `~/.stateroot/learnings`); candidates surface nowhere.
+    let mut durable: Vec<super::learnings_reader::Learning> =
         super::learnings_reader::read_local_learnings(&ctx.cwd)
             .into_iter()
             .filter(|l| {
@@ -550,6 +552,27 @@ skipping duplicate. Pass --force to reprint.)\n\n{NO_REFETCH_FOOTER}"
                     && l.confidence >= super::learnings_reader::SURFACE_THRESHOLD
             })
             .collect();
+    if let Ok(home) = stateroot_core::harness_install::home_dir() {
+        let mut seen: std::collections::BTreeSet<String> =
+            durable.iter().map(|l| l.id.clone()).collect();
+        for learning in stateroot_core::learnings::read_scope(&ctx.cwd, &home, "user") {
+            if learning.status == "active"
+                && learning.confidence >= super::learnings_reader::SURFACE_THRESHOLD
+                && seen.insert(learning.id.clone())
+            {
+                durable.push(super::learnings_reader::Learning {
+                    id: learning.id,
+                    statement: learning.statement,
+                    category: learning.category,
+                    confidence: learning.confidence,
+                    label: learning.label,
+                    sources: learning.sources,
+                    scope: learning.scope,
+                    status: learning.status,
+                });
+            }
+        }
+    }
     // Active goal from the local goal docs.
     let active_goal = super::learnings_reader::read_local_goals(&ctx.cwd)
         .into_iter()

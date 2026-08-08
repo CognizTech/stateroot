@@ -10,7 +10,10 @@ mod commands;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use cli::{Command, HandoffAction, McpAction, SkillAction};
+use cli::{
+    Command, HandoffAction, LearnAction, LearningsAction, McpAction, ProposalsAction, SkillAction,
+    SoulAction,
+};
 use commands::Ctx;
 
 #[tokio::main]
@@ -97,6 +100,47 @@ async fn main() -> anyhow::Result<()> {
             )
             .await?
         }
+        Command::Soul(args) => match args.action {
+            SoulAction::Show { harness } => commands::soul::show(&ctx, harness.as_deref())?,
+            SoulAction::Edit => commands::soul::edit(&ctx)?,
+            SoulAction::Import { from } => commands::soul::import(&ctx, &from)?,
+            SoulAction::Generate { apply, yes } => commands::soul::generate(&ctx, yes, apply)?,
+            SoulAction::Propose {
+                file,
+                stdin,
+                rationale,
+            } => commands::soul::propose(
+                &ctx,
+                file.as_deref().map(|p| p.to_str().unwrap_or("")),
+                stdin,
+                rationale.as_deref(),
+            )?,
+        },
+        Command::Proposals(args) => match args.action {
+            ProposalsAction::List { status } => commands::proposals::list(&ctx, status.as_deref())?,
+            ProposalsAction::Show { id } => commands::proposals::show(&ctx, &id)?,
+            ProposalsAction::Approve { id, edit } => {
+                commands::proposals::approve(&ctx, &id, edit.as_deref())?
+            }
+            ProposalsAction::Reject { id } => commands::proposals::reject(&ctx, &id)?,
+        },
+        Command::Learnings(args) => match args.action {
+            LearningsAction::List { user, status } => {
+                commands::learnings::list(&ctx, user, status.as_deref())?
+            }
+            LearningsAction::Accept { id, user } => commands::learnings::accept(&ctx, &id, user)?,
+            LearningsAction::Reject { id, user } => commands::learnings::reject(&ctx, &id, user)?,
+            LearningsAction::Edit {
+                id,
+                statement,
+                user,
+            } => commands::learnings::edit(&ctx, &id, &statement, user)?,
+            LearningsAction::Distill => commands::learnings::distill(&ctx)?,
+        },
+        Command::Learn(args) => match args.action {
+            LearnAction::Record { note } => commands::learn::record(&ctx, &note)?,
+        },
+        Command::Synthesize { force } => commands::synthesize::run(&ctx, force).await?,
         Command::Skill(args) => match args.action {
             SkillAction::Install => commands::skill::install(&ctx)?,
             SkillAction::List => commands::skill::list(&ctx).await?,
