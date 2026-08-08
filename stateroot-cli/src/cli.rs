@@ -26,8 +26,26 @@ pub enum Command {
     Checkpoint(CheckpointArgs),
     /// Handoff packets (write/read/list/accept) — local store.
     Handoff(HandoffArgs),
-    /// Local history: checkpoints and handoff lineage.
+    /// Create a root snapshot of the working state (git plumbing).
+    Snap(SnapArgs),
+    /// Root lineage with coverage lines and fork markers.
     Log,
+    /// Show one root by hash (prefix allowed).
+    Show {
+        /// Root hash or prefix.
+        hash: String,
+    },
+    /// Diff two roots (names+status; --content for unified diffs).
+    Diff(DiffArgs),
+    /// Append-only revert to a root's tree (NEW root; confirm required).
+    Revert(RevertArgs),
+    /// Branch-materialize a root under refs/stateroot/forks/<name>.
+    Fork(ForkArgs),
+    /// Render a transition receipt (verified tier = git delta).
+    Receipt {
+        /// Transition id or prefix.
+        id: String,
+    },
     /// Project status (manifest, handoff, counts) — local only.
     Status,
     /// Diagnose the local setup (config, store, registry, hooks, federation).
@@ -246,4 +264,40 @@ pub enum McpAction {
         #[arg(long)]
         from: Option<String>,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct SnapArgs {
+    /// Free-text reason recorded in the root manifest + transition.
+    #[arg(long)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct DiffArgs {
+    /// Base root hash.
+    pub from: String,
+    /// Target root hash.
+    pub to: String,
+    /// Print unified line diffs (capped at 20 files / 200 lines each).
+    #[arg(long)]
+    pub content: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RevertArgs {
+    /// Root hash to revert to (a NEW root is created; history is append-only).
+    pub root: String,
+    /// Do not ask for confirmation.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ForkArgs {
+    /// Root hash to branch from.
+    pub root: String,
+    /// Branch name (default: fork-<hash8>).
+    #[arg(long)]
+    pub branch: Option<String>,
 }

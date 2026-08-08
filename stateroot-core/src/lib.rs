@@ -16,6 +16,7 @@ pub mod local_store;
 pub mod mcp_federation;
 pub mod openclaw_identity;
 pub mod presentation;
+pub mod roots;
 pub mod skill_federation;
 pub mod sync_engine;
 pub mod transcripts;

@@ -62,7 +62,13 @@ async fn main() -> anyhow::Result<()> {
             HandoffAction::Show { seq } => commands::handoff::show(&ctx, seq).await?,
             HandoffAction::Accept { by } => commands::handoff::accept(&ctx, &by).await?,
         },
-        Command::Log => commands::log::run(&ctx)?,
+        Command::Snap(args) => commands::roots::snap(&ctx, args.reason.as_deref())?,
+        Command::Log => commands::roots::log(&ctx)?,
+        Command::Show { hash } => commands::roots::show(&ctx, &hash)?,
+        Command::Diff(args) => commands::roots::diff(&ctx, &args.from, &args.to, args.content)?,
+        Command::Revert(args) => commands::roots::revert(&ctx, &args.root, args.yes)?,
+        Command::Fork(args) => commands::roots::fork(&ctx, &args.root, args.branch.as_deref())?,
+        Command::Receipt { id } => commands::roots::receipt(&ctx, &id)?,
         Command::Status => commands::status::run(&ctx)?,
         Command::Doctor => {
             let code = commands::doctor::run(&ctx).await?;

@@ -82,7 +82,17 @@ pub async fn run(ctx: &Ctx, args: crate::cli::InitArgs) -> Result<()> {
         println!("  {action}");
     }
 
+    // M2: non-git folders get a silent repo for plumbing roots (the user's
+    // branch log is never touched — roots live under refs/stateroot/).
+    let repo_existed = dir.join(".git").exists();
+    match stateroot_core::roots::ensure_repo(&dir) {
+        Ok(_) if !repo_existed => {
+            println!("  git repo initialized (plumbing roots under refs/stateroot/)")
+        }
+        Ok(_) => println!("  git repo ready (plumbing roots under refs/stateroot/)"),
+        Err(err) => note!("warning: could not prepare git repo ({err}); roots unavailable"),
+    }
+
     println!("initialized '{}' ({project_id}) at {}", name, dir.display());
-    // M2: this is where `git init` + the first plumbing root attach.
     Ok(())
 }
