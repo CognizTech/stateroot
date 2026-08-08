@@ -87,16 +87,25 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
     // Federation doctors (local engines).
     if local_store::is_stateroot_dir(&ctx.cwd) {
         match stateroot_core::skill_federation::doctor(&ctx.cwd, None) {
-            Ok(issues) => checks.push(Check {
-                label: "skill federation".into(),
-                ok: issues.is_empty(),
-                detail: if issues.is_empty() {
-                    "ok".into()
-                } else {
-                    format!("{} issue(s)", issues.len())
-                },
-                hard: false,
-            }),
+            Ok(notes) => {
+                // The engine's doctor returns informational notes; only
+                // warning-prefixed lines are issues.
+                let issues: Vec<&String> =
+                    notes.iter().filter(|n| n.starts_with("warning:")).collect();
+                checks.push(Check {
+                    label: "skill federation".into(),
+                    ok: issues.is_empty(),
+                    detail: if issues.is_empty() {
+                        "ok".into()
+                    } else {
+                        format!("{} issue(s)", issues.len())
+                    },
+                    hard: false,
+                });
+                for issue in issues {
+                    println!("  {issue}");
+                }
+            }
             Err(err) => checks.push(Check {
                 label: "skill federation".into(),
                 ok: false,

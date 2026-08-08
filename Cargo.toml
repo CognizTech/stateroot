@@ -37,7 +37,8 @@ include_dir = "0.7"
 assert_cmd = "2"
 predicates = "3"
 # M2 wires git roots on plumbing (never porcelain). Declared now, unused in M1.
-git2 = { version = "0.20", default-features = false }
+# git2: vendored libgit2 keeps CI deterministic (ubuntu + windows).
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 wiremock = "0.6"
 
