@@ -14,6 +14,7 @@ use stateroot_core::local_store;
 pub mod auth;
 pub mod blocks;
 pub mod checkpoint;
+pub mod cloud;
 pub mod doctor;
 pub mod handoff;
 pub mod harness_display;

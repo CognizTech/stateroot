@@ -141,6 +141,26 @@ impl Default for GithubConfig {
     }
 }
 
+/// Cloud runs configuration (`[cloud]` in config.toml).
+///
+/// `base_url` is the StateSmith deployment that hosts the cloud-runs API
+/// (agent-21 builds the server side); env override `STATEROOT_CLOUD_URL`.
+/// Auth uses the Phase-1 login credential (GitHub token) as the bearer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CloudConfig {
+    /// Cloud API base URL.
+    pub base_url: String,
+}
+
+impl Default for CloudConfig {
+    fn default() -> Self {
+        Self {
+            base_url: "https://cloud.statesmith.dev".into(),
+        }
+    }
+}
+
 /// Service endpoint configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -169,6 +189,9 @@ pub struct AppConfig {
     /// GitHub integration (`[github]`).
     #[serde(default)]
     pub github: GithubConfig,
+    /// Cloud runs (`[cloud]`).
+    #[serde(default)]
+    pub cloud: CloudConfig,
 }
 
 impl Default for AppConfig {
@@ -184,6 +207,7 @@ impl Default for AppConfig {
             fire_drill: None,
             synthesis: SynthesisConfig::default(),
             github: GithubConfig::default(),
+            cloud: CloudConfig::default(),
         }
     }
 }

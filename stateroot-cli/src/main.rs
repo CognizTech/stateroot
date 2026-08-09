@@ -12,7 +12,7 @@ use tracing_subscriber::EnvFilter;
 
 use cli::{
     Command, HandoffAction, LearnAction, LearningsAction, McpAction, ProposalsAction, RepoAction,
-    SkillAction, SoulAction,
+    RunsAction, SkillAction, SoulAction,
 };
 use commands::Ctx;
 
@@ -150,6 +150,21 @@ async fn main() -> anyhow::Result<()> {
             RepoAction::Status => commands::repo::status(&ctx)?,
         },
         Command::Sync(args) => commands::sync::run(&ctx, args.push, args.pull)?,
+        Command::Run(args) => {
+            commands::cloud::run(
+                &ctx,
+                &args.cloud,
+                args.from.as_deref(),
+                args.harness.as_deref(),
+                args.verification.as_deref(),
+                args.watch,
+            )
+            .await?
+        }
+        Command::Runs(args) => match args.action {
+            RunsAction::List => commands::cloud::list(&ctx).await?,
+            RunsAction::Status { id } => commands::cloud::status(&ctx, &id).await?,
+        },
         Command::McpStdio => commands::mcp_stdio::run(&ctx).await?,
         Command::Skill(args) => match args.action {
             SkillAction::Install => commands::skill::install(&ctx)?,

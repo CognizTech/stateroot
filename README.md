@@ -92,6 +92,28 @@ stateroot sync                        # push + pull refs/stateroot/*
 - `.stateroot/local/` (sync state, machine-local notes) never enters roots
   and never syncs. Trees beyond 200 MB earn a `.staterootignore` hint.
 
+## Cloud runs (optional, paid product)
+
+`stateroot run --cloud "<objective>" [--from <root>] [--harness <id>] [--verification <cmd>] [--watch]`
+hands an objective to StateSmith Cloud: it clones your repo + refs at the
+root, hydrates the environment, runs the agent headless against the state
+the refs carried (soul, learnings, skills, active goal), executes the
+verification surface, and pushes a new root + transition + receipt back.
+
+```bash
+stateroot run --cloud "port the lexer" --harness codex --watch
+stateroot runs list
+stateroot runs status <run-id>
+```
+
+- Requires `stateroot login` (the Phase-1 credential is the bearer token);
+  without one the commands fail with exactly that message.
+- Endpoint: `[cloud] base_url` in `config.toml` (default the StateSmith
+  deployment) or the `STATEROOT_CLOUD_URL` env override.
+- `--watch` polls until a terminal state with a compact event tail; on
+  success the result root id prints with the `stateroot sync --pull`
+  reminder.
+
 ## The truth contract
 
 StateRoot never blurs provenance. Every artifact carries its tier:

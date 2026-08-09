@@ -70,6 +70,10 @@ pub enum Command {
     Repo(RepoArgs),
     /// Push/pull refs/stateroot/* against the linked remote (never force).
     Sync(SyncArgs),
+    /// Cloud run: objective executed in StateSmith cloud (requires login).
+    Run(RunArgs),
+    /// List or inspect cloud runs.
+    Runs(RunsArgs),
     /// Local stdio MCP server (line-delimited JSON-RPC; W8 tools, local stores).
     McpStdio,
     /// Canonical soul, overlay, projections (all local).
@@ -496,4 +500,40 @@ pub struct SyncArgs {
     /// Fetch remote refs/stateroot/* (default if neither flag set).
     #[arg(long)]
     pub pull: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RunArgs {
+    /// The objective for the cloud run.
+    #[arg(long)]
+    pub cloud: String,
+    /// Start from this root (default: latest synced).
+    #[arg(long)]
+    pub from: Option<String>,
+    /// Harness to run as (default: server decides).
+    #[arg(long)]
+    pub harness: Option<String>,
+    /// Verification surface to execute in the cloud.
+    #[arg(long)]
+    pub verification: Option<String>,
+    /// Poll until the run reaches a terminal state (with an event tail).
+    #[arg(long)]
+    pub watch: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct RunsArgs {
+    #[command(subcommand)]
+    pub action: RunsAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RunsAction {
+    /// List cloud runs for this project.
+    List,
+    /// Show one run (status + last events).
+    Status {
+        /// Run id.
+        id: String,
+    },
 }
