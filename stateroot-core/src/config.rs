@@ -115,6 +115,32 @@ impl Default for SynthesisConfig {
     }
 }
 
+/// GitHub integration (`[github]` in config.toml).
+///
+/// The OAuth App is registered by the project owner; until then the
+/// client_id ships as a documented placeholder and every flow errors
+/// honestly. Env overrides: `STATEROOT_GITHUB_CLIENT_ID`,
+/// `STATEROOT_GITHUB_WEB_BASE` (device flow), `STATEROOT_GITHUB_API_BASE`
+/// (REST), `STATEROOT_GITHUB_GIT_BASE` (clone/push URLs).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct GithubConfig {
+    /// OAuth App client id (placeholder until registered — see README).
+    pub client_id: String,
+    /// OAuth scope: `repo` (private repos, default) — `public_repo` is the
+    /// variant for users who only sync public repos.
+    pub scope: String,
+}
+
+impl Default for GithubConfig {
+    fn default() -> Self {
+        Self {
+            client_id: "STATEROOT_GITHUB_CLIENT_ID_PLACEHOLDER".into(),
+            scope: "repo".into(),
+        }
+    }
+}
+
 /// Service endpoint configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -140,6 +166,9 @@ pub struct AppConfig {
     /// Synthesis layer (`synthesis.enabled`, default true).
     #[serde(default)]
     pub synthesis: SynthesisConfig,
+    /// GitHub integration (`[github]`).
+    #[serde(default)]
+    pub github: GithubConfig,
 }
 
 impl Default for AppConfig {
@@ -154,6 +183,7 @@ impl Default for AppConfig {
             installed_harnesses: Vec::new(),
             fire_drill: None,
             synthesis: SynthesisConfig::default(),
+            github: GithubConfig::default(),
         }
     }
 }

@@ -11,6 +11,7 @@ use anyhow::anyhow;
 use stateroot_core::config::{self as core_config, AppConfig, ProjectEntry};
 use stateroot_core::local_store;
 
+pub mod auth;
 pub mod blocks;
 pub mod checkpoint;
 pub mod doctor;
@@ -27,12 +28,14 @@ pub mod mcp;
 pub mod mcp_stdio;
 pub mod persona;
 pub mod proposals;
+pub mod repo;
 pub mod resume;
 pub mod roots;
 pub mod setup;
 pub mod skill;
 pub mod soul;
 pub mod status;
+pub mod sync;
 pub mod synthesize;
 
 /// Shared context built once per command invocation.

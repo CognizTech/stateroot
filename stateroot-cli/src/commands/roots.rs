@@ -30,6 +30,12 @@ pub fn snap(ctx: &Ctx, reason: Option<&str>) -> anyhow::Result<()> {
     if manifest.coverage == "state_only" {
         note!("hint: state-only coverage — the project tree is empty or fully ignored");
     }
+    if manifest.tree_bytes > stateroot_core::roots::TREE_SIZE_WARN_BYTES {
+        note!(
+            "warning: root tree is {} MB — syncs carry this much history; consider .staterootignore for large assets",
+            manifest.tree_bytes / (1024 * 1024)
+        );
+    }
     Ok(())
 }
 

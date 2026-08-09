@@ -58,6 +58,18 @@ pub enum Command {
     Uninstall,
     /// Guided local setup (harnesses, skills).
     Setup(SetupArgs),
+    /// Log in (OAuth device flow). Currently: --via github.
+    Login {
+        /// Provider (only `github` exists).
+        #[arg(long, default_value = "github")]
+        via: String,
+    },
+    /// Clear the stored credential.
+    Logout,
+    /// GitHub repo binding for refs sync.
+    Repo(RepoArgs),
+    /// Push/pull refs/stateroot/* against the linked remote (never force).
+    Sync(SyncArgs),
     /// Local stdio MCP server (line-delimited JSON-RPC; W8 tools, local stores).
     McpStdio,
     /// Canonical soul, overlay, projections (all local).
@@ -453,4 +465,35 @@ pub enum LearnAction {
         /// The note to record.
         note: String,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct RepoArgs {
+    #[command(subcommand)]
+    pub action: RepoAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RepoAction {
+    /// Bind the project to a GitHub repo (verifies access with the token).
+    Link {
+        /// owner/repo (a github.com URL works too).
+        repo: String,
+        /// `same-repo` (default; refs/stateroot/* inside the repo) or
+        /// `companion` (a dedicated <project>-stateroot repo).
+        #[arg(long)]
+        layout: Option<String>,
+    },
+    /// Show the current binding + last sync.
+    Status,
+}
+
+#[derive(Debug, Args)]
+pub struct SyncArgs {
+    /// Push local refs/stateroot/* (default if neither flag set).
+    #[arg(long)]
+    pub push: bool,
+    /// Fetch remote refs/stateroot/* (default if neither flag set).
+    #[arg(long)]
+    pub pull: bool,
 }

@@ -28,6 +28,8 @@ console.workspace = true
 include_dir.workspace = true
 sha2.workspace = true
 reqwest.workspace = true
+keyring.workspace = true
+git2.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 

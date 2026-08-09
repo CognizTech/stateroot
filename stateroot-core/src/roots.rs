@@ -89,6 +89,9 @@ pub struct RootManifest {
     /// `full` | `state_only` (empty/ignored project tree).
     #[serde(default)]
     pub coverage: String,
+    /// Total pinned bytes (large-repo guard; sync warns past the cap).
+    #[serde(default)]
+    pub tree_bytes: u64,
 }
 
 /// A transition linking from-root → to-root.
@@ -141,7 +144,12 @@ fn signature() -> Result<git2::Signature<'static>, git2::Error> {
 
 /// Build a git tree from the working directory honoring the ignore rules.
 /// Returns the tree oid and the number of project (non-`.stateroot`) files.
-fn build_tree(repo: &Repository, dir: &Path) -> Result<(git2::Oid, i64), RootsError> {
+/// Large-repo guard threshold (sync warn): trees beyond this get a
+/// `.staterootignore` hint.
+pub const TREE_SIZE_WARN_BYTES: u64 = 200 * 1024 * 1024;
+
+/// Build the working tree; returns (tree oid, files pinned, total bytes).
+fn build_tree(repo: &Repository, dir: &Path) -> Result<(git2::Oid, i64, u64), RootsError> {
     let rules = IgnoreRules::load(dir);
     fn walk(
         repo: &Repository,
@@ -149,6 +157,7 @@ fn build_tree(repo: &Repository, dir: &Path) -> Result<(git2::Oid, i64), RootsEr
         dir: &Path,
         rules: &IgnoreRules,
         pinned: &mut i64,
+        total_bytes: &mut u64,
     ) -> Result<Option<git2::Oid>, RootsError> {
         let mut builder = repo.treebuilder(None)?;
         let mut any = false;
@@ -167,18 +176,28 @@ fn build_tree(repo: &Repository, dir: &Path) -> Result<(git2::Oid, i64), RootsEr
                 .map(|r| r.to_string_lossy().replace('\\', "/"))
                 .unwrap_or_default();
             if path.is_dir() {
+                // `.stateroot/local/` is the quarantine lane (sync state,
+                // machine-local notes) — it NEVER enters roots, and thus
+                // never syncs. (Files-first doctrine.)
+                if rel == ".stateroot/local" || rel.starts_with(".stateroot/local/") {
+                    continue;
+                }
                 if rules.is_ignored(&rel, true) {
                     continue;
                 }
-                if let Some(sub) = walk(repo, root, &path, rules, pinned)? {
+                if let Some(sub) = walk(repo, root, &path, rules, pinned, total_bytes)? {
                     builder.insert(&name, sub, 0o040000)?;
                     any = true;
                 }
             } else if path.is_file() {
+                if rel.starts_with(".stateroot/local/") {
+                    continue;
+                }
                 if rules.is_ignored(&rel, false) {
                     continue;
                 }
                 let bytes = std::fs::read(&path)?;
+                *total_bytes += bytes.len() as u64;
                 let blob = repo.blob(&bytes)?;
                 builder.insert(&name, blob, 0o100644)?;
                 any = true;
@@ -195,13 +214,14 @@ fn build_tree(repo: &Repository, dir: &Path) -> Result<(git2::Oid, i64), RootsEr
         }
     }
     let mut pinned = 0i64;
-    let tree = walk(repo, dir, dir, &rules, &mut pinned)?;
+    let mut total_bytes = 0u64;
+    let tree = walk(repo, dir, dir, &rules, &mut pinned, &mut total_bytes)?;
     // An empty tree is legal (state_only roots before any project file).
     let tree = match tree {
         Some(oid) => oid,
         None => repo.treebuilder(None)?.write()?,
     };
-    Ok((tree, pinned))
+    Ok((tree, pinned, total_bytes))
 }
 
 fn latest_oid(repo: &Repository) -> Option<git2::Oid> {
@@ -256,6 +276,7 @@ fn persist_root(
     harness: &str,
     reason: &str,
     files_pinned: i64,
+    tree_bytes: u64,
     kind: &str,
     evidence: Value,
 ) -> Result<(RootManifest, Transition), RootsError> {
@@ -297,6 +318,7 @@ fn persist_root(
         created_reason: reason.into(),
         files_pinned,
         coverage: coverage.into(),
+        tree_bytes,
     };
     write_json(
         &root.join(ROOTS_DIR).join(format!("{}.json", manifest.id)),
@@ -312,7 +334,7 @@ pub fn create_root(
     reason: &str,
 ) -> Result<(RootManifest, Transition), RootsError> {
     let repo = ensure_repo(project_dir)?;
-    let (tree, pinned) = build_tree(&repo, project_dir)?;
+    let (tree, pinned, tree_bytes) = build_tree(&repo, project_dir)?;
     let parent = latest_oid(&repo);
     let parents: Vec<git2::Oid> = parent.into_iter().collect();
     let parent_hashes: Vec<String> = parents.iter().map(|o| o.to_string()).collect();
@@ -329,6 +351,7 @@ pub fn create_root(
         harness,
         reason,
         pinned,
+        tree_bytes,
         "snapshot",
         json!({"reason": reason}),
     )
@@ -589,6 +612,7 @@ pub fn revert_to_root(
         harness,
         &format!("revert to {}", &target_id[..12]),
         manifest.files_pinned,
+        manifest.tree_bytes,
         "revert",
         json!({"revert_to": target_id}),
     )

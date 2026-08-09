@@ -11,8 +11,8 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 use cli::{
-    Command, HandoffAction, LearnAction, LearningsAction, McpAction, ProposalsAction, SkillAction,
-    SoulAction,
+    Command, HandoffAction, LearnAction, LearningsAction, McpAction, ProposalsAction, RepoAction,
+    SkillAction, SoulAction,
 };
 use commands::Ctx;
 
@@ -141,6 +141,15 @@ async fn main() -> anyhow::Result<()> {
             LearnAction::Record { note } => commands::learn::record(&ctx, &note)?,
         },
         Command::Synthesize { force } => commands::synthesize::run(&ctx, force).await?,
+        Command::Login { via } => commands::auth::login(&ctx, &via).await?,
+        Command::Logout => commands::auth::logout(&ctx)?,
+        Command::Repo(args) => match args.action {
+            RepoAction::Link { repo, layout } => {
+                commands::repo::link(&ctx, &repo, layout.as_deref()).await?
+            }
+            RepoAction::Status => commands::repo::status(&ctx)?,
+        },
+        Command::Sync(args) => commands::sync::run(&ctx, args.push, args.pull)?,
         Command::McpStdio => commands::mcp_stdio::run(&ctx).await?,
         Command::Skill(args) => match args.action {
             SkillAction::Install => commands::skill::install(&ctx)?,

@@ -64,6 +64,34 @@ stateroot receipt <transition-id>   # verified tier: the git delta itself
 | **Shared self-improvement tools** | `stateroot mcp-stdio` is a local stdio MCP server exposing `memory_save / memory_recall / learn_record / skill_propose / soul_read / learnings_list` to every harness — "any agent can teach; all inherit". Writes arrive quarantined. |
 | **Local synthesis** | `stateroot synthesize` condenses transcript bundles into handoff sections using *your own* provider key — OpenAI, DeepSeek, Ollama, litellm, anything OpenAI-compatible. No key? The deterministic digest always works. |
 
+## GitHub-backed sync (optional)
+
+StateRoot syncs `refs/stateroot/*` over plain git — roots are commit-trees,
+so state and files travel inside the commits; no translation layer, no
+hosted service of ours.
+
+```bash
+stateroot login --via github          # OAuth device flow
+stateroot repo link owner/repo        # verify + bind (writes to the manifest)
+stateroot sync                        # push + pull refs/stateroot/*
+```
+
+- **Layouts**: `same-repo` (default — refs live in your repo, invisible to
+  the branch list) or `--layout companion` (a dedicated
+  `<project>-stateroot` repo you create first).
+- **Never destructive**: divergence forks (both tips kept as
+  `refs/stateroot/forks/sync-diverged-*`); pushes are never forced, remote
+  refs are never deleted. A non-fast-forward push fails honestly — pull
+  first, or fork on purpose.
+- **Scope decision**: the OAuth App asks for `repo` (refs push needs it for
+  private repos). Public-only users can set `public_repo`:
+  `[github] scope = "public_repo"` in `config.toml`.
+- **Client id**: the OAuth App is registered by the project owner; until
+  then set `STATEROOT_GITHUB_CLIENT_ID` (or `[github] client_id`) — the
+  shipped placeholder fails with a pointer here instead of a broken flow.
+- `.stateroot/local/` (sync state, machine-local notes) never enters roots
+  and never syncs. Trees beyond 200 MB earn a `.staterootignore` hint.
+
 ## The truth contract
 
 StateRoot never blurs provenance. Every artifact carries its tier:
