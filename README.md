@@ -76,4 +76,4 @@ Issues and pull requests are welcome. Please run `cargo test --workspace` before
 
 ## License
 
-Business Source License 1.1 — see [LICENSE](LICENSE). Converts to Apache-2.0 on the change date.
+Apache-2.0 — see [LICENSE](LICENSE).
