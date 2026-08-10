@@ -29,6 +29,22 @@ fn init_project(config_home: &Path, user_home: &Path, project: &Path) {
         .success();
 }
 
+/// `file://` URL for a local path that git2 accepts on Windows and Unix.
+fn path_as_file_url(path: &Path) -> String {
+    let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut s = abs.to_string_lossy().replace('\\', "/");
+    if let Some(rest) = s.strip_prefix("//?/") {
+        s = rest.to_string();
+    }
+    if cfg!(windows) {
+        // Drive paths need the third slash: file:///C:/...
+        format!("file:///{s}")
+    } else {
+        // Absolute POSIX path already starts with `/` → file:///tmp/...
+        format!("file://{s}")
+    }
+}
+
 #[tokio::test]
 async fn device_flow_login_polls_until_approved_and_logout_clears() {
     let server = MockServer::start().await;
@@ -163,7 +179,7 @@ fn sync_push_pull_and_divergence_forks() {
     let remote_dir = tempfile::tempdir().expect("remote");
     let remote_repo = remote_dir.path().join("acme/widgets.git");
     git2::Repository::init_bare(&remote_repo).expect("bare remote");
-    let git_base = format!("file://{}", remote_dir.path().display());
+    let git_base = path_as_file_url(remote_dir.path());
 
     let p1 = tempfile::tempdir().expect("p1");
     let p2 = tempfile::tempdir().expect("p2");

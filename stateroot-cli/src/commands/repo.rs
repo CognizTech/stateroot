@@ -21,7 +21,28 @@ pub fn binding(ctx: &Ctx) -> Option<Value> {
 /// The clone/push URL for the binding.
 pub fn remote_url(_ctx: &Ctx, binding: &Value) -> String {
     let repo = binding.get("repo").and_then(|v| v.as_str()).unwrap_or("");
-    format!("{}/{repo}.git", gh::git_base())
+    let base = gh::git_base().trim_end_matches('/').to_string();
+    normalize_file_remote_url(&format!("{base}/{repo}.git"))
+}
+
+/// Normalize `file://` remotes so git2 accepts them on Windows.
+///
+/// `file://C:\Temp\repo` (common when joining a Windows path) is invalid;
+/// git wants `file:///C:/Temp/repo`.
+pub fn normalize_file_remote_url(url: &str) -> String {
+    let Some(rest) = url.strip_prefix("file://") else {
+        return url.to_string();
+    };
+    let rest = rest.replace('\\', "/");
+    if rest.starts_with('/') {
+        // Unix absolute (`/tmp/...`) or already `file:///C:/...`.
+        format!("file://{rest}")
+    } else if rest.len() >= 2 && rest.as_bytes().get(1) == Some(&b':') {
+        // Windows drive letter without the required third slash.
+        format!("file:///{rest}")
+    } else {
+        format!("file:///{rest}")
+    }
 }
 
 /// Parse `owner/repo` (also accepts full https/ssh URLs).
@@ -137,4 +158,37 @@ pub fn status(ctx: &Ctx) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_file_remote_url;
+
+    #[test]
+    fn normalize_unix_file_url() {
+        assert_eq!(
+            normalize_file_remote_url("file:///tmp/acme/widgets.git"),
+            "file:///tmp/acme/widgets.git"
+        );
+    }
+
+    #[test]
+    fn normalize_windows_drive_file_url() {
+        assert_eq!(
+            normalize_file_remote_url(r"file://C:\Users\RUNNER~\Temp\acme/widgets.git"),
+            "file:///C:/Users/RUNNER~/Temp/acme/widgets.git"
+        );
+        assert_eq!(
+            normalize_file_remote_url("file://C:/Temp/acme/widgets.git"),
+            "file:///C:/Temp/acme/widgets.git"
+        );
+    }
+
+    #[test]
+    fn normalize_leaves_https_alone() {
+        assert_eq!(
+            normalize_file_remote_url("https://github.com/acme/widgets.git"),
+            "https://github.com/acme/widgets.git"
+        );
+    }
 }
