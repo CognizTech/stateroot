@@ -86,10 +86,15 @@ fn cloud_preview_flag_enables_real_behavior() {
 // --- B: auto-update ------------------------------------------------------
 
 fn release_body(tag: &str, asset_url: &str, checksums_url: &str) -> serde_json::Value {
+    // Include every platform asset name the CLI looks up — Windows CI
+    // requests `stateroot-windows-x64.exe`; a linux-only fixture never
+    // writes the update cache, so the second check hits the network again.
     json!({
         "tag_name": tag,
         "assets": [
             {"name": "stateroot-linux-x64", "browser_download_url": asset_url},
+            {"name": "stateroot-windows-x64.exe", "browser_download_url": asset_url},
+            {"name": "stateroot-macos-aarch64", "browser_download_url": asset_url},
             {"name": "checksums.txt", "browser_download_url": checksums_url}
         ]
     })

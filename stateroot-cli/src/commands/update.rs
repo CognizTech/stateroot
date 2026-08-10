@@ -136,23 +136,24 @@ pub async fn check_latest(ctx: &Ctx, force: bool) -> Option<ReleaseInfo> {
             checksums_url = Some(url.to_string());
         }
     }
-    let info = ReleaseInfo {
-        tag,
-        asset_url: asset_url?,
-        checksums_url: checksums_url?,
-    };
+    // Always record the check timestamp so a missing platform asset does not
+    // re-hit the network on every invocation within the interval.
     let _ = std::fs::create_dir_all(&ctx.config_dir);
     let _ = std::fs::write(
         cache_path(ctx),
         serde_json::to_string_pretty(&json!({
             "checked_at": stateroot_core::local_store::now_rfc3339(),
-            "latest_tag": info.tag,
-            "asset_url": info.asset_url,
-            "checksums_url": info.checksums_url,
+            "latest_tag": tag,
+            "asset_url": asset_url,
+            "checksums_url": checksums_url,
         }))
         .ok()?,
     );
-    Some(info)
+    Some(ReleaseInfo {
+        tag,
+        asset_url: asset_url?,
+        checksums_url: checksums_url?,
+    })
 }
 
 /// True when `latest` is a newer version than the running binary.
