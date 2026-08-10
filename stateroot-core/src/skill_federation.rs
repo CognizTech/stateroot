@@ -239,7 +239,7 @@ pub fn load_registry() -> Result<RegistryContract, String> {
 pub fn normalize_harness(raw: &str) -> String {
     let key = raw.trim().to_ascii_lowercase();
     if key.is_empty() {
-        return "skillsagent".to_string();
+        return "statesmith".to_string();
     }
     if let Ok(reg) = load_registry() {
         for entry in &reg.harnesses {
@@ -263,7 +263,7 @@ pub fn display_name(id: &str) -> String {
             return entry.display.clone();
         }
     }
-    if canon == "skillsagent" {
+    if canon == "statesmith" {
         return "StateSmith".to_string();
     }
     canon
@@ -530,7 +530,7 @@ fn scan_skill_dir(
         .map(normalize_harness)
         .unwrap_or_else(|| {
             if is_product {
-                "skillsagent".to_string()
+                "statesmith".to_string()
             } else {
                 normalize_harness(origin_harness)
             }
@@ -1092,7 +1092,7 @@ fn discover_with_scope(
             discover_openclaw_skills(&home, &mut found);
             continue;
         }
-        if entry.id == "skillsagent" || entry.id == "planner" {
+        if entry.id == "statesmith" || entry.id == "planner" {
             continue;
         }
         for rel in &entry.skill_source_roots.global {
@@ -1130,7 +1130,7 @@ fn discover_with_scope(
     // Portable canonical roots are origins of record, scanned exactly once.
     scan_tree(
         &home.join(".stateroot/skills"),
-        "skillsagent",
+        "statesmith",
         "global",
         "portable",
         &mut found,
@@ -1138,7 +1138,7 @@ fn discover_with_scope(
     if include_project_scope {
         scan_tree(
             &project_dir.join(".stateroot/skills"),
-            "skillsagent",
+            "statesmith",
             "project",
             "package",
             &mut found,
@@ -1370,7 +1370,7 @@ fn same_path(left: &Path, right: &Path) -> bool {
 }
 
 fn existing_package_digest(path: &Path, scope: &str) -> Option<String> {
-    scan_skill_dir(path, "skillsagent", scope, "portable").map(|skill| skill.package_digest)
+    scan_skill_dir(path, "statesmith", scope, "portable").map(|skill| skill.package_digest)
 }
 
 fn canonical_destination(root: &Path, skill: &DiscoveredSkill) -> PathBuf {
@@ -1608,8 +1608,8 @@ cross-harness microtask.
             "projection_kind": "federation_router",
             "slug": "stateroot-skill-router",
             "package_digest": digest,
-            "source_harness": "skillsagent",
-            "native_harness": "skillsagent",
+            "source_harness": "statesmith",
+            "native_harness": "statesmith",
             "native_invocation": "stateroot harness run <harness> --skill <skill> --objective <microtask>",
         }),
     )
@@ -1655,7 +1655,7 @@ pub fn ensure_product_skill_package(
             slug: "stateroot".into(),
             name: "stateroot".into(),
             description: String::new(),
-            harness: "skillsagent".into(),
+            harness: "statesmith".into(),
             source_path: dest.display().to_string(),
             scope: "global".into(),
             ownership_class: "statesmith_authored".into(),
@@ -1665,7 +1665,7 @@ pub fn ensure_product_skill_package(
             files: file_digests,
             source_kind: "product".into(),
             license: None,
-            native_harness: "skillsagent".into(),
+            native_harness: "statesmith".into(),
             native_invocation: "stateroot resume --harness <id>".into(),
             compatibility: serde_json::json!({"compatible": true, "reasons": []}),
             hash_exclusions: Vec::new(),
@@ -1707,7 +1707,7 @@ pub fn ensure_product_skill_package(
         slug: "stateroot".into(),
         name: "stateroot".into(),
         description: String::new(),
-        harness: "skillsagent".into(),
+        harness: "statesmith".into(),
         source_path: dest.display().to_string(),
         scope: "global".into(),
         ownership_class: "statesmith_authored".into(),
@@ -1717,7 +1717,7 @@ pub fn ensure_product_skill_package(
         files: file_digests,
         source_kind: "product".into(),
         license: None,
-        native_harness: "skillsagent".into(),
+        native_harness: "statesmith".into(),
         native_invocation: "stateroot resume --harness <id>".into(),
         compatibility: serde_json::json!({"compatible": true, "reasons": []}),
         hash_exclusions: Vec::new(),
@@ -1770,7 +1770,7 @@ fn project_product_adapters(
 
     let reg = load_registry()?;
     for entry in &reg.harnesses {
-        if entry.id == "skillsagent" || entry.id == "planner" {
+        if entry.id == "statesmith" || entry.id == "planner" {
             continue;
         }
         let roots = if skill.scope == "global" {
@@ -2050,7 +2050,7 @@ fn sync_scoped(
         for skill in local {
             let src = PathBuf::from(&skill.source_path);
             for entry in &reg.harnesses {
-                if entry.id == "skillsagent" || entry.id == "planner" {
+                if entry.id == "statesmith" || entry.id == "planner" {
                     continue;
                 }
                 // Prefer .agents/skills which most harnesses already scan; only
@@ -2111,7 +2111,7 @@ fn sync_scoped(
 
 fn list_portable(root: &Path, scope: &str) -> Vec<DiscoveredSkill> {
     let mut out = Vec::new();
-    scan_tree(root, "skillsagent", scope, "portable", &mut out);
+    scan_tree(root, "statesmith", scope, "portable", &mut out);
     out
 }
 
@@ -2319,7 +2319,7 @@ mod tests {
         let reg = load_registry().expect("registry");
         assert!(reg.harnesses.len() >= 16);
         assert_eq!(normalize_harness("claude-code"), "claude");
-        assert_eq!(display_name("skillsagent"), "StateSmith");
+        assert_eq!(display_name("statesmith"), "StateSmith");
     }
 
     #[test]
@@ -2811,12 +2811,8 @@ mod tests {
             .global
             .iter()
             .any(|t| t.shape == "mcp_servers"));
-        let skillsagent = reg
-            .harnesses
-            .iter()
-            .find(|h| h.id == "skillsagent")
-            .unwrap();
-        assert!(skillsagent
+        let statesmith = reg.harnesses.iter().find(|h| h.id == "statesmith").unwrap();
+        assert!(statesmith
             .mcp_config
             .global
             .iter()

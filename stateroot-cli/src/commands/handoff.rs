@@ -24,7 +24,7 @@ pub enum HandoffOrigin {
 /// `contracts/stateroot_harness_registry.v1.json`.
 const CANONICAL_HARNESSES: &[&str] = &[
     "planner",
-    "skillsagent",
+    "statesmith",
     "cursor",
     "codex",
     "claude",
@@ -49,7 +49,7 @@ const CANONICAL_HARNESSES: &[&str] = &[
 ];
 
 /// Generic actor id for CLI-originated writes ("cli" is not in the server Literal).
-const SERVER_ACTOR: &str = "skillsagent";
+const SERVER_ACTOR: &str = "statesmith";
 
 /// Handoff quality bounds at write (plan P4.1).
 const SUMMARY_MAX: usize = 3000;
@@ -319,7 +319,7 @@ fn queue_selection_observation(project_dir: &std::path::Path, by: &str) {
         return;
     }
     let harness = if by.trim().is_empty() || by == "cli" {
-        "skillsagent"
+        "statesmith"
     } else {
         by
     };
@@ -430,7 +430,7 @@ mod tests {
             "bugs_found": ["z".repeat(2000)],
             "changed_files": (0..600).map(|i| format!("src/f{i}.rs")).collect::<Vec<_>>(),
             "created_at": "2026-07-18T00:00:00Z",
-            "created_by_harness": "skillsagent",
+            "created_by_harness": "statesmith",
         });
         packet = bound_packet(packet);
 

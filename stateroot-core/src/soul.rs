@@ -340,7 +340,7 @@ fn flush_section(kept: &mut Vec<String>, heading: &str, capture: &[String]) {
 /// and the cap differ). Ported from the server renderer.
 fn harness_line_cap(harness: &str) -> Option<usize> {
     match crate::skill_federation::normalize_harness(harness).as_str() {
-        "skillsagent" => None,
+        "statesmith" => None,
         "claude" | "codex" => Some(16),
         "cursor" => Some(14),
         "openclaw" | "hermes" => Some(12),

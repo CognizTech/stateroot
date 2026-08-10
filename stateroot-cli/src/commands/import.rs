@@ -26,7 +26,7 @@ use super::{note, truncate, Ctx};
 
 /// Server-canonical actor for imported writes ("claude" is not in the
 /// server HarnessId Literal; codex is).
-const SERVER_ACTOR: &str = "skillsagent";
+const SERVER_ACTOR: &str = "statesmith";
 
 /// Options for `stateroot import`.
 pub struct ImportOptions {

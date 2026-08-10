@@ -4,7 +4,7 @@
 //! and projected into every harness MCP config. Product bridge keys
 //! (`stateroot`, `skillsagent-stateroot`) are reserved and never federated.
 //!
-//! StateSmith (skillsagent) cloud mode only receives SSE / streamable-HTTP /
+//! StateSmith (canonical id `statesmith`) cloud mode only receives SSE / streamable-HTTP /
 //! URL-based remote servers via `.stateroot/tools/mcp.cloud.json`.
 
 use std::collections::BTreeMap;
@@ -23,8 +23,10 @@ use crate::skill_federation::{load_registry, normalize_harness, McpConfigTarget}
 
 const SCHEMA_VERSION: &str = "stateroot.mcp_federation.v1";
 const PROJECTIONS_SCHEMA: &str = "stateroot.mcp_projections.v1";
-const RESERVED_KEYS: &[&str] = &["stateroot", "skillsagent-stateroot"];
-const CLOUD_HARNESS_ID: &str = "skillsagent";
+// Product bridge keys — the canonical `statesmith-stateroot` AND the legacy
+// `skillsagent-stateroot` are ours forever (both map to the same harness).
+const RESERVED_KEYS: &[&str] = &["stateroot", "statesmith-stateroot", "skillsagent-stateroot"];
+const CLOUD_HARNESS_ID: &str = "statesmith";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -336,7 +338,7 @@ fn collect_targets_with(
             // Detection-gating (R2.1): targets for harnesses absent from the
             // machine are never materialized. An existing config file counts
             // as detected; the product harnesses are always writable.
-            let product = matches!(entry.id.as_str(), "skillsagent" | "planner");
+            let product = matches!(entry.id.as_str(), "statesmith" | "planner");
             if !product
                 && !crate::skill_federation::harness_detected_with(entry, home, Some(&path), probe)
             {
@@ -352,7 +354,7 @@ fn collect_targets_with(
         if let Some(project_dir) = project_dir {
             for target in &entry.mcp_config.project {
                 let path = project_dir.join(&target.path);
-                let product = matches!(entry.id.as_str(), "skillsagent" | "planner");
+                let product = matches!(entry.id.as_str(), "statesmith" | "planner");
                 if !product
                     && !crate::skill_federation::harness_detected_with(
                         entry,
@@ -976,6 +978,7 @@ mod tests {
     fn reserved_keys_are_skipped() {
         assert!(is_reserved_mcp_key("stateroot"));
         assert!(is_reserved_mcp_key("skillsagent-stateroot"));
+        assert!(is_reserved_mcp_key("statesmith-stateroot"));
         assert!(!is_reserved_mcp_key("github"));
     }
 
@@ -1048,9 +1051,7 @@ mod tests {
         );
         assert!(
             actions.iter().any(|a| {
-                a.name == "github"
-                    && a.action == "skipped_local"
-                    && a.detail.contains("skillsagent")
+                a.name == "github" && a.action == "skipped_local" && a.detail.contains("statesmith")
             }),
             "stdio must not project to StateSmith cloud: {actions:#?}"
         );
@@ -1120,25 +1121,29 @@ mod tests {
                 dry_run: false,
                 pull: true,
                 push: true,
-                cmd_probe: None,
+                // Hermetic (CI has no harness binaries on PATH): pretend
+                // claude exists so the desktop projection is deterministic —
+                // the assertions below pin cloud-vs-desktop routing, not the
+                // host's PATH.
+                cmd_probe: Some(vec!["claude".into()]),
             },
         )
         .unwrap();
         assert!(
             actions.iter().any(|a| {
-                a.name == "local" && a.action == "skipped_local" && a.detail.contains("skillsagent")
+                a.name == "local" && a.action == "skipped_local" && a.detail.contains("statesmith")
             }),
             "{actions:#?}"
         );
         assert!(
             actions.iter().any(|a| {
-                a.name == "remote" && a.action == "projected" && a.detail.contains("skillsagent")
+                a.name == "remote" && a.action == "projected" && a.detail.contains("statesmith")
             }),
             "{actions:#?}"
         );
         assert!(
             actions.iter().any(|a| {
-                a.name == "httpish" && a.action == "projected" && a.detail.contains("skillsagent")
+                a.name == "httpish" && a.action == "projected" && a.detail.contains("statesmith")
             }),
             "{actions:#?}"
         );
@@ -1417,7 +1422,7 @@ mod detection_gating_tests {
         assert!(
             !actions
                 .iter()
-                .any(|a| a.action == "projected" && !a.detail.contains("skillsagent")),
+                .any(|a| a.action == "projected" && !a.detail.contains("statesmith")),
             "no foreign projections expected: {actions:#?}"
         );
     }

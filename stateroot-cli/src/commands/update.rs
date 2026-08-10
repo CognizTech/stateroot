@@ -518,10 +518,13 @@ mod tests {
             .await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
             .and(wiremock::matchers::path("/checksums.txt"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(
-                "0000000000000000000000000000000000000000000000000000000000000000  stateroot-linux-x64
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_string(format!(
+                    "0000000000000000000000000000000000000000000000000000000000000000  {}
 ",
-            ))
+                    asset_name()
+                )),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -560,8 +563,9 @@ mod tests {
             .and(wiremock::matchers::path("/checksums.txt"))
             .respond_with(
                 wiremock::ResponseTemplate::new(200).set_body_string(format!(
-                    "{sha}  stateroot-linux-x64
-"
+                    "{sha}  {}
+",
+                    asset_name()
                 )),
             )
             .expect(1)

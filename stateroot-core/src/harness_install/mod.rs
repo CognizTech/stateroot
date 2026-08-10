@@ -693,8 +693,8 @@ fn write_product_install_marker(dest: &Path, bundle: &SkillBundle) -> Result<(),
         "identity_key": identity_key,
         "slug": "stateroot",
         "package_digest": package_digest,
-        "source_harness": "skillsagent",
-        "native_harness": "skillsagent",
+        "source_harness": "statesmith",
+        "native_harness": "statesmith",
         "ownership_class": "statesmith_authored",
     });
     std::fs::write(

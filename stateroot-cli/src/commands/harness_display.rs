@@ -14,7 +14,7 @@ mod tests {
 
     #[test]
     fn skillsagent_displays_as_statesmith() {
-        assert_eq!(display_name("skillsagent"), "StateSmith");
+        assert_eq!(display_name("statesmith"), "StateSmith");
         assert_eq!(display_name("SKILLSAGENT"), "StateSmith");
     }
 
@@ -35,7 +35,7 @@ mod tests {
 
     #[test]
     fn normalize_statesmith_alias() {
-        assert_eq!(normalize("statesmith"), "skillsagent");
-        assert_eq!(NATIVE_HARNESS_ID, "skillsagent");
+        assert_eq!(normalize("statesmith"), "statesmith");
+        assert_eq!(NATIVE_HARNESS_ID, "statesmith");
     }
 }

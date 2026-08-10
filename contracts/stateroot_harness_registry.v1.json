@@ -1,13 +1,13 @@
 {
   "schema_version": "stateroot.harness_registry.v1",
-  "native_harness_id": "skillsagent",
+  "native_harness_id": "statesmith",
   "product_skills": [
     "stateroot",
     "stateroot-skill-router"
   ],
   "harnesses": [
     {
-      "id": "skillsagent",
+      "id": "statesmith",
       "display": "StateSmith",
       "aliases": [
         "statesmith",

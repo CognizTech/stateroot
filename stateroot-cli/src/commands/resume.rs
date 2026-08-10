@@ -16,7 +16,7 @@ const HOT_APEX_BUDGET: usize = 1500;
 
 /// Default harness used for the context pack when `--harness` is absent.
 /// Storage/API id remains `skillsagent`; user-facing display is StateSmith.
-const DEFAULT_HARNESS: &str = "skillsagent";
+const DEFAULT_HARNESS: &str = "statesmith";
 
 /// Footer appended to resume output AND the hook digest — identical wording
 /// in both (plan P4.2).
@@ -693,7 +693,7 @@ mod tests {
             ],
             "changed_files": ["src/api.rs"],
             "created_at": "2026-07-26T00:00:00Z",
-            "created_by_harness": "skillsagent"
+            "created_by_harness": "statesmith"
         })
     }
 

@@ -50,7 +50,7 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
     let home = stateroot_core::harness_install::home_dir().map_err(|e| anyhow::anyhow!(e))?;
-    let mut caller_harness = "skillsagent".to_string();
+    let mut caller_harness = "statesmith".to_string();
     let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
     let mut stdout = tokio::io::stdout();
     let mut line = String::new();
@@ -105,7 +105,7 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<()> {
                     .pointer("/params/arguments")
                     .cloned()
                     .unwrap_or(json!({}));
-                let external = caller_harness != "skillsagent" && caller_harness != "cli";
+                let external = caller_harness != "statesmith" && caller_harness != "cli";
                 Some(call_tool(
                     ctx,
                     &home,

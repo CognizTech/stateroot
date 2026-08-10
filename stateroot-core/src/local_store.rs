@@ -173,7 +173,7 @@ pub fn init_skeleton(
         "recommended_next_harness": null,
         "task_tree_ref": "project/task-tree.json",
         "updated_at": now,
-        "updated_by_harness": "skillsagent",
+        "updated_by_harness": "statesmith",
     });
     write_json_if_absent(&root.join(STATE_PATH), &state, &mut created)?;
 
@@ -577,7 +577,7 @@ mod tests {
             "project_id": "p",
             "seq": 1,
             "created_at": "2026-07-18T12:00:00Z",
-            "created_by_harness": "skillsagent",
+            "created_by_harness": "statesmith",
         });
         write_handoff_local(tmp.path(), &packet).expect("write");
         let read = read_handoff_local(tmp.path())
