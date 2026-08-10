@@ -182,7 +182,7 @@ pub struct UpdateConfig {
 impl Default for UpdateConfig {
     fn default() -> Self {
         Self {
-            repo: "OWNER/stateroot (placeholder — set to the public repo)".into(),
+            repo: "CognizTech/stateroot".into(),
             enabled: true,
             check_interval_hours: 24,
         }

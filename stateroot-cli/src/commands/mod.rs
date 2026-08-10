@@ -151,5 +151,5 @@ pub fn cloud_preview_enabled(ctx: &Ctx) -> bool {
 pub fn cloud_coming_soon() {
     println!("StateSmith Cloud is coming soon.");
     println!("StateRoot is fully local today — everything works offline.");
-    println!("Watch https://github.com/OWNER/stateroot (placeholder) for the launch.");
+    println!("Watch https://github.com/CognizTech/stateroot for the launch.");
 }
