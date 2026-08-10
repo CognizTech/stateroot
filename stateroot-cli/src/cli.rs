@@ -18,6 +18,9 @@ pub struct Cli {
 pub enum Command {
     /// Initialize a project (creates `.stateroot/`, product skill, projections).
     Init(InitArgs),
+    /// Remove a project (`.stateroot/`, registry entry, convenience layer,
+    /// our git refs) — plan preview + confirmation.
+    Remove(RemoveArgs),
     /// Import sessions from native harness transcripts (all six readers).
     Import(ImportArgs),
     /// Print the compact resume digest for the current project.
@@ -550,4 +553,17 @@ pub enum RunsAction {
         /// Run id.
         id: String,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct RemoveArgs {
+    /// Skip the interactive confirmation.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    /// Print the plan without touching anything.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Skip the server-side deletion (when the cloud path applies).
+    #[arg(long)]
+    pub keep_server_state: bool,
 }

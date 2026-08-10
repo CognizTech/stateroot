@@ -160,7 +160,7 @@ pub struct CloudConfig {
 impl Default for CloudConfig {
     fn default() -> Self {
         Self {
-            base_url: "https://cloud.statesmith.dev".into(),
+            base_url: "https://api.statesmith.dev".into(),
             preview: false,
         }
     }

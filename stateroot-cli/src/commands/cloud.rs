@@ -16,7 +16,7 @@ use super::{auth as gh, truncate, Ctx};
 
 const TERMINAL: &[&str] = &["succeeded", "failed", "cancelled", "error", "completed"];
 
-fn base_url(ctx: &Ctx) -> String {
+pub(crate) fn base_url(ctx: &Ctx) -> String {
     std::env::var("STATEROOT_CLOUD_URL")
         .ok()
         .filter(|s| !s.trim().is_empty())

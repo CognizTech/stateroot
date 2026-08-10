@@ -45,6 +45,9 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Init(args) => commands::init::run(&ctx, args).await?,
+        Command::Remove(args) => {
+            commands::remove::run(&ctx, args.keep_server_state, args.yes, args.dry_run).await?
+        }
         Command::Import(args) => {
             commands::import::run(
                 &ctx,

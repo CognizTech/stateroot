@@ -29,6 +29,7 @@ pub mod mcp;
 pub mod mcp_stdio;
 pub mod persona;
 pub mod proposals;
+pub mod remove;
 pub mod repo;
 pub mod resume;
 pub mod roots;
