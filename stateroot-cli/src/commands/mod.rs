@@ -38,6 +38,7 @@ pub mod soul;
 pub mod status;
 pub mod sync;
 pub mod synthesize;
+pub mod update;
 
 /// Shared context built once per command invocation.
 #[derive(Clone)]
@@ -133,4 +134,22 @@ pub fn truncate(text: &str, max: usize) -> String {
         out.push('…');
         out
     }
+}
+
+/// Preview gate for cloud features (controlled launch). ON when
+/// `STATEROOT_CLOUD_PREVIEW=1` (or true/yes) or `[cloud] preview = true`.
+pub fn cloud_preview_enabled(ctx: &Ctx) -> bool {
+    let env_on = std::env::var("STATEROOT_CLOUD_PREVIEW")
+        .ok()
+        .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    env_on || ctx.config.cloud.preview
+}
+
+/// The coming-soon message printed when a cloud command runs with the
+/// preview gate OFF. Warm, honest, exits 0.
+pub fn cloud_coming_soon() {
+    println!("StateSmith Cloud is coming soon.");
+    println!("StateRoot is fully local today — everything works offline.");
+    println!("Watch https://github.com/OWNER/stateroot (placeholder) for the launch.");
 }

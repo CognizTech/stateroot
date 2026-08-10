@@ -32,6 +32,16 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = cli::Cli::parse();
     let ctx = Ctx::load()?;
+    // Controlled launch: cloud commands are gated behind the preview flag.
+    let cloud_preview = commands::cloud_preview_enabled(&ctx);
+
+    // The updater runs only on user-facing entrypoints — never on hook or
+    // mcp-stdio (harness event flows must stay fast) and never on
+    // self-update itself.
+    let update_allowed = !matches!(
+        &cli.command,
+        cli::Command::Hook(_) | cli::Command::McpStdio | cli::Command::SelfUpdate { .. }
+    );
 
     match cli.command {
         Command::Init(args) => commands::init::run(&ctx, args).await?,
@@ -141,8 +151,14 @@ async fn main() -> anyhow::Result<()> {
             LearnAction::Record { note } => commands::learn::record(&ctx, &note)?,
         },
         Command::Synthesize { force } => commands::synthesize::run(&ctx, force).await?,
+        Command::Login { .. } if !cloud_preview => commands::cloud_coming_soon(),
         Command::Login { via } => commands::auth::login(&ctx, &via).await?,
+        Command::Logout if !cloud_preview => commands::cloud_coming_soon(),
         Command::Logout => commands::auth::logout(&ctx)?,
+        Command::Repo(_) if !cloud_preview => commands::cloud_coming_soon(),
+        Command::Sync(_) if !cloud_preview => commands::cloud_coming_soon(),
+        Command::Run(_) if !cloud_preview => commands::cloud_coming_soon(),
+        Command::Runs(_) if !cloud_preview => commands::cloud_coming_soon(),
         Command::Repo(args) => match args.action {
             RepoAction::Link { repo, layout } => {
                 commands::repo::link(&ctx, &repo, layout.as_deref()).await?
@@ -197,6 +213,10 @@ async fn main() -> anyhow::Result<()> {
                 commands::mcp::accept_theirs(&ctx, &name, from.as_deref())?
             }
         },
+        Command::SelfUpdate { check } => commands::update::self_update(&ctx, check).await?,
+    }
+    if update_allowed {
+        commands::update::maybe_auto_update(&ctx).await;
     }
     Ok(())
 }

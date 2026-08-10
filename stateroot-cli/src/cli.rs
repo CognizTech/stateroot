@@ -74,6 +74,12 @@ pub enum Command {
     Run(RunArgs),
     /// List or inspect cloud runs.
     Runs(RunsArgs),
+    /// Check for / install a newer stateroot binary (from GitHub releases).
+    SelfUpdate {
+        /// Only report current vs latest; do not install.
+        #[arg(long)]
+        check: bool,
+    },
     /// Local stdio MCP server (line-delimited JSON-RPC; W8 tools, local stores).
     McpStdio,
     /// Canonical soul, overlay, projections (all local).

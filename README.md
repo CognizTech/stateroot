@@ -66,6 +66,12 @@ stateroot receipt <transition-id>   # verified tier: the git delta itself
 
 ## GitHub-backed sync (optional)
 
+> **Coming soon.** Cloud features (login, repo link, sync, cloud runs) are
+> behind a preview gate during the controlled launch — StateRoot is fully
+> local today and everything works offline. (`STATEROOT_CLOUD_PREVIEW=1`
+> enables them early.)
+
+
 StateRoot syncs `refs/stateroot/*` over plain git — roots are commit-trees,
 so state and files travel inside the commits; no translation layer, no
 hosted service of ours.

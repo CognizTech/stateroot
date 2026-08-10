@@ -14,6 +14,9 @@ fn stateroot(config_home: &Path, user_home: &Path, cwd: &Path) -> Command {
         .env("STATEROOT_TEST_HOME", user_home)
         .env("STATEROOT_TEST_CMD_PROBES", "")
         .env("STATEROOT_CREDENTIALS", "file")
+        // These tests exercise the real cloud paths (the gate is tested
+        // separately in tests/update.rs).
+        .env("STATEROOT_CLOUD_PREVIEW", "1")
         .current_dir(cwd);
     cmd
 }

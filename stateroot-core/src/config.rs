@@ -151,12 +151,40 @@ impl Default for GithubConfig {
 pub struct CloudConfig {
     /// Cloud API base URL.
     pub base_url: String,
+    /// Preview gate for cloud features (login/repo/sync/cloud runs) during
+    /// the controlled launch — default OFF; `STATEROOT_CLOUD_PREVIEW=1`
+    /// overrides.
+    pub preview: bool,
 }
 
 impl Default for CloudConfig {
     fn default() -> Self {
         Self {
             base_url: "https://cloud.statesmith.dev".into(),
+            preview: false,
+        }
+    }
+}
+
+/// Auto-update configuration (`[update]` in config.toml).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct UpdateConfig {
+    /// Release repo (owner/name). Placeholder until the public repo exists.
+    pub repo: String,
+    /// Auto-update enabled (env `STATEROOT_NO_AUTO_UPDATE=1` opts out).
+    pub enabled: bool,
+    /// Minimum hours between version checks (cached in
+    /// `config_dir/update-check.json`).
+    pub check_interval_hours: i64,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            repo: "OWNER/stateroot (placeholder — set to the public repo)".into(),
+            enabled: true,
+            check_interval_hours: 24,
         }
     }
 }
@@ -192,6 +220,9 @@ pub struct AppConfig {
     /// Cloud runs (`[cloud]`).
     #[serde(default)]
     pub cloud: CloudConfig,
+    /// Auto-update (`[update]`).
+    #[serde(default)]
+    pub update: UpdateConfig,
 }
 
 impl Default for AppConfig {
@@ -208,6 +239,7 @@ impl Default for AppConfig {
             synthesis: SynthesisConfig::default(),
             github: GithubConfig::default(),
             cloud: CloudConfig::default(),
+            update: UpdateConfig::default(),
         }
     }
 }
