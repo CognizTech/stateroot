@@ -40,8 +40,8 @@ mod tests {
     #[test]
     fn statesmith_displays_as_statesmith() {
         assert_eq!(display_name("statesmith"), "StateSmith");
-        // No legacy alias (owner directive): unknown ids pass through.
-        assert_eq!(display_name("skillsagent"), "skillsagent");
+        // Unknown ids pass through unchanged (no silent remapping).
+        assert_eq!(display_name("unknown-harness"), "unknown-harness");
     }
 
     #[test]
@@ -49,9 +49,8 @@ mod tests {
         assert_eq!(normalize("statesmith"), "statesmith");
         assert_eq!(normalize("claude-code"), "claude");
         assert_eq!(normalize(""), "statesmith");
-        // skillsagent is NOT an alias anymore — it passes through as an
-        // unknown id rather than resolving to the canonical one.
-        assert_eq!(normalize("skillsagent"), "skillsagent");
+        // Unregistered ids pass through rather than resolving to native.
+        assert_eq!(normalize("unknown-harness"), "unknown-harness");
     }
 
     #[test]

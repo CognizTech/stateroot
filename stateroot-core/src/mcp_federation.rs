@@ -978,8 +978,8 @@ mod tests {
     fn reserved_keys_are_skipped() {
         assert!(is_reserved_mcp_key("stateroot"));
         assert!(is_reserved_mcp_key("statesmith-stateroot"));
-        assert!(!is_reserved_mcp_key("skillsagent-stateroot"));
         assert!(!is_reserved_mcp_key("github"));
+        assert!(!is_reserved_mcp_key("foreign-bridge"));
     }
 
     #[test]

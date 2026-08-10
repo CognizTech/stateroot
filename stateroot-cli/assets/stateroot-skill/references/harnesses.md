@@ -1,6 +1,6 @@
 # Harness Install Layout
 
-`stateroot skill install --harness H` (also run by `stateroot init`) writes the per-harness stubs from `assets/` into the project. Harness identifiers are lowercase; the server-side canonical set is defined in `technical/stateroot_adapters.md` (`planner`, `cursor`, `codex`, `kimi`, `opencode`, `hermes`, `openclaw`, `skillsagent`).
+`stateroot skill install --harness H` (also run by `stateroot init`) writes the per-harness stubs from `assets/` into the project. Harness identifiers are lowercase; the server-side canonical set includes `planner`, `cursor`, `codex`, `kimi`, `opencode`, `hermes`, `openclaw`, `statesmith`, and others in the harness registry contract.
 
 ## Claude Code
 

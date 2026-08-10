@@ -1,6 +1,6 @@
 //! Shared error types for service clients.
 //!
-//! All three backends (SkillsAgent, Auth, FileSystem) respond with the commons
+//! Cloud backends (StateSmith, Auth, FileSystem) respond with the commons
 //! JSON envelope: `{success, data, error: {code, message, details}, meta}`.
 //! [`ApiError`] captures transport failures, envelope-level server errors and
 //! unexpected response shapes in one place so the individual clients can map

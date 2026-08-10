@@ -193,7 +193,7 @@ impl Default for UpdateConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct AppConfig {
-    /// SkillsAgent base URL (stateroot REST).
+    /// StateSmith Cloud base URL (stateroot REST; optional paid add-on).
     pub server_url: String,
     /// Auth microservice base URL.
     pub auth_url: String,

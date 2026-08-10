@@ -376,12 +376,12 @@ mod tests {
         assert!(cwd_matches(r"D:\siderai\SiderClaw", project));
         // WSL mount ↔ drive letter, both directions.
         assert!(cwd_matches(
-            "/mnt/d/siderai/skillsAgent",
-            Path::new(r"D:\siderai\skillsAgent")
+            "/mnt/d/example/DemoApp",
+            Path::new(r"D:\example\DemoApp")
         ));
         assert!(cwd_matches(
-            r"D:\siderai\skillsAgent",
-            Path::new("/mnt/d/siderai/skillsAgent")
+            r"D:\example\DemoApp",
+            Path::new("/mnt/d/example/DemoApp")
         ));
         // Non-boundary sibling must NOT match.
         assert!(!cwd_matches(r"D:\SAAS\Laiq2", Path::new(r"D:\SAAS\Laiq")));
@@ -396,8 +396,8 @@ mod tests {
         assert_eq!(normalize_path(r"\\?\D:\SAAS\Laiq"), "d:/saas/laiq");
         assert_eq!(normalize_path(r"\\.\D:\SAAS"), "d:/saas");
         assert_eq!(
-            normalize_path("/mnt/d/siderai/skillsAgent"),
-            "d:/siderai/skillsagent"
+            normalize_path("/mnt/d/example/DemoApp"),
+            "d:/example/demoapp"
         );
         assert_eq!(normalize_path(r"D:\SAAS\Laiq\"), "d:/saas/laiq");
         assert_eq!(normalize_path("d:/"), "d:/");
