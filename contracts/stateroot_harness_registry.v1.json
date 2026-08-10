@@ -10,9 +10,7 @@
       "id": "statesmith",
       "display": "StateSmith",
       "aliases": [
-        "statesmith",
-        "skills-agent",
-        "skillsagent"
+        "statesmith"
       ],
       "framing": "StateSmith native harness: full project state for cloud execution.",
       "tier": "A",

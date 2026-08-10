@@ -13,9 +13,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn skillsagent_displays_as_statesmith() {
+    fn statesmith_displays_as_statesmith() {
         assert_eq!(display_name("statesmith"), "StateSmith");
-        assert_eq!(display_name("SKILLSAGENT"), "StateSmith");
     }
 
     #[test]

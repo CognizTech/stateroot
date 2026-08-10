@@ -2,7 +2,7 @@
 //!
 //! User-installed MCP servers are pooled under `.stateroot/tools/mcp.json`
 //! and projected into every harness MCP config. Product bridge keys
-//! (`stateroot`, `skillsagent-stateroot`) are reserved and never federated.
+//! (`stateroot`, `statesmith-stateroot`) are reserved and never federated.
 //!
 //! StateSmith (canonical id `statesmith`) cloud mode only receives SSE / streamable-HTTP /
 //! URL-based remote servers via `.stateroot/tools/mcp.cloud.json`.
@@ -23,9 +23,9 @@ use crate::skill_federation::{load_registry, normalize_harness, McpConfigTarget}
 
 const SCHEMA_VERSION: &str = "stateroot.mcp_federation.v1";
 const PROJECTIONS_SCHEMA: &str = "stateroot.mcp_projections.v1";
-// Product bridge keys — the canonical `statesmith-stateroot` AND the legacy
-// `skillsagent-stateroot` are ours forever (both map to the same harness).
-const RESERVED_KEYS: &[&str] = &["stateroot", "statesmith-stateroot", "skillsagent-stateroot"];
+// Product bridge keys (canonical only — no legacy variants per owner
+// directive).
+const RESERVED_KEYS: &[&str] = &["stateroot", "statesmith-stateroot"];
 const CLOUD_HARNESS_ID: &str = "statesmith";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -977,8 +977,8 @@ mod tests {
     #[test]
     fn reserved_keys_are_skipped() {
         assert!(is_reserved_mcp_key("stateroot"));
-        assert!(is_reserved_mcp_key("skillsagent-stateroot"));
         assert!(is_reserved_mcp_key("statesmith-stateroot"));
+        assert!(!is_reserved_mcp_key("skillsagent-stateroot"));
         assert!(!is_reserved_mcp_key("github"));
     }
 

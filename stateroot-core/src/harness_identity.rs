@@ -1,12 +1,12 @@
 //! Canonical harness id ↔ display name / alias helpers.
 //!
-//! Storage/API keep the canonical internal id (`statesmith`; legacy
-//! `skillsagent` remains a valid alias forever). User-visible surfaces
+//! Storage/API use the canonical internal id (`statesmith` — there is NO
+//! legacy alias, per owner directive). User-visible surfaces
 //! (resume digests, install instructions) show product names (`StateSmith`).
 //! Aliases come from the shared `stateroot_harness_registry.v1.json` contract.
 
 /// Canonical native harness id used on the wire and in storage.
-/// (`skillsagent` stays a valid legacy alias — see the registry contract.)
+/// (Owner directive: no legacy aliases — `statesmith`, period.)
 pub const NATIVE_HARNESS_ID: &str = "statesmith";
 
 /// Map an alias or id to the canonical storage id. Empty → native id.
@@ -40,18 +40,18 @@ mod tests {
     #[test]
     fn statesmith_displays_as_statesmith() {
         assert_eq!(display_name("statesmith"), "StateSmith");
-        assert_eq!(display_name("skillsagent"), "StateSmith");
-        assert_eq!(display_name("SKILLSAGENT"), "StateSmith");
+        // No legacy alias (owner directive): unknown ids pass through.
+        assert_eq!(display_name("skillsagent"), "skillsagent");
     }
 
     #[test]
     fn normalize_aliases() {
         assert_eq!(normalize("statesmith"), "statesmith");
-        // Legacy alias: forever valid, resolves to the canonical id.
-        assert_eq!(normalize("skillsagent"), "statesmith");
-        assert_eq!(normalize("skills-agent"), "statesmith");
         assert_eq!(normalize("claude-code"), "claude");
         assert_eq!(normalize(""), "statesmith");
+        // skillsagent is NOT an alias anymore — it passes through as an
+        // unknown id rather than resolving to the canonical one.
+        assert_eq!(normalize("skillsagent"), "skillsagent");
     }
 
     #[test]
@@ -59,10 +59,6 @@ mod tests {
         assert_eq!(resume_command("codex"), "stateroot resume --harness codex");
         assert_eq!(
             resume_command("statesmith"),
-            "stateroot resume --harness statesmith"
-        );
-        assert_eq!(
-            resume_command("skillsagent"),
             "stateroot resume --harness statesmith"
         );
     }

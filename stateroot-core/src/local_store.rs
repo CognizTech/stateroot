@@ -490,7 +490,7 @@ mod tests {
         std::fs::create_dir_all(&skill_dir).expect("mkdir");
         std::fs::write(
             skill_dir.join("SKILL.md"),
-            "<!-- stateroot:skill origin=learning_review harness=skillsagent version=1 -->\n---\nname: demo-skill\ndescription: Does demo things\n---\n\n# Demo\n",
+            "<!-- stateroot:skill origin=learning_review harness=statesmith version=1 -->\n---\nname: demo-skill\ndescription: Does demo things\n---\n\n# Demo\n",
         )
         .expect("write");
         // A directory without SKILL.md is skipped.
