@@ -96,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Install => commands::install::install(&ctx).await?,
-        Command::Uninstall => commands::install::uninstall(&ctx)?,
+        Command::Uninstall { purge, yes } => commands::uninstall::run(&ctx, purge, yes)?,
         Command::Setup(args) => {
             commands::setup::run(
                 ctx.clone(),

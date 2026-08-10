@@ -221,59 +221,6 @@ async fn install_registry_tiers(
     }
 }
 
-/// `stateroot uninstall` — remove stateroot-managed content only.
-pub fn uninstall(ctx: &Ctx) -> Result<()> {
-    let home = home_dir()?;
-    println!(
-        "Removing stateroot global integration (home: {}):",
-        home.display()
-    );
-    for spec in all_specs(&home) {
-        let mut actions: Vec<String> = Vec::new();
-        if let Some(file) = &spec.instruction_file {
-            match core::remove_marked_block(file) {
-                Ok(true) => actions.push(format!("block removed ({})", file.display())),
-                Ok(false) => {}
-                Err(err) => note!("  ! {} block removal failed: {err:#}", spec.id),
-            }
-        }
-        for mcp_file in &spec.mcp_files {
-            match core::uninstall_mcp_entry(mcp_file) {
-                Ok(true) => {
-                    actions.push(format!("MCP registration removed ({})", mcp_file.display()))
-                }
-                Ok(false) => {}
-                Err(err) => note!("  ! {} MCP removal failed: {err:#}", spec.id),
-            }
-        }
-        if spec.claude_extras {
-            for path in [
-                home.join(".claude/skills/stateroot"),
-                home.join(".claude/commands/stateroot.md"),
-            ] {
-                let removed = if path.is_dir() {
-                    std::fs::remove_dir_all(&path).is_ok()
-                } else if path.is_file() {
-                    std::fs::remove_file(&path).is_ok()
-                } else {
-                    false
-                };
-                if removed {
-                    actions.push(format!("removed {}", path.display()));
-                }
-            }
-        }
-        for action in &actions {
-            println!("  {}: {action}", spec.id);
-        }
-    }
-    let mut config = ctx.config.clone();
-    config.installed_harnesses = Vec::new();
-    stateroot_core::config::save_config(&ctx.config_dir, &config)?;
-    println!("Done. Project-level files (AGENTS.md blocks, .stateroot/) are untouched.");
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::render_one_agent_block;

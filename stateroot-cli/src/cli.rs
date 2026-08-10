@@ -54,8 +54,16 @@ pub enum Command {
     Hook(HookArgs),
     /// Install stateroot integration for detected harnesses (global).
     Install,
-    /// Remove stateroot-managed harness integration (global).
-    Uninstall,
+    /// Full machine removal: harness registrations, config dir, and the
+    /// binary itself (project .stateroot/ dirs are never touched).
+    Uninstall {
+        /// Also delete user-global data (~/.stateroot: soul, learnings, memories).
+        #[arg(long)]
+        purge: bool,
+        /// Skip the interactive confirmation.
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
     /// Guided local setup (harnesses, skills).
     Setup(SetupArgs),
     /// Log in (OAuth device flow). Currently: --via github.

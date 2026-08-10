@@ -107,6 +107,7 @@ jobs:
       # The updater verifies downloads against this file (sha256sum format).
       - name: Generate checksums.txt
         run: |
+          cp install.sh install.ps1 dist/
           cd dist
           sha256sum stateroot-* > checksums.txt
           cat checksums.txt

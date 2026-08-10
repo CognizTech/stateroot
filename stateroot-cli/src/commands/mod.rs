@@ -38,6 +38,7 @@ pub mod soul;
 pub mod status;
 pub mod sync;
 pub mod synthesize;
+pub mod uninstall;
 pub mod update;
 
 /// Shared context built once per command invocation.
