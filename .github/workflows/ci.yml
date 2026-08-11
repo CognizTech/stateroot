@@ -153,10 +153,18 @@ jobs:
             -SourceExe 'dist/stateroot-windows-x64.exe' `
             -OutputMsi 'dist/StateRootSetup-x64.msi'
 
+      - name: Smoke-test Windows GUI installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./packaging/windows/test-installer.ps1 `
+            -Msi 'dist/StateRootSetup-x64.msi' `
+            -ExpectedVersion '${{ needs.preview-version.outputs.display }}'
+
       - name: Upload preview artifact
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.artifact }}
+          name: ${{ runner.os == 'Windows' && 'StateRoot-windows-x64-installer-and-portable' || matrix.artifact }}
           path: dist/
           retention-days: 14
 
@@ -196,6 +204,9 @@ jobs:
           name: StateRoot ${{ needs.preview-version.outputs.display }} (rolling preview)
           body: |
             Automated preview of `${{ github.sha }}` from `main`.
+
+            **Windows installation:** download and run `StateRootSetup-x64.msi`.
+            `stateroot-windows-x64.exe` is the portable command-line binary, not an installer.
 
             These preview artifacts are unsigned. Permanent `v*` releases are signed and immutable.
           prerelease: true
@@ -325,10 +336,18 @@ jobs:
           }
           Write-Host "Verified publisher: $($signature.SignerCertificate.Subject)"
 
+      - name: Smoke-test Windows GUI installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./packaging/windows/test-installer.ps1 `
+            -Msi 'dist/StateRootSetup-x64.msi' `
+            -ExpectedVersion '${{ github.ref_name }}'
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.artifact }}
+          name: ${{ runner.os == 'Windows' && 'StateRoot-windows-x64-installer-and-portable' || matrix.artifact }}
           path: dist/
 
   release:
@@ -359,6 +378,9 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: dist/*
+          body: |
+            **Windows installation:** download and run `StateRootSetup-x64.msi`.
+            `stateroot-windows-x64.exe` is the portable command-line binary, not an installer.
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
