@@ -1,0 +1,52 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="StateRoot"
+           Manufacturer="CognizTech"
+           Version="$(ProductVersion)"
+           UpgradeCode="{835594F4-F7DA-42D9-9806-96D037B354B7}"
+           Scope="perUser"
+           InstallerVersion="500"
+           Language="1033"
+           Compressed="yes">
+
+    <SummaryInformation Description="StateRoot command-line interface"
+                        Manufacturer="CognizTech" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of StateRoot is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="LOCALPROGRAMSFOLDER" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="StateRoot">
+          <Component Id="StateRootExecutable"
+                     Guid="{7AE30BE2-0F6C-400A-A0B6-A8D19F3489D6}"
+                     Bitness="always64">
+            <File Id="StateRootExe"
+                  Source="$(SourceExe)"
+                  Name="stateroot.exe"
+                  KeyPath="yes" />
+            <Environment Id="StateRootUserPath"
+                         Name="PATH"
+                         Value="[INSTALLFOLDER]"
+                         Action="set"
+                         Part="last"
+                         Permanent="no"
+                         System="no" />
+          </Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="StateRootFeature"
+             Title="StateRoot"
+             Description="StateRoot command-line interface"
+             Level="1"
+             Absent="disallow">
+      <ComponentRef Id="StateRootExecutable" />
+    </Feature>
+
+    <Property Id="ARPINSTALLLOCATION" Value="[INSTALLFOLDER]" />
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(LicenseRtf)" />
+  </Package>
+</Wix>
