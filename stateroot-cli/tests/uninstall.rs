@@ -37,6 +37,13 @@ fn seed_registrations(home: &Path) {
         .to_string(),
     )
     .unwrap();
+    // hermes MCP: YAML shape, ours + foreign, with no backup to restore.
+    std::fs::create_dir_all(home.join(".hermes")).unwrap();
+    std::fs::write(
+        home.join(".hermes/config.yaml"),
+        "model: gpt-4\nmcp_servers:\n  stateroot:\n    command: stateroot\n    args: [mcp-stdio]\n  foreign:\n    command: other\n",
+    )
+    .unwrap();
     // claude hooks (nested) + instruction block with user content
     std::fs::create_dir_all(home.join(".claude")).unwrap();
     std::fs::write(
@@ -90,6 +97,14 @@ fn uninstall_cleans_registrations_and_preserves_foreign_and_data() {
     assert!(mcp["mcpServers"].get("stateroot").is_none(), "{mcp}");
     // foreign preserved
     assert!(mcp["mcpServers"].get("github").is_some(), "{mcp}");
+
+    let hermes: serde_yaml::Value = serde_yaml::from_str(
+        &std::fs::read_to_string(user_home.path().join(".hermes/config.yaml")).unwrap(),
+    )
+    .unwrap();
+    assert!(hermes["mcp_servers"]["stateroot"].is_null());
+    assert_eq!(hermes["mcp_servers"]["foreign"]["command"], "other");
+    assert!(!stdout.contains("hermes MCP removal failed"), "{stdout}");
 
     let settings: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(user_home.path().join(".claude/settings.json")).unwrap(),

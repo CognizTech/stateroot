@@ -564,12 +564,26 @@ pub fn install_quirk_full(home: &Path, quirk: &registry::HarnessQuirk, block: &s
     actions
 }
 
-/// Remove the stateroot MCP registration: restore `.bak` when present, else
-/// delete only the `mcpServers.stateroot` key.
+/// Remove the stateroot MCP registration from a JSON `mcpServers` config:
+/// restore `.bak` when present, else delete only the managed key.
 pub fn uninstall_mcp_entry(path: &Path) -> Result<bool, HarnessError> {
+    uninstall_json_mcp_entry_at(path, "mcpServers")
+}
+
+fn restore_mcp_backup(path: &Path) -> Result<bool, HarnessError> {
     let bak = bak_path(path);
     if bak.exists() {
-        std::fs::rename(&bak, path).map_err(io_err(path))?;
+        // `rename` does not replace an existing destination on Windows.
+        // Copy first so a failed restore leaves the pristine backup intact.
+        std::fs::copy(&bak, path).map_err(io_err(path))?;
+        std::fs::remove_file(&bak).map_err(io_err(&bak))?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn uninstall_json_mcp_entry_at(path: &Path, root_key: &str) -> Result<bool, HarnessError> {
+    if restore_mcp_backup(path)? {
         return Ok(true);
     }
     if !path.is_file() {
@@ -589,7 +603,7 @@ pub fn uninstall_mcp_entry(path: &Path) -> Result<bool, HarnessError> {
         }
     };
     let removed = doc
-        .get_mut("mcpServers")
+        .get_mut(root_key)
         .and_then(|s| s.as_object_mut())
         .map(|servers| servers.remove("stateroot").is_some())
         .unwrap_or(false);
@@ -598,6 +612,57 @@ pub fn uninstall_mcp_entry(path: &Path) -> Result<bool, HarnessError> {
         std::fs::write(path, format!("{text}\n")).map_err(io_err(path))?;
     }
     Ok(removed)
+}
+
+fn uninstall_yaml_mcp_entry(path: &Path) -> Result<bool, HarnessError> {
+    if restore_mcp_backup(path)? {
+        return Ok(true);
+    }
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let text = std::fs::read_to_string(path).map_err(io_err(path))?;
+    if text.trim().is_empty() {
+        return Ok(false);
+    }
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(&text).map_err(|source| {
+        HarnessError::Invalid(format!(
+            "{} is not valid YAML — leaving it alone ({source})",
+            path.display()
+        ))
+    })?;
+    let removed = doc
+        .get_mut("mcp_servers")
+        .and_then(serde_yaml::Value::as_mapping_mut)
+        .map(|servers| {
+            servers
+                .remove(serde_yaml::Value::String("stateroot".to_string()))
+                .is_some()
+        })
+        .unwrap_or(false);
+    if removed {
+        let text = serde_yaml::to_string(&doc)
+            .map_err(|e| HarnessError::Invalid(format!("YAML serialization failed: {e}")))?;
+        std::fs::write(path, text).map_err(io_err(path))?;
+    }
+    Ok(removed)
+}
+
+/// Remove the managed MCP entry using the config shape declared by the
+/// harness registry. Foreign servers and unrelated config keys are preserved.
+pub fn uninstall_quirk_mcp(
+    home: &Path,
+    quirk: &registry::HarnessQuirk,
+) -> Result<bool, HarnessError> {
+    let Some(target) = quirk.mcp else {
+        return Ok(false);
+    };
+    let path = home.join(target.path);
+    match target.shape {
+        registry::McpShape::McpServersJson => uninstall_json_mcp_entry_at(&path, "mcpServers"),
+        registry::McpShape::ServersJson => uninstall_json_mcp_entry_at(&path, "servers"),
+        registry::McpShape::YamlMcpServers => uninstall_yaml_mcp_entry(&path),
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -909,6 +974,55 @@ mod tests {
         let bak = yaml_doc(&bak_path(&file));
         let bak_servers = bak["mcp_servers"].as_mapping().expect("bak mapping");
         assert!(!bak_servers.contains_key(serde_yaml::Value::String("stateroot".to_string())));
+    }
+
+    #[test]
+    fn yaml_mcp_uninstall_without_backup_preserves_foreign_config() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let file = tmp.path().join(".hermes/config.yaml");
+        std::fs::create_dir_all(file.parent().expect("parent")).expect("mkdir");
+        std::fs::write(
+            &file,
+            "model: gpt-4\nmcp_servers:\n  stateroot:\n    command: stateroot\n    args: [mcp-stdio]\n  foreign:\n    command: other\n",
+        )
+        .expect("seed");
+
+        let hermes = registry::quirk("hermes").expect("hermes");
+        assert!(uninstall_quirk_mcp(tmp.path(), hermes).expect("uninstall"));
+
+        let doc = yaml_doc(&file);
+        assert_eq!(doc["model"], "gpt-4");
+        let servers = doc["mcp_servers"].as_mapping().expect("mapping");
+        assert!(!servers.contains_key(serde_yaml::Value::String("stateroot".to_string())));
+        assert!(servers.contains_key(serde_yaml::Value::String("foreign".to_string())));
+    }
+
+    #[test]
+    fn servers_json_uninstall_uses_declared_root_key() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let vscode = registry::adapters()
+            .iter()
+            .find(|quirk| {
+                quirk
+                    .mcp
+                    .map(|target| target.shape == registry::McpShape::ServersJson)
+                    .unwrap_or(false)
+            })
+            .expect("servers-json adapter");
+        let target = vscode.mcp.expect("mcp target");
+        let file = tmp.path().join(target.path);
+        std::fs::create_dir_all(file.parent().expect("parent")).expect("mkdir");
+        std::fs::write(
+            &file,
+            r#"{"servers":{"stateroot":{"command":"stateroot"},"foreign":{"url":"https://example.com"}}}"#,
+        )
+        .expect("seed");
+
+        assert!(uninstall_quirk_mcp(tmp.path(), vscode).expect("uninstall"));
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(file).expect("read")).expect("json");
+        assert!(doc["servers"].get("stateroot").is_none());
+        assert!(doc["servers"].get("foreign").is_some());
     }
 
     #[test]

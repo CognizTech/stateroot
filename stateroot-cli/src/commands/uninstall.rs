@@ -50,7 +50,7 @@ fn remove_harness_registrations(ctx: &Ctx, home: &Path) -> Result<()> {
             }
         }
         if let Some(target) = quirk.mcp {
-            match core::uninstall_mcp_entry(&home.join(target.path)) {
+            match core::uninstall_quirk_mcp(home, quirk) {
                 Ok(true) => actions.push(format!("MCP registration removed ({})", target.path)),
                 Ok(false) => {}
                 Err(err) => note!("  ! {} MCP removal failed: {err:#}", quirk.id),
