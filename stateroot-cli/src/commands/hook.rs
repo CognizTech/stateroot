@@ -171,16 +171,21 @@ pub fn hook_digest(config_dir: &Path, project_dir: &Path) -> Option<String> {
         out.push_str(&format!("Summary: {}\n", truncate(summary, 300)));
     }
 
-    // Hot-apex excerpt.
-    for rel in [
-        local_store::MEMORY_CORE_PATH,
-        local_store::USER_PROFILE_PATH,
-    ] {
+    // Project memory remains local to the project.
+    for rel in [local_store::MEMORY_CORE_PATH] {
         if let Ok(text) = std::fs::read_to_string(local_store::root(project_dir).join(rel)) {
             let text = text.trim();
             if !text.is_empty() {
                 out.push_str(&format!("\n(apex {rel})\n{}\n", truncate(text, 400)));
             }
+        }
+    }
+    if let Ok(home) = stateroot_core::harness_install::home_dir() {
+        if let Some(text) = stateroot_core::user_profile::read(&home) {
+            out.push_str(&format!(
+                "\n(apex user/USER.md)\n{}\n",
+                truncate(&text, 400)
+            ));
         }
     }
 

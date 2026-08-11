@@ -36,10 +36,14 @@ pub struct OpenClawIdentity {
     pub origin: &'static str,
     /// Absolute workspace path.
     pub workspace: PathBuf,
-    /// Composed SOUL + IDENTITY + USER markdown (ready for soul import).
-    pub identity_markdown: String,
-    /// Absolute paths that contributed to `identity_markdown`.
-    pub identity_files: Vec<PathBuf>,
+    /// Composed IDENTITY + SOUL persona markdown.
+    pub persona_markdown: String,
+    /// Absolute paths that contributed to the persona.
+    pub persona_files: Vec<PathBuf>,
+    /// Separate human profile from USER.md.
+    pub user_markdown: Option<String>,
+    /// Absolute USER.md path when present.
+    pub user_path: Option<PathBuf>,
     /// Optional MEMORY.md body (for later memory ingest — not soul).
     pub memory_markdown: Option<String>,
     /// Absolute MEMORY.md path when present.
@@ -163,19 +167,12 @@ fn compose_identity(workspace: PathBuf) -> Option<OpenClawIdentity> {
     ));
     sections.push(String::new());
 
-    // Identity + User first: they are short and carry the names. The compact
+    // Identity first: it is short and carries the agent name. The compact
     // per-harness projection is line-capped, so long persona prose must not
     // push "who am I / who are you" out of the window.
     if let Some((path, text)) = &identity {
         files.push(path.clone());
         sections.push("## Identity (IDENTITY.md)".to_string());
-        sections.push(String::new());
-        sections.push(strip_outer_h1(text));
-        sections.push(String::new());
-    }
-    if let Some((path, text)) = &user {
-        files.push(path.clone());
-        sections.push("## User (USER.md)".to_string());
         sections.push(String::new());
         sections.push(strip_outer_h1(text));
         sections.push(String::new());
@@ -188,10 +185,15 @@ fn compose_identity(workspace: PathBuf) -> Option<OpenClawIdentity> {
         sections.push(String::new());
     }
 
-    let identity_markdown = sections.join("\n").trim().to_string() + "\n";
-    if identity_markdown.trim().is_empty() {
-        return None;
-    }
+    let persona_markdown = if files.is_empty() {
+        String::new()
+    } else {
+        sections.join("\n").trim().to_string() + "\n"
+    };
+    let (user_path, user_markdown) = match user {
+        Some((path, text)) => (Some(path), Some(text)),
+        None => (None, None),
+    };
 
     let (memory_path, memory_markdown) = match memory {
         Some((path, text)) => (Some(path), Some(text)),
@@ -203,11 +205,21 @@ fn compose_identity(workspace: PathBuf) -> Option<OpenClawIdentity> {
         .and_then(|s| s.to_str())
         .unwrap_or("workspace");
     Some(OpenClawIdentity {
-        label: format!("openclaw workspace ({short}) — {} file(s)", files.len()),
+        label: format!(
+            "openclaw workspace ({short}) — {} persona file(s){}",
+            files.len(),
+            if user_markdown.is_some() {
+                " + user"
+            } else {
+                ""
+            }
+        ),
         origin: "openclaw",
         workspace,
-        identity_markdown,
-        identity_files: files,
+        persona_markdown,
+        persona_files: files,
+        user_markdown,
+        user_path,
         memory_markdown,
         memory_path,
     })
@@ -420,15 +432,19 @@ mod tests {
         let packs = discover_openclaw_identities(home.path());
         assert_eq!(packs.len(), 1);
         let pack = &packs[0];
-        assert!(pack.identity_markdown.contains("Be direct."));
-        assert!(pack.identity_markdown.contains("Yinyue"));
-        assert!(pack.identity_markdown.contains("Han Li"));
-        assert!(!pack.identity_markdown.contains("We shipped the demo."));
+        assert!(pack.persona_markdown.contains("Be direct."));
+        assert!(pack.persona_markdown.contains("Yinyue"));
+        assert!(!pack.persona_markdown.contains("Han Li"));
+        assert_eq!(
+            pack.user_markdown.as_deref(),
+            Some("# User\n\nName: Han Li")
+        );
+        assert!(!pack.persona_markdown.contains("We shipped the demo."));
         assert_eq!(
             pack.memory_markdown.as_deref(),
             Some("# Memory\n\nWe shipped the demo.")
         );
-        assert_eq!(pack.identity_files.len(), 3);
+        assert_eq!(pack.persona_files.len(), 2);
     }
 
     #[test]
@@ -455,7 +471,7 @@ mod tests {
         let packs = discover_openclaw_identities(home.path());
         assert_eq!(packs.len(), 1);
         assert!(packs[0].workspace.ends_with("Yinyue"));
-        assert!(packs[0].identity_markdown.contains("Custom persona"));
+        assert!(packs[0].persona_markdown.contains("Custom persona"));
     }
 
     #[test]
@@ -494,13 +510,13 @@ mod tests {
         assert!(
             packs
                 .iter()
-                .any(|p| p.identity_markdown.contains("Alpha persona")),
+                .any(|p| p.persona_markdown.contains("Alpha persona")),
             "agents.list[0] workspace must resolve: {packs:#?}"
         );
         assert!(
             packs
                 .iter()
-                .any(|p| p.identity_markdown.contains("Beta persona")),
+                .any(|p| p.persona_markdown.contains("Beta persona")),
             "agents.list[1] workspace must resolve: {packs:#?}"
         );
         assert!(
@@ -525,6 +541,6 @@ mod tests {
 
         let packs = discover_openclaw_identities(home.path());
         assert_eq!(packs.len(), 1);
-        assert!(packs[0].identity_markdown.contains("Legacy persona"));
+        assert!(packs[0].persona_markdown.contains("Legacy persona"));
     }
 }

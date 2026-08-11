@@ -521,7 +521,10 @@ skipping duplicate. Pass --force to reprint.)\n\n{NO_REFETCH_FOOTER}"
     let (handoff, _handoff_source) = fetch_handoff(&ctx.cwd);
 
     let root = local_store::root(&ctx.cwd);
-    let user_md = read_hot_apex(&root, local_store::USER_PROFILE_PATH);
+    let user_md = stateroot_core::harness_install::home_dir()
+        .ok()
+        .and_then(|home| stateroot_core::user_profile::read(&home))
+        .map(|text| truncate(&text, HOT_APEX_BUDGET));
     let memory_md = read_hot_apex(&root, local_store::MEMORY_CORE_PATH);
 
     // --- digest (stdout only) ---

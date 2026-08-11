@@ -12,9 +12,7 @@
 //! ├── handoffs/history/<ts>-<harness>.json
 //! ├── memories/episodic.jsonl  # one JSON record per line
 //! ├── memories/MEMORY.md
-//! ├── soul/SOUL.md
 //! ├── instructions/AGENTS.md
-//! ├── user/USER.md
 //! └── outbox.jsonl             # CLI-local offline op queue
 //! ```
 
@@ -183,18 +181,8 @@ pub fn init_skeleton(
         &mut created,
     )?;
     write_text_if_absent(
-        &root.join(SOUL_PATH),
-        "# Soul\n\nProject tone, values, and non-negotiable constraints.\n",
-        &mut created,
-    )?;
-    write_text_if_absent(
         &root.join(INSTRUCTIONS_PATH),
         "# Agent Instructions\n\nShared instructions for all harnesses attached to this StateRoot project.\nHarness-specific guidance lives in `instructions/{harness}.md`.\n",
-        &mut created,
-    )?;
-    write_text_if_absent(
-        &root.join(USER_PROFILE_PATH),
-        "# User Profile\n\nStable facts about the user that help agents collaborate.\n",
         &mut created,
     )?;
     write_text_if_absent(
@@ -519,14 +507,14 @@ mod tests {
             MANIFEST_PATH,
             STATE_PATH,
             "project/objectives.md",
-            SOUL_PATH,
             INSTRUCTIONS_PATH,
-            USER_PROFILE_PATH,
             MEMORY_CORE_PATH,
             EPISODIC_PATH,
         ] {
             assert!(root.join(rel).is_file(), "missing {rel}");
         }
+        assert!(!root.join(SOUL_PATH).exists());
+        assert!(!root.join(USER_PROFILE_PATH).exists());
         assert!(root.join(HANDOFF_HISTORY_DIR).is_dir());
 
         let manifest = read_manifest(tmp.path()).expect("read").expect("manifest");

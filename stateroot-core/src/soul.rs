@@ -114,10 +114,15 @@ pub fn import(home: &Path, source: ImportSource) -> Result<(String, String), Sou
                         .into(),
                 ));
             };
-            Ok((pack.identity_markdown.clone(), "openclaw".into()))
+            if pack.persona_markdown.trim().is_empty() {
+                return Err(SoulError::Empty(
+                    "openclaw workspace contains USER.md but no IDENTITY.md or SOUL.md".into(),
+                ));
+            }
+            Ok((pack.persona_markdown.clone(), "openclaw".into()))
         }
         ImportSource::Hermes => {
-            let path = home.join(".hermes/SOUL.md");
+            let path = hermes_home(home).join("SOUL.md");
             let text = std::fs::read_to_string(&path)
                 .map_err(|_| SoulError::Empty(format!("no hermes soul at {}", path.display())))?;
             let text = text.trim().to_string();
@@ -129,6 +134,16 @@ pub fn import(home: &Path, source: ImportSource) -> Result<(String, String), Sou
             }
             Ok((text, "hermes-agent".into()))
         }
+    }
+}
+
+/// Resolve Hermes' local home while honoring test/user overrides.
+pub fn hermes_home(home: &Path) -> PathBuf {
+    match std::env::var("HERMES_HOME") {
+        Ok(value) if !value.trim().is_empty() => {
+            crate::openclaw_identity::expand_user_path(&value, home)
+        }
+        _ => home.join(".hermes"),
     }
 }
 

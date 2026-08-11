@@ -1,7 +1,6 @@
 //! `stateroot setup` — the setup wizard (Phase A).
 //!
-//! Local variant: only the `harnesses` and `skills` sections exist (auth,
-//! soul, workspace and firedrill needed the server). Engine: a section
+//! Local variant includes identity, harnesses, and skills. Engine: a section
 //! registry driven through a [`Prompter`] trait so every flow is
 //! headless-testable. Depths: `--quick` (defaults everywhere), `--full`
 //! (default, asks everything), `--blank-slate` (nothing pre-selected).
@@ -11,6 +10,7 @@
 //! keys the prompts use.
 
 pub mod harnesses;
+pub mod identity;
 pub mod skills;
 
 use std::collections::HashMap;
@@ -352,6 +352,7 @@ pub trait WizardSection: Send {
 /// auth, harnesses and a workspace from the earlier sections).
 pub fn registry() -> Vec<Box<dyn WizardSection>> {
     vec![
+        Box::new(identity::IdentitySection),
         Box::new(harnesses::HarnessesSection::default()),
         Box::new(skills::SkillsSection),
     ]

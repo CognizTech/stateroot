@@ -23,3 +23,4 @@ pub mod skill_federation;
 pub mod soul;
 pub mod sync_engine;
 pub mod transcripts;
+pub mod user_profile;

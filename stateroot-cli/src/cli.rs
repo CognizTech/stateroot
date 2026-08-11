@@ -78,7 +78,7 @@ pub enum Command {
         #[arg(long, hide = true)]
         msi_cleanup: bool,
     },
-    /// Guided local setup (harnesses, skills).
+    /// Guided local setup (identity, harnesses, skills).
     Setup(SetupArgs),
     /// Log in (OAuth device flow). Currently: --via github.
     Login {
@@ -222,7 +222,7 @@ pub struct HookArgs {
 
 #[derive(Debug, Args)]
 pub struct SetupArgs {
-    /// Only run these sections (comma-separated): harnesses, skills.
+    /// Only run these sections (comma-separated): identity, harnesses, skills.
     #[arg(long, value_delimiter = ',')]
     pub only: Vec<String>,
     /// Print planned writes without touching disk.
