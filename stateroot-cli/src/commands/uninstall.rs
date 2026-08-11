@@ -8,6 +8,7 @@
 use std::path::Path;
 
 use anyhow::Result;
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use stateroot_core::harness_install::{self as core, registry};
 
 use super::{note, stdin_is_tty, Ctx};
@@ -117,23 +118,70 @@ fn is_standard_install_location(exe: &Path) -> bool {
         || text.contains("/usr/bin/")
 }
 
-/// The detached self-delete helper (spawned, never waited on). Windows: a
-/// running exe can't delete itself — cmd waits on the pid, then deletes.
-/// Unix: unlink after a short delay. Returned for structure testing.
-pub fn self_delete_command(exe: &Path) -> (String, Vec<String>) {
-    let exe = exe.display().to_string();
-    if cfg!(windows) {
-        let pid = std::process::id();
-        (
-            "cmd".into(),
-            vec![
-                "/C".into(),
-                format!(
-                    "ping 127.0.0.1 -n 3 > nul & tasklist /FI \"PID eq {pid}\" | find \"{pid}\" > nul && goto wait & del /F /Q \"{exe}\" & exit & :wait & ping 127.0.0.1 -n 2 > nul & goto check & :check & tasklist /FI \"PID eq {pid}\" | find \"{pid}\" > nul && (ping 127.0.0.1 -n 2 > nul & goto check) || del /F /Q \"{exe}\""
-                ),
-            ],
+fn windows_self_delete_command(exe: &Path) -> (String, Vec<String>) {
+    // PowerShell's encoded-command form avoids cmd.exe quoting hazards for
+    // paths containing spaces or shell metacharacters. Windows keeps a
+    // running executable locked, so retry until this process exits and the
+    // removal succeeds. The helper gives up honestly after 30 seconds.
+    let target = exe.display().to_string().replace('\'', "''");
+    let script = format!(
+        "$target = '{target}'; \
+         for ($attempt = 0; $attempt -lt 120; $attempt++) {{ \
+           Start-Sleep -Milliseconds 250; \
+           Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue; \
+           if (-not (Test-Path -LiteralPath $target)) {{ exit 0 }} \
+         }}; \
+         exit 1"
+    );
+    let encoded_bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let encoded = BASE64_STANDARD.encode(encoded_bytes);
+    (
+        "powershell.exe".into(),
+        vec![
+            "-NoLogo".into(),
+            "-NoProfile".into(),
+            "-NonInteractive".into(),
+            "-WindowStyle".into(),
+            "Hidden".into(),
+            "-EncodedCommand".into(),
+            encoded,
+        ],
+    )
+}
+
+fn park_for_windows_uninstall(exe: &Path) -> Result<std::path::PathBuf> {
+    let parent = exe
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("{} has no parent directory", exe.display()))?;
+    let name = exe
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("{} has no file name", exe.display()))?;
+    let parked = parent.join(format!(
+        "{}.uninstalling-{}",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    if parked.exists() {
+        std::fs::remove_file(&parked)?;
+    }
+    std::fs::rename(exe, &parked).map_err(|err| {
+        anyhow::anyhow!(
+            "could not remove {} from PATH by renaming it to {}: {err}",
+            exe.display(),
+            parked.display()
         )
+    })?;
+    Ok(parked)
+}
+
+/// The detached self-delete helper (spawned, never waited on). Windows: a
+/// hidden PowerShell process retries until the running exe can be deleted.
+/// Unix: unlink after the current process exits. Returned for testing.
+pub fn self_delete_command(exe: &Path) -> (String, Vec<String>) {
+    if cfg!(windows) {
+        windows_self_delete_command(exe)
     } else {
+        let exe = exe.display().to_string();
         (
             "sh".into(),
             vec![
@@ -231,15 +279,42 @@ pub fn run(ctx: &Ctx, purge: bool, yes: bool) -> Result<()> {
         );
         return Ok(());
     }
-    let (program, args) = self_delete_command(&exe);
-    std::process::Command::new(program)
+    // Rename first on Windows. This removes `stateroot.exe` from PATH before
+    // the process exits, while the detached helper cleans up the still-locked
+    // parked file afterward. The updater uses the same rename-park property.
+    let delete_target = if cfg!(windows) {
+        park_for_windows_uninstall(&exe)?
+    } else {
+        exe.clone()
+    };
+    let (program, args) = self_delete_command(&delete_target);
+    let mut command = std::process::Command::new(program);
+    command
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        // Do not flash another console window while the helper waits for this
+        // process to exit. CREATE_NO_WINDOW from WinBase.h.
+        command.creation_flags(0x0800_0000);
+    }
+    if let Err(spawn_err) = command.spawn() {
+        if delete_target != exe {
+            if let Err(rollback_err) = std::fs::rename(&delete_target, &exe) {
+                anyhow::bail!(
+                    "could not start uninstall cleanup ({spawn_err}) and could not restore the binary ({rollback_err}); it remains at {}",
+                    delete_target.display()
+                );
+            }
+        }
+        return Err(spawn_err.into());
+    }
     println!(
-        "goodbye — the binary at {} will delete itself on exit",
+        "goodbye — removed {}; final cleanup runs on exit",
         exe.display()
     );
     Ok(())
@@ -248,6 +323,17 @@ pub fn run(ctx: &Ctx, purge: bool, yes: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn decode_powershell_command(args: &[String]) -> String {
+        let encoded = args.last().expect("encoded command");
+        let bytes = BASE64_STANDARD.decode(encoded).expect("base64");
+        assert_eq!(bytes.len() % 2, 0, "UTF-16LE byte count");
+        let words: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        String::from_utf16(&words).expect("UTF-16LE command")
+    }
 
     #[test]
     fn self_delete_helper_waits_then_deletes() {
@@ -258,9 +344,10 @@ mod tests {
         });
         let (program, args) = self_delete_command(exe);
         if cfg!(windows) {
-            assert_eq!(program, "cmd");
-            let script = args.join(" ");
-            assert!(script.contains("del"), "{script}");
+            assert_eq!(program, "powershell.exe");
+            let script = decode_powershell_command(&args);
+            assert!(script.contains("Remove-Item"), "{script}");
+            assert!(script.contains("Test-Path"), "{script}");
             assert!(script.contains("stateroot.exe"), "{script}");
         } else {
             assert_eq!(program, "sh");
@@ -270,6 +357,68 @@ mod tests {
             assert!(script.contains("rm -f"), "{script}");
             assert!(script.contains("/home/u/.local/bin/stateroot"), "{script}");
         }
+    }
+
+    #[test]
+    fn windows_self_delete_helper_encodes_special_paths_and_retries() {
+        let exe = Path::new("C:\\Users\\O'Brien & Sons\\stateroot.exe");
+        let (program, args) = windows_self_delete_command(exe);
+        assert_eq!(program, "powershell.exe");
+        assert!(args.iter().any(|arg| arg == "-EncodedCommand"));
+        let script = decode_powershell_command(&args);
+        assert!(script.contains("O''Brien & Sons"), "{script}");
+        assert!(script.contains("$attempt -lt 120"), "{script}");
+        assert!(script.contains("Start-Sleep -Milliseconds 250"), "{script}");
+    }
+
+    #[test]
+    fn windows_uninstall_parks_the_command_name_before_cleanup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let exe = dir.path().join("stateroot.exe");
+        std::fs::write(&exe, b"fixture").expect("fixture");
+        let parked = park_for_windows_uninstall(&exe).expect("park");
+        assert!(!exe.exists(), "command name must disappear immediately");
+        assert!(parked.is_file(), "parked binary must remain for cleanup");
+        assert!(
+            parked
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("stateroot.exe.uninstalling-")),
+            "{}",
+            parked.display()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_self_delete_helper_retries_a_locked_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let exe = dir.path().join("StateRoot O'Brien & Sons.exe");
+        std::fs::write(&exe, b"fixture").expect("fixture");
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&exe)
+            .expect("exclusive lock");
+
+        let (program, args) = windows_self_delete_command(&exe);
+        let mut helper = std::process::Command::new(program)
+            .args(args)
+            .spawn()
+            .expect("spawn helper");
+        std::thread::sleep(Duration::from_millis(750));
+        assert!(
+            exe.exists(),
+            "locked fixture must survive the first retries"
+        );
+        drop(lock);
+
+        let status = helper.wait().expect("wait for helper");
+        assert!(status.success(), "helper exited with {status}");
+        assert!(!exe.exists(), "helper must delete the fixture after unlock");
     }
 
     #[test]
