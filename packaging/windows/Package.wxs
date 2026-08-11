@@ -44,6 +44,30 @@
       <ComponentRef Id="StateRootExecutable" />
     </Feature>
 
+    <!-- Keep setup in the CLI and launch that same interactive wizard after
+         a fresh GUI install. The ExitDialog event is not published by quiet
+         installs, repairs, or uninstalls. -->
+    <CustomAction Id="LaunchStateRootSetup"
+                  FileRef="StateRootExe"
+                  ExeCommand="setup"
+                  Execute="immediate"
+                  Impersonate="yes"
+                  Return="asyncNoWait" />
+
+    <UI>
+      <Publish Dialog="ExitDialog"
+               Control="Finish"
+               Event="DoAction"
+               Value="LaunchStateRootSetup"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed" />
+    </UI>
+
+    <Property Id="WIXUI_EXITDIALOGOPTIONALTEXT"
+              Value="Complete setup to connect StateRoot to your AI coding harnesses." />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT"
+              Value="Run StateRoot setup now" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+
     <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
     <WixVariable Id="WixUILicenseRtf" Value="$(LicenseRtf)" />
   </Package>
