@@ -6,9 +6,16 @@
 
 use clap::{Args, Parser, Subcommand};
 
+/// Exact version embedded in this binary. Rolling CI previews append an
+/// automatically increasing `-dev.<run>` suffix without mutating Cargo.toml.
+pub const BUILD_VERSION: &str = match option_env!("STATEROOT_BUILD_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 /// StateRoot — local-first continuity for every harness.
 #[derive(Debug, Parser)]
-#[command(name = "stateroot", version, about, long_about = None)]
+#[command(name = "stateroot", version = BUILD_VERSION, about, long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,

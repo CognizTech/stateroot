@@ -89,7 +89,7 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<()> {
                     id,
                     json!({
                         "protocolVersion": "2024-11-05",
-                        "serverInfo": {"name": "stateroot", "version": env!("CARGO_PKG_VERSION")},
+                        "serverInfo": {"name": "stateroot", "version": crate::cli::BUILD_VERSION},
                         "capabilities": {"tools": {}},
                     }),
                 ))
