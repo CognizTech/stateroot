@@ -12,7 +12,7 @@ Set-StrictMode -Version Latest
 
 $msiPath = (Resolve-Path -LiteralPath $Msi).Path
 $normalizedExpectedVersion = $ExpectedVersion.TrimStart('v')
-$installDirectory = Join-Path $env:RUNNER_TEMP 'StateRoot Custom Install'
+$installDirectory = Join-Path $env:RUNNER_TEMP 'StateRootCustomInstall'
 $installedExecutable = Join-Path $installDirectory 'stateroot.exe'
 $installLog = Join-Path $env:RUNNER_TEMP 'stateroot-msi-install.log'
 $settingsUninstallLog = Join-Path $env:RUNNER_TEMP 'stateroot-msi-settings-uninstall.log'
