@@ -36,15 +36,21 @@ function Invoke-Msi {
         [string[]]$AdditionalArguments = @()
     )
 
-    $quotedMsiPath = '"' + $msiPath + '"'
-    $quotedLogPath = '"' + $LogPath + '"'
-    $arguments = @($Action, $quotedMsiPath, '/qn', '/norestart', '/L*v', $quotedLogPath)
+    $arguments = @($Action, $msiPath, '/qn', '/norestart', '/L*v', $LogPath)
     $arguments += $AdditionalArguments
     $description = "msiexec $Action ($LogPath)"
     Write-Host "Starting $description"
-    $process = Start-Process -FilePath 'msiexec.exe' `
-        -ArgumentList $arguments `
-        -PassThru
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = 'msiexec.exe'
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    foreach ($argument in $arguments) {
+        [void]$startInfo.ArgumentList.Add($argument)
+    }
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    if ($null -eq $process) {
+        throw "Could not start $description."
+    }
 
     if (-not $process.WaitForExit(120000)) {
         Write-MsiLog -Path $LogPath
@@ -96,8 +102,8 @@ $cleanupFailure = $null
 
 try {
     Write-Host "Installing StateRoot into custom directory '$installDirectory'."
-    $quotedInstallProperty = '"INSTALLFOLDER=' + $installDirectory + '"'
-    Invoke-Msi -Action '/i' -LogPath $installLog -AdditionalArguments @($quotedInstallProperty)
+    $installProperty = 'INSTALLFOLDER=' + $installDirectory
+    Invoke-Msi -Action '/i' -LogPath $installLog -AdditionalArguments @($installProperty)
     $installationCompleted = $true
 
     if (-not (Test-Path -LiteralPath $installedExecutable -PathType Leaf)) {
@@ -155,7 +161,7 @@ try {
     # Reinstall, then prove `stateroot uninstall` delegates final removal back
     # to Windows Installer instead of self-deleting and stranding MSI state.
     Write-Host 'Reinstalling before testing CLI-initiated uninstall.'
-    Invoke-Msi -Action '/i' -LogPath $installLog -AdditionalArguments @($quotedInstallProperty)
+    Invoke-Msi -Action '/i' -LogPath $installLog -AdditionalArguments @($installProperty)
     $installationCompleted = $true
     Write-Host 'Testing stateroot uninstall delegation to Windows Installer.'
     & $installedExecutable uninstall --yes
