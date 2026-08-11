@@ -40,12 +40,10 @@
     <Feature Id="StateRootFeature"
              Title="StateRoot"
              Description="StateRoot command-line interface"
-             Level="1"
-             Absent="disallow">
+             Level="1">
       <ComponentRef Id="StateRootExecutable" />
     </Feature>
 
-    <Property Id="ARPINSTALLLOCATION" Value="[INSTALLFOLDER]" />
     <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
     <WixVariable Id="WixUILicenseRtf" Value="$(LicenseRtf)" />
   </Package>
