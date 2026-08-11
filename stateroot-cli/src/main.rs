@@ -40,7 +40,10 @@ async fn main() -> anyhow::Result<()> {
     // self-update itself.
     let update_allowed = !matches!(
         &cli.command,
-        cli::Command::Hook(_) | cli::Command::McpStdio | cli::Command::SelfUpdate { .. }
+        cli::Command::Hook(_)
+            | cli::Command::McpStdio
+            | cli::Command::SelfUpdate { .. }
+            | cli::Command::Uninstall { .. }
     );
 
     match cli.command {
@@ -99,7 +102,11 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Install => commands::install::install(&ctx).await?,
-        Command::Uninstall { purge, yes } => commands::uninstall::run(&ctx, purge, yes)?,
+        Command::Uninstall {
+            purge,
+            yes,
+            msi_cleanup,
+        } => commands::uninstall::run(&ctx, purge, yes, msi_cleanup)?,
         Command::Setup(args) => {
             commands::setup::run(
                 ctx.clone(),

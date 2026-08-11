@@ -48,6 +48,7 @@ try {
     & wix build $packageSource `
         -arch x64 `
         -ext WixToolset.UI.wixext `
+        -ext WixToolset.Util.wixext `
         -d "ProductVersion=$packageVersion" `
         -d "SourceExe=$sourceExePath" `
         -d "LicenseRtf=$licenseRtfPath" `

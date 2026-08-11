@@ -32,6 +32,17 @@
                          Part="last"
                          Permanent="no"
                          System="no" />
+            <RegistryKey Root="HKCU" Key="Software\CognizTech\StateRoot">
+              <RegistryValue Name="InstallDir"
+                             Type="string"
+                             Value="[INSTALLFOLDER]" />
+              <RegistryValue Name="ProductCode"
+                             Type="string"
+                             Value="[ProductCode]" />
+              <RegistryValue Name="InstallerManaged"
+                             Type="integer"
+                             Value="1" />
+            </RegistryKey>
           </Component>
         </Directory>
       </Directory>
@@ -48,11 +59,32 @@
          a fresh GUI install. The ExitDialog event is not published by quiet
          installs, repairs, or uninstalls. -->
     <CustomAction Id="LaunchStateRootSetup"
-                  FileRef="StateRootExe"
-                  ExeCommand="setup"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="&quot;[%ComSpec]&quot; /d /k &quot;&quot;[#StateRootExe]&quot; setup &amp; echo. &amp; echo StateRoot setup finished. This window will remain open.&quot;"
                   Execute="immediate"
                   Impersonate="yes"
                   Return="asyncNoWait" />
+
+    <!-- Windows Settings and msiexec removals must clean harness integrations
+         and config before MSI removes the CLI. Major upgrades deliberately
+         skip this cleanup so continuity remains intact. -->
+    <SetProperty Id="WixQuietExecCmdLine"
+                 Value="&quot;[#StateRootExe]&quot; uninstall --yes --msi-cleanup"
+                 Before="CleanupStateRootBeforeMsiUninstall"
+                 Sequence="execute"
+                 Condition="REMOVE = &quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE AND NOT STATEROOT_CLEANUP_DONE" />
+    <CustomAction Id="CleanupStateRootBeforeMsiUninstall"
+                  BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+                  DllEntry="WixQuietExec"
+                  Execute="immediate"
+                  Impersonate="yes"
+                  Return="check" />
+
+    <InstallExecuteSequence>
+      <Custom Action="CleanupStateRootBeforeMsiUninstall"
+              Before="RemoveFiles"
+              Condition="REMOVE = &quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE AND NOT STATEROOT_CLEANUP_DONE" />
+    </InstallExecuteSequence>
 
     <UI>
       <Publish Dialog="ExitDialog"
@@ -67,6 +99,18 @@
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT"
               Value="Run StateRoot setup now" />
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+
+    <!-- AppSearch restores a custom directory before costing on subsequent
+         major upgrades. A first install falls back to the directory tree's
+         LocalAppData\Programs\StateRoot default. -->
+    <Property Id="INSTALLFOLDER">
+      <RegistrySearch Id="RememberStateRootInstallDirectory"
+                      Root="HKCU"
+                      Key="Software\CognizTech\StateRoot"
+                      Name="InstallDir"
+                      Type="raw"
+                      Bitness="always64" />
+    </Property>
 
     <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
     <WixVariable Id="WixUILicenseRtf" Value="$(LicenseRtf)" />

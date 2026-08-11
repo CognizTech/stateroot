@@ -73,6 +73,10 @@ pub enum Command {
         /// Skip the interactive confirmation.
         #[arg(short = 'y', long)]
         yes: bool,
+        /// Remove integrations/data without deleting the binary. Reserved for
+        /// the Windows Installer uninstall transaction.
+        #[arg(long, hide = true)]
+        msi_cleanup: bool,
     },
     /// Guided local setup (harnesses, skills).
     Setup(SetupArgs),

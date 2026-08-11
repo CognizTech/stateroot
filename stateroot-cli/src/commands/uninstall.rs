@@ -5,7 +5,7 @@
 //! self-delete absolutely LAST. Project `.stateroot/` dirs are NEVER
 //! touched by uninstall — `stateroot remove` per project does that.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -21,6 +21,15 @@ const HOME_LEFTOVERS: &[&str] = &[
     // Legacy monorepo-CLI debris (pre-extensions openclaw plugin path).
     ".openclaw/plugins/stateroot",
 ];
+
+#[cfg(windows)]
+const WINDOWS_INSTALLER_REGISTRY_KEY: &str = r"HKCU\Software\CognizTech\StateRoot";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WindowsMsiInstall {
+    product_code: String,
+    install_dir: PathBuf,
+}
 
 fn remove_path(path: &Path) -> bool {
     if path.is_dir() {
@@ -118,6 +127,20 @@ fn is_standard_install_location(exe: &Path) -> bool {
         || text.contains("/usr/bin/")
 }
 
+fn encode_powershell_command(script: &str) -> Vec<String> {
+    let encoded_bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let encoded = BASE64_STANDARD.encode(encoded_bytes);
+    vec![
+        "-NoLogo".into(),
+        "-NoProfile".into(),
+        "-NonInteractive".into(),
+        "-WindowStyle".into(),
+        "Hidden".into(),
+        "-EncodedCommand".into(),
+        encoded,
+    ]
+}
+
 fn windows_self_delete_command(exe: &Path) -> (String, Vec<String>) {
     // PowerShell's encoded-command form avoids cmd.exe quoting hazards for
     // paths containing spaces or shell metacharacters. Windows keeps a
@@ -133,20 +156,97 @@ fn windows_self_delete_command(exe: &Path) -> (String, Vec<String>) {
          }}; \
          exit 1"
     );
-    let encoded_bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
-    let encoded = BASE64_STANDARD.encode(encoded_bytes);
-    (
-        "powershell.exe".into(),
-        vec![
-            "-NoLogo".into(),
-            "-NoProfile".into(),
-            "-NonInteractive".into(),
-            "-WindowStyle".into(),
-            "Hidden".into(),
-            "-EncodedCommand".into(),
-            encoded,
-        ],
+    ("powershell.exe".into(), encode_powershell_command(&script))
+}
+
+#[cfg(any(windows, test))]
+fn parse_registry_string(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let (_, value) = line.split_once("REG_SZ")?;
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    })
+}
+
+#[cfg(any(windows, test))]
+fn normalize_windows_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase()
+}
+
+#[cfg(windows)]
+fn windows_registry_string(name: &str) -> Option<String> {
+    use std::os::windows::process::CommandExt;
+
+    let mut command = std::process::Command::new("reg.exe");
+    command
+        .args([
+            "query",
+            WINDOWS_INSTALLER_REGISTRY_KEY,
+            "/v",
+            name,
+            "/reg:64",
+        ])
+        .creation_flags(0x0800_0000);
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_registry_string(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(windows)]
+fn windows_msi_install(exe: &Path) -> Option<WindowsMsiInstall> {
+    let raw_product_code = windows_registry_string("ProductCode")?;
+    let parsed = uuid::Uuid::parse_str(
+        raw_product_code.trim_matches(|character| character == '{' || character == '}'),
     )
+    .ok()?;
+    let product_code = format!("{{{}}}", parsed.hyphenated().to_string().to_uppercase());
+    let install_dir = PathBuf::from(windows_registry_string("InstallDir")?);
+    let exe_dir = exe.parent()?;
+    if normalize_windows_path(exe_dir) != normalize_windows_path(&install_dir) {
+        return None;
+    }
+    Some(WindowsMsiInstall {
+        product_code,
+        install_dir,
+    })
+}
+
+#[cfg(not(windows))]
+fn windows_msi_install(_exe: &Path) -> Option<WindowsMsiInstall> {
+    None
+}
+
+fn windows_msi_uninstall_command(product_code: &str, parent_pid: u32) -> (String, Vec<String>) {
+    let script = format!(
+        "$parentPid = {parent_pid}; \
+         Wait-Process -Id $parentPid -ErrorAction SilentlyContinue; \
+         $process = Start-Process -FilePath 'msiexec.exe' \
+           -ArgumentList @('/x', '{product_code}', '/qn', '/norestart', 'STATEROOT_CLEANUP_DONE=1') \
+           -Wait -PassThru; \
+         exit $process.ExitCode"
+    );
+    ("powershell.exe".into(), encode_powershell_command(&script))
+}
+
+fn spawn_hidden(program: String, args: Vec<String>) -> std::io::Result<()> {
+    let mut command = std::process::Command::new(program);
+    command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        command.creation_flags(0x0800_0000);
+    }
+    command.spawn().map(|_| ())
 }
 
 fn park_for_windows_uninstall(exe: &Path) -> Result<std::path::PathBuf> {
@@ -197,8 +297,13 @@ pub fn self_delete_command(exe: &Path) -> (String, Vec<String>) {
 }
 
 /// Run `stateroot uninstall`.
-pub fn run(ctx: &Ctx, purge: bool, yes: bool) -> Result<()> {
+pub fn run(ctx: &Ctx, purge: bool, yes: bool, msi_cleanup: bool) -> Result<()> {
+    if msi_cleanup && !yes {
+        anyhow::bail!("--msi-cleanup requires --yes");
+    }
     let home = core::home_dir()?;
+    let exe = std::env::current_exe()?;
+    let msi_install = windows_msi_install(&exe);
 
     // Interactive confirm (default NO) unless --yes.
     if !yes {
@@ -218,7 +323,11 @@ pub fn run(ctx: &Ctx, purge: bool, yes: bool) -> Result<()> {
                 home.join(".stateroot").display()
             );
         }
-        println!("  delete : this binary (last)");
+        if msi_install.is_some() {
+            println!("  remove : Windows Installer registration, PATH entry, and binary (last)");
+        } else {
+            println!("  delete : this binary (last)");
+        }
         println!("  keep   : project .stateroot/ dirs (never touched by uninstall)");
         if !stdin_is_tty() {
             anyhow::bail!(
@@ -270,8 +379,28 @@ pub fn run(ctx: &Ctx, purge: bool, yes: bool) -> Result<()> {
         );
     }
 
-    // 4. Self-delete LAST — and only from a standard install location.
-    let exe = std::env::current_exe()?;
+    // An MSI uninstall transaction owns the binary, PATH entry, remembered
+    // install directory, and Installed Apps registration. Its custom action
+    // uses this cleanup-only mode before Windows Installer removes files.
+    if msi_cleanup {
+        println!("MSI cleanup complete; Windows Installer will remove the application files");
+        return Ok(());
+    }
+
+    // For a CLI-initiated MSI uninstall, wait until this process exits and
+    // then let Windows Installer remove all installer-owned state. Direct
+    // self-deletion would strand PATH and Installed Apps registration.
+    if let Some(msi) = msi_install {
+        let (program, args) = windows_msi_uninstall_command(&msi.product_code, std::process::id());
+        spawn_hidden(program, args)?;
+        println!(
+            "goodbye — Windows Installer will remove StateRoot from {} after this process exits",
+            msi.install_dir.display()
+        );
+        return Ok(());
+    }
+
+    // 4. Self-delete LAST — and only from a standard non-MSI location.
     if !is_standard_install_location(&exe) {
         println!(
             "not self-deleting: {} is not a standard install location — delete it manually if desired",
@@ -288,21 +417,7 @@ pub fn run(ctx: &Ctx, purge: bool, yes: bool) -> Result<()> {
         exe.clone()
     };
     let (program, args) = self_delete_command(&delete_target);
-    let mut command = std::process::Command::new(program);
-    command
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-
-        // Do not flash another console window while the helper waits for this
-        // process to exit. CREATE_NO_WINDOW from WinBase.h.
-        command.creation_flags(0x0800_0000);
-    }
-    if let Err(spawn_err) = command.spawn() {
+    if let Err(spawn_err) = spawn_hidden(program, args) {
         if delete_target != exe {
             if let Err(rollback_err) = std::fs::rename(&delete_target, &exe) {
                 anyhow::bail!(
@@ -369,6 +484,35 @@ mod tests {
         assert!(script.contains("O''Brien & Sons"), "{script}");
         assert!(script.contains("$attempt -lt 120"), "{script}");
         assert!(script.contains("Start-Sleep -Milliseconds 250"), "{script}");
+    }
+
+    #[test]
+    fn windows_registry_values_preserve_paths_with_spaces() {
+        let output = concat!(
+            "HKEY_CURRENT_USER\\Software\\CognizTech\\StateRoot\r\n",
+            "    InstallDir    REG_SZ    D:\\AI Tools\\StateRoot\r\n"
+        );
+        assert_eq!(
+            parse_registry_string(output).as_deref(),
+            Some("D:\\AI Tools\\StateRoot")
+        );
+        assert_eq!(
+            normalize_windows_path(Path::new("D:/AI Tools/StateRoot/")),
+            normalize_windows_path(Path::new("d:\\AI Tools\\StateRoot"))
+        );
+    }
+
+    #[test]
+    fn windows_msi_helper_waits_and_delegates_to_installer() {
+        let product_code = "{835594F4-F7DA-42D9-9806-96D037B354B7}";
+        let (program, args) = windows_msi_uninstall_command(product_code, 4242);
+        assert_eq!(program, "powershell.exe");
+        let script = decode_powershell_command(&args);
+        assert!(script.contains("Wait-Process -Id $parentPid"), "{script}");
+        assert!(script.contains("$parentPid = 4242"), "{script}");
+        assert!(script.contains("msiexec.exe"), "{script}");
+        assert!(script.contains(product_code), "{script}");
+        assert!(script.contains("STATEROOT_CLEANUP_DONE=1"), "{script}");
     }
 
     #[test]
