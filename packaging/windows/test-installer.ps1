@@ -40,10 +40,19 @@ function Invoke-Msi {
     $quotedLogPath = '"' + $LogPath + '"'
     $arguments = @($Action, $quotedMsiPath, '/qn', '/norestart', '/L*v', $quotedLogPath)
     $arguments += $AdditionalArguments
+    $description = "msiexec $Action ($LogPath)"
+    Write-Host "Starting $description"
     $process = Start-Process -FilePath 'msiexec.exe' `
         -ArgumentList $arguments `
-        -Wait `
         -PassThru
+
+    if (-not $process.WaitForExit(120000)) {
+        Write-MsiLog -Path $LogPath
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        throw "$description did not finish within 120 seconds."
+    }
+    $process.Refresh()
+    Write-Host "Completed $description with exit code $($process.ExitCode)"
 
     if ($process.ExitCode -notin @(0, 3010)) {
         Write-MsiLog -Path $LogPath
@@ -86,6 +95,7 @@ $primaryFailure = $null
 $cleanupFailure = $null
 
 try {
+    Write-Host "Installing StateRoot into custom directory '$installDirectory'."
     $quotedInstallProperty = '"INSTALLFOLDER=' + $installDirectory + '"'
     Invoke-Msi -Action '/i' -LogPath $installLog -AdditionalArguments @($quotedInstallProperty)
     $installationCompleted = $true
@@ -126,6 +136,7 @@ try {
     $cleanupFixture = Join-Path $env:USERPROFILE '.claude\commands\stateroot.md'
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $cleanupFixture) | Out-Null
     Set-Content -LiteralPath $cleanupFixture -Value 'StateRoot MSI cleanup fixture'
+    Write-Host 'Testing Windows Installer initiated uninstall and cleanup.'
     Invoke-Msi -Action '/x' -LogPath $settingsUninstallLog
     $installationCompleted = $false
     if (Test-Path -LiteralPath $cleanupFixture) {
@@ -143,8 +154,10 @@ try {
 
     # Reinstall, then prove `stateroot uninstall` delegates final removal back
     # to Windows Installer instead of self-deleting and stranding MSI state.
+    Write-Host 'Reinstalling before testing CLI-initiated uninstall.'
     Invoke-Msi -Action '/i' -LogPath $installLog -AdditionalArguments @($quotedInstallProperty)
     $installationCompleted = $true
+    Write-Host 'Testing stateroot uninstall delegation to Windows Installer.'
     & $installedExecutable uninstall --yes
     if ($LASTEXITCODE -ne 0) {
         throw "The installed CLI exited with code $LASTEXITCODE during MSI-aware uninstall."

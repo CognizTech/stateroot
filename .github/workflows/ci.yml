@@ -156,6 +156,7 @@ jobs:
 
       - name: Smoke-test Windows GUI installer
         if: runner.os == 'Windows'
+        timeout-minutes: 6
         shell: pwsh
         run: |
           ./packaging/windows/test-installer.ps1 `
@@ -340,6 +341,7 @@ jobs:
 
       - name: Smoke-test Windows GUI installer
         if: runner.os == 'Windows'
+        timeout-minutes: 6
         shell: pwsh
         run: |
           ./packaging/windows/test-installer.ps1 `
