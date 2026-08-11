@@ -274,9 +274,9 @@ mod tests {
     #[test]
     fn kimi_reader_extracts_session_and_filters() {
         let project = tempfile::tempdir().expect("project");
-        let cwd = project.path().to_str().expect("utf8");
+        let cwd = crate::transcripts::path_for_json(project.path());
         let home = tempfile::tempdir().expect("home");
-        write_index(home.path(), &[("ses_demo-1", cwd)]);
+        write_index(home.path(), &[("ses_demo-1", &cwd)]);
         write_wire(
             home.path(),
             "ses_demo-1",

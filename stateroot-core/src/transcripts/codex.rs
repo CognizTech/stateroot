@@ -516,7 +516,7 @@ mod tests {
             &home.path().join(".codex/sessions/2026/07/01"),
             "rollout-2026-07-01T10-00-00-s-1.jsonl",
             &[
-                &meta(project.path().to_str().expect("utf8")),
+                &meta(&crate::transcripts::path_for_json(project.path())),
                 r#"{"timestamp":"2026-07-01T10:00:01Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions instructions>…</permissions instructions>"}]}}"#,
                 r#"{"timestamp":"2026-07-01T10:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>cwd</environment_context>"}]}}"#,
                 r#"{"timestamp":"2026-07-01T10:00:03Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"create the handoff notes doc (token sk-proj-AbCdEfGhIjKlMnOpQrStUvWx)"}]}}"#,
@@ -562,7 +562,7 @@ mod tests {
             &home.path().join(".codex/sessions/2026/07/02"),
             "rollout-2026-07-02T10-00-00-s-2.jsonl",
             &[
-                &meta(project.path().to_str().expect("utf8")).replace("s-1", "s-2"),
+                &meta(&crate::transcripts::path_for_json(project.path())).replace("s-1", "s-2"),
                 r#"{"timestamp":"2026-07-02T10:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"do the thing"}]}}"#,
                 r#"{"timestamp":"2026-07-02T10:00:02Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"make\"}","call_id":"c9"}}"#,
             ],
@@ -592,7 +592,7 @@ mod tests {
         let rollout = write_rollout(
             &home.path().join(".codex/sessions/2026/07/04"),
             "rollout-2026-07-04T10-00-00-s-4.jsonl",
-            &[&meta(nested.to_str().expect("utf8")).replace("s-1", "s-4")],
+            &[&meta(&crate::transcripts::path_for_json(&nested)).replace("s-1", "s-4")],
         );
         assert!(parse_rollout(&rollout, project.path()).is_some());
     }
@@ -607,7 +607,7 @@ mod tests {
             &home.path().join(".codex/sessions/2026/07/26"),
             "rollout-2026-07-26T10-00-00-s-5.jsonl",
             &[
-                &meta(project.path().to_str().expect("utf8")).replace("s-1", "s-5"),
+                &meta(&crate::transcripts::path_for_json(project.path())).replace("s-1", "s-5"),
                 r#"{"timestamp":"2026-07-26T10:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<recommended_plugins>\nHere is a list of plugins that are available but not installed"}]}}"#,
                 r##"{"timestamp":"2026-07-26T10:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# Files mentioned by the user:\n- docs/plan.md"}]}}"##,
                 r#"{"timestamp":"2026-07-26T10:00:03Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"PLEASE IMPLEMENT THIS PLAN:\n# LAIQ Production Marketplace Implementation"}]}}"#,
@@ -638,7 +638,7 @@ mod tests {
             &home.path().join(".codex/sessions/2026/07/26"),
             "rollout-2026-07-26T10-00-00-s-9.jsonl",
             &[
-                &meta(project.path().to_str().expect("utf8")).replace("s-1", "s-9"),
+                &meta(&crate::transcripts::path_for_json(project.path())).replace("s-1", "s-9"),
                 aborted,
             ],
         );
@@ -655,7 +655,7 @@ mod tests {
             &home.path().join(".codex/sessions/2026/07/27"),
             "rollout-2026-07-27T10-00-00-s-10.jsonl",
             &[
-                &meta(project.path().to_str().expect("utf8")).replace("s-1", "s-10"),
+                &meta(&crate::transcripts::path_for_json(project.path())).replace("s-1", "s-10"),
                 aborted,
                 r#"{"timestamp":"2026-07-27T10:00:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"actually, ship the marketplace plan"}]}}"#,
             ],
@@ -672,7 +672,7 @@ mod tests {
             &home.path().join(".codex/sessions/2026/07/26"),
             "rollout-2026-07-26T10-00-00-s-6.jsonl",
             &[
-                &meta(project.path().to_str().expect("utf8")).replace("s-1", "s-6"),
+                &meta(&crate::transcripts::path_for_json(project.path())).replace("s-1", "s-6"),
                 r#"{"timestamp":"2026-07-26T10:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"build it"}]}}"#,
                 r#"{"timestamp":"2026-07-26T10:00:02Z","type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch\n*** Update File: src/main.rs\n@@\n-old\n+new\n*** Add File: src/lib.rs\n*** End Patch","call_id":"cc1"}}"#,
                 r#"{"timestamp":"2026-07-26T10:00:03Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"cc1","output":{"text":"Patch applied"}}}"#,
@@ -703,7 +703,8 @@ mod tests {
         write_rollout(
             &home.path().join(".codex/archived_sessions"),
             "rollout-2026-07-20T10-00-00-arch-only.jsonl",
-            &[&meta(project.path().to_str().expect("utf8")).replace("s-1", "arch-only")],
+            &[&meta(&crate::transcripts::path_for_json(project.path()))
+                .replace("s-1", "arch-only")],
         );
         // Same id in BOTH stores → one session, and the ACTIVE copy wins
         // (distinguished by a different objective in each copy).
@@ -711,7 +712,7 @@ mod tests {
             &home.path().join(".codex/sessions/2026/07/21"),
             "rollout-2026-07-21T10-00-00-dup.jsonl",
             &[
-                &meta(project.path().to_str().expect("utf8")).replace("s-1", "dup"),
+                &meta(&crate::transcripts::path_for_json(project.path())).replace("s-1", "dup"),
                 r#"{"timestamp":"2026-07-21T10:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"ACTIVE copy objective"}]}}"#,
             ],
         );
@@ -719,7 +720,7 @@ mod tests {
             &home.path().join(".codex/archived_sessions"),
             "rollout-2026-07-21T10-00-00-dup.jsonl",
             &[
-                &meta(project.path().to_str().expect("utf8")).replace("s-1", "dup"),
+                &meta(&crate::transcripts::path_for_json(project.path())).replace("s-1", "dup"),
                 r#"{"timestamp":"2026-07-21T10:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"archived copy objective"}]}}"#,
             ],
         );
@@ -746,7 +747,7 @@ mod tests {
             &home.path().join(".codex/sessions/2026/07/26"),
             "rollout-2026-07-26T10-00-00-s-7.jsonl",
             &[
-                &meta(project.path().to_str().expect("utf8")).replace("s-1", "s-7"),
+                &meta(&crate::transcripts::path_for_json(project.path())).replace("s-1", "s-7"),
                 r#"{"timestamp":"2026-07-26T10:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"do the work"}]}}"#,
                 r#"{"timestamp":"2026-07-26T10:00:02Z","type":"compacted","payload":{"message":"EARLIER summary — superseded"}}"#,
                 r#"{"timestamp":"2026-07-26T10:00:03Z","type":"compacted","payload":{"message":"LATEST summary: 3 files written, plan at step 2 of 4"}}"#,
@@ -766,7 +767,7 @@ mod tests {
         let plain = write_rollout(
             &home.path().join(".codex/sessions/2026/07/27"),
             "rollout-2026-07-27T10-00-00-s-8.jsonl",
-            &[&meta(project.path().to_str().expect("utf8")).replace("s-1", "s-8")],
+            &[&meta(&crate::transcripts::path_for_json(project.path())).replace("s-1", "s-8")],
         );
         let plain = parse_rollout(&plain, project.path()).expect("plain");
         assert!(plain.progress_summaries.is_empty());
@@ -777,7 +778,7 @@ mod tests {
             &home.path().join(".codex/sessions/2026/07/28"),
             "rollout-2026-07-28T10-00-00-s-9.jsonl",
             &[
-                &meta(project.path().to_str().expect("utf8")).replace("s-1", "s-9"),
+                &meta(&crate::transcripts::path_for_json(project.path())).replace("s-1", "s-9"),
                 r#"{"timestamp":"2026-07-28T10:00:02Z","type":"compacted","payload":{"message":""}}"#,
                 r#"{"timestamp":"2026-07-28T10:00:03Z","type":"compacted","payload":{"message":"   \n  "}}"#,
                 r#"{"timestamp":"2026-07-28T10:00:04Z","type":"compaction","payload":{"encrypted_content":"gAAAAABmF6b2NlZDE"}}"#,
@@ -797,7 +798,7 @@ mod tests {
         let project = project();
         let home = tempfile::tempdir().expect("home");
         let mut lines = vec![
-            meta(project.path().to_str().expect("utf8")).replace("s-1", "s-14"),
+            meta(&crate::transcripts::path_for_json(project.path())).replace("s-1", "s-14"),
             r#"{"timestamp":"2026-07-26T10:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"do three tasks"}]}}"#.to_string(),
         ];
         // Task 1: substantial assistant text → milestone.
@@ -828,7 +829,8 @@ mod tests {
         assert!(session.milestones[1].starts_with("Done. Migrated the marketplace schema"));
 
         // Cap: 40 tasks → LAST 30 kept, oldest-of-kept first.
-        let mut lines = vec![meta(project.path().to_str().expect("utf8")).replace("s-1", "s-15")];
+        let mut lines =
+            vec![meta(&crate::transcripts::path_for_json(project.path())).replace("s-1", "s-15")];
         for i in 1..=40 {
             lines.push(format!(
                 r#"{{"timestamp":"2026-07-26T10:{i:02}:00Z","type":"response_item","payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"Completed task number {i} with a sufficiently long summary text."}}]}}}}"#
@@ -858,7 +860,7 @@ mod tests {
         let project = project();
         let home = tempfile::tempdir().expect("home");
         let mut lines = vec![
-            meta(project.path().to_str().expect("utf8")).replace("s-1", "s-16"),
+            meta(&crate::transcripts::path_for_json(project.path())).replace("s-1", "s-16"),
             r#"{"timestamp":"2026-07-26T10:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"long-running goal work"}]}}"#.to_string(),
         ];
         // 5 heartbeat messages (seeded opener + a session-proven one)…
@@ -917,7 +919,7 @@ mod tests {
             &home.path().join(".codex/sessions/2026/07/26"),
             "rollout-2026-07-26T10-00-00-s-11.jsonl",
             &[
-                &meta(project.path().to_str().expect("utf8")).replace("s-1", "s-11"),
+                &meta(&crate::transcripts::path_for_json(project.path())).replace("s-1", "s-11"),
                 r#"{"timestamp":"2026-07-26T10:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"build the thing"}]}}"#,
                 r#"{"timestamp":"2026-07-26T10:00:02Z","type":"response_item","payload":{"type":"function_call","name":"update_plan","arguments":"{\"plan\":[{\"step\":\"old step A\",\"status\":\"pending\"},{\"step\":\"old step B\",\"status\":\"pending\"}]}","call_id":"c1"}}"#,
                 r#"{"timestamp":"2026-07-26T10:00:03Z","type":"response_item","payload":{"type":"function_call","name":"update_plan","arguments":"{\"plan\":[{\"step\":\"write the code\",\"status\":\"completed\"},{\"step\":\"run the tests\",\"status\":\"in_progress\"},{\"step\":\"ship it\",\"status\":\"pending\"}]}","call_id":"c2"}}"#,
@@ -944,7 +946,8 @@ mod tests {
     fn conversation_tail_is_chronological_last_window() {
         let project = project();
         let home = tempfile::tempdir().expect("home");
-        let mut lines = vec![meta(project.path().to_str().expect("utf8")).replace("s-1", "s-12")];
+        let mut lines =
+            vec![meta(&crate::transcripts::path_for_json(project.path())).replace("s-1", "s-12")];
         // 15 user+assistant pairs = 30 messages → tail keeps the LAST 24.
         for i in 1..=15 {
             lines.push(format!(
@@ -984,7 +987,7 @@ mod tests {
             .replace('"', "\\\"")
             .replace('\n', "\\n");
         let mut lines = vec![
-            meta(project.path().to_str().expect("utf8")).replace("s-1", "s-13"),
+            meta(&crate::transcripts::path_for_json(project.path())).replace("s-1", "s-13"),
             format!(
                 r#"{{"timestamp":"2026-07-26T10:00:01Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":"{long_prompt}"}}]}}}}"#
             ),

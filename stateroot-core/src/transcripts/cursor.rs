@@ -276,7 +276,10 @@ mod tests {
     fn cursor_reader_extracts_session_and_filters_workspace() {
         let project = tempfile::tempdir().expect("project");
         let home = tempfile::tempdir().expect("home");
-        seed_db(home.path(), project.path().to_str().expect("utf8"));
+        seed_db(
+            home.path(),
+            &crate::transcripts::path_for_json(project.path()),
+        );
 
         let sessions = CursorReader.scan(home.path(), project.path());
         assert_eq!(

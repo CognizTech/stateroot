@@ -247,7 +247,7 @@ mod tests {
     #[test]
     fn hermes_reader_scans_state_db() {
         let project = tempfile::tempdir().expect("project");
-        let cwd = project.path().to_str().expect("utf8");
+        let cwd = crate::transcripts::path_for_json(project.path());
         let home = tempfile::tempdir().expect("home");
         let db_path = home.path().join(".hermes/state.db");
         std::fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir");

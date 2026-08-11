@@ -187,6 +187,16 @@ fn walk_into(dir: &Path, pred: &dyn Fn(&Path) -> bool, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// Path string safe to embed in JSON/JSONL via `format!` on Windows.
+///
+/// Raw `Path::to_str()` uses `\`, which JSON treats as escapes (`\t` in
+/// `.tmp…`, `\U` in `\Users`, …) and breaks fixture parsing on Windows CI.
+/// Forward slashes are valid Windows paths and survive `normalize_path`.
+#[cfg(test)]
+pub(crate) fn path_for_json(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 /// Normalize a path for cross-platform cwd comparison:
 /// - strip `\\?\` / `\\.\` verbatim prefixes (Windows `canonicalize` output);
 /// - convert `\` → `/`;
@@ -347,6 +357,36 @@ mod tests {
         // Bare `>` with nothing plausible after it yields nothing.
         let targets = shell_write_targets("foo > | bar");
         assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn path_for_json_is_json_safe_on_windows_style_paths() {
+        // Regression: embedding `C:\Users\...\Temp\.tmpX` via format! into
+        // JSONL made `\t` a tab and `\U` an invalid escape — Windows CI
+        // then found zero sessions. Forward-slash form must round-trip.
+        let raw = r"C:\Users\RUNNER~1\AppData\Local\Temp\.tmpABC123";
+        let safe = path_for_json(Path::new(raw));
+        let line = format!(r#"{{"cwd":"{safe}"}}"#);
+        let parsed: serde_json::Value = serde_json::from_str(&line).expect("json");
+        assert_eq!(
+            parsed["cwd"].as_str().unwrap(),
+            "C:/Users/RUNNER~1/AppData/Local/Temp/.tmpABC123"
+        );
+        assert!(cwd_matches(
+            parsed["cwd"].as_str().unwrap(),
+            Path::new(r"C:\Users\RUNNER~1\AppData\Local\Temp\.tmpABC123")
+        ));
+
+        // `canonicalize` may return a verbatim path on Windows. The helper
+        // must keep it valid JSON and normalization must remove the prefix.
+        let verbatim = Path::new(r"\\?\C:\Users\runner\AppData\Local\Temp\.tmpABC123");
+        let safe = path_for_json(verbatim);
+        let line = format!(r#"{{"cwd":"{safe}"}}"#);
+        let parsed: serde_json::Value = serde_json::from_str(&line).expect("json");
+        assert!(cwd_matches(
+            parsed["cwd"].as_str().expect("cwd"),
+            Path::new(r"C:\Users\runner\AppData\Local\Temp\.tmpABC123")
+        ));
     }
 
     #[test]

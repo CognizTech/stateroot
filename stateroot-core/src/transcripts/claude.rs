@@ -235,7 +235,7 @@ mod tests {
     #[test]
     fn claude_reader_extracts_full_session_and_skips_non_prompts() {
         let project = tempfile::tempdir().expect("project");
-        let cwd = project.path().to_str().expect("utf8");
+        let cwd = crate::transcripts::path_for_json(project.path());
         let home = tempfile::tempdir().expect("home");
         let file = write_session(
             &home.path().join(".claude/projects/-work-demo"),
@@ -288,7 +288,7 @@ mod tests {
     #[test]
     fn claude_reader_interrupted_on_dangling_tool_use_and_cwd_filter() {
         let project = tempfile::tempdir().expect("project");
-        let cwd = project.path().to_str().expect("utf8");
+        let cwd = crate::transcripts::path_for_json(project.path());
         let home = tempfile::tempdir().expect("home");
         let file = write_session(
             &home.path().join(".claude/projects/-work-demo"),

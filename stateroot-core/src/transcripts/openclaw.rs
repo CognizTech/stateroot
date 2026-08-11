@@ -260,7 +260,7 @@ mod tests {
     #[test]
     fn openclaw_reader_parses_header_and_messages() {
         let project = tempfile::tempdir().expect("project");
-        let cwd = project.path().to_str().expect("utf8");
+        let cwd = crate::transcripts::path_for_json(project.path());
         let home = tempfile::tempdir().expect("home");
         let file = write_session(
             &home.path().join(".openclaw/agents/main/sessions"),

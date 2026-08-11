@@ -908,7 +908,7 @@ mod tests {
             &home.path().join(".codex/sessions/2026/07/01"),
             "rollout-2026-07-01T10-00-00-s-b1.jsonl",
             &[
-                &meta(project.path().to_str().expect("utf8"), "s-b1"),
+                &meta(&crate::transcripts::path_for_json(project.path()), "s-b1"),
                 r#"{"timestamp":"2026-07-01T10:00:01Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions instructions>drop me</permissions instructions>"}]}}"#,
                 r#"{"timestamp":"2026-07-01T10:00:02Z","type":"response_item","payload":{"type":"reasoning","summary":[]}}"#,
                 r#"{"timestamp":"2026-07-01T10:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{}}}"#,
@@ -945,7 +945,7 @@ mod tests {
             &home.path().join(".codex/sessions/2026/07/01"),
             "rollout-2026-07-01T10-00-00-s-b2.jsonl",
             &[
-                &meta(project.path().to_str().expect("utf8"), "s-b2"),
+                &meta(&crate::transcripts::path_for_json(project.path()), "s-b2"),
                 r#"{"timestamp":"2026-07-01T10:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"BEFORE compaction"}]}}"#,
                 r#"{"timestamp":"2026-07-01T10:00:02Z","type":"compacted","payload":{"message":"progress so far: schema done"}}"#,
                 r#"{"timestamp":"2026-07-01T10:00:03Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"AFTER compaction"}]}}"#,
@@ -973,7 +973,7 @@ mod tests {
             &home.path().join(".codex/sessions/2026/07/01"),
             "rollout-2026-07-01T10-00-00-s-b3.jsonl",
             &[
-                &meta(project.path().to_str().expect("utf8"), "s-b3"),
+                &meta(&crate::transcripts::path_for_json(project.path()), "s-b3"),
                 r#"{"timestamp":"2026-07-01T10:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"ERA ONE work"}]}}"#,
                 r#"{"timestamp":"2026-07-01T10:00:02Z","type":"compacted","payload":{"message":""}}"#,
                 r#"{"timestamp":"2026-07-01T10:00:03Z","type":"compaction","payload":{"encrypted_content":"gAAAAABmF6b2NlZDE"}}"#,
@@ -1040,7 +1040,7 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         let long = "y".repeat(2000);
         let mut lines = vec![
-            meta(project.path().to_str().expect("utf8"), "s-b4"),
+            meta(&crate::transcripts::path_for_json(project.path()), "s-b4"),
             r#"{"timestamp":"2026-07-01T10:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"start"}]}}"#.to_string(),
             r#"{"timestamp":"2026-07-01T10:00:02Z","type":"response_item","payload":{"type":"function_call","name":"create_goal","arguments":"{\"objective\":\"the complete goal text, unabridged\"}","call_id":"g1"}}"#.to_string(),
             r#"{"timestamp":"2026-07-01T10:00:03Z","type":"response_item","payload":{"type":"function_call","name":"update_plan","arguments":"{\"plan\":[{\"step\":\"done step\",\"status\":\"completed\"},{\"step\":\"next step\",\"status\":\"pending\"}]}","call_id":"p1"}}"#.to_string(),
@@ -1092,7 +1092,7 @@ mod new_harness_bundle_tests {
     #[test]
     fn kimi_and_cursor_sessions_bundle_as_full() {
         let project = tempfile::tempdir().expect("project");
-        let cwd = project.path().to_str().expect("utf8");
+        let cwd = crate::transcripts::path_for_json(project.path());
         let home = tempfile::tempdir().expect("home");
 
         // Kimi fixture (verified shape).
