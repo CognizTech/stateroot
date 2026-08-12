@@ -82,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
                 commands::handoff::write(
                     &ctx,
                     from.as_deref(),
-                    &to,
+                    to.as_deref(),
                     note.as_deref(),
                     input.as_deref(),
                     objective.as_deref(),
@@ -92,6 +92,9 @@ async fn main() -> anyhow::Result<()> {
             HandoffAction::List => commands::handoff::list(&ctx).await?,
             HandoffAction::Show { seq } => commands::handoff::show(&ctx, seq).await?,
             HandoffAction::Accept { by } => commands::handoff::accept(&ctx, &by).await?,
+            HandoffAction::Finalize { from } => {
+                commands::handoff::finalize(&ctx, from.as_deref()).await?
+            }
         },
         Command::Snap(args) => {
             commands::roots::snap(&ctx, args.reason.as_deref(), args.harness.as_deref())?

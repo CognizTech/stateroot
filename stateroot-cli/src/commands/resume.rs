@@ -636,6 +636,18 @@ skipping duplicate. Pass --force to reprint.)\n\n{NO_REFETCH_FOOTER}"
             if !out.ends_with('\n') {
                 out.push('\n');
             }
+            if let Ok(home) = stateroot_core::harness_install::home_dir() {
+                if let Some(gap) =
+                    stateroot_core::handoff_continuity::overlay_for_handoff(&home, &ctx.cwd, packet)
+                {
+                    out.push_str(
+                        &stateroot_core::handoff_continuity::compose_since_handoff_overlay(
+                            &ctx.cwd, packet, &gap,
+                        ),
+                    );
+                    out.push('\n');
+                }
+            }
         }
         None => {
             out.push_str("(no handoff yet — write one with `stateroot handoff write`)\n");
@@ -823,6 +835,14 @@ mod tests {
             "out: {out}"
         );
         assert!(out.contains("## Progress Narrative"), "out: {out}");
+    }
+
+    #[test]
+    fn digest_omits_recommended_next_when_null() {
+        let mut packet = rich_packet();
+        packet["recommended_next_harness"] = Value::Null;
+        let out = render_handoff_digest(&packet);
+        assert!(!out.contains("Recommended next harness"), "out: {out}");
     }
 
     #[test]

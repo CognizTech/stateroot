@@ -16,13 +16,13 @@ Operational details behind the rules in `SKILL.md`. Read this when the top-level
 
 ## Handoff Packet Fields
 
-Handoffs use strict content JSON passed with `stateroot handoff write --from <resolved-current-harness> --to <harness> --input <handoff.json>`. Resolve `--from` explicitly to the actual current harness. The CLI rejects unknown keys and owns schema, project, sequence, timestamps, source, destination, provenance, and transcript-derived fields.
+Handoffs use strict content JSON passed with `stateroot handoff write --from <resolved-current-harness> [--to <harness>] --input <handoff.json>`. Resolve `--from` explicitly to the actual current harness. Omit `--to` for normal session-end continuity (no routing hint). Use `--to` only for orchestrated/auto harness selection when handing to a different harness. The CLI rejects unknown keys and owns schema, project, sequence, timestamps, source, optional routing destination, provenance, and transcript-derived fields.
 
 1. **objective** — the durable goal that can span multiple sessions.
 2. **task** — the immediate work boundary for the receiving agent.
 3. **context_summary** — a detailed continuity narrative for the receiving agent: present state, verified evidence, decisions and rationale, constraints, failed approaches, and implications for the next agent. Distinct from the task; structured arrays complement the prose rather than replacing it.
 4. **decisions** — each decision with the *why*.
-5. **next_actions** — ordered, concrete, executable without re-discovery; required when switching to another harness.
+5. **next_actions** — ordered, concrete, executable without re-discovery; required only when `--to` names a different harness (cross-harness routing).
 6. **failures** and **bugs_found** — truthful observed failures and known bugs; an explicit empty `failures` array means none were observed.
 
 Supporting input fields are `current_phase`, `implementation_status`, `changed_files`, `tests_run`, `blockers`, `open_questions`, `warnings`, `relevant_memories`, `relevant_skills`, `artifacts`, and `traces`. Every field is optional so omission remains distinct from an explicitly empty value. Recent conversation, plan state, progress summaries, milestones, files, failures, objective, task, and actions are auto-captured only from the latest matching verified native transcript when author content is absent.

@@ -191,9 +191,9 @@ pub enum HandoffAction {
         /// Harness creating the handoff (falls back to the active local marker).
         #[arg(long)]
         from: Option<String>,
-        /// Harness the handoff recommends next.
+        /// Optional routing hint for orchestrated harness selection (omit for continuity-only).
         #[arg(long)]
-        to: String,
+        to: Option<String>,
         /// Short context note.
         #[arg(long)]
         note: Option<String>,
@@ -216,6 +216,12 @@ pub enum HandoffAction {
         /// Accepting harness (default: cli).
         #[arg(long, default_value = "cli")]
         by: String,
+    },
+    /// Finalize continuity from the latest verified transcript (no routing).
+    Finalize {
+        /// Harness whose session to finalize (falls back to the active local marker).
+        #[arg(long)]
+        from: Option<String>,
     },
 }
 

@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
+use crate::handoff_continuity;
 use crate::learnings;
 use crate::local_store;
 use crate::roots;
 use crate::skill_federation;
-use crate::transcripts::{self, TranscriptSession};
 
 /// Optional inputs when creating a snapshot root.
 #[derive(Debug, Clone, Default)]
@@ -17,35 +17,6 @@ pub struct SnapContext {
     pub home: PathBuf,
     /// Observed harness id (falls back to the `harness` argument).
     pub harness: Option<String>,
-}
-
-fn session_order(left: &TranscriptSession, right: &TranscriptSession) -> std::cmp::Ordering {
-    let left_latest = if left.ended_at.is_empty() {
-        &left.started_at
-    } else {
-        &left.ended_at
-    };
-    let right_latest = if right.ended_at.is_empty() {
-        &right.started_at
-    } else {
-        &right.ended_at
-    };
-    left_latest
-        .cmp(right_latest)
-        .then_with(|| left.started_at.cmp(&right.started_at))
-        .then_with(|| left.session_id.cmp(&right.session_id))
-}
-
-/// Latest matching verified transcript session for one harness + project.
-pub fn latest_verified_session(
-    home: &Path,
-    project: &Path,
-    harness: &str,
-) -> Option<TranscriptSession> {
-    transcripts::readers()
-        .into_iter()
-        .find(|reader| reader.id() == harness)
-        .and_then(|reader| reader.scan(home, project).into_iter().max_by(session_order))
 }
 
 fn active_learning_ids(project_dir: &Path, home: &Path) -> Vec<String> {
@@ -104,9 +75,11 @@ pub fn build_snap_evidence(
             });
         }
 
-        if let Some(session) = latest_verified_session(home, project_dir, observed_harness) {
+        if let Some(session) =
+            handoff_continuity::latest_verified_session(home, project_dir, observed_harness)
+        {
             let mut activity = json!({
-                "transcript_ref": transcripts::source_id(&session),
+                "transcript_ref": crate::transcripts::source_id(&session),
                 "outcome": session.outcome.as_str(),
                 "tool_events": session.tool_events,
             });

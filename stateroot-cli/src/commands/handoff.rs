@@ -7,9 +7,10 @@ use std::path::Path;
 use anyhow::Context as _;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use stateroot_core::handoff_continuity::{self, FINALIZE_WARNING};
 use stateroot_core::local_store::now_rfc3339;
 use stateroot_core::local_store::{self, SCHEMA_HANDOFF_V1};
-use stateroot_core::transcripts::{self, TranscriptSession};
+use stateroot_core::transcripts::TranscriptSession;
 
 use super::resume::{fetch_handoff, render_handoff_digest};
 use super::{note, truncate, Ctx};
@@ -355,34 +356,6 @@ fn parse_legacy_note(note: &str) -> LegacyNote {
     parsed
 }
 
-fn session_order(left: &TranscriptSession, right: &TranscriptSession) -> std::cmp::Ordering {
-    let left_latest = if left.ended_at.is_empty() {
-        &left.started_at
-    } else {
-        &left.ended_at
-    };
-    let right_latest = if right.ended_at.is_empty() {
-        &right.started_at
-    } else {
-        &right.ended_at
-    };
-    left_latest
-        .cmp(right_latest)
-        .then_with(|| left.started_at.cmp(&right.started_at))
-        .then_with(|| left.session_id.cmp(&right.session_id))
-}
-
-fn latest_verified_session(
-    home: &Path,
-    project: &Path,
-    harness: &str,
-) -> Option<TranscriptSession> {
-    transcripts::readers()
-        .into_iter()
-        .find(|reader| reader.id() == harness)
-        .and_then(|reader| reader.scan(home, project).into_iter().max_by(session_order))
-}
-
 pub(crate) fn compact_tail(session: &TranscriptSession) -> Vec<Value> {
     let mut user_remaining = 2usize;
     let mut assistant_remaining = 2usize;
@@ -451,7 +424,7 @@ struct PacketContext<'a> {
     project_id: &'a str,
     seq: i64,
     source: &'a str,
-    to: &'a str,
+    routing_dest: Option<&'a str>,
     note_text: Option<&'a str>,
     objective_override: Option<&'a str>,
     state_objective: String,
@@ -575,7 +548,11 @@ fn assemble_packet(
         "task": task,
         "current_phase": current_phase,
         "last_harness": context.source,
-        "recommended_next_harness": context.to,
+        "recommended_next_harness": if context.handing_to_another {
+            json!(context.routing_dest.unwrap_or(context.source))
+        } else {
+            Value::Null
+        },
         "objective": objective,
         "implementation_status": implementation_status,
         "decisions": decisions,
@@ -736,15 +713,16 @@ fn write_packet_durable(project_dir: &Path, packet: &Value) -> anyhow::Result<()
     }
 }
 
-/// `stateroot handoff write [--from H] --to H [--input PATH] [--note …]`.
+/// `stateroot handoff write [--from H] [--to H] [--input PATH] [--note …]`.
 ///
 /// Explicit origin replaces the current structured handoff. Automatic origin
 /// (lifecycle hooks) records a checkpoint only and preserves any existing
-/// structured handoff.
+/// structured handoff. `--to` is optional: omit it for continuity-only writes;
+/// use it only for explicit cross-harness routing (orchestration/auto mode).
 pub async fn write(
     ctx: &Ctx,
     from: Option<&str>,
-    to: &str,
+    to: Option<&str>,
     note_text: Option<&str>,
     input_path: Option<&str>,
     objective_override: Option<&str>,
@@ -765,7 +743,7 @@ pub async fn write(
 pub async fn write_with_origin(
     ctx: &Ctx,
     from: Option<&str>,
-    to: &str,
+    to: Option<&str>,
     note_text: Option<&str>,
     input_path: Option<&str>,
     objective_override: Option<&str>,
@@ -783,11 +761,14 @@ pub async fn write_with_origin(
             .map_err(|err| anyhow::anyhow!("cannot use active harness marker ({err}); pass --from <harness>"))?
             .ok_or_else(|| anyhow::anyhow!("handoff source is unknown; pass --from <harness>"))?,
     };
-    let destination = super::active_harness::canonical_id(to).map_err(|_| {
-        anyhow::anyhow!(
-            "unknown handoff destination '{to}'; pass --to <harness> with a known harness id or alias"
-        )
-    })?;
+    let destination = match to {
+        Some(explicit) => super::active_harness::canonical_id(explicit).map_err(|_| {
+            anyhow::anyhow!(
+                "unknown handoff destination '{explicit}'; pass --to <harness> with a known harness id or alias"
+            )
+        })?,
+        None => source.clone(),
+    };
     let input = read_input(input_path)?;
     // Read directly so malformed state cannot silently reset the sequence.
     let current = local_store::read_handoff_local(&ctx.cwd)?;
@@ -801,7 +782,7 @@ pub async fn write_with_origin(
     // refreshes it as work progresses, so an explicit restatement wins.
     let (state_objective, phase) = local_state_fields(&ctx.cwd)?;
     let home = super::install::home_dir()?;
-    let session = latest_verified_session(&home, &ctx.cwd, &source);
+    let session = handoff_continuity::latest_verified_session(&home, &ctx.cwd, &source);
     let handing_to_another = destination != source;
     let packet = assemble_packet(
         input,
@@ -811,7 +792,11 @@ pub async fn write_with_origin(
             project_id: &project.project_id,
             seq: current_seq + 1,
             source: &source,
-            to: &destination,
+            routing_dest: if handing_to_another {
+                Some(destination.as_str())
+            } else {
+                None
+            },
             note_text,
             objective_override,
             state_objective,
@@ -821,13 +806,81 @@ pub async fn write_with_origin(
     )?;
 
     write_packet_durable(&ctx.cwd, &packet)?;
-    println!(
-        "handoff #{} written",
-        packet.get("seq").and_then(|v| v.as_i64()).unwrap_or(0)
-    );
+    let seq = packet.get("seq").and_then(|v| v.as_i64()).unwrap_or(0);
+    let written_at = packet
+        .get("written_at")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    handoff_continuity::write_explicit_marker(&ctx.cwd, &source, seq, written_at)?;
+    println!("handoff #{seq} written");
     // Compact digest footer (composed locally — no extra server calls).
     if let Some(footer) = super::resume::digest_footer(&ctx.cwd) {
         println!("{footer}");
+    }
+    Ok(())
+}
+
+fn resolve_handoff_source(ctx: &Ctx, from: Option<&str>) -> anyhow::Result<String> {
+    match from {
+        Some(explicit) => super::active_harness::canonical_id(explicit).map_err(|_| {
+            anyhow::anyhow!(
+                "unknown handoff source '{explicit}'; pass --from <harness> with a known harness id"
+            )
+        }),
+        None => super::active_harness::read(&ctx.cwd)
+            .map_err(|err| {
+                anyhow::anyhow!("cannot use active harness marker ({err}); pass --from <harness>")
+            })?
+            .ok_or_else(|| anyhow::anyhow!("handoff source is unknown; pass --from <harness>")),
+    }
+}
+
+/// Auto-finalize observed session work into `current.json` when gates pass.
+pub fn try_auto_finalize(ctx: &Ctx, harness: &str) -> anyhow::Result<bool> {
+    ctx.require_project()?;
+    let current = local_store::read_handoff_local(&ctx.cwd)?;
+    let Some(handoff) = current.as_ref() else {
+        return Ok(false);
+    };
+    let home = super::install::home_dir()?;
+    if !handoff_continuity::should_finalize(&ctx.cwd, &home, harness, current.as_ref()) {
+        return Ok(false);
+    }
+    let session = handoff_continuity::latest_verified_session(&home, &ctx.cwd, harness)
+        .context("should_finalize implied a matching transcript session")?;
+    let current_seq = handoff.get("seq").and_then(|v| v.as_i64()).unwrap_or(0);
+    let (state_objective, phase) = local_state_fields(&ctx.cwd)?;
+    let project = ctx.require_project()?;
+    let mut packet = handoff_continuity::build_finalize_packet(
+        &project.project_id,
+        &ctx.cwd,
+        harness,
+        current_seq,
+        &session,
+        &state_objective,
+        &phase,
+    );
+    packet = bound_packet(packet);
+    validate_packet(&packet, false)?;
+    write_packet_durable(&ctx.cwd, &packet)?;
+    Ok(true)
+}
+
+/// `stateroot handoff finalize [--from H]` — manual recovery when hooks missed.
+pub async fn finalize(ctx: &Ctx, from: Option<&str>) -> anyhow::Result<()> {
+    let source = resolve_handoff_source(ctx, from)?;
+    if try_auto_finalize(ctx, &source)? {
+        let seq = local_store::read_handoff_local(&ctx.cwd)?
+            .and_then(|packet| packet.get("seq").and_then(|v| v.as_i64()))
+            .unwrap_or(0);
+        println!("handoff #{seq} finalized from verified transcript ({FINALIZE_WARNING})");
+        if let Some(footer) = super::resume::digest_footer(&ctx.cwd) {
+            println!("{footer}");
+        }
+    } else {
+        println!(
+            "nothing to finalize (no newer verified session or explicit handoff blocks overwrite)"
+        );
     }
     Ok(())
 }
@@ -1077,7 +1130,7 @@ mod tests {
                 project_id: "project",
                 seq: 1,
                 source: "codex",
-                to: "codex",
+                routing_dest: None,
                 note_text: None,
                 objective_override: None,
                 state_objective: String::new(),

@@ -603,3 +603,255 @@ fn detailed_context_summary_preserved_through_write_and_show() {
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
     assert!(stdout.contains(&narrative[..80]));
 }
+
+fn seed_codex_session(home: &Path, project: &Path, session_id: &str, start: &str, end: &str) {
+    write_rollout(
+        home,
+        &format!("rollout-{session_id}.jsonl"),
+        &[
+            meta(session_id, project, start),
+            json!({"timestamp":start,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"codex observed objective"}]}}),
+            json!({"timestamp":end,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"codex progress on continuity"}]}}),
+            json!({"timestamp":end,"type":"compacted","payload":{"message":"Codex verified compaction after stale handoff."}}),
+            json!({"timestamp":end,"type":"event_msg","payload":{"type":"task_complete","turn_id":"done"}}),
+        ],
+    );
+}
+
+fn patch_handoff_written_at(project: &Path, written_at: &str) {
+    let path = project.join(".stateroot/handoffs/current.json");
+    let mut packet: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("current")).expect("json");
+    packet["written_at"] = json!(written_at);
+    packet["created_at"] = json!(written_at);
+    std::fs::write(
+        path,
+        format!("{}\n", serde_json::to_string_pretty(&packet).expect("json")),
+    )
+    .expect("patch");
+}
+
+#[test]
+fn write_without_to_leaves_routing_null_and_skips_next_actions_requirement() {
+    let (config, home, project) = project();
+    let input = write_json(
+        project.path(),
+        "continuity-only.json",
+        &json!({
+            "objective":"Continuity goal",
+            "task":"Finish local module",
+            "context_summary":"Detailed continuity without cross-harness routing.",
+            "failures":[]
+        }),
+    );
+    stateroot(config.path(), home.path(), project.path())
+        .args(["handoff", "write", "--from", "codex", "--input", &input])
+        .assert()
+        .success();
+    let packet = current(project.path());
+    assert!(packet["recommended_next_harness"].is_null());
+    assert_eq!(packet["last_harness"], "codex");
+}
+
+#[test]
+fn cross_harness_write_sets_routing_and_requires_next_actions() {
+    let (config, home, project) = project();
+    let missing = write_json(
+        project.path(),
+        "no-actions.json",
+        &json!({
+            "objective":"goal",
+            "task":"task",
+            "context_summary":"summary for routing test",
+            "next_actions":[]
+        }),
+    );
+    stateroot(config.path(), home.path(), project.path())
+        .args([
+            "handoff", "write", "--from", "codex", "--to", "cursor", "--input", &missing,
+        ])
+        .assert()
+        .failure();
+
+    let valid = write_json(
+        project.path(),
+        "with-actions.json",
+        &json!({
+            "objective":"goal",
+            "task":"task",
+            "context_summary":"summary for routing test",
+            "next_actions":["Continue in cursor"]
+        }),
+    );
+    stateroot(config.path(), home.path(), project.path())
+        .args([
+            "handoff", "write", "--from", "codex", "--to", "cursor", "--input", &valid,
+        ])
+        .assert()
+        .success();
+    let packet = current(project.path());
+    assert_eq!(packet["recommended_next_harness"], "cursor");
+}
+
+#[test]
+fn finalize_after_stale_handoff_increments_seq_without_routing() {
+    let (config, home, project) = project();
+    let input = write_json(
+        project.path(),
+        "claude-handoff.json",
+        &json!({
+            "objective":"Ship continuity",
+            "task":"Hand off to codex",
+            "context_summary":"Claude finished planning; codex should implement.",
+            "next_actions":["Implement in codex"],
+            "failures":[]
+        }),
+    );
+    stateroot(config.path(), home.path(), project.path())
+        .args([
+            "handoff", "write", "--from", "claude", "--to", "codex", "--input", &input,
+        ])
+        .assert()
+        .success();
+    patch_handoff_written_at(project.path(), "2026-08-12T08:00:00Z");
+    seed_codex_session(
+        home.path(),
+        project.path(),
+        "after-stale",
+        "2026-08-12T11:00:00Z",
+        "2026-08-12T12:00:00Z",
+    );
+
+    stateroot(config.path(), home.path(), project.path())
+        .args(["handoff", "finalize", "--from", "codex"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "finalized from verified transcript",
+        ));
+
+    let packet = current(project.path());
+    assert_eq!(packet["seq"], 2);
+    assert!(packet["recommended_next_harness"].is_null());
+    assert_eq!(packet["created_by_harness"], "codex");
+    assert_eq!(packet["last_harness"], "codex");
+    assert!(packet["warnings"]
+        .as_array()
+        .expect("warnings")
+        .iter()
+        .any(|item| item
+            .as_str()
+            .is_some_and(|text| text.contains("finalized from verified transcript"))));
+    assert_eq!(
+        packet["context_summary"],
+        "Codex verified compaction after stale handoff."
+    );
+}
+
+#[test]
+fn explicit_write_blocks_finalize_over_same_seq() {
+    let (config, home, project) = project();
+    let input = write_json(
+        project.path(),
+        "stale.json",
+        &json!({
+            "objective":"goal",
+            "task":"stale boundary",
+            "context_summary":"Stale formal handoff before codex work.",
+            "next_actions":["continue"],
+            "failures":[]
+        }),
+    );
+    stateroot(config.path(), home.path(), project.path())
+        .args([
+            "handoff", "write", "--from", "claude", "--to", "codex", "--input", &input,
+        ])
+        .assert()
+        .success();
+    patch_handoff_written_at(project.path(), "2026-08-12T08:00:00Z");
+    seed_codex_session(
+        home.path(),
+        project.path(),
+        "blocked",
+        "2026-08-12T11:00:00Z",
+        "2026-08-12T12:00:00Z",
+    );
+
+    let explicit = write_json(
+        project.path(),
+        "explicit-codex.json",
+        &json!({
+            "objective":"Author codex objective",
+            "task":"Author codex task",
+            "context_summary":"Explicit author-written codex handoff.",
+            "next_actions":["Author next"],
+            "failures":[]
+        }),
+    );
+    stateroot(config.path(), home.path(), project.path())
+        .args(["handoff", "write", "--from", "codex", "--input", &explicit])
+        .assert()
+        .success();
+    let before = current(project.path());
+    assert_eq!(before["seq"], 2);
+    assert_eq!(before["task"], "Author codex task");
+
+    stateroot(config.path(), home.path(), project.path())
+        .args(["handoff", "finalize", "--from", "codex"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("nothing to finalize"));
+    assert_eq!(current(project.path())["task"], "Author codex task");
+}
+
+#[test]
+fn resume_overlay_when_finalize_missed_and_no_overlay_after_finalize() {
+    let (config, home, project) = project();
+    let input = write_json(
+        project.path(),
+        "stale.json",
+        &json!({
+            "objective":"goal",
+            "task":"stale boundary",
+            "context_summary":"Stale formal handoff before codex work.",
+            "next_actions":["continue"],
+            "failures":[]
+        }),
+    );
+    stateroot(config.path(), home.path(), project.path())
+        .args([
+            "handoff", "write", "--from", "claude", "--to", "codex", "--input", &input,
+        ])
+        .assert()
+        .success();
+    patch_handoff_written_at(project.path(), "2026-08-12T08:00:00Z");
+    seed_codex_session(
+        home.path(),
+        project.path(),
+        "overlay",
+        "2026-08-12T11:00:00Z",
+        "2026-08-12T12:00:00Z",
+    );
+
+    let overlay = stateroot(config.path(), home.path(), project.path())
+        .args(["resume", "--harness", "cursor", "--force"])
+        .assert()
+        .success();
+    let overlay_stdout = String::from_utf8(overlay.get_output().stdout.clone()).expect("utf8");
+    assert!(overlay_stdout.contains("Work since handoff #1 (observed — codex)"));
+    assert!(overlay_stdout.contains("NOT a formal handoff packet"));
+    assert_eq!(current(project.path())["seq"], 1);
+
+    stateroot(config.path(), home.path(), project.path())
+        .args(["handoff", "finalize", "--from", "codex"])
+        .assert()
+        .success();
+
+    let after = stateroot(config.path(), home.path(), project.path())
+        .args(["resume", "--harness", "cursor", "--force"])
+        .assert()
+        .success();
+    let after_stdout = String::from_utf8(after.get_output().stdout.clone()).expect("utf8");
+    assert!(!after_stdout.contains("Work since handoff #1 (observed — codex)"));
+    assert_eq!(current(project.path())["seq"], 2);
+}

@@ -209,6 +209,18 @@ pub fn hook_digest(config_dir: &Path, project_dir: &Path) -> Option<String> {
                 truncate(&text, 400)
             ));
         }
+        if let Some(gap) =
+            stateroot_core::handoff_continuity::overlay_for_handoff(&home, project_dir, &handoff)
+        {
+            out.push_str(
+                &stateroot_core::handoff_continuity::compose_since_handoff_overlay(
+                    project_dir,
+                    &handoff,
+                    &gap,
+                ),
+            );
+            out.push('\n');
+        }
     }
 
     out.push_str(&format!("\n{}", super::resume::NO_REFETCH_FOOTER));
@@ -591,12 +603,15 @@ async fn checkpoint_from_spool(
         }
     }
 
-    // stop/session_end: checkpoint already recorded above. Never replace an
-    // explicit structured handoff with a thin lifecycle note.
-    if matches!(canonical, "stop" | "session_end") && !tail.is_empty() {
-        note!("checkpoint recorded; existing structured handoff preserved");
-    }
+    // stop/session_end: checkpoint already recorded above. Try transcript
+    // finalize when gates pass; never clobber an explicit handoff at the
+    // current seq.
     if matches!(canonical, "stop" | "session_end") {
+        if super::handoff::try_auto_finalize(&hook_ctx, quirk.id).unwrap_or(false) {
+            note!("finalized observed session into handoff continuity");
+        } else if !tail.is_empty() {
+            note!("checkpoint recorded; existing structured handoff preserved");
+        }
         let path = spool_path(project_dir);
         if path.exists() {
             let _ = std::fs::write(&path, "");
