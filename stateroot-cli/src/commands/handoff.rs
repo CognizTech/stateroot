@@ -447,6 +447,7 @@ fn local_state_fields(cwd: &Path) -> anyhow::Result<(String, String)> {
 }
 
 struct PacketContext<'a> {
+    project_dir: &'a Path,
     project_id: &'a str,
     seq: i64,
     source: &'a str,
@@ -615,6 +616,12 @@ fn assemble_packet(
         let tail = compact_tail(session);
         if !tail.is_empty() {
             packet["conversation_tail"] = Value::Array(tail);
+        }
+    }
+
+    if let Ok(Some(root)) = stateroot_core::roots::latest_root(context.project_dir) {
+        if !root.is_empty() {
+            packet["latest_root"] = json!(root);
         }
     }
 
@@ -800,6 +807,7 @@ pub async fn write_with_origin(
         input,
         session.as_ref(),
         PacketContext {
+            project_dir: &ctx.cwd,
             project_id: &project.project_id,
             seq: current_seq + 1,
             source: &source,
@@ -1065,6 +1073,7 @@ mod tests {
             },
             Some(&session),
             PacketContext {
+                project_dir: Path::new("."),
                 project_id: "project",
                 seq: 1,
                 source: "codex",

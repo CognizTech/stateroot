@@ -2115,6 +2115,19 @@ fn list_portable(root: &Path, scope: &str) -> Vec<DiscoveredSkill> {
     out
 }
 
+/// Active portable skill slugs present in project + global stores.
+pub fn active_portable_slugs(project_dir: &Path, home: &Path) -> Vec<String> {
+    let mut slugs: Vec<String> = list_portable(&project_dir.join(".stateroot/skills"), "project")
+        .into_iter()
+        .chain(list_portable(&home.join(".stateroot/skills"), "global"))
+        .filter(|skill| skill.lifecycle == "active")
+        .map(|skill| skill.slug)
+        .collect();
+    slugs.sort();
+    slugs.dedup();
+    slugs
+}
+
 pub fn status_report(project_dir: &Path, home: Option<&Path>) -> Result<Value, String> {
     let home = match home {
         Some(path) => path.to_path_buf(),

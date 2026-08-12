@@ -50,6 +50,10 @@ pub struct Learning {
     pub scope: String,
     /// `candidate` | `proposed` | `active` | `rejected`.
     pub status: String,
+    /// Root hash when this learning became active (empty until promoted).
+    pub active_at_root: String,
+    /// Id of the learning that superseded this one (empty when current).
+    pub superseded_by: String,
 }
 
 impl Learning {
@@ -74,15 +78,24 @@ impl Learning {
             sources: sources.into(),
             scope: scope.into(),
             status: "candidate".into(),
+            active_at_root: String::new(),
+            superseded_by: String::new(),
         }
     }
 
     /// Render one markdown bullet.
     pub fn render_bullet(&self) -> String {
-        format!(
-            "- **{}** <!-- id: {}; confidence: {:.2}; label: {}; sources: {}; scope: {}; status: {} -->",
-            self.statement, self.id, self.confidence, self.label, self.sources, self.scope, self.status
-        )
+        let mut meta = format!(
+            "id: {}; confidence: {:.2}; label: {}; sources: {}; scope: {}; status: {}",
+            self.id, self.confidence, self.label, self.sources, self.scope, self.status
+        );
+        if !self.active_at_root.is_empty() {
+            meta.push_str(&format!("; active_at_root: {}", self.active_at_root));
+        }
+        if !self.superseded_by.is_empty() {
+            meta.push_str(&format!("; superseded_by: {}", self.superseded_by));
+        }
+        format!("- **{}** <!-- {} -->", self.statement, meta)
     }
 }
 
@@ -104,6 +117,8 @@ pub fn parse_bullet(line: &str, category: &str) -> Option<Learning> {
     let mut sources = String::new();
     let mut scope = String::from("project");
     let mut status = String::from("active");
+    let mut active_at_root = String::new();
+    let mut superseded_by = String::new();
     for part in comment.split(';') {
         let Some((key, value)) = part.trim().split_once(':') else {
             continue;
@@ -116,6 +131,8 @@ pub fn parse_bullet(line: &str, category: &str) -> Option<Learning> {
             "sources" => sources = value.to_string(),
             "scope" if !value.is_empty() => scope = value.to_string(),
             "status" if !value.is_empty() => status = value.to_string(),
+            "active_at_root" if !value.is_empty() => active_at_root = value.to_string(),
+            "superseded_by" if !value.is_empty() => superseded_by = value.to_string(),
             _ => {}
         }
     }
@@ -131,6 +148,8 @@ pub fn parse_bullet(line: &str, category: &str) -> Option<Learning> {
         sources,
         scope,
         status,
+        active_at_root,
+        superseded_by,
     })
 }
 
@@ -238,6 +257,25 @@ pub fn promote(
     rewrite_without_id(&candidates_path, &learning.id)?;
     // Append active bullet.
     learning.status = "active".into();
+    learning.active_at_root = crate::roots::latest_root(project_dir)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    // Supersede any prior active learning with the same normalized statement.
+    let normalized = normalize(&learning.statement);
+    for prior in read_dir(&root, None) {
+        if prior.id != learning.id
+            && prior.status == "active"
+            && normalize(&prior.statement) == normalized
+            && prior.superseded_by.is_empty()
+        {
+            mark_superseded(
+                &root.join(format!("{}.md", prior.category)),
+                &prior.id,
+                &learning.id,
+            )?;
+        }
+    }
     let active_path = root.join(format!("{}.md", learning.category));
     let mut body = std::fs::read_to_string(&active_path).unwrap_or_default();
     if !body.ends_with('\n') && !body.is_empty() {
@@ -318,6 +356,32 @@ pub fn edit(
         }
     }
     Ok(false)
+}
+
+fn mark_superseded(path: &Path, id: &str, superseded_by: &str) -> Result<(), LearningsError> {
+    let category = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("general")
+        .to_string();
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Ok(());
+    };
+    let rebuilt: String = text
+        .lines()
+        .map(|line| {
+            if let Some(mut learning) = parse_bullet(line, &category) {
+                if learning.id == id {
+                    learning.superseded_by = superseded_by.to_string();
+                    return learning.render_bullet();
+                }
+            }
+            line.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(path, format!("{rebuilt}\n"))?;
+    Ok(())
 }
 
 fn rewrite_without_id(path: &Path, id: &str) -> Result<(), LearningsError> {
@@ -538,6 +602,9 @@ mod tests {
     #[test]
     fn candidate_lifecycle_roundtrip() {
         let (project, home) = dirs();
+        std::fs::create_dir_all(project.path().join(".stateroot")).unwrap();
+        let (_root, _) = crate::roots::create_root(project.path(), "cli", "for learning pin", None)
+            .expect("snap");
         let learning = Learning::candidate(
             "always re-run clippy after edits",
             "preferences",
@@ -550,9 +617,11 @@ mod tests {
         assert!(!append_candidate(project.path(), home.path(), "project", &learning).unwrap());
         assert!(promote(project.path(), home.path(), "project", &learning.id).unwrap());
         let active = read_scope(project.path(), home.path(), "project");
-        assert!(active
+        let promoted = active
             .iter()
-            .any(|l| l.id == learning.id && l.status == "active"));
+            .find(|l| l.id == learning.id && l.status == "active")
+            .expect("active learning");
+        assert!(!promoted.active_at_root.is_empty());
     }
 
     #[test]

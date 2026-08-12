@@ -208,4 +208,15 @@ fn diff_content_revert_and_fork() {
         stdout.contains(&second[..12]),
         "v2 root still present: {stdout}"
     );
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["compare", &first, &second])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(stdout.contains("# Root compare"), "compare: {stdout}");
+    assert!(
+        stdout.contains("Verified diff (files)"),
+        "compare: {stdout}"
+    );
 }

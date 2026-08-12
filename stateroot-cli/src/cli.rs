@@ -47,6 +47,8 @@ pub enum Command {
     },
     /// Diff two roots (names+status; --content for unified diffs).
     Diff(DiffArgs),
+    /// Compare two roots for experiment semantics (files, state, transitions, activity).
+    Compare(CompareArgs),
     /// Append-only revert to a root's tree (NEW root; confirm required).
     Revert(RevertArgs),
     /// Branch-materialize a root under refs/stateroot/forks/<name>.
@@ -348,6 +350,17 @@ pub struct SnapArgs {
     /// Free-text reason recorded in the root manifest + transition.
     #[arg(long)]
     pub reason: Option<String>,
+    /// Harness that drove this snapshot (defaults to active-harness marker or `cli`).
+    #[arg(long)]
+    pub harness: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct CompareArgs {
+    /// First root hash.
+    pub a: String,
+    /// Second root hash.
+    pub b: String,
 }
 
 #[derive(Debug, Args)]

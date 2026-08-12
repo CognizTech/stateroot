@@ -332,17 +332,28 @@ pub fn create_root(
     project_dir: &Path,
     harness: &str,
     reason: &str,
+    snap_ctx: Option<&crate::snap_context::SnapContext>,
 ) -> Result<(RootManifest, Transition), RootsError> {
     let repo = ensure_repo(project_dir)?;
     let (tree, pinned, tree_bytes) = build_tree(&repo, project_dir)?;
     let parent = latest_oid(&repo);
     let parents: Vec<git2::Oid> = parent.into_iter().collect();
     let parent_hashes: Vec<String> = parents.iter().map(|o| o.to_string()).collect();
+    let from_root = parent_hashes.first().cloned().unwrap_or_default();
     let message = match reason {
         "" => format!("root by {harness}"),
         r => format!("root: {r} (by {harness})"),
     };
     let oid = commit_root(&repo, tree, &parents, &message)?;
+    let to_root = oid.to_string();
+    let evidence = crate::snap_context::build_snap_evidence(
+        project_dir,
+        harness,
+        reason,
+        &from_root,
+        &to_root,
+        snap_ctx,
+    );
     persist_root(
         &repo,
         project_dir,
@@ -353,7 +364,7 @@ pub fn create_root(
         pinned,
         tree_bytes,
         "snapshot",
-        json!({"reason": reason}),
+        evidence,
     )
 }
 
@@ -711,6 +722,72 @@ pub fn render_receipt(project_dir: &Path, id_prefix: &str) -> Result<String, Roo
             out.push_str(&format!("reason: {reason}\n"));
         }
     }
+    if let Some(seq) = transition
+        .evidence
+        .get("handoff_seq")
+        .and_then(Value::as_u64)
+    {
+        out.push_str(&format!("handoff_seq: {seq}\n"));
+    }
+
+    if let Some(context) = transition.evidence.get("context") {
+        out.push_str("\n## Context supplied (observed)\n");
+        let learning_ids = context
+            .get("learning_ids")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let skill_slugs = context
+            .get("skill_slugs")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if learning_ids.is_empty() && skill_slugs.is_empty() {
+            out.push_str("_none recorded_\n");
+        } else {
+            if !learning_ids.is_empty() {
+                out.push_str(&format!("learnings: {}\n", learning_ids.len()));
+                for id in learning_ids.iter().take(20) {
+                    out.push_str(&format!("  - {}\n", id.as_str().unwrap_or("?")));
+                }
+            }
+            if !skill_slugs.is_empty() {
+                out.push_str(&format!("skills: {}\n", skill_slugs.len()));
+                for slug in skill_slugs.iter().take(20) {
+                    out.push_str(&format!("  - {}\n", slug.as_str().unwrap_or("?")));
+                }
+            }
+        }
+    }
+
+    if let Some(activity) = transition.evidence.get("activity") {
+        out.push_str("\n## Activity (observed)\n");
+        if let Some(reference) = activity.get("transcript_ref").and_then(Value::as_str) {
+            out.push_str(&format!("transcript_ref: {reference}\n"));
+        }
+        if let Some(outcome) = activity.get("outcome").and_then(Value::as_str) {
+            out.push_str(&format!("outcome: {outcome}\n"));
+        }
+        if let Some(count) = activity.get("tool_events").and_then(Value::as_u64) {
+            out.push_str(&format!("tool_events: {count}\n"));
+        }
+        if let Some(files) = activity.get("files_touched").and_then(Value::as_array) {
+            if !files.is_empty() {
+                out.push_str(&format!("files_touched: {}\n", files.len()));
+            }
+        }
+        if let Some(failures) = activity.get("failed_approaches").and_then(Value::as_array) {
+            if !failures.is_empty() {
+                out.push_str(&format!("failed_approaches: {}\n", failures.len()));
+            }
+        }
+    }
+
+    if let Some(verified) = transition.evidence.get("verified") {
+        if let Some(count) = verified.get("files_changed").and_then(Value::as_u64) {
+            out.push_str(&format!("\nverified.files_changed: {count}\n"));
+        }
+    }
 
     if !transition.from_root.is_empty() {
         let delta = diff_roots(
@@ -748,6 +825,128 @@ pub fn render_receipt(project_dir: &Path, id_prefix: &str) -> Result<String, Roo
     Ok(out)
 }
 
+fn transition_into_root(project_dir: &Path, root_hash: &str) -> Option<Transition> {
+    let dir = local_store::root(project_dir).join(TRANSITIONS_DIR);
+    let entries = std::fs::read_dir(&dir).ok()?;
+    let mut matches = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(transition) = serde_json::from_str::<Transition>(&text) else {
+            continue;
+        };
+        if transition.to_root == root_hash || transition.to_root.starts_with(root_hash) {
+            matches.push(transition);
+        }
+    }
+    matches
+        .into_iter()
+        .max_by(|left, right| left.created_at.cmp(&right.created_at))
+}
+
+/// Compare two roots for experiment semantics (markdown report).
+pub fn compare_roots(project_dir: &Path, a: &str, b: &str) -> Result<String, RootsError> {
+    let manifest_a = get_root(project_dir, a)?;
+    let manifest_b = get_root(project_dir, b)?;
+    let delta = diff_roots(project_dir, &manifest_a.id, &manifest_b.id, false, 0, 0)?;
+
+    let mut out = String::new();
+    out.push_str("# Root compare\n\n");
+    out.push_str(&format!(
+        "A: {} (harness: {}; coverage: {})\n",
+        short(&manifest_a.id),
+        manifest_a.created_by_harness,
+        manifest_a.coverage
+    ));
+    out.push_str(&format!(
+        "B: {} (harness: {}; coverage: {})\n",
+        short(&manifest_b.id),
+        manifest_b.created_by_harness,
+        manifest_b.coverage
+    ));
+
+    for (label, manifest_id) in [("A", manifest_a.id.as_str()), ("B", manifest_b.id.as_str())] {
+        if let Some(transition) = transition_into_root(project_dir, manifest_id) {
+            out.push_str(&format!(
+                "\n## Transition into {label} (observed)\n\nharness: {}\nobjective: {}\n",
+                transition.harness,
+                if transition.objective.is_empty() {
+                    "_(empty)_"
+                } else {
+                    transition.objective.as_str()
+                }
+            ));
+            if let Some(activity) = transition.evidence.get("activity") {
+                if let Some(reference) = activity.get("transcript_ref").and_then(Value::as_str) {
+                    out.push_str(&format!("transcript_ref: {reference}\n"));
+                }
+                if let Some(outcome) = activity.get("outcome").and_then(Value::as_str) {
+                    out.push_str(&format!("outcome: {outcome}\n"));
+                }
+            }
+            if let Some(context) = transition.evidence.get("context") {
+                let learning_count = context
+                    .get("learning_ids")
+                    .and_then(Value::as_array)
+                    .map(|items| items.len())
+                    .unwrap_or(0);
+                let skill_count = context
+                    .get("skill_slugs")
+                    .and_then(Value::as_array)
+                    .map(|items| items.len())
+                    .unwrap_or(0);
+                if learning_count > 0 || skill_count > 0 {
+                    out.push_str(&format!(
+                        "context: {learning_count} learning(s), {skill_count} skill(s)\n"
+                    ));
+                }
+            }
+        }
+    }
+
+    out.push_str("\n## Verified diff (files)\n\n");
+    let files = delta["files"].as_array().cloned().unwrap_or_default();
+    if files.is_empty() {
+        out.push_str("_no project file changes_\n");
+    } else {
+        for item in files.iter().take(40) {
+            out.push_str(&format!(
+                "  {} {}\n",
+                item.get("status").and_then(Value::as_str).unwrap_or("?"),
+                item.get("path").and_then(Value::as_str).unwrap_or("?")
+            ));
+        }
+        if files.len() > 40 {
+            out.push_str(&format!("  … {} more\n", files.len() - 40));
+        }
+    }
+
+    out.push_str("\n## Verified diff (state / .stateroot)\n\n");
+    let state = delta["state"].as_array().cloned().unwrap_or_default();
+    if state.is_empty() {
+        out.push_str("_no state changes_\n");
+    } else {
+        for item in state.iter().take(40) {
+            let path = item.get("path").and_then(Value::as_str).unwrap_or("?");
+            out.push_str(&format!(
+                "  {} {}\n",
+                item.get("status").and_then(Value::as_str).unwrap_or("?"),
+                path
+            ));
+        }
+        if state.len() > 40 {
+            out.push_str(&format!("  … {} more\n", state.len() - 40));
+        }
+    }
+
+    Ok(out)
+}
+
 fn short(hash: &str) -> String {
     if hash.is_empty() {
         return "∅".into();
@@ -775,7 +974,7 @@ mod tests {
     #[test]
     fn root_creation_non_git_auto_init_and_coverage() {
         let (_tmp, dir) = project();
-        let (manifest, transition) = create_root(&dir, "cli", "first").expect("snap");
+        let (manifest, transition) = create_root(&dir, "cli", "first", None).expect("snap");
         assert!(dir.join(".git").is_dir(), "auto git init");
         assert_eq!(manifest.coverage, "state_only");
         assert_eq!(manifest.files_pinned, 0);
@@ -794,7 +993,7 @@ mod tests {
         write(&dir, "node_modules/junk/index.js", "junk");
         write(&dir, ".gitignore", "node_modules/\nsecret.txt\n");
         write(&dir, "secret.txt", "nope");
-        let (m2, t2) = create_root(&dir, "cli", "second").expect("snap2");
+        let (m2, t2) = create_root(&dir, "cli", "second", None).expect("snap2");
         assert_eq!(m2.coverage, "full");
         assert_eq!(
             m2.files_pinned, 2,
@@ -817,9 +1016,9 @@ mod tests {
     fn revert_is_append_only_and_history_untouched() {
         let (_tmp, dir) = project();
         write(&dir, "a.txt", "v1");
-        let (a, _) = create_root(&dir, "cli", "v1").expect("a");
+        let (a, _) = create_root(&dir, "cli", "v1", None).expect("a");
         write(&dir, "a.txt", "v2");
-        let (b, _) = create_root(&dir, "cli", "v2").expect("b");
+        let (b, _) = create_root(&dir, "cli", "v2", None).expect("b");
         let (c, tc) = revert_to_root(&dir, &a.id[..12], "cli").expect("revert");
         assert_eq!(tc.kind, "revert");
         assert_eq!(tc.evidence["revert_to"], json!(a.id));
@@ -847,7 +1046,7 @@ mod tests {
     fn fork_creates_branch_ref_and_record() {
         let (_tmp, dir) = project();
         write(&dir, "a.txt", "v1");
-        let (a, _) = create_root(&dir, "cli", "v1").expect("a");
+        let (a, _) = create_root(&dir, "cli", "v1", None).expect("a");
         let (name, refname) = fork_root(&dir, &a.id, Some("claude-line"), "cli").expect("fork");
         assert_eq!(name, "claude-line");
         let repo = git2::Repository::open(&dir).unwrap();
@@ -860,10 +1059,10 @@ mod tests {
     fn receipt_renders_verified_git_delta() {
         let (_tmp, dir) = project();
         write(&dir, "a.txt", "v1");
-        let (a, _) = create_root(&dir, "cli", "v1").expect("a");
+        let (a, _) = create_root(&dir, "cli", "v1", None).expect("a");
         write(&dir, "a.txt", "v2");
         write(&dir, "b.txt", "new");
-        let (_b, t2) = create_root(&dir, "codex", "v2").expect("b");
+        let (_b, t2) = create_root(&dir, "codex", "v2", None).expect("b");
         let receipt = render_receipt(&dir, &t2.id).expect("receipt");
         assert!(receipt.contains("# Transition receipt"), "{receipt}");
         assert!(receipt.contains("harness: codex"), "{receipt}");
@@ -880,9 +1079,9 @@ mod tests {
     fn diff_names_status_and_content_with_caps() {
         let (_tmp, dir) = project();
         write(&dir, "a.txt", "one\ntwo\nthree\n");
-        let (a, _) = create_root(&dir, "cli", "v1").expect("a");
+        let (a, _) = create_root(&dir, "cli", "v1", None).expect("a");
         write(&dir, "a.txt", "one\nTWO\nthree\nfour\nfive\nsix\n");
-        let (b, _) = create_root(&dir, "cli", "v2").expect("b");
+        let (b, _) = create_root(&dir, "cli", "v2", None).expect("b");
         let names = diff_roots(&dir, &a.id, &b.id, false, 20, 200).expect("diff");
         assert_eq!(names["files"][0]["path"], json!("a.txt"));
         assert_eq!(names["files"][0]["status"], json!("M"));

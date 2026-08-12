@@ -21,6 +21,7 @@ pub mod presentation;
 pub mod proposals;
 pub mod roots;
 pub mod skill_federation;
+pub mod snap_context;
 pub mod soul;
 pub mod sync_engine;
 pub mod transcripts;

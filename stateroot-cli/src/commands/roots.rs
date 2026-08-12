@@ -7,11 +7,27 @@ use super::{note, truncate, Ctx};
 
 const LOCAL_HARNESS: &str = "cli";
 
-/// `stateroot snap [--reason R]`
-pub fn snap(ctx: &Ctx, reason: Option<&str>) -> anyhow::Result<()> {
+/// `stateroot snap [--reason R] [--harness H]`
+pub fn snap(ctx: &Ctx, reason: Option<&str>, harness: Option<&str>) -> anyhow::Result<()> {
     ctx.require_project()?;
-    let (manifest, transition) =
-        engine::create_root(&ctx.cwd, LOCAL_HARNESS, reason.unwrap_or(""))?;
+    let resolved_harness = if let Some(raw) = harness {
+        super::active_harness::canonical_id(raw)?
+    } else if let Some(observed) = super::active_harness::read(&ctx.cwd)? {
+        observed
+    } else {
+        LOCAL_HARNESS.to_string()
+    };
+    let home = stateroot_core::harness_install::home_dir().map_err(|e| anyhow::anyhow!(e))?;
+    let snap_ctx = stateroot_core::snap_context::SnapContext {
+        home,
+        harness: Some(resolved_harness.clone()),
+    };
+    let (manifest, transition) = engine::create_root(
+        &ctx.cwd,
+        &resolved_harness,
+        reason.unwrap_or(""),
+        Some(&snap_ctx),
+    )?;
     println!("root {}", manifest.id);
     println!(
         "coverage: {}",
@@ -233,6 +249,14 @@ pub fn fork(ctx: &Ctx, hash: &str, branch: Option<&str>) -> anyhow::Result<()> {
 pub fn receipt(ctx: &Ctx, id_prefix: &str) -> anyhow::Result<()> {
     ctx.require_project()?;
     let md = engine::render_receipt(&ctx.cwd, id_prefix).map_err(|e| anyhow::anyhow!(e))?;
+    print!("{md}");
+    Ok(())
+}
+
+/// `stateroot compare <a> <b>` — experiment semantics across two roots.
+pub fn compare(ctx: &Ctx, a: &str, b: &str) -> anyhow::Result<()> {
+    ctx.require_project()?;
+    let md = engine::compare_roots(&ctx.cwd, a, b).map_err(|e| anyhow::anyhow!(e))?;
     print!("{md}");
     Ok(())
 }

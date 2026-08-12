@@ -93,6 +93,14 @@ pub fn render_handoff_digest_full(
     if !objective.is_empty() {
         out.push_str(&format!("## Objective\n\n{objective}\n\n"));
     }
+    if let Some(root) = packet
+        .get("latest_root")
+        .and_then(|v| v.as_str())
+        .filter(|value| !value.is_empty())
+    {
+        let short: String = root.chars().take(12).collect();
+        out.push_str(&format!("Continuing from root `{short}`.\n\n"));
+    }
     let phase = get_str("current_phase");
     if !phase.is_empty() {
         out.push_str(&format!("## Current Phase\n\n{phase}\n\n"));
