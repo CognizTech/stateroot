@@ -59,7 +59,8 @@ pub fn resolve_in_project(
     project_dir: Option<&std::path::Path>,
     harness_id: Option<&str>,
 ) -> Option<String> {
-    if let Some(project) = project_dir.filter(|p| stateroot_core::local_store::is_stateroot_dir(p)) {
+    if let Some(project) = project_dir.filter(|p| stateroot_core::local_store::is_stateroot_dir(p))
+    {
         if let Some(overlay) = stateroot_core::soul::read_overlay(project) {
             let projection = stateroot_core::soul::render_projection(&overlay, harness_id);
             if !projection.trim().is_empty() {
