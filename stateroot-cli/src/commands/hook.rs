@@ -149,10 +149,29 @@ pub fn hook_digest(config_dir: &Path, project_dir: &Path) -> Option<String> {
     if !phase.is_empty() {
         out.push_str(&format!("Phase: {phase}\n"));
     }
+    let mut failures = Vec::new();
+    for key in ["failures", "bugs_found"] {
+        if let Some(items) = handoff.get(key).and_then(|v| v.as_array()) {
+            for item in items {
+                let text = match item {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                if !text.trim().is_empty() && !failures.contains(&text) {
+                    failures.push(text);
+                }
+            }
+        }
+    }
+    if !failures.is_empty() {
+        out.push_str("Failed approaches / bugs:\n");
+        for text in failures.iter().take(6) {
+            out.push_str(&format!("- {}\n", truncate(text, 180)));
+        }
+    }
     for (key, title) in [
         ("next_actions", "Next actions"),
         ("open_questions", "Open questions"),
-        ("bugs_found", "Failed approaches / bugs"),
         ("blockers", "Blockers"),
         ("warnings", "Warnings"),
     ] {

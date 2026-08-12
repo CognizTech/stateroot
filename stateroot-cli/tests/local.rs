@@ -24,6 +24,11 @@ fn init_project(config_home: &Path, user_home: &Path, project: &Path) {
         .arg("init")
         .assert()
         .success();
+    std::fs::write(
+        project.join("handoff-input.json"),
+        r#"{"objective":"continue the project","task":"continue implementation","context_summary":"The project has captured local state ready for a receiving agent.","next_actions":["Continue from the captured state"],"failures":[]}"#,
+    )
+    .expect("handoff input");
 }
 
 #[test]
@@ -87,6 +92,8 @@ fn checkpoint_handoff_resume_and_log_flow() {
             "codex",
             "--to",
             "codex",
+            "--input",
+            "handoff-input.json",
             "--objective",
             "ship the parser",
         ])
@@ -198,6 +205,8 @@ fn hook_session_start_injects_digest_once() {
             "codex",
             "--to",
             "claude",
+            "--input",
+            "handoff-input.json",
             "--objective",
             "hook demo",
         ])
@@ -242,7 +251,16 @@ fn handoff_source_attribution_is_explicit_or_locally_observed() {
 
     // Explicit aliases normalize to the canonical packet id.
     stateroot(config_home.path(), user_home.path(), project.path())
-        .args(["handoff", "write", "--from", "Codex", "--to", "cursor"])
+        .args([
+            "handoff",
+            "write",
+            "--from",
+            "Codex",
+            "--to",
+            "cursor",
+            "--input",
+            "handoff-input.json",
+        ])
         .assert()
         .success();
     let current = project.path().join(".stateroot/handoffs/current.json");
@@ -260,7 +278,14 @@ fn handoff_source_attribution_is_explicit_or_locally_observed() {
         .assert()
         .success();
     stateroot(config_home.path(), user_home.path(), project.path())
-        .args(["handoff", "write", "--to", "codex"])
+        .args([
+            "handoff",
+            "write",
+            "--to",
+            "codex",
+            "--input",
+            "handoff-input.json",
+        ])
         .assert()
         .success();
     let packet: serde_json::Value =
@@ -271,7 +296,16 @@ fn handoff_source_attribution_is_explicit_or_locally_observed() {
 
     // Explicit evidence wins over the active marker.
     stateroot(config_home.path(), user_home.path(), project.path())
-        .args(["handoff", "write", "--from", "cursor", "--to", "codex"])
+        .args([
+            "handoff",
+            "write",
+            "--from",
+            "cursor",
+            "--to",
+            "codex",
+            "--input",
+            "handoff-input.json",
+        ])
         .assert()
         .success();
     let packet: serde_json::Value =
@@ -332,7 +366,16 @@ fn resume_refreshes_active_marker_before_deduplicating_output() {
     let project = tempfile::tempdir().expect("project");
     init_project(config_home.path(), user_home.path(), project.path());
     stateroot(config_home.path(), user_home.path(), project.path())
-        .args(["handoff", "write", "--from", "codex", "--to", "cursor"])
+        .args([
+            "handoff",
+            "write",
+            "--from",
+            "codex",
+            "--to",
+            "cursor",
+            "--input",
+            "handoff-input.json",
+        ])
         .assert()
         .success();
     stateroot(config_home.path(), user_home.path(), project.path())
@@ -366,7 +409,7 @@ fn import_from_codex_rollout_writes_local_records() {
     let sessions_dir = user_home.path().join(".codex/sessions/2026/08/07");
     std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
     let rollout = format!(
-        "{}\n{}\n{}\n",
+        "{}\n{}\n{}\n{}\n{}\n",
         serde_json::json!({
             "type": "session_meta",
             "payload": {
@@ -378,6 +421,14 @@ fn import_from_codex_rollout_writes_local_records() {
         serde_json::json!({
             "type": "response_item",
             "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "fix the importer"}]}
+        }),
+        serde_json::json!({
+            "type": "response_item",
+            "payload": {"type": "function_call", "name": "exec_command", "arguments": "{\"cmd\":\"cargo test\"}", "call_id": "failed-test"}
+        }),
+        serde_json::json!({
+            "type": "response_item",
+            "payload": {"type": "function_call_output", "call_id": "failed-test", "output": "Error: importer regression failed"}
         }),
         serde_json::json!({
             "type": "response_item",
@@ -410,6 +461,22 @@ fn import_from_codex_rollout_writes_local_records() {
     let handoff = std::fs::read_to_string(project.path().join(".stateroot/handoffs/current.json"))
         .expect("handoff");
     assert!(handoff.contains("fix the importer"), "handoff: {handoff}");
+    let packet: serde_json::Value = serde_json::from_str(&handoff).expect("handoff json");
+    assert_eq!(
+        packet["failures"],
+        serde_json::json!(["Error: importer regression failed"])
+    );
+    assert!(!packet["implementation_status"]
+        .as_str()
+        .unwrap_or("")
+        .is_empty());
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["handoff", "show"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(
+            "Error: importer regression failed",
+        ));
     let state = std::fs::read_to_string(project.path().join(".stateroot/project/state.json"))
         .expect("state");
     assert!(state.contains("fix the importer"), "state: {state}");

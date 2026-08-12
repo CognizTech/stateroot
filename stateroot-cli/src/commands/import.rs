@@ -325,7 +325,7 @@ async fn synthesize_handoff(
     // when the transcript has one; otherwise the plain import statement.
     // (The full rich set also travels in the optional HandoffV1 fields
     // below and in the observation payload; this field is the digest.)
-    let context_summary = if let Some(newest) = latest.progress_summaries.first() {
+    let mut context_summary = if let Some(newest) = latest.progress_summaries.first() {
         newest.clone()
     } else {
         // Plain provenance line — the objective has its own field; do NOT
@@ -350,30 +350,55 @@ async fn synthesize_handoff(
         .rev()
         .find(|s| !s.conversation_tail.is_empty());
     let milestone_source = sessions.iter().rev().find(|s| !s.milestones.is_empty());
+    let task = latest
+        .user_prompts
+        .iter()
+        .rev()
+        .find(|text| !text.trim().is_empty())
+        .cloned()
+        .or_else(|| latest.next_steps.first().cloned())
+        .unwrap_or_else(|| format!("Review imported {} session {date}", latest.harness));
+    let implementation_status = format!(
+        "Transcript outcome: {}; {} file(s) changed, {} failure(s), {} next action(s), {} tool event(s).",
+        latest.outcome.as_str(),
+        latest.files_touched.len(),
+        failed.len(),
+        latest.next_steps.len(),
+        latest.tool_events
+    );
+    if task.trim().eq_ignore_ascii_case(context_summary.trim()) {
+        context_summary = implementation_status.clone();
+    }
+    let mut warnings = vec!["imported from transcripts — observed, not verified".to_string()];
+    if context_summary.chars().count() > 1800 {
+        warnings.push("context_summary truncated to 1800 characters".to_string());
+    }
     let mut packet = json!({
         "schema_version": SCHEMA_HANDOFF_V1,
         "project_id": project_id,
         "seq": 1,
-        "task": format!("imported from {} session {}", latest.harness, date),
+        "task": task,
         "current_phase": "",
         "last_harness": from,
         "recommended_next_harness": null,
         "objective": latest.objective,
-        "implementation_status": "",
+        "implementation_status": implementation_status,
         "decisions": [],
         "changed_files": latest.files_touched,
         "tests_run": [],
-        "bugs_found": failed,
+        "failures": failed,
+        "bugs_found": [],
         "blockers": [],
         "open_questions": [],
         "next_actions": latest.next_steps,
-        "warnings": ["imported from transcripts — observed, not verified"],
+        "warnings": warnings,
         "relevant_memories": [],
         "relevant_skills": [],
         "artifacts": [],
         "traces": [],
-        "context_summary": truncate(&context_summary, 3000),
+        "context_summary": truncate(&context_summary, 1800),
         "created_at": now_rfc3339(),
+        "written_at": now_rfc3339(),
         "created_by_harness": from,
         // LOCAL ONLY — the server schema is extra="forbid" (accepted_by
         // precedent); stripped before POSTing.
@@ -390,11 +415,7 @@ async fn synthesize_handoff(
         packet["progress_summaries"] = json!(source.progress_summaries);
     }
     if let Some(source) = tail_source {
-        packet["conversation_tail"] = json!(source
-            .conversation_tail
-            .iter()
-            .map(|e| json!({"role": e.role, "text": e.text}))
-            .collect::<Vec<_>>());
+        packet["conversation_tail"] = json!(super::handoff::compact_tail(source));
     }
     if let Some(source) = milestone_source {
         packet["milestones"] = json!(source.milestones);

@@ -219,11 +219,33 @@ pub fn render_handoff_digest_full(
             }
         }
     }
+    // Failures and bugs are separate authoring channels but one reader-facing
+    // section. Preserve first-seen wording and avoid duplicate rendering.
+    let mut failures = Vec::new();
+    for key in ["failures", "bugs_found"] {
+        if let Some(items) = packet.get(key).and_then(|v| v.as_array()) {
+            for item in items {
+                let text = match item {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                if !text.trim().is_empty() && !failures.contains(&text) {
+                    failures.push(text);
+                }
+            }
+        }
+    }
+    if !failures.is_empty() {
+        out.push_str("## Failed Approaches / Bugs\n\n");
+        for text in failures {
+            out.push_str(&format!("- {}\n", truncate(&text, ITEM_BUDGET)));
+        }
+        out.push('\n');
+    }
     // Actionables first.
     for (key, title) in [
         ("next_actions", "Next Actions"),
         ("open_questions", "Open Questions"),
-        ("bugs_found", "Failed Approaches / Bugs"),
         ("blockers", "Blockers"),
         ("warnings", "Warnings"),
     ] {
@@ -390,6 +412,14 @@ fn is_dup_section(title: &str, handoff: Option<&Value>) -> bool {
         return false;
     };
     let lowered = title.to_lowercase();
+    if (lowered == "failures" || lowered.starts_with("failures ["))
+        && packet
+            .get("failures")
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty())
+    {
+        return true;
+    }
     PACK_DUP_TITLES.iter().any(|(dup_title, key)| {
         let dup_lowered = dup_title.to_lowercase();
         let title_matches =

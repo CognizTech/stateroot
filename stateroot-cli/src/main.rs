@@ -76,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
                 from,
                 to,
                 note,
+                input,
                 objective,
             } => {
                 commands::handoff::write(
@@ -83,6 +84,7 @@ async fn main() -> anyhow::Result<()> {
                     from.as_deref(),
                     &to,
                     note.as_deref(),
+                    input.as_deref(),
                     objective.as_deref(),
                 )
                 .await?

@@ -195,6 +195,9 @@ pub enum HandoffAction {
         /// Short context note.
         #[arg(long)]
         note: Option<String>,
+        /// Strict structured handoff JSON file (`-` reads standard input).
+        #[arg(long, value_name = "PATH")]
+        input: Option<String>,
         /// Restate the objective.
         #[arg(long)]
         objective: Option<String>,

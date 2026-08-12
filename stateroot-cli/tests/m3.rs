@@ -33,6 +33,11 @@ fn init_project(config_home: &Path, user_home: &Path, project: &Path) {
         .arg("init")
         .assert()
         .success();
+    std::fs::write(
+        project.join("handoff-input.json"),
+        r#"{"objective":"continue the project","task":"continue implementation","context_summary":"The project has captured local state ready for a receiving agent.","next_actions":["Continue from the captured state"],"failures":[]}"#,
+    )
+    .expect("handoff input");
 }
 
 fn canonical_soul(user_home: &Path) -> String {
@@ -237,6 +242,8 @@ fn learnings_lifecycle_and_distill_and_resume_surface() {
             "codex",
             "--to",
             "codex",
+            "--input",
+            "handoff-input.json",
             "--objective",
             "resume check",
         ])
@@ -336,6 +343,8 @@ async fn synthesize_merges_sections_and_governance_skips() {
             "codex",
             "--to",
             "codex",
+            "--input",
+            "handoff-input.json",
             "--objective",
             "ship the parser",
         ])

@@ -45,9 +45,11 @@ Before attempting any non-trivial approach:
 ### 4) Session end / usage limit / harness switch -> handoff
 
 Before ending a session, when approaching usage limits, or when the user asks to switch harness:
-1. run `scripts/handoff.sh write --from <current-harness> --to <harness> [--note ...]`
-2. the handoff MUST capture: objective, current state, decisions with the why, next actions, failed approaches
-3. a handoff missing `next_actions` or `failed_approaches` is a failed handoff — do not write one
+1. write the handoff content as strict JSON, then run `scripts/handoff.sh write --from <resolved-current-harness> --to <harness> --input <handoff.json>`
+2. resolve `--from` to the actual current harness id; never copy a placeholder or infer it from an environment variable
+3. include the durable objective, immediate task, concise context summary, decisions with the why, next actions, and truthful failures; the CLI auto-captures recent verified conversation and other observed transcript evidence
+4. do not paste giant state or transcript dumps into `--note`; `--note` is only a legacy short-summary fallback
+5. file paths work directly on Windows; `--input -` is an optional stdin convenience, not required shell behavior
 
 ### 5) Never edit `.stateroot/` directly
 
@@ -66,7 +68,7 @@ The CLI is offline-safe: when the server is unreachable it queues operations in 
 |---|---|---|
 | `stateroot resume [--harness H] [--budget N]` | session start | prints handoff + hot-apex memory + context pack as markdown |
 | `stateroot checkpoint --note "..." [--files a,b]` | after any state-changing step | appends an episodic record and updates handoff state |
-| `stateroot handoff write --from CURRENT_HARNESS --to H [--note ...]` | session end / harness switch | writes current handoff plus history entry |
+| `stateroot handoff write --from CURRENT_HARNESS --to H --input PATH` | session end / harness switch | strict structured JSON; writes current handoff plus history entry |
 | `stateroot handoff list` / `stateroot handoff show` | inspect prior handoffs | read-only |
 | `stateroot search <query> [--kinds ...] [--top-k N]` | find decisions, failures, memories | hybrid search over project state and memory |
 | `stateroot pack [--harness H] [--budget N]` | need a fresh context pack | prints the pack to stdout |

@@ -16,17 +16,24 @@ Operational details behind the rules in `SKILL.md`. Read this when the top-level
 
 ## Handoff Packet Fields
 
-Handoffs follow the canonical schema (`stateroot.handoff.v1`; see `technical/stateroot_canonical_schema.md`). A handoff write MUST cover five core sections:
+Handoffs use strict content JSON passed with `stateroot handoff write --from <resolved-current-harness> --to <harness> --input <handoff.json>`. Resolve `--from` explicitly to the actual current harness. The CLI rejects unknown keys and owns schema, project, sequence, timestamps, source, destination, provenance, and transcript-derived fields.
 
-1. **objective** — the current top-level goal in one sentence.
-2. **state** — status (`active|blocked|paused|done`), current phase, and a compact implementation-status summary.
-3. **decisions** — each decision with the *why*. This section includes **failed_approaches**: every approach tried and rejected or abandoned, with the reason it failed, so the next harness does not repeat it.
-4. **next_actions** — ordered, concrete, executable without re-discovery.
-5. **failed_approaches** — surfaced as its own section (and searched before new attempts); never bury failures inside `decisions` prose only.
+1. **objective** — the durable goal that can span multiple sessions.
+2. **task** — the immediate work boundary for the receiving agent.
+3. **context_summary** — a concise synthesis of current state, distinct from the task.
+4. **decisions** — each decision with the *why*.
+5. **next_actions** — ordered, concrete, executable without re-discovery; required when switching to another harness.
+6. **failures** and **bugs_found** — truthful observed failures and known bugs; an explicit empty `failures` array means none were observed.
 
-Supporting fields to populate when known: `changed_files[]`, `tests_run[]`, `bugs_found[]`, `blockers[]`, `open_questions[]`, `warnings[]`, `relevant_memories[]`, `relevant_skills[]`, `artifacts[]`, `traces[]`, `context_summary`. The CLI sets `last_harness` and `recommended_next_harness` from `--to`.
+Supporting input fields are `current_phase`, `implementation_status`, `changed_files`, `tests_run`, `blockers`, `open_questions`, `warnings`, `relevant_memories`, `relevant_skills`, `artifacts`, and `traces`. Every field is optional so omission remains distinct from an explicitly empty value. Recent conversation, plan state, progress summaries, milestones, files, failures, objective, task, and actions are auto-captured only from the latest matching verified native transcript when author content is absent.
 
-Quality bar: a handoff without `next_actions` or `failed_approaches` is a failed handoff. Write the handoff early enough that a usage-limit cutoff still leaves a complete packet — do not wait for the last moment.
+Compact strict example (no envelope or provenance keys):
+
+```json
+{"objective":"Ship reliable local handoffs","task":"Finish adversarial CLI tests","context_summary":"Structured input and verified transcript enrichment are implemented; final workspace checks remain.","decisions":["Keep envelope ownership in the CLI"],"changed_files":["stateroot-cli/src/commands/handoff.rs"],"tests_run":["cargo test -p stateroot-cli"],"failures":[],"bugs_found":[],"next_actions":["Run the full workspace checks"]}
+```
+
+Write the JSON to a normal path (Windows paths are supported) and pass that path to `--input`. `--input -` may read stdin when convenient, but shell piping is optional. Do not paste giant transcript or state dumps into `--note`; unstructured notes become only the summary, while exact legacy section labels receive conservative migration.
 
 ## Offline Outbox Semantics
 
