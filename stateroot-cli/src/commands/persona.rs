@@ -7,6 +7,10 @@ use std::path::PathBuf;
 /// Cache file for the rendered persona inside the config dir.
 pub const PERSONA_CACHE_FILE: &str = "persona.md";
 
+/// Imperative framing prepended to every identity injection surface.
+pub const IDENTITY_ACTIVATION: &str =
+    "**Active identity (apply from your first message — do not wait to be asked who you are):**";
+
 /// Path of the persona cache.
 pub fn cache_path(config_dir: &std::path::Path) -> PathBuf {
     config_dir.join(PERSONA_CACHE_FILE)
@@ -36,21 +40,37 @@ pub async fn sync_best_effort(ctx: &super::Ctx) -> Option<String> {
 /// every harness, honestly the same content.
 pub async fn for_harness(
     ctx: &super::Ctx,
-    _harness_id: &str,
+    harness_id: &str,
     fallback: Option<&str>,
 ) -> Option<String> {
     fallback
         .map(str::to_string)
-        .or_else(|| resolve(&ctx.config_dir))
+        .or_else(|| resolve_for_harness(&ctx.config_dir, Some(harness_id)))
 }
 
 /// Persona resolution used everywhere: cache → canonical soul projection.
 pub fn resolve(config_dir: &std::path::Path) -> Option<String> {
+    resolve_for_harness(config_dir, None)
+}
+
+/// Cache-first persona with optional per-harness soul projection emphasis.
+pub fn resolve_for_harness(
+    config_dir: &std::path::Path,
+    harness_id: Option<&str>,
+) -> Option<String> {
     if let Some(cached) = read_cache(config_dir) {
         return Some(cached);
     }
     let home = stateroot_core::harness_install::home_dir().ok()?;
     let soul = stateroot_core::soul::read_canonical(&home)?;
-    let projection = stateroot_core::soul::render_projection(&soul, None);
+    let projection = stateroot_core::soul::render_projection(&soul, harness_id);
     (!projection.trim().is_empty()).then_some(projection)
+}
+
+/// Always-on Cursor rule body for project-level persona injection.
+pub fn render_cursor_persona_rule(persona: &str) -> String {
+    format!(
+        "---\ndescription: StateRoot working identity — voice and relationship (always active)\nglobs:\nalwaysApply: true\n---\n\n{IDENTITY_ACTIVATION}\n\n{}\n",
+        persona.trim()
+    )
 }

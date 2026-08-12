@@ -565,10 +565,6 @@ skipping duplicate. Pass --force to reprint.)\n\n{NO_REFETCH_FOOTER}"
     let (handoff, _handoff_source) = fetch_handoff(&ctx.cwd);
 
     let root = local_store::root(&ctx.cwd);
-    let user_md = stateroot_core::harness_install::home_dir()
-        .ok()
-        .and_then(|home| stateroot_core::user_profile::read(&home))
-        .filter(|text| !text.trim().is_empty());
     let memory_md = read_hot_apex(&root, local_store::MEMORY_CORE_PATH);
 
     // --- digest (stdout only) ---
@@ -582,7 +578,19 @@ skipping duplicate. Pass --force to reprint.)\n\n{NO_REFETCH_FOOTER}"
 
     // Persona (local cache).
     if let Some(persona) = super::persona::resolve(&ctx.config_dir) {
+        out.push_str(super::persona::IDENTITY_ACTIVATION);
+        out.push_str("\n\n");
         out.push_str(&persona);
+        out.push_str("\n\n---\n\n");
+    }
+
+    let user_md = stateroot_core::harness_install::home_dir()
+        .ok()
+        .and_then(|home| stateroot_core::user_profile::read(&home))
+        .filter(|text| !text.trim().is_empty());
+    if let Some(user) = user_md.as_ref() {
+        out.push_str("### USER.md\n\n");
+        out.push_str(user);
         out.push_str("\n\n---\n\n");
     }
 
@@ -654,13 +662,10 @@ skipping duplicate. Pass --force to reprint.)\n\n{NO_REFETCH_FOOTER}"
         }
     }
 
-    if user_md.is_some() || memory_md.is_some() {
+    if memory_md.is_some() {
         out.push_str("\n## Memory (hot apex)\n");
         if let Some(memory) = memory_md {
             out.push_str(&format!("\n### MEMORY.md\n\n{memory}\n"));
-        }
-        if let Some(user) = user_md {
-            out.push_str(&format!("\n### USER.md\n\n{user}\n"));
         }
     }
 

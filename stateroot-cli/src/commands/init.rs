@@ -81,8 +81,9 @@ pub async fn run(ctx: &Ctx, args: crate::cli::InitArgs) -> Result<()> {
     }
 
     // Project-level convenience layer (AGENTS.md block + harness stubs).
+    let persona = super::persona::resolve(&ctx.config_dir);
     let block = super::install::render_project_agents_block();
-    for action in super::skill::ensure_convenience_layer(&dir, &block) {
+    for action in super::skill::ensure_convenience_layer(&dir, &block, persona.as_deref()) {
         println!("  {action}");
     }
 

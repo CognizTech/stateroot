@@ -112,7 +112,7 @@ const LEGACY_ORDER: &[&str] = &[
 fn legacy_guidance(id: &str) -> Option<&'static str> {
     match id {
         "cursor" => Some(
-            "cursor: project Rules + MCP are installed automatically; paste the persona from `stateroot resume` into Cursor Settings → Rules only if you want it in the global User Rules UI",
+            "cursor: global block → ~/.cursor/AGENTS.md; project Rules + MCP install automatically on init/install",
         ),
         "opencode" => Some(
             "opencode: registered MCP under the `mcpServers` key in opencode.json (no existing file found to verify the shape against)",

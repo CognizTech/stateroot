@@ -63,9 +63,11 @@ pub struct HookTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Injection {
     /// `hookSpecificOutput.additionalContext` JSON envelope on stdout
-    /// (claude-code, devin).
+    /// (claude-code, codex, devin).
     StdoutJson,
-    /// Plain text on stdout (codex, cursor, gemini-cli, antigravity, kimi).
+    /// Cursor native hooks: `{ "additional_context": "…" }` on stdout.
+    CursorJson,
+    /// Plain text on stdout (gemini-cli, antigravity, kimi).
     StdoutText,
     /// Stdout is discarded on SessionStart; resume fires on UserPromptSubmit
     /// (kimi-code).
@@ -283,7 +285,7 @@ pub const ADAPTERS: &[HarnessQuirk] = &[
             path: ".codex/hooks.json",
             format: HookFormat::NestedJson,
         }),
-        injection: Injection::StdoutText,
+        injection: Injection::StdoutJson,
         compact_injection: false,
         events: es::ALL & !es::SESSION_END,
         legacy_id: Some("codex"),
@@ -295,7 +297,7 @@ pub const ADAPTERS: &[HarnessQuirk] = &[
         tier: Tier::A,
         detect: &[".cursor"],
         detect_cmds: &["cursor"],
-        instruction_file: None,
+        instruction_file: Some(".cursor/AGENTS.md"),
         mcp: Some(McpTarget {
             path: ".cursor/mcp.json",
             shape: McpShape::McpServersJson,
@@ -304,7 +306,7 @@ pub const ADAPTERS: &[HarnessQuirk] = &[
             path: ".cursor/hooks.json",
             format: HookFormat::FlatJson,
         }),
-        injection: Injection::StdoutText,
+        injection: Injection::CursorJson,
         compact_injection: false,
         events: es::ALL,
         legacy_id: Some("cursor"),

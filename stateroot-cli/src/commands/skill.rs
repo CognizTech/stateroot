@@ -43,9 +43,12 @@ fn write_file(path: &Path, contents: &[u8]) -> Result<()> {
 /// Install the project-level convenience layer into `dir`:
 /// AGENTS.md marked block (content provided by the caller — the one-agent
 /// block with persona), `.claude/commands/stateroot.md`,
-/// `.cursor/rules/stateroot.mdc`. Always all three (v1.1); returns
-/// human-readable action descriptions.
-pub fn ensure_convenience_layer(dir: &Path, block_content: &str) -> Vec<String> {
+/// `.cursor/rules/stateroot.mdc`, and optional `.cursor/rules/stateroot-persona.mdc`.
+pub fn ensure_convenience_layer(
+    dir: &Path,
+    block_content: &str,
+    persona: Option<&str>,
+) -> Vec<String> {
     let mut actions = Vec::new();
     match ensure_marked_block(&dir.join("AGENTS.md"), block_content) {
         Ok(true) => actions.push("AGENTS.md block updated".to_string()),
@@ -66,13 +69,24 @@ pub fn ensure_convenience_layer(dir: &Path, block_content: &str) -> Vec<String> 
         Ok(()) => actions.push(".cursor/rules/stateroot.mdc".to_string()),
         Err(err) => note!("  ! cursor rule failed: {err:#}"),
     }
+    if let Some(persona) = persona.filter(|text| !text.trim().is_empty()) {
+        let rule = super::persona::render_cursor_persona_rule(persona);
+        match write_file(
+            &dir.join(".cursor/rules/stateroot-persona.mdc"),
+            rule.as_bytes(),
+        ) {
+            Ok(()) => actions.push(".cursor/rules/stateroot-persona.mdc".to_string()),
+            Err(err) => note!("  ! cursor persona rule failed: {err:#}"),
+        }
+    }
     actions
 }
 
 /// `stateroot skill install` — (re)materialize the convenience layer in cwd.
 pub fn install(ctx: &Ctx) -> Result<()> {
     let block = super::install::render_project_agents_block();
-    let actions = ensure_convenience_layer(&ctx.cwd, &block);
+    let persona = super::persona::resolve(&ctx.config_dir);
+    let actions = ensure_convenience_layer(&ctx.cwd, &block, persona.as_deref());
     for action in &actions {
         println!("  - {action}");
     }

@@ -104,13 +104,13 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
     let payload = read_payload();
 
     match kind {
-        EventKind::Resume => resume_output(ctx, quirk, canonical, &project_dir).await,
+        EventKind::Resume => resume_output(ctx, quirk, canonical, &project_dir, &payload).await,
         EventKind::Capture => {
             let code = capture_observation(quirk, canonical, &project_dir, &payload)?;
             // kimi-code: SessionStart stdout is discarded — prompt-submit is the
             // only resume injection channel for that harness.
             if canonical == "user_prompt_submit" && quirk.injection == Injection::UserPromptSubmit {
-                resume_output(ctx, quirk, canonical, &project_dir).await?;
+                resume_output(ctx, quirk, canonical, &project_dir, &payload).await?;
             }
             Ok(code)
         }
@@ -125,9 +125,11 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
 // ---------------------------------------------------------------------
 
 /// Build the identity prefix (full persona + full USER.md). Never budgeted.
-fn hook_identity_prefix(config_dir: &Path, home: &Path) -> String {
+fn hook_identity_prefix(config_dir: &Path, home: &Path, harness_id: &str) -> String {
     let mut out = String::new();
-    if let Some(persona) = super::persona::resolve(config_dir) {
+    out.push_str(super::persona::IDENTITY_ACTIVATION);
+    out.push_str("\n\n");
+    if let Some(persona) = super::persona::resolve_for_harness(config_dir, Some(harness_id)) {
         out.push_str(persona.trim());
         out.push_str("\n\n");
     }
@@ -139,15 +141,7 @@ fn hook_identity_prefix(config_dir: &Path, home: &Path) -> String {
     out
 }
 
-/// Build the bounded hook digest (actionables-first) or `None` when there is
-/// no handoff content worth injecting. Identity (persona + USER) is always
-/// full; `DIGEST_BUDGET` applies only to the work/handoff body.
-pub fn hook_digest(config_dir: &Path, project_dir: &Path) -> Option<String> {
-    let handoff = local_store::read_handoff_local(project_dir)
-        .ok()
-        .flatten()?;
-    let mut work = String::new();
-
+fn append_handoff_work(work: &mut String, handoff: &Value, project_dir: &Path) {
     let get_str = |key: &str| handoff.get(key).and_then(|v| v.as_str()).unwrap_or("");
     let objective = get_str("objective");
     let phase = get_str("current_phase");
@@ -201,7 +195,6 @@ pub fn hook_digest(config_dir: &Path, project_dir: &Path) -> Option<String> {
         work.push_str(&format!("Summary: {}\n", truncate(summary, 300)));
     }
 
-    // Project memory remains local to the project.
     for rel in [local_store::MEMORY_CORE_PATH] {
         if let Ok(text) = std::fs::read_to_string(local_store::root(project_dir).join(rel)) {
             let text = text.trim();
@@ -212,25 +205,38 @@ pub fn hook_digest(config_dir: &Path, project_dir: &Path) -> Option<String> {
     }
     if let Ok(home) = stateroot_core::harness_install::home_dir() {
         if let Some(gap) =
-            stateroot_core::handoff_continuity::overlay_for_handoff(&home, project_dir, &handoff)
+            stateroot_core::handoff_continuity::overlay_for_handoff(&home, project_dir, handoff)
         {
             work.push_str(
                 &stateroot_core::handoff_continuity::compose_since_handoff_overlay(
                     project_dir,
-                    &handoff,
+                    handoff,
                     &gap,
                 ),
             );
             work.push('\n');
         }
     }
+}
 
-    work.push_str(&format!("\n{}", super::resume::NO_REFETCH_FOOTER));
+/// Build the bounded hook digest. Identity (persona + USER) is always full
+/// and emitted even without a handoff; `DIGEST_BUDGET` applies only to the
+/// work/handoff body.
+pub fn hook_digest(config_dir: &Path, project_dir: &Path, harness_id: &str) -> Option<String> {
+    let handoff = local_store::read_handoff_local(project_dir).ok().flatten();
+    let mut work = String::new();
+    if let Some(ref handoff) = handoff {
+        append_handoff_work(&mut work, handoff, project_dir);
+    }
+
+    if !work.trim().is_empty() {
+        work.push_str(&format!("\n{}", super::resume::NO_REFETCH_FOOTER));
+    }
     let home = stateroot_core::harness_install::home_dir().ok();
     let identity = home
         .as_ref()
-        .map(|home| hook_identity_prefix(config_dir, home))
-        .unwrap_or_else(|| hook_identity_prefix(config_dir, config_dir));
+        .map(|home| hook_identity_prefix(config_dir, home, harness_id))
+        .unwrap_or_else(|| hook_identity_prefix(config_dir, config_dir, harness_id));
     let work = work.trim().to_string();
     if identity.trim().is_empty() && work.is_empty() {
         return None;
@@ -250,6 +256,50 @@ pub fn hook_digest(config_dir: &Path, project_dir: &Path) -> Option<String> {
     Some(digest.trim().to_string())
 }
 
+fn hook_event_name(canonical: &str) -> &'static str {
+    match canonical {
+        "session_start" => "SessionStart",
+        "user_prompt_submit" => "UserPromptSubmit",
+        "pre_compact" => "PreCompact",
+        "post_compaction" => "PostCompact",
+        _ => "SessionStart",
+    }
+}
+
+fn print_hook_injection(quirk: &registry::HarnessQuirk, canonical: &str, digest: &str) {
+    match quirk.injection {
+        Injection::StdoutJson => {
+            let envelope = json!({
+                "hookSpecificOutput": {
+                    "hookEventName": hook_event_name(canonical),
+                    "additionalContext": digest,
+                }
+            });
+            println!("{envelope}");
+        }
+        Injection::CursorJson => {
+            let envelope = json!({ "additional_context": digest });
+            println!("{envelope}");
+        }
+        Injection::StdoutText | Injection::UserPromptSubmit => {
+            println!("{digest}");
+        }
+        Injection::None | Injection::McpPull => {}
+    }
+}
+
+fn session_id_from_payload(payload: &Value) -> Option<String> {
+    for key in ["session_id", "conversation_id", "generation_id"] {
+        if let Some(id) = payload.get(key).and_then(|v| v.as_str()) {
+            let id = id.trim();
+            if !id.is_empty() {
+                return Some(id.to_string());
+            }
+        }
+    }
+    None
+}
+
 fn resume_marker_path(project_dir: &Path) -> PathBuf {
     local_store::root(project_dir).join(RESUME_DELIVERED_MARKER)
 }
@@ -261,7 +311,12 @@ fn handoff_seq(project_dir: &Path) -> Option<i64> {
         .and_then(|handoff| handoff.get("seq").and_then(|v| v.as_i64()))
 }
 
-fn resume_already_delivered(project_dir: &Path, harness: &str, seq: i64) -> bool {
+fn resume_already_delivered(
+    project_dir: &Path,
+    harness: &str,
+    seq: i64,
+    session_id: Option<&str>,
+) -> bool {
     let path = resume_marker_path(project_dir);
     let Ok(text) = std::fs::read_to_string(&path) else {
         return false;
@@ -269,20 +324,28 @@ fn resume_already_delivered(project_dir: &Path, harness: &str, seq: i64) -> bool
     let Ok(marker) = serde_json::from_str::<Value>(&text) else {
         return false;
     };
-    marker.get("harness").and_then(|v| v.as_str()) == Some(harness)
-        && marker.get("handoff_seq").and_then(|v| v.as_i64()) == Some(seq)
+    if marker.get("harness").and_then(|v| v.as_str()) != Some(harness) {
+        return false;
+    }
+    if let Some(session_id) = session_id {
+        return marker.get("session_id").and_then(|v| v.as_str()) == Some(session_id);
+    }
+    marker.get("handoff_seq").and_then(|v| v.as_i64()) == Some(seq)
 }
 
-fn mark_resume_delivered(project_dir: &Path, harness: &str, seq: i64) {
+fn mark_resume_delivered(project_dir: &Path, harness: &str, seq: i64, session_id: Option<&str>) {
     let path = resume_marker_path(project_dir);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let marker = json!({
+    let mut marker = json!({
         "harness": harness,
         "handoff_seq": seq,
         "delivered_at": now_rfc3339(),
     });
+    if let Some(session_id) = session_id {
+        marker["session_id"] = json!(session_id);
+    }
     let _ = std::fs::write(path, serde_json::to_string(&marker).unwrap_or_default());
 }
 
@@ -291,6 +354,7 @@ async fn resume_output(
     quirk: &registry::HarnessQuirk,
     canonical: &str,
     project_dir: &Path,
+    payload: &Value,
 ) -> anyhow::Result<u8> {
     // W5: session_start queues a draft heartbeat for the server root model.
     // Fire-and-forget — replayed (best-effort) by the next online command.
@@ -331,50 +395,31 @@ async fn resume_output(
             note!("warning: MCP federation sync skipped: {err}");
         }
     }
-    let digest = hook_digest(&ctx.config_dir, project_dir);
+    let digest = hook_digest(&ctx.config_dir, project_dir, quirk.id);
     let Some(digest) = digest else {
         return Ok(0); // nothing worth injecting — silent
     };
+    let session_id = session_id_from_payload(payload);
     if let Some(seq) = handoff_seq(project_dir) {
-        if resume_already_delivered(project_dir, quirk.id, seq) {
+        if resume_already_delivered(project_dir, quirk.id, seq, session_id.as_deref()) {
             return Ok(0);
         }
     }
     match quirk.injection {
         Injection::None | Injection::McpPull => Ok(0),
         Injection::UserPromptSubmit => {
-            // kimi-code: SessionStart stdout is discarded — only prompt-submit
-            // carries context into the model.
             if canonical == "user_prompt_submit" {
-                println!("{digest}");
+                print_hook_injection(quirk, canonical, &digest);
                 if let Some(seq) = handoff_seq(project_dir) {
-                    mark_resume_delivered(project_dir, quirk.id, seq);
+                    mark_resume_delivered(project_dir, quirk.id, seq, session_id.as_deref());
                 }
             }
             Ok(0)
         }
-        Injection::StdoutText => {
-            println!("{digest}");
+        Injection::StdoutJson | Injection::CursorJson | Injection::StdoutText => {
+            print_hook_injection(quirk, canonical, &digest);
             if let Some(seq) = handoff_seq(project_dir) {
-                mark_resume_delivered(project_dir, quirk.id, seq);
-            }
-            Ok(0)
-        }
-        Injection::StdoutJson => {
-            let event_name = if canonical == "session_start" {
-                "SessionStart"
-            } else {
-                "UserPromptSubmit"
-            };
-            let envelope = json!({
-                "hookSpecificOutput": {
-                    "hookEventName": event_name,
-                    "additionalContext": digest,
-                }
-            });
-            println!("{envelope}");
-            if let Some(seq) = handoff_seq(project_dir) {
-                mark_resume_delivered(project_dir, quirk.id, seq);
+                mark_resume_delivered(project_dir, quirk.id, seq, session_id.as_deref());
             }
             Ok(0)
         }
@@ -597,27 +642,8 @@ async fn checkpoint_from_spool(
     // the bounded hook digest — state re-injected at the moment of
     // compaction. Unsupported harnesses: checkpoint only.
     if quirk.compact_injection && matches!(canonical, "pre_compact" | "post_compaction") {
-        if let Some(digest) = hook_digest(&hook_ctx.config_dir, project_dir) {
-            match quirk.injection {
-                Injection::StdoutJson => {
-                    let event_name = if canonical == "pre_compact" {
-                        "PreCompact"
-                    } else {
-                        "PostCompact"
-                    };
-                    let envelope = json!({
-                        "hookSpecificOutput": {
-                            "hookEventName": event_name,
-                            "additionalContext": digest,
-                        }
-                    });
-                    println!("{envelope}");
-                }
-                Injection::StdoutText | Injection::UserPromptSubmit => {
-                    println!("{digest}");
-                }
-                Injection::None | Injection::McpPull => {}
-            }
+        if let Some(digest) = hook_digest(&hook_ctx.config_dir, project_dir, quirk.id) {
+            print_hook_injection(quirk, canonical, &digest);
         }
     }
 
@@ -697,7 +723,7 @@ mod tests {
         )
         .expect("persona");
 
-        let digest = hook_digest(home.path(), project.path()).expect("digest");
+        let digest = hook_digest(home.path(), project.path(), "codex").expect("digest");
         assert!(digest.contains("You are YinYue."));
         assert!(digest.contains("ship the hooks"));
         assert!(digest.contains("- wire the installers"));
@@ -711,10 +737,25 @@ mod tests {
     }
 
     #[test]
-    fn digest_is_none_without_handoff() {
+    fn digest_emits_identity_without_handoff() {
         let home = tempfile::tempdir().expect("home");
         let project = tempfile::tempdir().expect("project");
-        assert!(hook_digest(home.path(), project.path()).is_none());
+        std::fs::write(
+            home.path().join("persona.md"),
+            "## Working relationship\n\nYou are Yinyue.\n",
+        )
+        .expect("persona");
+        let digest = hook_digest(home.path(), project.path(), "cursor").expect("digest");
+        assert!(digest.contains("Active identity"));
+        assert!(digest.contains("You are Yinyue."));
+        assert!(!digest.contains("Objective:"));
+    }
+
+    #[test]
+    fn cursor_registry_uses_native_json_injection() {
+        let quirk = registry::quirk("cursor").expect("cursor");
+        assert_eq!(quirk.injection, Injection::CursorJson);
+        assert_eq!(quirk.instruction_file, Some(".cursor/AGENTS.md"));
     }
 
     #[test]
@@ -749,7 +790,7 @@ mod tests {
         let prior = std::env::var("STATEROOT_TEST_HOME").ok();
         // SAFETY: serialized by TEST_HOME_ENV.
         unsafe { std::env::set_var("STATEROOT_TEST_HOME", home.path()) };
-        let digest = hook_digest(home.path(), project.path()).expect("digest");
+        let digest = hook_digest(home.path(), project.path(), "codex").expect("digest");
         match prior {
             Some(value) => unsafe { std::env::set_var("STATEROOT_TEST_HOME", value) },
             None => unsafe { std::env::remove_var("STATEROOT_TEST_HOME") },
@@ -757,7 +798,7 @@ mod tests {
 
         assert!(digest.contains("Persona voice line 19: stay in character always"));
         assert!(digest.contains(&long_user));
-        assert!(hook_identity_prefix(home.path(), home.path()).contains(&long_user));
+        assert!(hook_identity_prefix(home.path(), home.path(), "cursor").contains(&long_user));
     }
 
     #[test]
@@ -784,7 +825,7 @@ mod tests {
         )
         .expect("persona");
 
-        let digest = hook_digest(home.path(), project.path()).expect("digest");
+        let digest = hook_digest(home.path(), project.path(), "codex").expect("digest");
         assert!(digest.contains("Identity marker line must survive budget"));
         assert!(
             !digest.contains(&huge_summary),
