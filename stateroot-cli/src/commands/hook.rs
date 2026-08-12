@@ -125,11 +125,18 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
 // ---------------------------------------------------------------------
 
 /// Build the identity prefix (full persona + full USER.md). Never budgeted.
-fn hook_identity_prefix(config_dir: &Path, home: &Path, harness_id: &str) -> String {
+fn hook_identity_prefix(
+    config_dir: &Path,
+    home: &Path,
+    project_dir: &Path,
+    harness_id: &str,
+) -> String {
     let mut out = String::new();
     out.push_str(super::persona::IDENTITY_ACTIVATION);
     out.push_str("\n\n");
-    if let Some(persona) = super::persona::resolve_for_harness(config_dir, Some(harness_id)) {
+    if let Some(persona) =
+        super::persona::resolve_in_project(config_dir, Some(project_dir), Some(harness_id))
+    {
         out.push_str(persona.trim());
         out.push_str("\n\n");
     }
@@ -235,8 +242,8 @@ pub fn hook_digest(config_dir: &Path, project_dir: &Path, harness_id: &str) -> O
     let home = stateroot_core::harness_install::home_dir().ok();
     let identity = home
         .as_ref()
-        .map(|home| hook_identity_prefix(config_dir, home, harness_id))
-        .unwrap_or_else(|| hook_identity_prefix(config_dir, config_dir, harness_id));
+        .map(|home| hook_identity_prefix(config_dir, home, project_dir, harness_id))
+        .unwrap_or_else(|| hook_identity_prefix(config_dir, config_dir, project_dir, harness_id));
     let work = work.trim().to_string();
     if identity.trim().is_empty() && work.is_empty() {
         return None;
@@ -798,7 +805,10 @@ mod tests {
 
         assert!(digest.contains("Persona voice line 19: stay in character always"));
         assert!(digest.contains(&long_user));
-        assert!(hook_identity_prefix(home.path(), home.path(), "cursor").contains(&long_user));
+        assert!(
+            hook_identity_prefix(home.path(), home.path(), project.path(), "cursor")
+                .contains(&long_user)
+        );
     }
 
     #[test]

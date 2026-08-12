@@ -29,6 +29,7 @@ fn refresh_persona_cache(ctx: &Ctx) {
             let _ = std::fs::write(super::persona::cache_path(&ctx.config_dir), projection);
         }
     }
+    super::install::refresh_global_instruction_blocks(&ctx.config_dir, &home);
 }
 
 /// `stateroot soul show [--harness <id>]`

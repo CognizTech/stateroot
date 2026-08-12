@@ -74,6 +74,14 @@ install -m 0755 "$WORK/$ASSET" "$DEST_DIR/stateroot" 2>/dev/null || cp "$WORK/$A
 chmod 0755 "$DEST_DIR/stateroot" 2>/dev/null || true
 log "installed to $DEST_DIR/stateroot"
 
+# --- harness integration (global persona + hooks) --------------------------
+log "configuring harness integrations (global persona, hooks, MCP)"
+if "$DEST_DIR/stateroot" install; then
+    log "harness integration complete"
+else
+    log "note: harness integration skipped — install a harness (Cursor, Codex, …) then re-run: stateroot install"
+fi
+
 # --- PATH ------------------------------------------------------------------
 case ":$PATH:" in
     *":$DEST_DIR:"*) ;;
@@ -88,5 +96,5 @@ cat <<'EOF'
 Quickstart:
   1. cd your-project && stateroot init
   2. work in any harness (Claude, Codex, Cursor, Kimi, OpenClaw, Hermes)
-  3. stateroot resume — anywhere, picks up the full working state
+  3. persona + hooks are already configured globally from this install
 EOF

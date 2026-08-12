@@ -576,8 +576,9 @@ skipping duplicate. Pass --force to reprint.)\n\n{NO_REFETCH_FOOTER}"
     };
     out.push_str(&format!("# StateRoot Resume — {name}\n\n"));
 
-    // Persona (local cache).
-    if let Some(persona) = super::persona::resolve(&ctx.config_dir) {
+    // Persona (global; project overlay overrides when present).
+    if let Some(persona) = super::persona::resolve_in_project(&ctx.config_dir, Some(&ctx.cwd), None)
+    {
         out.push_str(super::persona::IDENTITY_ACTIVATION);
         out.push_str("\n\n");
         out.push_str(&persona);

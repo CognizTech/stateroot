@@ -80,10 +80,9 @@ pub async fn run(ctx: &Ctx, args: crate::cli::InitArgs) -> Result<()> {
         note!("warning: product projection refresh failed ({err})");
     }
 
-    // Project-level convenience layer (AGENTS.md block + harness stubs).
-    let persona = super::persona::resolve(&ctx.config_dir);
+    // Project-level convenience layer (protocol stubs only — persona is global).
     let block = super::install::render_project_agents_block();
-    for action in super::skill::ensure_convenience_layer(&dir, &block, persona.as_deref()) {
+    for action in super::skill::ensure_convenience_layer(&dir, &block) {
         println!("  {action}");
     }
 

@@ -182,6 +182,31 @@ pub async fn install(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
+/// Refresh global harness instruction blocks after soul/persona changes.
+pub(crate) fn refresh_global_instruction_blocks(config_dir: &Path, home: &Path) {
+    let persona = super::persona::resolve_for_harness(config_dir, None);
+    let Some(persona) = persona else {
+        return;
+    };
+    for spec in all_specs(home)
+        .into_iter()
+        .filter(|spec| spec_exists(home, spec.id))
+    {
+        let block = render_one_agent_block(Some(&persona), spec.id);
+        let _ = install_spec(home, &spec, &block, InstallToggles::default());
+    }
+    use stateroot_core::harness_install::registry::{adapters, quirk_detected};
+    let legacy: Vec<&str> = adapters().iter().filter_map(|q| q.legacy_id).collect();
+    for quirk in adapters()
+        .iter()
+        .filter(|q| !legacy.contains(&q.id))
+        .filter(|q| quirk_detected(home, q))
+    {
+        let block = render_one_agent_block(Some(&persona), quirk.id);
+        let _ = stateroot_core::harness_install::install_quirk_full(home, quirk, &block);
+    }
+}
+
 /// Install detected non-legacy registry harnesses via `install_quirk_full`
 /// (instruction block + MCP + tier installer: Tier A hooks, Tier B plugin,
 /// Tier C MCP, managed placeholders), printing tier-grouped output.

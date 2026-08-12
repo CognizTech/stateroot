@@ -50,10 +50,27 @@ pub async fn for_harness(
 
 /// Persona resolution used everywhere: cache → canonical soul projection.
 pub fn resolve(config_dir: &std::path::Path) -> Option<String> {
-    resolve_for_harness(config_dir, None)
+    resolve_in_project(config_dir, None, None)
 }
 
-/// Cache-first persona with optional per-harness soul projection emphasis.
+/// Resolve persona for injection: optional project overlay overrides global.
+pub fn resolve_in_project(
+    config_dir: &std::path::Path,
+    project_dir: Option<&std::path::Path>,
+    harness_id: Option<&str>,
+) -> Option<String> {
+    if let Some(project) = project_dir.filter(|p| stateroot_core::local_store::is_stateroot_dir(p)) {
+        if let Some(overlay) = stateroot_core::soul::read_overlay(project) {
+            let projection = stateroot_core::soul::render_projection(&overlay, harness_id);
+            if !projection.trim().is_empty() {
+                return Some(projection);
+            }
+        }
+    }
+    resolve_for_harness(config_dir, harness_id)
+}
+
+/// Cache-first global persona with optional per-harness soul projection emphasis.
 pub fn resolve_for_harness(
     config_dir: &std::path::Path,
     harness_id: Option<&str>,
@@ -67,10 +84,30 @@ pub fn resolve_for_harness(
     (!projection.trim().is_empty()).then_some(projection)
 }
 
-/// Always-on Cursor rule body for project-level persona injection.
-pub fn render_cursor_persona_rule(persona: &str) -> String {
-    format!(
-        "---\ndescription: StateRoot working identity — voice and relationship (always active)\nglobs:\nalwaysApply: true\n---\n\n{IDENTITY_ACTIVATION}\n\n{}\n",
-        persona.trim()
-    )
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_overlay_takes_precedence_over_global() {
+        let config = tempfile::tempdir().expect("config");
+        let project = tempfile::tempdir().expect("project");
+        let root = stateroot_core::local_store::root(project.path());
+        std::fs::create_dir_all(root.join("soul")).expect("soul dir");
+        std::fs::write(
+            root.join("manifest.json"),
+            r#"{"schema_version":"stateroot.manifest.v1","project_id":"p1","name":"test"}"#,
+        )
+        .expect("manifest");
+        std::fs::write(
+            root.join("soul/OVERLAY.md"),
+            "# Soul\n\n## Communication\n\n- Tone: project-specific voice\n",
+        )
+        .expect("overlay");
+        std::fs::write(config.path().join("persona.md"), "global cached persona").expect("cache");
+        let persona =
+            resolve_in_project(config.path(), Some(project.path()), None).expect("persona");
+        assert!(persona.contains("project-specific voice"));
+        assert!(!persona.contains("global cached persona"));
+    }
 }

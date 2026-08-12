@@ -58,6 +58,14 @@ try {
     Copy-Item (Join-Path $Work $Asset) $Dest -Force
     Log "installed to $Dest"
 
+    Log 'configuring harness integrations (global persona, hooks, MCP)'
+    try {
+        & $Dest install | Out-Host
+        Log 'harness integration complete'
+    } catch {
+        Log 'note: harness integration skipped — install a harness then re-run: stateroot install'
+    }
+
     # --- PATH (user scope) ---
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     if (-not ($userPath -split ';' | Where-Object { $_ -eq $DestDir })) {
@@ -69,7 +77,7 @@ try {
     Write-Host 'Quickstart:'
     Write-Host '  1. cd your-project; stateroot init'
     Write-Host '  2. work in any harness (Claude, Codex, Cursor, Kimi, OpenClaw, Hermes)'
-    Write-Host '  3. stateroot resume — anywhere, picks up the full working state'
+    Write-Host '  3. persona + hooks are already configured globally from this install'
 } finally {
     Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
 }
