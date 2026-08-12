@@ -184,26 +184,44 @@ pub struct HandoffArgs {
     pub action: HandoffAction,
 }
 
+#[derive(Debug, Args)]
+pub struct HandoffWriteArgs {
+    /// Harness creating the handoff (falls back to the active local marker).
+    #[arg(long)]
+    pub from: Option<String>,
+    /// Optional routing hint for orchestrated harness selection (omit for continuity-only).
+    #[arg(long)]
+    pub to: Option<String>,
+    /// Short context note.
+    #[arg(long)]
+    pub note: Option<String>,
+    /// Strict structured handoff JSON file (`-` reads standard input).
+    #[arg(long, value_name = "PATH")]
+    pub input: Option<String>,
+    /// Restate the objective.
+    #[arg(long)]
+    pub objective: Option<String>,
+    /// Immediate work boundary for the receiving agent.
+    #[arg(long)]
+    pub task: Option<String>,
+    /// Detailed continuity narrative (alias `--summary`).
+    #[arg(long, alias = "summary")]
+    pub context_summary: Option<String>,
+    /// Next action (repeatable; required when `--to` names another harness).
+    #[arg(long, action = clap::ArgAction::Append)]
+    pub next: Vec<String>,
+    /// Decision with rationale (repeatable).
+    #[arg(long, action = clap::ArgAction::Append)]
+    pub decision: Vec<String>,
+    /// Failed approach or bug (repeatable).
+    #[arg(long, action = clap::ArgAction::Append)]
+    pub failure: Vec<String>,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum HandoffAction {
     /// Write a new handoff packet (local store).
-    Write {
-        /// Harness creating the handoff (falls back to the active local marker).
-        #[arg(long)]
-        from: Option<String>,
-        /// Optional routing hint for orchestrated harness selection (omit for continuity-only).
-        #[arg(long)]
-        to: Option<String>,
-        /// Short context note.
-        #[arg(long)]
-        note: Option<String>,
-        /// Strict structured handoff JSON file (`-` reads standard input).
-        #[arg(long, value_name = "PATH")]
-        input: Option<String>,
-        /// Restate the objective.
-        #[arg(long)]
-        objective: Option<String>,
-    },
+    Write(Box<HandoffWriteArgs>),
     /// List known handoffs.
     List,
     /// Show a handoff packet (defaults to the current one).

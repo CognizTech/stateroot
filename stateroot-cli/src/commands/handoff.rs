@@ -133,11 +133,62 @@ fn bound_packet(mut packet: Value) -> Value {
     packet
 }
 
+/// CLI flag overrides for `handoff write` (authoritative over `--input`).
+#[derive(Debug, Default, Clone)]
+pub struct HandoffWriteFlags<'a> {
+    pub objective: Option<&'a str>,
+    pub task: Option<&'a str>,
+    pub context_summary: Option<&'a str>,
+    pub next: &'a [String],
+    pub decisions: &'a [String],
+    pub failures: &'a [String],
+}
+
+const HANDOFF_INPUT_KEYS: &[&str] = &[
+    "task",
+    "objective",
+    "current_phase",
+    "implementation_status",
+    "context_summary",
+    "decisions",
+    "changed_files",
+    "tests_run",
+    "failures",
+    "bugs_found",
+    "blockers",
+    "open_questions",
+    "next_actions",
+    "warnings",
+    "relevant_memories",
+    "relevant_skills",
+    "artifacts",
+    "traces",
+];
+
+const HANDOFF_INPUT_ALIASES: &[(&str, &str)] =
+    &[("immediate_task", "task"), ("summary", "context_summary")];
+
+const HANDOFF_ENVELOPE_KEYS: &[&str] = &[
+    "schema_version",
+    "project_id",
+    "seq",
+    "last_harness",
+    "recommended_next_harness",
+    "created_at",
+    "written_at",
+    "created_by_harness",
+    "latest_root",
+    "plan_state",
+    "progress_summaries",
+    "milestones",
+    "conversation_tail",
+    "accepted_by",
+];
+
 /// Author-controlled handoff content. Envelope, provenance, transcript-rich
-/// fields, and timestamps intentionally do not appear here: serde rejects
+/// fields, and timestamps intentionally do not appear here: parsing rejects
 /// them instead of allowing the input file to impersonate the CLI.
 #[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct HandoffInput {
     task: Option<String>,
     objective: Option<String>,
@@ -159,29 +210,144 @@ struct HandoffInput {
     traces: Option<Vec<String>>,
 }
 
+fn coerce_decision_item(item: &Value) -> Option<String> {
+    match item {
+        Value::String(text) => {
+            let text = text.trim();
+            if text.is_empty() {
+                None
+            } else {
+                Some(text.to_string())
+            }
+        }
+        Value::Object(map) => {
+            let decision = map
+                .get("decision")
+                .or_else(|| map.get("text"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            let rationale = map
+                .get("rationale")
+                .or_else(|| map.get("why"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if decision.is_empty() && rationale.is_empty() {
+                return None;
+            }
+            if rationale.is_empty() {
+                Some(decision.to_string())
+            } else if decision.is_empty() {
+                Some(rationale.to_string())
+            } else {
+                Some(format!("{decision} — {rationale}"))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn normalize_handoff_input_object(obj: &mut serde_json::Map<String, Value>) -> anyhow::Result<()> {
+    for (alias, canonical) in HANDOFF_INPUT_ALIASES {
+        if let Some(value) = obj.remove(*alias) {
+            obj.entry(canonical.to_string()).or_insert(value);
+        }
+    }
+
+    if let Some(decisions) = obj.get_mut("decisions") {
+        if let Some(items) = decisions.as_array() {
+            let coerced: Vec<Value> = items
+                .iter()
+                .filter_map(coerce_decision_item)
+                .map(Value::String)
+                .collect();
+            *decisions = Value::Array(coerced);
+        }
+    }
+
+    let envelope: Vec<String> = obj
+        .keys()
+        .filter(|key| HANDOFF_ENVELOPE_KEYS.contains(&key.as_str()))
+        .cloned()
+        .collect();
+    if !envelope.is_empty() {
+        anyhow::bail!(
+            "handoff input must not include envelope/provenance keys ({}) — the CLI owns those fields",
+            envelope.join(", ")
+        );
+    }
+
+    let unknown: Vec<String> = obj
+        .keys()
+        .filter(|key| !HANDOFF_INPUT_KEYS.contains(&key.as_str()))
+        .cloned()
+        .collect();
+    if !unknown.is_empty() {
+        anyhow::bail!(
+            "unknown handoff input key(s): {}. Allowed content keys: {}",
+            unknown.join(", "),
+            HANDOFF_INPUT_KEYS.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn parse_handoff_input_text(text: &str, path: &str) -> anyhow::Result<HandoffInput> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(HandoffInput::default());
+    }
+    let mut value: Value = serde_json::from_str(trimmed).with_context(|| {
+        format!("invalid handoff JSON in '{path}': expected a JSON object of content fields")
+    })?;
+    let obj = value.as_object_mut().ok_or_else(|| {
+        anyhow::anyhow!("invalid handoff JSON in '{path}': expected a JSON object")
+    })?;
+    normalize_handoff_input_object(obj)?;
+    serde_json::from_value(Value::Object(std::mem::take(obj))).with_context(|| {
+        format!("invalid handoff input '{path}': could not parse normalized content fields")
+    })
+}
+
 fn read_input(path: Option<&str>) -> anyhow::Result<HandoffInput> {
     let Some(path) = path else {
         return Ok(HandoffInput::default());
     };
-    let mut text = String::new();
-    if path == "-" {
+    let text = if path == "-" {
+        let mut text = String::new();
         std::io::stdin()
             .read_to_string(&mut text)
             .context("could not read handoff JSON from stdin")?;
+        text
     } else {
-        text = std::fs::read_to_string(path).with_context(|| {
+        std::fs::read_to_string(path).with_context(|| {
             format!(
                 "could not read handoff input '{}'",
                 Path::new(path).display()
             )
-        })?;
+        })?
+    };
+    parse_handoff_input_text(&text, path)
+}
+
+fn apply_write_flags(mut input: HandoffInput, flags: &HandoffWriteFlags<'_>) -> HandoffInput {
+    if let Some(task) = flags.task.filter(|text| !text.trim().is_empty()) {
+        input.task = Some(task.to_string());
     }
-    serde_json::from_str(&text).with_context(|| {
-        format!(
-            "invalid strict handoff input '{}': expected only content fields",
-            path
-        )
-    })
+    if let Some(summary) = flags.context_summary.filter(|text| !text.trim().is_empty()) {
+        input.context_summary = Some(summary.to_string());
+    }
+    if !flags.next.is_empty() {
+        input.next_actions = Some(flags.next.to_vec());
+    }
+    if !flags.decisions.is_empty() {
+        input.decisions = Some(flags.decisions.to_vec());
+    }
+    if !flags.failures.is_empty() {
+        input.failures = Some(flags.failures.to_vec());
+    }
+    input
 }
 
 fn nonempty(text: Option<String>) -> Option<String> {
@@ -713,19 +879,20 @@ fn write_packet_durable(project_dir: &Path, packet: &Value) -> anyhow::Result<()
     }
 }
 
-/// `stateroot handoff write [--from H] [--to H] [--input PATH] [--note …]`.
+/// `stateroot handoff write [--from H] [--to H] [--task …] [--next …] [--input PATH]`.
 ///
 /// Explicit origin replaces the current structured handoff. Automatic origin
 /// (lifecycle hooks) records a checkpoint only and preserves any existing
 /// structured handoff. `--to` is optional: omit it for continuity-only writes;
 /// use it only for explicit cross-harness routing (orchestration/auto mode).
+/// Prefer CLI flags near usage limits; `--input` is optional for large payloads.
 pub async fn write(
     ctx: &Ctx,
     from: Option<&str>,
     to: Option<&str>,
     note_text: Option<&str>,
     input_path: Option<&str>,
-    objective_override: Option<&str>,
+    write_flags: &HandoffWriteFlags<'_>,
 ) -> anyhow::Result<()> {
     write_with_origin(
         ctx,
@@ -733,7 +900,7 @@ pub async fn write(
         to,
         note_text,
         input_path,
-        objective_override,
+        write_flags,
         HandoffOrigin::Explicit,
     )
     .await
@@ -746,7 +913,7 @@ pub async fn write_with_origin(
     to: Option<&str>,
     note_text: Option<&str>,
     input_path: Option<&str>,
-    objective_override: Option<&str>,
+    write_flags: &HandoffWriteFlags<'_>,
     origin: HandoffOrigin,
 ) -> anyhow::Result<()> {
     if origin == HandoffOrigin::Automatic {
@@ -769,7 +936,7 @@ pub async fn write_with_origin(
         })?,
         None => source.clone(),
     };
-    let input = read_input(input_path)?;
+    let input = apply_write_flags(read_input(input_path)?, write_flags);
     // Read directly so malformed state cannot silently reset the sequence.
     let current = local_store::read_handoff_local(&ctx.cwd)?;
     let current_seq = current
@@ -798,7 +965,7 @@ pub async fn write_with_origin(
                 None
             },
             note_text,
-            objective_override,
+            objective_override: write_flags.objective,
             state_objective,
             state_phase: phase,
             handing_to_another,
@@ -1157,5 +1324,59 @@ mod tests {
             conservative_numbered_items("1. safe first\ncontinuation without a number"),
             vec!["1. safe first\ncontinuation without a number"]
         );
+    }
+
+    #[test]
+    fn input_accepts_immediate_task_alias() {
+        let input = parse_handoff_input_text(
+            r#"{"immediate_task":"boundary","objective":"goal","context_summary":"summary"}"#,
+            "test.json",
+        )
+        .expect("parse");
+        assert_eq!(input.task.as_deref(), Some("boundary"));
+    }
+
+    #[test]
+    fn input_coerces_decision_objects() {
+        let input = parse_handoff_input_text(
+            r#"{"objective":"goal","task":"task","context_summary":"summary","decisions":[{"decision":"Use async","rationale":"Lower latency"}]}"#,
+            "test.json",
+        )
+        .expect("parse");
+        assert_eq!(
+            input.decisions,
+            Some(vec!["Use async — Lower latency".to_string()])
+        );
+    }
+
+    #[test]
+    fn input_unknown_key_lists_allowed_fields() {
+        let err = parse_handoff_input_text(
+            r#"{"surprise":true,"objective":"goal","task":"task","context_summary":"summary"}"#,
+            "test.json",
+        )
+        .expect_err("unknown");
+        let message = format!("{err:#}");
+        assert!(message.contains("unknown handoff input key(s): surprise"));
+        assert!(message.contains("Allowed content keys"));
+        assert!(message.contains("task"));
+    }
+
+    #[test]
+    fn write_flags_override_input_fields() {
+        let input = apply_write_flags(
+            HandoffInput {
+                task: Some("from file".into()),
+                next_actions: Some(vec!["old".into()]),
+                ..Default::default()
+            },
+            &HandoffWriteFlags {
+                task: Some("from flag"),
+                next: &["new".into()],
+                ..Default::default()
+            },
+        );
+        assert_eq!(input.task.as_deref(), Some("from flag"));
+        assert_eq!(input.next_actions, Some(vec!["new".to_string()]));
     }
 }

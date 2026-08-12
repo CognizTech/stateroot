@@ -72,20 +72,22 @@ async fn main() -> anyhow::Result<()> {
         )?,
         Command::Checkpoint(args) => commands::checkpoint::run(&ctx, &args.note, &args.files)?,
         Command::Handoff(args) => match args.action {
-            HandoffAction::Write {
-                from,
-                to,
-                note,
-                input,
-                objective,
-            } => {
+            HandoffAction::Write(args) => {
+                let flags = commands::handoff::HandoffWriteFlags {
+                    objective: args.objective.as_deref(),
+                    task: args.task.as_deref(),
+                    context_summary: args.context_summary.as_deref(),
+                    next: &args.next,
+                    decisions: &args.decision,
+                    failures: &args.failure,
+                };
                 commands::handoff::write(
                     &ctx,
-                    from.as_deref(),
-                    to.as_deref(),
-                    note.as_deref(),
-                    input.as_deref(),
-                    objective.as_deref(),
+                    args.from.as_deref(),
+                    args.to.as_deref(),
+                    args.note.as_deref(),
+                    args.input.as_deref(),
+                    &flags,
                 )
                 .await?
             }

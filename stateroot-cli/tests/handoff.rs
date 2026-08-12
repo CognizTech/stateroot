@@ -855,3 +855,132 @@ fn resume_overlay_when_finalize_missed_and_no_overlay_after_finalize() {
     assert!(!after_stdout.contains("Work since handoff #1 (observed — codex)"));
     assert_eq!(current(project.path())["seq"], 2);
 }
+
+#[test]
+fn flag_only_cross_harness_write_sets_routing_from_next_flags() {
+    let (config, home, project) = project();
+    stateroot(config.path(), home.path(), project.path())
+        .args([
+            "handoff",
+            "write",
+            "--from",
+            "claude",
+            "--to",
+            "cursor",
+            "--objective",
+            "Ship the feature",
+            "--task",
+            "Resume verification in the receiving harness",
+            "--context-summary",
+            "Verified local state is ready; cross-harness routing test.",
+            "--next",
+            "Run smoke tests",
+            "--next",
+            "Fix remaining blockers",
+        ])
+        .assert()
+        .success();
+    let packet = current(project.path());
+    assert_eq!(packet["recommended_next_harness"], "cursor");
+    assert_eq!(
+        packet["next_actions"],
+        json!(["Run smoke tests", "Fix remaining blockers"])
+    );
+    assert_eq!(
+        packet["task"],
+        "Resume verification in the receiving harness"
+    );
+}
+
+#[test]
+fn flag_only_continuity_write_has_null_routing() {
+    let (config, home, project) = project();
+    stateroot(config.path(), home.path(), project.path())
+        .args([
+            "handoff",
+            "write",
+            "--from",
+            "claude",
+            "--objective",
+            "Durable goal",
+            "--task",
+            "Continue current work",
+            "--context-summary",
+            "Continuity-only flag write without routing.",
+        ])
+        .assert()
+        .success();
+    let packet = current(project.path());
+    assert!(packet["recommended_next_harness"].is_null());
+}
+
+#[test]
+fn input_immediate_task_alias_accepted_on_write() {
+    let (config, home, project) = project();
+    let path = write_json(
+        project.path(),
+        "alias.json",
+        &json!({
+            "immediate_task": "Alias boundary task",
+            "objective": "Alias objective",
+            "context_summary": "Alias summary for continuity."
+        }),
+    );
+    stateroot(config.path(), home.path(), project.path())
+        .args(["handoff", "write", "--from", "claude", "--input", &path])
+        .assert()
+        .success();
+    assert_eq!(current(project.path())["task"], "Alias boundary task");
+}
+
+#[test]
+fn input_decision_objects_coerced_on_write() {
+    let (config, home, project) = project();
+    let path = write_json(
+        project.path(),
+        "decisions.json",
+        &json!({
+            "objective": "goal",
+            "task": "task",
+            "context_summary": "summary",
+            "decisions": [{"decision": "Pick Postgres", "rationale": "Team standard"}]
+        }),
+    );
+    stateroot(config.path(), home.path(), project.path())
+        .args(["handoff", "write", "--from", "claude", "--input", &path])
+        .assert()
+        .success();
+    assert_eq!(
+        current(project.path())["decisions"],
+        json!(["Pick Postgres — Team standard"])
+    );
+}
+
+#[test]
+fn input_unknown_key_error_names_key_and_allowed_fields() {
+    let (config, home, project) = project();
+    let path = write_json(
+        project.path(),
+        "bad.json",
+        &json!({
+            "surprise": true,
+            "objective": "goal",
+            "task": "task",
+            "context_summary": "summary"
+        }),
+    );
+    let failure = stateroot(config.path(), home.path(), project.path())
+        .args(["handoff", "write", "--from", "claude", "--input", &path])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(failure.get_output().stderr.clone()).expect("utf8");
+    assert!(
+        stderr.contains("unknown handoff input key(s): surprise"),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("Allowed content keys"), "stderr: {stderr}");
+    assert!(!project
+        .path()
+        .join(".stateroot/handoffs/current.json")
+        .exists());
+}
