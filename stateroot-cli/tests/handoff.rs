@@ -429,7 +429,7 @@ fn quality_rejections_are_atomic_and_missing_transcript_is_honest() {
 #[test]
 fn stdin_windows_paths_bounds_dedupe_and_legacy_labels_are_stable() {
     let (config, home, project) = project();
-    let long = "current state ".repeat(200);
+    let long = "current state ".repeat(500);
     let stdin = json!({
         "objective":"JSON objective",
         "task":"Use Windows fixture paths",
@@ -464,7 +464,7 @@ fn stdin_windows_paths_bounds_dedupe_and_legacy_labels_are_stable() {
             .expect("summary")
             .chars()
             .count()
-            <= 1800
+            <= stateroot_core::handoff_bounds::CONTEXT_SUMMARY_MAX
     );
     assert!(packet["warnings"]
         .as_array()
@@ -472,7 +472,7 @@ fn stdin_windows_paths_bounds_dedupe_and_legacy_labels_are_stable() {
         .iter()
         .any(|warning| warning
             .as_str()
-            .is_some_and(|text| text.contains("truncated to 1800"))));
+            .is_some_and(|text| text.contains("truncated to 6000"))));
 
     let minimal = write_json(
         project.path(),
@@ -501,7 +501,7 @@ fn stdin_windows_paths_bounds_dedupe_and_legacy_labels_are_stable() {
             .expect("summary")
             .chars()
             .count()
-            <= 1800
+            <= stateroot_core::handoff_bounds::CONTEXT_SUMMARY_MAX
     );
     assert_eq!(
         packet["decisions"],
@@ -555,4 +555,51 @@ fn stdin_windows_paths_bounds_dedupe_and_legacy_labels_are_stable() {
     assert_eq!(packet["context_summary"], prose);
     assert_eq!(packet["decisions"], json!([]));
     assert_eq!(packet["failures"], json!([]));
+}
+
+#[test]
+fn detailed_context_summary_preserved_through_write_and_show() {
+    let (config, home, project) = project();
+    let narrative = "Verified state and rationale. ".repeat(180);
+    assert!(
+        narrative.chars().count() > 4000 && narrative.chars().count() < 6000,
+        "fixture len {}",
+        narrative.chars().count()
+    );
+    let input = write_json(
+        project.path(),
+        "detailed-handoff.json",
+        &json!({
+            "objective": "Ship detailed continuity",
+            "task": "Validate narrative preservation",
+            "context_summary": narrative,
+            "decisions": ["Keep bounded detailed prose"],
+            "failures": [],
+            "next_actions": ["Run regression tests"]
+        }),
+    );
+    stateroot(config.path(), home.path(), project.path())
+        .args([
+            "handoff", "write", "--from", "codex", "--to", "cursor", "--input", &input,
+        ])
+        .assert()
+        .success();
+    let packet = current(project.path());
+    assert_eq!(
+        packet["context_summary"].as_str().expect("summary"),
+        narrative
+    );
+    assert!(!packet["warnings"]
+        .as_array()
+        .map(|w| w.iter().any(|item| {
+            item.as_str()
+                .is_some_and(|text| text.contains("context_summary truncated"))
+        }))
+        .unwrap_or(false));
+    let out = stateroot(config.path(), home.path(), project.path())
+        .args(["handoff", "show"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(stdout.contains(&narrative[..80]));
 }

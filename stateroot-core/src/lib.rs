@@ -10,6 +10,7 @@
 pub mod canonical;
 pub mod config;
 pub mod error;
+pub mod handoff_bounds;
 pub mod harness_identity;
 pub mod harness_install;
 pub mod learnings;

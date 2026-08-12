@@ -370,8 +370,11 @@ async fn synthesize_handoff(
         context_summary = implementation_status.clone();
     }
     let mut warnings = vec!["imported from transcripts — observed, not verified".to_string()];
-    if context_summary.chars().count() > 1800 {
-        warnings.push("context_summary truncated to 1800 characters".to_string());
+    let summary_max = stateroot_core::handoff_bounds::CONTEXT_SUMMARY_MAX;
+    if context_summary.chars().count() > summary_max {
+        warnings.push(format!(
+            "context_summary truncated to {summary_max} characters"
+        ));
     }
     let mut packet = json!({
         "schema_version": SCHEMA_HANDOFF_V1,
@@ -396,7 +399,7 @@ async fn synthesize_handoff(
         "relevant_skills": [],
         "artifacts": [],
         "traces": [],
-        "context_summary": truncate(&context_summary, 1800),
+        "context_summary": truncate(&context_summary, summary_max),
         "created_at": now_rfc3339(),
         "written_at": now_rfc3339(),
         "created_by_harness": from,

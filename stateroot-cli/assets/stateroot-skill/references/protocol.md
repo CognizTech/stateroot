@@ -20,7 +20,7 @@ Handoffs use strict content JSON passed with `stateroot handoff write --from <re
 
 1. **objective** — the durable goal that can span multiple sessions.
 2. **task** — the immediate work boundary for the receiving agent.
-3. **context_summary** — a concise synthesis of current state, distinct from the task.
+3. **context_summary** — a detailed continuity narrative for the receiving agent: present state, verified evidence, decisions and rationale, constraints, failed approaches, and implications for the next agent. Distinct from the task; structured arrays complement the prose rather than replacing it.
 4. **decisions** — each decision with the *why*.
 5. **next_actions** — ordered, concrete, executable without re-discovery; required when switching to another harness.
 6. **failures** and **bugs_found** — truthful observed failures and known bugs; an explicit empty `failures` array means none were observed.

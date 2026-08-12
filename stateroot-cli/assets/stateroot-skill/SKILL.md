@@ -47,7 +47,7 @@ Before attempting any non-trivial approach:
 Before ending a session, when approaching usage limits, or when the user asks to switch harness:
 1. write the handoff content as strict JSON, then run `scripts/handoff.sh write --from <resolved-current-harness> --to <harness> --input <handoff.json>`
 2. resolve `--from` to the actual current harness id; never copy a placeholder or infer it from an environment variable
-3. include the durable objective, immediate task, concise context summary, decisions with the why, next actions, and truthful failures; the CLI auto-captures recent verified conversation and other observed transcript evidence
+3. include the durable objective, immediate task, detailed continuity narrative in `context_summary` (present state, verified evidence, decisions and rationale, constraints, failed approaches, implications for the next agent), decisions with the why, next actions, and truthful failures; the CLI auto-captures recent verified conversation and other observed transcript evidence
 4. do not paste giant state or transcript dumps into `--note`; `--note` is only a legacy short-summary fallback
 5. file paths work directly on Windows; `--input -` is an optional stdin convenience, not required shell behavior
 

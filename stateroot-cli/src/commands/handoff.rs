@@ -26,7 +26,7 @@ pub enum HandoffOrigin {
 }
 
 /// Handoff quality bounds at write (plan P4.1).
-const SUMMARY_MAX: usize = 1800;
+const SUMMARY_MAX: usize = stateroot_core::handoff_bounds::CONTEXT_SUMMARY_MAX;
 const TEXT_MAX: usize = 3000;
 const ITEM_MAX: usize = 1500;
 const LIST_ITEMS_MAX: usize = 20;
@@ -971,7 +971,7 @@ mod tests {
             "project_id": "p",
             "seq": 1,
             "task": "x".repeat(4000),
-            "context_summary": "y".repeat(3200),
+            "context_summary": "y".repeat(7000),
             "next_actions": (0..25).map(|i| format!("action {i}")).collect::<Vec<_>>(),
             "bugs_found": ["z".repeat(2000)],
             "changed_files": (0..600).map(|i| format!("src/f{i}.rs")).collect::<Vec<_>>(),
@@ -987,7 +987,8 @@ mod tests {
             task.chars().count()
         );
         let summary = packet["context_summary"].as_str().expect("summary");
-        assert!(summary.chars().count() <= 3001);
+        assert!(summary.chars().count() <= SUMMARY_MAX + 1);
+        assert_eq!(summary.chars().count(), SUMMARY_MAX);
 
         let actions = packet["next_actions"].as_array().expect("arr");
         assert_eq!(actions.len(), 20);
