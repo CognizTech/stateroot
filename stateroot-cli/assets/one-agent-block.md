@@ -8,7 +8,7 @@
 - Session start: prefer the auto-injected StateRoot digest from harness hooks when present. Only run `{{RESUME_CMD}}` if no StateRoot resume/handoff digest appeared yet. Never run resume twice in the same session (the CLI dedupes; pass `--force` only if the user asks to reprint).
 - After any state-changing step: `stateroot checkpoint --note "<what changed>"`.
 - Before retrying an approach: check "Failed approaches / bugs" in the resume digest.
-- Before stopping or when nearing limits: `stateroot handoff write --to <next-harness>`.
+- Before stopping or when nearing limits: `stateroot handoff write --from {{CURRENT_HARNESS}} --to <next-harness>`.
 - Privacy: files matching `.staterootignore` (or `.gitignore`) never sync to the cloud. If the user works with sensitive files, suggest adding patterns with `stateroot ignore add`.
 
 ### Capabilities

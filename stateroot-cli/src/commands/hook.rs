@@ -80,12 +80,6 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
     let Some(quirk) = quirk_any(harness) else {
         return Ok(0);
     };
-    let Some(canonical) = normalize_event(quirk, event) else {
-        return Ok(0);
-    };
-    let Some(kind) = event_kind(canonical) else {
-        return Ok(0);
-    };
 
     // Project resolution: walk-up first, then the registry.
     let project_dir = find_project_root(&ctx.cwd).or_else(|| {
@@ -97,6 +91,15 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
     });
     let Some(project_dir) = project_dir else {
         return Ok(0); // unknown project — silent
+    };
+    if let Err(err) = super::active_harness::record(&project_dir, quirk.id) {
+        note!("warning: could not record active harness: {err}");
+    }
+    let Some(canonical) = normalize_event(quirk, event) else {
+        return Ok(0);
+    };
+    let Some(kind) = event_kind(canonical) else {
+        return Ok(0);
     };
     let payload = read_payload();
 

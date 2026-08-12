@@ -46,9 +46,11 @@ pub fn render_one_agent_block(persona: Option<&str>, harness_id: &str) -> String
         _ => "_(no working relationship synced yet — run `stateroot persona sync`)_".to_string(),
     };
     let resume = super::harness_display::resume_command(harness_id);
+    let current_harness = super::harness_display::normalize(harness_id);
     ONE_AGENT_BLOCK_TEMPLATE
         .replace("{{PERSONA}}", &persona_section)
         .replace("{{RESUME_CMD}}", &resume)
+        .replace("{{CURRENT_HARNESS}}", &current_harness)
 }
 
 /// Project AGENTS.md convenience block — checkpoint/handoff rules only.
@@ -237,8 +239,10 @@ mod tests {
         assert!(block.contains("Be direct."));
         assert!(!block.contains("### Persona\n"));
         assert!(block.contains("stateroot resume --harness codex"));
+        assert!(block.contains("stateroot handoff write --from codex"));
         assert!(block.contains("auto-injected") || block.contains("Never run resume twice"));
         assert!(!block.contains("{{RESUME_CMD}}"));
+        assert!(!block.contains("{{CURRENT_HARNESS}}"));
     }
 
     #[test]

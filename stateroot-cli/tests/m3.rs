@@ -233,6 +233,8 @@ fn learnings_lifecycle_and_distill_and_resume_surface() {
         .args([
             "handoff",
             "write",
+            "--from",
+            "codex",
             "--to",
             "codex",
             "--objective",
@@ -330,6 +332,8 @@ async fn synthesize_merges_sections_and_governance_skips() {
         .args([
             "handoff",
             "write",
+            "--from",
+            "codex",
             "--to",
             "codex",
             "--objective",

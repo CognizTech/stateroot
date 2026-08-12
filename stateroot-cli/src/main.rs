@@ -73,10 +73,20 @@ async fn main() -> anyhow::Result<()> {
         Command::Checkpoint(args) => commands::checkpoint::run(&ctx, &args.note, &args.files)?,
         Command::Handoff(args) => match args.action {
             HandoffAction::Write {
+                from,
                 to,
                 note,
                 objective,
-            } => commands::handoff::write(&ctx, &to, note.as_deref(), objective.as_deref()).await?,
+            } => {
+                commands::handoff::write(
+                    &ctx,
+                    from.as_deref(),
+                    &to,
+                    note.as_deref(),
+                    objective.as_deref(),
+                )
+                .await?
+            }
             HandoffAction::List => commands::handoff::list(&ctx).await?,
             HandoffAction::Show { seq } => commands::handoff::show(&ctx, seq).await?,
             HandoffAction::Accept { by } => commands::handoff::accept(&ctx, &by).await?,

@@ -186,6 +186,9 @@ pub struct HandoffArgs {
 pub enum HandoffAction {
     /// Write a new handoff packet (local store).
     Write {
+        /// Harness creating the handoff (falls back to the active local marker).
+        #[arg(long)]
+        from: Option<String>,
         /// Harness the handoff recommends next.
         #[arg(long)]
         to: String,
@@ -216,7 +219,7 @@ pub struct HookArgs {
     /// Harness-native or canonical event name (e.g. SessionStart, stop).
     pub event: String,
     /// Harness id (canonical or legacy), e.g. claude-code, kimi.
-    #[arg(long, default_value = "claude-code")]
+    #[arg(long)]
     pub harness: String,
 }
 

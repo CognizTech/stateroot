@@ -48,9 +48,6 @@ const CANONICAL_HARNESSES: &[&str] = &[
     "omp",
 ];
 
-/// Generic actor id for CLI-originated writes ("cli" is not in the server Literal).
-const SERVER_ACTOR: &str = "statesmith";
-
 /// Handoff quality bounds at write (plan P4.1).
 const SUMMARY_MAX: usize = 3000;
 const ITEM_MAX: usize = 1500;
@@ -152,6 +149,7 @@ fn canonical_harness(input: &str) -> Option<String> {
 fn build_packet(
     project_id: &str,
     seq: i64,
+    source: &str,
     to: Option<String>,
     note_text: Option<&str>,
     objective: &str,
@@ -163,7 +161,7 @@ fn build_packet(
         "seq": seq,
         "task": note_text.unwrap_or(""),
         "current_phase": phase,
-        "last_harness": SERVER_ACTOR,
+        "last_harness": source,
         "recommended_next_harness": to,
         "objective": objective,
         "implementation_status": "",
@@ -182,7 +180,7 @@ fn build_packet(
         "context_summary": note_text.unwrap_or(""),
         "created_at": now_rfc3339(),
         "written_at": now_rfc3339(),
-        "created_by_harness": SERVER_ACTOR,
+        "created_by_harness": source,
     })
 }
 
@@ -208,19 +206,21 @@ fn local_state_fields(cwd: &std::path::Path) -> (String, String) {
     (objective, phase)
 }
 
-/// `stateroot handoff write --to H [--note …] [--objective …]`.
+/// `stateroot handoff write [--from H] --to H [--note …] [--objective …]`.
 ///
 /// Explicit origin replaces the current structured handoff. Automatic origin
 /// (lifecycle hooks) records a checkpoint only and preserves any existing
 /// structured handoff.
 pub async fn write(
     ctx: &Ctx,
+    from: Option<&str>,
     to: &str,
     note_text: Option<&str>,
     objective_override: Option<&str>,
 ) -> anyhow::Result<()> {
     write_with_origin(
         ctx,
+        from,
         to,
         note_text,
         objective_override,
@@ -232,6 +232,7 @@ pub async fn write(
 /// Same as [`write`] with an explicit/automatic origin.
 pub async fn write_with_origin(
     ctx: &Ctx,
+    from: Option<&str>,
     to: &str,
     note_text: Option<&str>,
     objective_override: Option<&str>,
@@ -242,6 +243,13 @@ pub async fn write_with_origin(
     }
 
     let project = ctx.require_project()?;
+    let source = match from {
+        Some(explicit) => super::active_harness::canonical_id(explicit)
+            .map_err(|_| anyhow::anyhow!("unknown handoff source '{explicit}'; pass --from <harness> with a known harness id"))?,
+        None => super::active_harness::read(&ctx.cwd)
+            .map_err(|err| anyhow::anyhow!("cannot use active harness marker ({err}); pass --from <harness>"))?
+            .ok_or_else(|| anyhow::anyhow!("handoff source is unknown; pass --from <harness>"))?,
+    };
     // Determine the next seq from the current handoff (local store).
     // Determine the next seq from the current handoff (server first).
     let (current, _) = fetch_handoff(&ctx.cwd);
@@ -261,6 +269,7 @@ pub async fn write_with_origin(
     let packet = bound_packet(build_packet(
         &project.project_id,
         current_seq + 1,
+        &source,
         canonical_harness(to),
         note_text,
         &objective,
@@ -318,10 +327,10 @@ fn queue_selection_observation(project_dir: &std::path::Path, by: &str) {
     if project_id.is_empty() {
         return;
     }
-    let harness = if by.trim().is_empty() || by == "cli" {
-        "statesmith"
-    } else {
-        by
+    // A CLI acceptance is not evidence that any harness performed it. Only
+    // queue a harness observation when the caller supplied a registered id.
+    let Ok(harness) = super::active_harness::canonical_id(by) else {
+        return;
     };
     let op = json!({
         "ts": now_rfc3339(),
@@ -333,12 +342,12 @@ fn queue_selection_observation(project_dir: &std::path::Path, by: &str) {
             "kind": "selection",
             "payload": {
                 "text": format!("Handoff accepted by {by}"),
-                "harness": harness,
+                "harness": &harness,
                 "event": "handoff_accept",
                 "kind_hint": "selection",
                 "explicit": true,
             },
-            "harness": harness,
+            "harness": &harness,
         },
     });
     if let Err(err) = local_store::outbox_append(project_dir, &op) {
@@ -430,7 +439,7 @@ mod tests {
             "bugs_found": ["z".repeat(2000)],
             "changed_files": (0..600).map(|i| format!("src/f{i}.rs")).collect::<Vec<_>>(),
             "created_at": "2026-07-18T00:00:00Z",
-            "created_by_harness": "statesmith",
+            "created_by_harness": "codex",
         });
         packet = bound_packet(packet);
 

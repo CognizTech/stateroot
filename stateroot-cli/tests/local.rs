@@ -83,6 +83,8 @@ fn checkpoint_handoff_resume_and_log_flow() {
         .args([
             "handoff",
             "write",
+            "--from",
+            "codex",
             "--to",
             "codex",
             "--objective",
@@ -135,6 +137,17 @@ fn checkpoint_handoff_resume_and_log_flow() {
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
     assert!(stdout.contains("ship the parser"), "force: {stdout}");
+    let packet: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.path().join(".stateroot/handoffs/current.json"))
+            .expect("handoff"),
+    )
+    .expect("handoff json");
+    assert!(
+        !packet["accepted_by"]
+            .as_array()
+            .is_some_and(|actors| actors.iter().any(|actor| actor == "statesmith")),
+        "resume without --harness must not fabricate StateSmith acceptance: {packet}"
+    );
 
     // log shows checkpoint + handoff history
     let out = stateroot(config_home.path(), user_home.path(), project.path())
@@ -181,6 +194,8 @@ fn hook_session_start_injects_digest_once() {
         .args([
             "handoff",
             "write",
+            "--from",
+            "codex",
             "--to",
             "claude",
             "--objective",
@@ -208,6 +223,135 @@ fn hook_session_start_injects_digest_once() {
         second_out.trim().is_empty() || !second_out.contains("hook demo"),
         "duplicate session_start must not re-inject: {second_out}"
     );
+
+    let marker: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.path().join(".stateroot/local/active-harness.json"))
+            .expect("active harness marker"),
+    )
+    .expect("marker json");
+    assert_eq!(marker["harness"], "claude");
+}
+
+#[test]
+fn handoff_source_attribution_is_explicit_or_locally_observed() {
+    let config_home = tempfile::tempdir().expect("config home");
+    seed_config_home(config_home.path());
+    let user_home = tempfile::tempdir().expect("user home");
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+
+    // Explicit aliases normalize to the canonical packet id.
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["handoff", "write", "--from", "Codex", "--to", "cursor"])
+        .assert()
+        .success();
+    let current = project.path().join(".stateroot/handoffs/current.json");
+    let packet: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&current).expect("handoff"))
+            .expect("handoff json");
+    assert_eq!(packet["last_harness"], "codex");
+    assert_eq!(packet["created_by_harness"], "codex");
+    assert_eq!(packet["recommended_next_harness"], "cursor");
+    assert_ne!(packet["last_harness"], "statesmith");
+
+    // Resume records a canonical active marker, which is the fallback source.
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["resume", "--harness", "claude-code", "--force"])
+        .assert()
+        .success();
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["handoff", "write", "--to", "codex"])
+        .assert()
+        .success();
+    let packet: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&current).expect("handoff"))
+            .expect("handoff json");
+    assert_eq!(packet["last_harness"], "claude");
+    assert_eq!(packet["created_by_harness"], "claude");
+
+    // Explicit evidence wins over the active marker.
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["handoff", "write", "--from", "cursor", "--to", "codex"])
+        .assert()
+        .success();
+    let packet: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&current).expect("handoff"))
+            .expect("handoff json");
+    assert_eq!(packet["last_harness"], "cursor");
+    assert_eq!(packet["created_by_harness"], "cursor");
+}
+
+#[test]
+fn handoff_rejects_unknown_and_missing_source() {
+    let config_home = tempfile::tempdir().expect("config home");
+    seed_config_home(config_home.path());
+    let user_home = tempfile::tempdir().expect("user home");
+
+    let missing_project = tempfile::tempdir().expect("missing source project");
+    init_project(config_home.path(), user_home.path(), missing_project.path());
+    let missing = stateroot(config_home.path(), user_home.path(), missing_project.path())
+        .args(["handoff", "write", "--to", "codex"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(missing.get_output().stderr.clone()).expect("utf8");
+    assert!(stderr.contains("pass --from <harness>"), "stderr: {stderr}");
+    assert!(!missing_project
+        .path()
+        .join(".stateroot/handoffs/current.json")
+        .exists());
+
+    let unknown_project = tempfile::tempdir().expect("unknown source project");
+    init_project(config_home.path(), user_home.path(), unknown_project.path());
+    let unknown = stateroot(config_home.path(), user_home.path(), unknown_project.path())
+        .args([
+            "handoff",
+            "write",
+            "--from",
+            "not-a-harness",
+            "--to",
+            "codex",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(unknown.get_output().stderr.clone()).expect("utf8");
+    assert!(
+        stderr.contains("unknown handoff source 'not-a-harness'"),
+        "stderr: {stderr}"
+    );
+    assert!(!unknown_project
+        .path()
+        .join(".stateroot/handoffs/current.json")
+        .exists());
+}
+
+#[test]
+fn resume_refreshes_active_marker_before_deduplicating_output() {
+    let config_home = tempfile::tempdir().expect("config home");
+    seed_config_home(config_home.path());
+    let user_home = tempfile::tempdir().expect("user home");
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["handoff", "write", "--from", "codex", "--to", "cursor"])
+        .assert()
+        .success();
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["resume", "--harness", "codex"])
+        .assert()
+        .success();
+
+    let marker = project.path().join(".stateroot/local/active-harness.json");
+    std::fs::remove_file(&marker).expect("remove marker to test refresh");
+    let duplicate = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["resume", "--harness", "codex"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(duplicate.get_output().stdout.clone()).expect("utf8");
+    assert!(stdout.contains("skipping duplicate"), "stdout: {stdout}");
+    let marker: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(marker).expect("refreshed marker"))
+            .expect("marker json");
+    assert_eq!(marker["harness"], "codex");
 }
 
 #[test]

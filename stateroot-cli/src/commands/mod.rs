@@ -11,6 +11,7 @@ use anyhow::anyhow;
 use stateroot_core::config::{self as core_config, AppConfig, ProjectEntry};
 use stateroot_core::local_store;
 
+pub mod active_harness;
 pub mod auth;
 pub mod blocks;
 pub mod checkpoint;

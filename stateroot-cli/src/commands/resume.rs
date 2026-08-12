@@ -14,9 +14,9 @@ use super::{note, truncate, Ctx};
 /// Maximum characters pulled from each hot-apex memory file.
 const HOT_APEX_BUDGET: usize = 1500;
 
-/// Default harness used for the context pack when `--harness` is absent.
-/// Storage/API id is `statesmith`; user-facing display is StateSmith.
-const DEFAULT_HARNESS: &str = "statesmith";
+/// Delivery-deduplication key when `--harness` is absent. This is local marker
+/// bookkeeping only and must never be recorded as an observed harness actor.
+const UNATTRIBUTED_CALLER: &str = "unattributed";
 
 /// Footer appended to resume output AND the hook digest — identical wording
 /// in both (plan P4.2).
@@ -504,7 +504,13 @@ pub fn run(
 ) -> anyhow::Result<()> {
     let project = ctx.require_project()?;
 
-    let caller = harness.unwrap_or(DEFAULT_HARNESS);
+    // An explicit resume harness is direct local evidence. Persist it before
+    // duplicate-delivery suppression so even an early return refreshes the
+    // active actor marker.
+    let recorded_harness = harness
+        .map(|id| super::active_harness::record(&ctx.cwd, id))
+        .transpose()?;
+    let caller = recorded_harness.as_deref().unwrap_or(UNATTRIBUTED_CALLER);
     let handoff_seq = local_handoff_seq(&ctx.cwd);
     if !force {
         if let Some(seq) = handoff_seq {
@@ -641,13 +647,14 @@ skipping duplicate. Pass --force to reprint.)\n\n{NO_REFETCH_FOOTER}"
 
     // Acceptance mark (unless --no-accept) + compact digest footer.
     if !no_accept {
-        let caller = harness.unwrap_or(DEFAULT_HARNESS);
-        match accept_handoff_local(&ctx.cwd, caller) {
-            Ok(count) if count > 0 => {
-                let _ = count;
+        if let Some(caller) = recorded_harness.as_deref() {
+            match accept_handoff_local(&ctx.cwd, caller) {
+                Ok(count) if count > 0 => {
+                    let _ = count;
+                }
+                Ok(_) => {}
+                Err(err) => note!("warning: could not mark acceptance: {err}"),
             }
-            Ok(_) => {}
-            Err(err) => note!("warning: could not mark acceptance: {err}"),
         }
     }
     if let Some(footer) = digest_footer(&ctx.cwd) {
@@ -696,7 +703,7 @@ mod tests {
             ],
             "changed_files": ["src/api.rs"],
             "created_at": "2026-07-26T00:00:00Z",
-            "created_by_harness": "statesmith"
+            "created_by_harness": "codex"
         })
     }
 

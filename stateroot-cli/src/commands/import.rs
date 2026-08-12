@@ -24,10 +24,6 @@ use stateroot_core::transcripts::{self, TranscriptSession};
 
 use super::{note, truncate, Ctx};
 
-/// Server-canonical actor for imported writes ("claude" is not in the
-/// server HarnessId Literal; codex is).
-const SERVER_ACTOR: &str = "statesmith";
-
 /// Options for `stateroot import`.
 pub struct ImportOptions {
     /// Restrict to one harness (`codex`, `claude`).
@@ -321,11 +317,9 @@ async fn synthesize_handoff(
             }
             acc
         });
-    let from = if latest.harness == "codex" {
-        "codex"
-    } else {
-        SERVER_ACTOR
-    };
+    // Transcript readers carry canonical harness ids. That observed source is
+    // the packet author; the local CLI must never replace it with StateSmith.
+    let from = latest.harness;
     let date = latest.started_at.get(..10).unwrap_or(&latest.started_at);
     // Actual progress content: the harness's own NEWEST compacted summary
     // when the transcript has one; otherwise the plain import statement.

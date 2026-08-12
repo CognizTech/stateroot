@@ -45,7 +45,7 @@ Before attempting any non-trivial approach:
 ### 4) Session end / usage limit / harness switch -> handoff
 
 Before ending a session, when approaching usage limits, or when the user asks to switch harness:
-1. run `scripts/handoff.sh write --to <harness> [--note ...]`
+1. run `scripts/handoff.sh write --from <current-harness> --to <harness> [--note ...]`
 2. the handoff MUST capture: objective, current state, decisions with the why, next actions, failed approaches
 3. a handoff missing `next_actions` or `failed_approaches` is a failed handoff — do not write one
 
@@ -66,7 +66,7 @@ The CLI is offline-safe: when the server is unreachable it queues operations in 
 |---|---|---|
 | `stateroot resume [--harness H] [--budget N]` | session start | prints handoff + hot-apex memory + context pack as markdown |
 | `stateroot checkpoint --note "..." [--files a,b]` | after any state-changing step | appends an episodic record and updates handoff state |
-| `stateroot handoff write --to H [--note ...]` | session end / harness switch | writes current handoff plus history entry |
+| `stateroot handoff write --from CURRENT_HARNESS --to H [--note ...]` | session end / harness switch | writes current handoff plus history entry |
 | `stateroot handoff list` / `stateroot handoff show` | inspect prior handoffs | read-only |
 | `stateroot search <query> [--kinds ...] [--top-k N]` | find decisions, failures, memories | hybrid search over project state and memory |
 | `stateroot pack [--harness H] [--budget N]` | need a fresh context pack | prints the pack to stdout |
