@@ -124,30 +124,38 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
 // resume
 // ---------------------------------------------------------------------
 
+/// Build the identity prefix (full persona + full USER.md). Never budgeted.
+fn hook_identity_prefix(config_dir: &Path, home: &Path) -> String {
+    let mut out = String::new();
+    if let Some(persona) = super::persona::resolve(config_dir) {
+        out.push_str(persona.trim());
+        out.push_str("\n\n");
+    }
+    if let Some(text) = stateroot_core::user_profile::read(home) {
+        out.push_str("(apex user/USER.md)\n");
+        out.push_str(text.trim());
+        out.push('\n');
+    }
+    out
+}
+
 /// Build the bounded hook digest (actionables-first) or `None` when there is
-/// no handoff content worth injecting.
+/// no handoff content worth injecting. Identity (persona + USER) is always
+/// full; `DIGEST_BUDGET` applies only to the work/handoff body.
 pub fn hook_digest(config_dir: &Path, project_dir: &Path) -> Option<String> {
     let handoff = local_store::read_handoff_local(project_dir)
         .ok()
         .flatten()?;
-    let mut out = String::new();
-
-    if let Some(persona) = super::persona::read_cache(config_dir) {
-        for line in persona.lines().take(6) {
-            out.push_str(line);
-            out.push('\n');
-        }
-        out.push('\n');
-    }
+    let mut work = String::new();
 
     let get_str = |key: &str| handoff.get(key).and_then(|v| v.as_str()).unwrap_or("");
     let objective = get_str("objective");
     let phase = get_str("current_phase");
     if !objective.is_empty() {
-        out.push_str(&format!("Objective: {objective}\n"));
+        work.push_str(&format!("Objective: {objective}\n"));
     }
     if !phase.is_empty() {
-        out.push_str(&format!("Phase: {phase}\n"));
+        work.push_str(&format!("Phase: {phase}\n"));
     }
     let mut failures = Vec::new();
     for key in ["failures", "bugs_found"] {
@@ -164,9 +172,9 @@ pub fn hook_digest(config_dir: &Path, project_dir: &Path) -> Option<String> {
         }
     }
     if !failures.is_empty() {
-        out.push_str("Failed approaches / bugs:\n");
+        work.push_str("Failed approaches / bugs:\n");
         for text in failures.iter().take(6) {
-            out.push_str(&format!("- {}\n", truncate(text, 180)));
+            work.push_str(&format!("- {}\n", truncate(text, 180)));
         }
     }
     for (key, title) in [
@@ -177,20 +185,20 @@ pub fn hook_digest(config_dir: &Path, project_dir: &Path) -> Option<String> {
     ] {
         if let Some(items) = handoff.get(key).and_then(|v| v.as_array()) {
             if !items.is_empty() {
-                out.push_str(&format!("{title}:\n"));
+                work.push_str(&format!("{title}:\n"));
                 for item in items.iter().take(6) {
                     let text = match item {
                         Value::String(s) => s.clone(),
                         other => other.to_string(),
                     };
-                    out.push_str(&format!("- {}\n", truncate(&text, 180)));
+                    work.push_str(&format!("- {}\n", truncate(&text, 180)));
                 }
             }
         }
     }
     let summary = get_str("context_summary");
     if !summary.is_empty() {
-        out.push_str(&format!("Summary: {}\n", truncate(summary, 300)));
+        work.push_str(&format!("Summary: {}\n", truncate(summary, 300)));
     }
 
     // Project memory remains local to the project.
@@ -198,38 +206,48 @@ pub fn hook_digest(config_dir: &Path, project_dir: &Path) -> Option<String> {
         if let Ok(text) = std::fs::read_to_string(local_store::root(project_dir).join(rel)) {
             let text = text.trim();
             if !text.is_empty() {
-                out.push_str(&format!("\n(apex {rel})\n{}\n", truncate(text, 400)));
+                work.push_str(&format!("\n(apex {rel})\n{}\n", truncate(text, 400)));
             }
         }
     }
     if let Ok(home) = stateroot_core::harness_install::home_dir() {
-        if let Some(text) = stateroot_core::user_profile::read(&home) {
-            out.push_str(&format!(
-                "\n(apex user/USER.md)\n{}\n",
-                truncate(&text, 400)
-            ));
-        }
         if let Some(gap) =
             stateroot_core::handoff_continuity::overlay_for_handoff(&home, project_dir, &handoff)
         {
-            out.push_str(
+            work.push_str(
                 &stateroot_core::handoff_continuity::compose_since_handoff_overlay(
                     project_dir,
                     &handoff,
                     &gap,
                 ),
             );
-            out.push('\n');
+            work.push('\n');
         }
     }
 
-    out.push_str(&format!("\n{}", super::resume::NO_REFETCH_FOOTER));
-    let digest = out.trim().to_string();
-    if digest.is_empty() {
-        None
-    } else {
-        Some(truncate(&digest, DIGEST_BUDGET))
+    work.push_str(&format!("\n{}", super::resume::NO_REFETCH_FOOTER));
+    let home = stateroot_core::harness_install::home_dir().ok();
+    let identity = home
+        .as_ref()
+        .map(|home| hook_identity_prefix(config_dir, home))
+        .unwrap_or_else(|| hook_identity_prefix(config_dir, config_dir));
+    let work = work.trim().to_string();
+    if identity.trim().is_empty() && work.is_empty() {
+        return None;
     }
+    let budgeted_work = if work.is_empty() {
+        String::new()
+    } else {
+        truncate(&work, DIGEST_BUDGET)
+    };
+    let mut digest = identity;
+    if !budgeted_work.is_empty() {
+        if !digest.is_empty() && !digest.ends_with('\n') {
+            digest.push('\n');
+        }
+        digest.push_str(&budgeted_work);
+    }
+    Some(digest.trim().to_string())
 }
 
 fn resume_marker_path(project_dir: &Path) -> PathBuf {
@@ -648,6 +666,9 @@ fn spool_tail(project_dir: &Path, count: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static TEST_HOME_ENV: Mutex<()> = Mutex::new(());
 
     #[test]
     fn digest_is_actionables_first_with_footer() {
@@ -694,5 +715,86 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         let project = tempfile::tempdir().expect("project");
         assert!(hook_digest(home.path(), project.path()).is_none());
+    }
+
+    #[test]
+    fn digest_includes_full_persona_and_user_without_truncation() {
+        let _guard = TEST_HOME_ENV.lock().expect("env lock");
+        let home = tempfile::tempdir().expect("home");
+        let project = tempfile::tempdir().expect("project");
+        let root = local_store::root(project.path());
+        std::fs::create_dir_all(root.join("handoffs")).expect("mkdir");
+        let packet = json!({
+            "schema_version": "stateroot.handoff.v1",
+            "objective": "ship",
+            "context_summary": "continuity",
+            "next_actions": ["continue"],
+        });
+        std::fs::write(
+            root.join("handoffs/current.json"),
+            serde_json::to_string_pretty(&packet).expect("json"),
+        )
+        .expect("write");
+
+        let persona_lines: String = (0..20)
+            .map(|i| format!("Persona voice line {i}: stay in character always"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(home.path().join("persona.md"), persona_lines).expect("persona");
+
+        let long_user = format!("Fellow Daoist Han — {}", "x".repeat(500));
+        std::fs::create_dir_all(home.path().join(".stateroot/user")).expect("user dir");
+        std::fs::write(home.path().join(".stateroot/user/USER.md"), &long_user).expect("user");
+
+        let prior = std::env::var("STATEROOT_TEST_HOME").ok();
+        // SAFETY: serialized by TEST_HOME_ENV.
+        unsafe { std::env::set_var("STATEROOT_TEST_HOME", home.path()) };
+        let digest = hook_digest(home.path(), project.path()).expect("digest");
+        match prior {
+            Some(value) => unsafe { std::env::set_var("STATEROOT_TEST_HOME", value) },
+            None => unsafe { std::env::remove_var("STATEROOT_TEST_HOME") },
+        }
+
+        assert!(digest.contains("Persona voice line 19: stay in character always"));
+        assert!(digest.contains(&long_user));
+        assert!(hook_identity_prefix(home.path(), home.path()).contains(&long_user));
+    }
+
+    #[test]
+    fn digest_budget_applies_to_work_body_not_identity() {
+        let home = tempfile::tempdir().expect("home");
+        let project = tempfile::tempdir().expect("project");
+        let root = local_store::root(project.path());
+        std::fs::create_dir_all(root.join("handoffs")).expect("mkdir");
+        let huge_summary = "W".repeat(DIGEST_BUDGET + 500);
+        let packet = json!({
+            "schema_version": "stateroot.handoff.v1",
+            "objective": "ship",
+            "context_summary": huge_summary,
+            "next_actions": ["continue"],
+        });
+        std::fs::write(
+            root.join("handoffs/current.json"),
+            serde_json::to_string_pretty(&packet).expect("json"),
+        )
+        .expect("write");
+        std::fs::write(
+            home.path().join("persona.md"),
+            "Identity marker line must survive budget\n",
+        )
+        .expect("persona");
+
+        let digest = hook_digest(home.path(), project.path()).expect("digest");
+        assert!(digest.contains("Identity marker line must survive budget"));
+        assert!(
+            !digest.contains(&huge_summary),
+            "work body should be budgeted: {}",
+            digest.len()
+        );
+        assert!(
+            digest.contains("Summary: W"),
+            "truncated summary prefix should remain: {}",
+            digest.len()
+        );
     }
 }

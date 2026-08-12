@@ -568,7 +568,7 @@ skipping duplicate. Pass --force to reprint.)\n\n{NO_REFETCH_FOOTER}"
     let user_md = stateroot_core::harness_install::home_dir()
         .ok()
         .and_then(|home| stateroot_core::user_profile::read(&home))
-        .map(|text| truncate(&text, HOT_APEX_BUDGET));
+        .filter(|text| !text.trim().is_empty());
     let memory_md = read_hot_apex(&root, local_store::MEMORY_CORE_PATH);
 
     // --- digest (stdout only) ---
@@ -972,5 +972,40 @@ mod tests {
         // Unrelated titles never dedupe.
         assert!(!is_dup_section("Soul", Some(&packet)));
         assert!(!is_dup_section("Project State", Some(&packet)));
+    }
+
+    #[test]
+    fn hot_apex_preserves_full_user_profile() {
+        let home = tempfile::tempdir().expect("home");
+        let long_user = format!("Fellow Daoist Han — {}", "u".repeat(HOT_APEX_BUDGET + 300));
+        std::fs::create_dir_all(home.path().join(".stateroot/user")).expect("user dir");
+        std::fs::write(home.path().join(".stateroot/user/USER.md"), &long_user).expect("user");
+
+        let user_md =
+            stateroot_core::user_profile::read(home.path()).filter(|text| !text.trim().is_empty());
+        let user = user_md.expect("user profile");
+        assert_eq!(user.len(), long_user.len());
+        assert!(user.contains(&"u".repeat(HOT_APEX_BUDGET + 50)));
+
+        let project = tempfile::tempdir().expect("project");
+        let root = local_store::root(project.path());
+        std::fs::create_dir_all(root.join("memories")).expect("mem dir");
+        let long_memory = "m".repeat(HOT_APEX_BUDGET + 400);
+        std::fs::write(root.join("memories/MEMORY.md"), &long_memory).expect("memory");
+        let memory_md = read_hot_apex(&root, local_store::MEMORY_CORE_PATH).expect("memory");
+        assert!(memory_md.chars().count() <= HOT_APEX_BUDGET);
+        assert!(!memory_md.contains(&"m".repeat(HOT_APEX_BUDGET + 50)));
+    }
+
+    #[test]
+    fn persona_resolve_stays_full_for_resume() {
+        let config = tempfile::tempdir().expect("config");
+        let persona_lines: String = (0..25)
+            .map(|i| format!("Resume persona voice line {i}: remain in character"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(config.path().join("persona.md"), persona_lines).expect("persona");
+        let persona = crate::commands::persona::resolve(config.path()).expect("persona");
+        assert!(persona.contains("Resume persona voice line 24: remain in character"));
     }
 }

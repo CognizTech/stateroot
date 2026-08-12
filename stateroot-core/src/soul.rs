@@ -323,7 +323,6 @@ pub fn render_projection(soul: &str, harness: Option<&str>) -> String {
                     && !line.starts_with("<!--")
                     && !is_voice_mask(line)
             })
-            .take(12)
             .map(|line| line.to_string())
             .collect();
         kept = vec!["## Working relationship".to_string(), String::new()];
@@ -351,19 +350,6 @@ fn flush_section(kept: &mut Vec<String>, heading: &str, capture: &[String]) {
     kept.push(body);
 }
 
-/// Per-harness presentation bounds (content lines identical — only emphasis
-/// and the cap differ). Ported from the server renderer.
-fn harness_line_cap(harness: &str) -> Option<usize> {
-    match crate::skill_federation::normalize_harness(harness).as_str() {
-        "statesmith" => None,
-        "claude" | "codex" => Some(16),
-        "cursor" => Some(14),
-        "openclaw" | "hermes" => Some(12),
-        "kimi" => Some(8),
-        _ => Some(16),
-    }
-}
-
 fn harness_emphasis_line(harness: &str) -> String {
     let id = crate::skill_federation::normalize_harness(harness);
     let Ok(reg) = crate::skill_federation::load_registry() else {
@@ -389,16 +375,9 @@ fn harness_emphasis_line(harness: &str) -> String {
     }
 }
 
+/// Per-harness emphasis line (content is identical — only framing differs).
 fn present_for_harness(kept: Vec<String>, harness: &str) -> String {
     let body: Vec<String> = kept.into_iter().skip(2).collect();
-    let body: Vec<String> = match harness_line_cap(harness) {
-        Some(cap) => body
-            .into_iter()
-            .filter(|line| !line.trim().is_empty())
-            .take(cap)
-            .collect(),
-        None => body,
-    };
     let mut out = vec!["## Working relationship".to_string(), String::new()];
     let emphasis = harness_emphasis_line(harness);
     if !emphasis.is_empty() {
@@ -442,15 +421,19 @@ mod tests {
     }
 
     #[test]
-    fn projection_filters_and_caps_per_harness() {
-        let soul = "# Soul\n\n## Communication\n\n- Tone: direct\n\n## Gossip\n\n- chatter\n\n## Principles\n\n- be correct\n";
+    fn projection_filters_without_line_caps() {
+        let soul = "# Soul\n\n## Communication\n\n- Tone: direct\n- Address the user as Fellow Daoist\n\n## Gossip\n\n- chatter\n\n## Principles\n\n- be correct\n- honor the cultivation register\n";
         let plain = render_projection(soul, None);
         assert!(plain.contains("### Communication"));
         assert!(plain.contains("### Principles"));
+        assert!(plain.contains("Fellow Daoist"));
+        assert!(plain.contains("honor the cultivation register"));
         assert!(!plain.contains("Gossip"), "{plain}");
-        let kimi = render_projection(soul, Some("kimi"));
-        assert!(kimi.starts_with("## Working relationship"));
-        let body_lines = kimi.lines().filter(|l| !l.trim().is_empty()).count();
-        assert!(body_lines <= 8 + 2, "kimi cap: {kimi}");
+        let cursor = render_projection(soul, Some("cursor"));
+        assert!(cursor.contains("Fellow Daoist"));
+        assert!(
+            cursor.contains("honor the cultivation register"),
+            "{cursor}"
+        );
     }
 }
