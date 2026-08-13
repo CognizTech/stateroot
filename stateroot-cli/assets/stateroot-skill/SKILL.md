@@ -111,4 +111,4 @@ Two learning layers — keep both current:
 
 First session after `stateroot init`: seed whichever layer is empty before other work. Later harnesses inherit and must update both when the user corrects you.
 When a fact is durable, call `memory_save`; when a procedure worked end-to-end, propose it with `skill_propose` (via the `stateroot` MCP tools where registered).
-Writes from harnesses stay quarantined (session-candidate/private) until a human approves them — never present your own proposals as already active.
+Learnings and memories take effect immediately — the next harness inherits them. Soul and skill changes still file a proposal.

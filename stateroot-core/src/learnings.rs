@@ -4,13 +4,15 @@
 //! `- **statement** <!-- id: …; confidence: 0.7; label: observed; sources: …; scope: …; status: … -->`
 //!
 //! Scopes: user (`~/.stateroot/learnings/`) and project
-//! (`.stateroot/learnings/`); candidates live in `_candidates/` and surface
-//! nowhere until promoted (lifecycle candidate → proposed → active, the
-//! promotion gated by local proposals).
+//! (`.stateroot/learnings/`). Explicit `learn record` / MCP `learn_record`
+//! writes learnings and memories as **active** immediately so the next
+//! harness inherits them. Distill still lands in `_candidates/` (lifecycle
+//! candidate → proposed → active, gated by local proposals) because those
+//! notes are inferred, not stated.
 //!
 //! Memory notes share the scoping ladder: `memory.md` per scope with
 //! `<!-- visibility: shared|private -->` markers on the note lines;
-//! foreign-origin notes land as session candidates.
+//! foreign-origin `memory_save` notes land as session candidates.
 
 use std::path::{Path, PathBuf};
 
@@ -234,6 +236,48 @@ pub fn append_candidate(
     Ok(true)
 }
 
+/// Write a learning as active immediately. Explicit `learn record` /
+/// MCP `learn_record` skips the proposal gate so the next harness inherits
+/// the note. Distill still lands in `_candidates/` until approved.
+/// Dedupes by normalized statement; promoting an existing candidate if needed.
+pub fn activate_learning(
+    project_dir: &Path,
+    home: &Path,
+    scope: &str,
+    statement: &str,
+    category: &str,
+    sources: &str,
+) -> Result<(String, bool), LearningsError> {
+    let normalized = normalize(statement);
+    let existing = read_scope(project_dir, home, scope);
+    if let Some(prior) = existing
+        .iter()
+        .find(|learning| normalize(&learning.statement) == normalized)
+    {
+        if prior.status != "active" {
+            let _ = promote(project_dir, home, scope, &prior.id)?;
+        }
+        return Ok((prior.id.clone(), false));
+    }
+    let mut learning = Learning::candidate(statement, category, 0.85, sources, scope);
+    learning.status = "active".into();
+    learning.active_at_root = crate::roots::latest_root(project_dir)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let root = scope_root(project_dir, home, scope);
+    std::fs::create_dir_all(&root)?;
+    let path = root.join(format!("{}.md", learning.category));
+    let mut body = std::fs::read_to_string(&path).unwrap_or_default();
+    if !body.ends_with('\n') && !body.is_empty() {
+        body.push('\n');
+    }
+    body.push_str(&learning.render_bullet());
+    body.push('\n');
+    std::fs::write(path, body)?;
+    Ok((learning.id, true))
+}
+
 /// Promote a candidate to active (proposal-approved): move the bullet from
 /// `_candidates/<cat>.md` into `<cat>.md` with `status: active`.
 pub fn promote(
@@ -448,7 +492,7 @@ pub struct Classification {
     pub category: String,
 }
 
-/// Classify a note into the review-loop lane (never a direct write).
+/// Classify a note into a review-loop lane.
 pub fn classify_note(note: &str) -> Classification {
     let lower = note.to_lowercase();
     let has = |markers: &[&str]| markers.iter().any(|m| lower.contains(m));
@@ -502,6 +546,71 @@ pub fn classify_note(note: &str) -> Classification {
         kind: "learning".into(),
         category: "general".into(),
     }
+}
+
+/// Result of an explicit `learn record` / MCP `learn_record`.
+#[derive(Debug, Clone)]
+pub enum Recorded {
+    /// Written to the active learnings store.
+    Learning {
+        /// Learning id (`lrn_…`).
+        id: String,
+        /// True when a new bullet was appended.
+        new: bool,
+    },
+    /// Appended to `memory.md` for the scope.
+    Memory {
+        /// Path of the memory file.
+        path: PathBuf,
+    },
+    /// Soul / skill still go through the proposal gate.
+    NeedsProposal,
+}
+
+/// Record an explicit note. Learnings and memories activate immediately;
+/// soul and skill still return [`Recorded::NeedsProposal`].
+pub fn record_note(
+    project_dir: &Path,
+    home: &Path,
+    note: &str,
+    scope: &str,
+    as_kind: Option<&str>,
+    origin: &str,
+) -> Result<(Classification, Recorded), LearningsError> {
+    let class = match as_kind {
+        Some(kind) => Classification {
+            kind: kind.to_string(),
+            category: match kind {
+                "soul" => "identity",
+                "skill" => "procedures",
+                "memory" => "facts",
+                "learning" => "general",
+                other => other,
+            }
+            .to_string(),
+        },
+        None => classify_note(note),
+    };
+    let recorded = match class.kind.as_str() {
+        "memory" => {
+            let path = append_memory_note(project_dir, home, scope, note)?;
+            Recorded::Memory { path }
+        }
+        "soul" | "skill" => Recorded::NeedsProposal,
+        _ => {
+            let category = if class.category.is_empty() {
+                "general"
+            } else {
+                class.category.as_str()
+            };
+            let (id, new) = activate_learning(project_dir, home, scope, note, category, origin)?;
+            Recorded::Learning { id, new }
+        }
+    };
+    if !matches!(recorded, Recorded::NeedsProposal) {
+        maybe_complete_first_run(project_dir, home)?;
+    }
+    Ok((class, recorded))
 }
 
 /// Deterministic distiller: mine episodic checkpoints + hook spool for
@@ -583,11 +692,12 @@ pub fn distill(project_dir: &Path, home: &Path) -> Vec<Learning> {
         .collect()
 }
 
-/// Whether a scope has any candidate or active learning.
+/// Whether a scope has any **active** learning (candidates do not count —
+/// they are not inherited by the next harness).
 pub fn scope_has_learnings(project_dir: &Path, home: &Path, scope: &str) -> bool {
     read_scope(project_dir, home, scope)
         .iter()
-        .any(|l| l.status == "active" || l.status == "candidate" || l.status == "proposed")
+        .any(|l| l.status == "active")
 }
 
 /// First-run / empty-scope status used to instruct harnesses.
@@ -648,7 +758,7 @@ pub fn compose_instruction(status: &BootstrapStatus) -> String {
         out.push_str("## Learnings (keep current)\n\n");
     }
     out.push_str(
-        "Every harness updates both layers. Cross-project taste → `--user` / `scope: user`. This-repo conventions → project scope. Read first (`stateroot learnings list` and `stateroot learnings list --user`); update rather than duplicate. Writes stay quarantined until approved.\n",
+        "Every harness updates both layers. Cross-project taste → `--user` / `scope: user`. This-repo conventions → project scope. Read first (`stateroot learnings list` and `stateroot learnings list --user`); update rather than duplicate. Learnings and memories take effect immediately so the next harness inherits them. Soul and skill changes still go through `stateroot proposals`.\n",
     );
     out
 }
@@ -877,12 +987,24 @@ mod tests {
         assert!(!after.first_session);
         assert!(after.project_needs_seed);
 
-        let project_learning =
-            Learning::candidate("this repo uses uv", "general", 0.5, "test", "project");
-        append_candidate(project.path(), home.path(), "project", &project_learning).unwrap();
-        let user_learning =
-            Learning::candidate("prefer small diffs", "preferences", 0.5, "test", "user");
-        append_candidate(project.path(), home.path(), "user", &user_learning).unwrap();
+        activate_learning(
+            project.path(),
+            home.path(),
+            "project",
+            "this repo uses uv",
+            "general",
+            "test",
+        )
+        .unwrap();
+        activate_learning(
+            project.path(),
+            home.path(),
+            "user",
+            "prefer small diffs",
+            "preferences",
+            "test",
+        )
+        .unwrap();
         maybe_complete_first_run(project.path(), home.path()).unwrap();
         let done = bootstrap_status(project.path(), home.path());
         assert!(!done.project_needs_seed);
@@ -891,6 +1013,59 @@ mod tests {
         assert!(keep.contains("keep current"));
         assert!(keep.contains("--user"));
         assert!(!keep.contains("are empty"));
+    }
+
+    #[test]
+    fn record_note_activates_learning_and_memory() {
+        let (project, home) = dirs();
+        std::fs::create_dir_all(project.path().join(".stateroot")).unwrap();
+        let (class, recorded) = record_note(
+            project.path(),
+            home.path(),
+            "prefer small diffs over rewrites",
+            "user",
+            None,
+            "test",
+        )
+        .unwrap();
+        assert_eq!(class.kind, "learning");
+        let Recorded::Learning { id, new } = recorded else {
+            panic!("expected active learning, got {recorded:?}");
+        };
+        assert!(new);
+        let active = read_scope(project.path(), home.path(), "user");
+        assert!(
+            active.iter().any(|l| l.id == id && l.status == "active"),
+            "{active:?}"
+        );
+
+        let (class, recorded) = record_note(
+            project.path(),
+            home.path(),
+            "the deploy uses systemd",
+            "project",
+            None,
+            "test",
+        )
+        .unwrap();
+        assert_eq!(class.kind, "memory");
+        let Recorded::Memory { path } = recorded else {
+            panic!("expected memory, got {recorded:?}");
+        };
+        let body = std::fs::read_to_string(path).unwrap();
+        assert!(body.contains("deploy uses systemd"));
+
+        let (class, recorded) = record_note(
+            project.path(),
+            home.path(),
+            "you are a careful reviewer",
+            "project",
+            None,
+            "test",
+        )
+        .unwrap();
+        assert_eq!(class.kind, "soul");
+        assert!(matches!(recorded, Recorded::NeedsProposal));
     }
 
     #[test]

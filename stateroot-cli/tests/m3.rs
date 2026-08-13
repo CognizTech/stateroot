@@ -156,7 +156,7 @@ fn soul_import_and_propose_flow() {
 }
 
 #[test]
-fn learn_record_classifies_and_approves_through_proposals() {
+fn learn_record_activates_learnings_and_gates_soul() {
     let config_home = tempfile::tempdir().expect("config home");
     seed_config_home(config_home.path(), "");
     let user_home = tempfile::tempdir().expect("user home");
@@ -173,11 +173,12 @@ fn learn_record_classifies_and_approves_through_proposals() {
         "record: {stdout}"
     );
 
-    // learning lane → candidate quarantined via proposal approve
-    stateroot(config_home.path(), user_home.path(), project.path())
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
         .args(["learn", "record", "prefer small diffs over rewrites"])
         .assert()
         .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(stdout.contains("[active; project]"), "record: {stdout}");
     stateroot(config_home.path(), user_home.path(), project.path())
         .args([
             "learn",
@@ -188,32 +189,19 @@ fn learn_record_classifies_and_approves_through_proposals() {
         .assert()
         .success();
     let out = stateroot(config_home.path(), user_home.path(), project.path())
-        .args(["learnings", "list", "--status", "candidate"])
+        .args(["learnings", "list", "--status", "active"])
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-    assert!(
-        stdout.contains("small diffs"),
-        "project candidate: {stdout}"
-    );
+    assert!(stdout.contains("small diffs"), "project active: {stdout}");
     let out = stateroot(config_home.path(), user_home.path(), project.path())
-        .args(["learnings", "list", "--user", "--status", "candidate"])
+        .args(["learnings", "list", "--user", "--status", "active"])
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
     assert!(
         stdout.contains("evidence over assertion"),
-        "user candidate: {stdout}"
-    );
-    // quarantine the candidate on disk the way distill does, then accept it
-    let out = stateroot(config_home.path(), user_home.path(), project.path())
-        .args(["learnings", "list", "--status", "pending"])
-        .assert()
-        .success();
-    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-    assert!(
-        stdout.contains("no learnings") || stdout.contains("Learnings"),
-        "list: {stdout}"
+        "user active: {stdout}"
     );
 }
 

@@ -3,8 +3,9 @@
 //! Line-delimited JSON-RPC over stdin/stdout, backed ENTIRELY by local
 //! stores (memory files, learnings, proposals, soul). No HTTP anywhere.
 //! The six tools mirror the server's W8 surface with identical
-//! names/semantics; writes from external harnesses are quarantined
-//! (session-candidate/private) until a human approves.
+//! names/semantics. `learn_record` activates learnings and memories
+//! immediately. Soul/skill and foreign `memory_save` still go through
+//! quarantine / proposals.
 
 use serde_json::{json, Value};
 
@@ -25,7 +26,7 @@ pub const TOOL_DEFS: &[(&str, &str, &str)] = &[
     ),
     (
         "learn_record",
-        "Record a correction or lesson. Use scope=user for global taste that follows the user across projects; scope=project (default) for this-repo conventions. Call after the user corrects you, on first session after init if learnings are empty, and whenever a durable preference appears. Files a proposal — never a direct write.",
+        "Record a correction or lesson. Use scope=user for global taste that follows the user across projects; scope=project (default) for this-repo conventions. Call after the user corrects you, on first session after init if learnings are empty, and whenever a durable preference appears. Learnings and memories take effect immediately so the next harness inherits them. Soul and skill changes still file a proposal.",
         r#"{"type":"object","properties":{"note":{"type":"string"},"scope":{"type":"string","enum":["user","project"]},"as_kind":{"type":"string","enum":["soul","memory","skill","learning"]}},"required":["note"]}"#,
     ),
     (
@@ -40,7 +41,7 @@ pub const TOOL_DEFS: &[(&str, &str, &str)] = &[
     ),
     (
         "learnings_list",
-        "List learnings (durable preferences, corrections) for self-orientation. Candidates surface nowhere until approved.",
+        "List learnings (durable preferences, corrections) for self-orientation. Active notes are inherited by every harness. Distill candidates stay hidden until approved.",
         r#"{"type":"object","properties":{"scope":{"type":"string","enum":["user","project"]},"status":{"type":"string"},"limit":{"type":"integer"}}}"#,
     ),
 ];
@@ -290,69 +291,61 @@ fn learn_record(ctx: &Ctx, home: &std::path::Path, args: &Value) -> String {
         return json!({"error": "note is required"}).to_string();
     }
     let forced = args.get("as_kind").and_then(|v| v.as_str());
-    let class = match forced {
-        Some(kind) => stateroot_core::learnings::Classification {
-            kind: kind.to_string(),
-            category: match kind {
-                "soul" => "identity",
-                "skill" => "procedures",
-                "memory" => "facts",
-                _ => "general",
-            }
-            .to_string(),
-        },
-        None => stateroot_core::learnings::classify_note(note),
-    };
     let scope = args
         .get("scope")
         .and_then(|v| v.as_str())
         .unwrap_or("project");
     let scope = if scope == "user" { "user" } else { "project" };
-    let payload = match class.kind.as_str() {
-        "learning" => {
-            let candidate = stateroot_core::learnings::Learning::candidate(
-                note,
-                &class.category,
-                0.45,
-                "mcp learn_record",
-                scope,
-            );
-            let _ = stateroot_core::learnings::append_candidate(&ctx.cwd, home, scope, &candidate);
-            let _ = stateroot_core::learnings::maybe_complete_first_run(&ctx.cwd, home);
-            json!({
-                "id": candidate.id,
-                "statement": candidate.statement,
-                "category": candidate.category,
-                "confidence": candidate.confidence,
-                "label": candidate.label,
-                "sources": candidate.sources,
-                "scope": candidate.scope,
-            })
-        }
-        _ => json!({"content": note, "scope": scope, "origin": "mcp learn_record"}),
-    };
-    match stateroot_core::proposals::create(
+    match stateroot_core::learnings::record_note(
         &ctx.cwd,
-        &class.kind,
-        &format!(
-            "{}: {}",
-            class.kind,
-            note.chars().take(60).collect::<String>()
-        ),
-        &format!(
-            "classified as {} ({}) via mcp learn_record",
-            class.kind, class.category
-        ),
-        payload,
-        json!({"route": "mcp learn_record"}),
+        home,
+        note,
+        scope,
+        forced,
+        "mcp learn_record",
     ) {
-        Ok(proposal) => json!({
+        Ok((class, stateroot_core::learnings::Recorded::Learning { id, new })) => json!({
             "classification": {"kind": class.kind, "category": class.category},
-            "proposal_id": proposal.id,
-            "status": "pending",
+            "status": "active",
+            "scope": scope,
+            "id": id,
+            "new": new,
         })
         .to_string(),
-        Err(err) => json!({"error": format!("proposal failed: {err}")}).to_string(),
+        Ok((class, stateroot_core::learnings::Recorded::Memory { path })) => json!({
+            "classification": {"kind": class.kind, "category": class.category},
+            "status": "active",
+            "scope": scope,
+            "path": path.display().to_string(),
+        })
+        .to_string(),
+        Ok((class, stateroot_core::learnings::Recorded::NeedsProposal)) => {
+            let payload = json!({"content": note, "scope": scope, "origin": "mcp learn_record"});
+            match stateroot_core::proposals::create(
+                &ctx.cwd,
+                &class.kind,
+                &format!(
+                    "{}: {}",
+                    class.kind,
+                    note.chars().take(60).collect::<String>()
+                ),
+                &format!(
+                    "classified as {} ({}) via mcp learn_record",
+                    class.kind, class.category
+                ),
+                payload,
+                json!({"route": "mcp learn_record"}),
+            ) {
+                Ok(proposal) => json!({
+                    "classification": {"kind": class.kind, "category": class.category},
+                    "proposal_id": proposal.id,
+                    "status": "pending",
+                })
+                .to_string(),
+                Err(err) => json!({"error": format!("proposal failed: {err}")}).to_string(),
+            }
+        }
+        Err(err) => json!({"error": format!("record failed: {err}")}).to_string(),
     }
 }
 

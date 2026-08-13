@@ -535,7 +535,7 @@ pub struct LearnArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum LearnAction {
-    /// Classify a note and file it as a proposal (never a direct write).
+    /// Record a lesson or memory (active immediately). Soul/skill still file a proposal.
     Record {
         /// The note to record.
         note: String,

@@ -163,7 +163,7 @@ fn stdio_round_trips_all_six_tools() {
         "private must not leak: {recall}"
     );
 
-    // learn_record → classification + proposal
+    // learn_record → classification + active learning (no approval gate)
     let learned = client.call(
         "tools/call",
         json!({"name": "learn_record", "arguments": {"note": "actually the build uses --locked"}}),
@@ -174,7 +174,8 @@ fn stdio_round_trips_all_six_tools() {
         json!("learning"),
         "{learned}"
     );
-    assert!(learned["proposal_id"].as_str().is_some(), "{learned}");
+    assert_eq!(learned["status"], json!("active"), "{learned}");
+    assert!(learned["id"].as_str().is_some(), "{learned}");
 
     // skill_propose → quarantined candidate, never projected
     let proposed = client.call(
@@ -324,7 +325,7 @@ fn instruction_block_and_install_register_stdio_mcp() {
     assert!(block.contains("learn_record"), "block: {block}");
     assert!(block.contains("memory_save"), "block: {block}");
     assert!(block.contains("skill_propose"), "block: {block}");
-    assert!(block.contains("quarantined"), "block: {block}");
+    assert!(block.contains("take effect immediately"), "block: {block}");
 
     // the harness MCP config registers the local stdio server (cursor has an
     // MCP target; codex's adapter deliberately registers none upstream)

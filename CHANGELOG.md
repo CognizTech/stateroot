@@ -3,6 +3,12 @@
 All notable changes to StateRoot. Format loosely follows Keep a Changelog;
 StateRoot is pre-1.0 and milestones land as minor versions.
 
+## Unreleased
+
+- `learn record` / MCP `learn_record` activate learnings and memories
+  immediately so the next harness inherits them. Soul and skill still file
+  a proposal. Distill remains gated (inferred notes).
+
 ## [0.1.0] — 2026-08 (first public release)
 
 The local-first, open-source StateRoot variant: a fully local substrate for
