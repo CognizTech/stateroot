@@ -432,9 +432,20 @@ mod tests {
     fn lint_finds_missing_index() {
         let p = project();
         ensure_layout(p.path()).unwrap();
-        write_page(p.path(), "auth", "Auth lives in crates/auth", "auth module", "entity").unwrap();
+        write_page(
+            p.path(),
+            "auth",
+            "Auth lives in crates/auth",
+            "auth module",
+            "entity",
+        )
+        .unwrap();
         // Drop index entry artificially
-        fs::write(wiki_path(p.path(), INDEX_FILE), "# StateRoot Wiki Index\n\n").unwrap();
+        fs::write(
+            wiki_path(p.path(), INDEX_FILE),
+            "# StateRoot Wiki Index\n\n",
+        )
+        .unwrap();
         let findings = lint(p.path()).unwrap();
         assert!(findings.iter().any(|f| f.code == "missing_index"));
     }

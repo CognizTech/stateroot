@@ -53,7 +53,11 @@ pub fn sync(ctx: &Ctx) -> Result<()> {
     let report = core::sync(&ctx.cwd, &home).map_err(|e| anyhow::anyhow!(e))?;
     println!(
         "rules sync: product-intent {} · imported {} · updated {} · unchanged {} · pruned {}",
-        if report.seeded { "refreshed" } else { "current" },
+        if report.seeded {
+            "refreshed"
+        } else {
+            "current"
+        },
         report.imported,
         report.updated,
         report.unchanged,

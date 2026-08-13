@@ -48,8 +48,9 @@ fn init_creates_project_and_convenience_layer() {
     assert!(project.path().join(".stateroot/manifest.json").is_file());
     assert!(project.path().join(".stateroot/first-run.json").is_file());
     assert!(project.path().join(".stateroot/learnings").is_dir());
-    let rules = std::fs::read_to_string(user_home.path().join(".stateroot/rules/product-intent.md"))
-        .expect("product-intent");
+    let rules =
+        std::fs::read_to_string(user_home.path().join(".stateroot/rules/product-intent.md"))
+            .expect("product-intent");
     assert!(
         rules.contains("Product Intent Is a Hard Constraint"),
         "shipped constitution missing: {rules}"
@@ -104,7 +105,10 @@ fn rules_sync_imports_harness_files() {
         .success();
     let list = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
     assert!(list.contains("product-intent"), "list: {list}");
-    assert!(list.contains("no-foo") || list.contains("cursor"), "list: {list}");
+    assert!(
+        list.contains("no-foo") || list.contains("cursor"),
+        "list: {list}"
+    );
 
     let out = stateroot(config_home.path(), user_home.path(), project.path())
         .args(["rules", "show", "product-intent"])

@@ -90,7 +90,12 @@ fn content_fingerprint(project_dir: &Path, home: &Path) -> String {
                 paths.sort();
                 for path in paths {
                     if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                        hasher.update(path.file_name().and_then(|n| n.to_str()).unwrap_or("").as_bytes());
+                        hasher.update(
+                            path.file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("")
+                                .as_bytes(),
+                        );
                         hasher.update(fs::read(&path).unwrap_or_default());
                     }
                 }
@@ -392,8 +397,14 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         local_store::init_skeleton(project.path(), "p", "P", "default").unwrap();
         let home = tempfile::tempdir().unwrap();
-        hot_apex::add(project.path(), home.path(), "memory", "api listens on port 7777", false)
-            .unwrap();
+        hot_apex::add(
+            project.path(),
+            home.path(),
+            "memory",
+            "api listens on port 7777",
+            false,
+        )
+        .unwrap();
         wiki::write_page(
             project.path(),
             "auth",
@@ -410,12 +421,15 @@ mod tests {
         rebuild(project.path(), home.path()).unwrap();
         let hits = search(project.path(), home.path(), "JWT auth", 5, true).unwrap();
         assert!(
-            hits.iter().any(|h| h.text.contains("JWT") || h.path.contains("auth")),
+            hits.iter()
+                .any(|h| h.text.contains("JWT") || h.path.contains("auth")),
             "{hits:?}"
         );
         let hits2 = search(project.path(), home.path(), "postgres learnings", 5, true).unwrap();
         assert!(
-            hits2.iter().any(|h| h.text.to_lowercase().contains("postgres")),
+            hits2
+                .iter()
+                .any(|h| h.text.to_lowercase().contains("postgres")),
             "{hits2:?}"
         );
         let hits3 = search(project.path(), home.path(), "7777", 5, true).unwrap();
@@ -449,6 +463,9 @@ mod tests {
         let external = search(project.path(), home.path(), "secret family", 5, false).unwrap();
         assert!(!external.iter().any(|h| h.private), "{external:?}");
         let pub_hits = search(project.path(), home.path(), "deploy port", 5, false).unwrap();
-        assert!(pub_hits.iter().any(|h| h.text.contains("80")), "{pub_hits:?}");
+        assert!(
+            pub_hits.iter().any(|h| h.text.contains("80")),
+            "{pub_hits:?}"
+        );
     }
 }
