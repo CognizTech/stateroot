@@ -294,11 +294,7 @@ pub fn add(
         ));
     }
     write_memory_body(&path, &entries)?;
-    Ok(MutationResult::ok(
-        usage(candidate.len(), limit),
-        path,
-        false,
-    ))
+    Ok(MutationResult::ok(usage(candidate.len(), limit), path, false))
 }
 
 fn add_user(home: &Path, entry: &str, limit: usize) -> Result<MutationResult, HotApexError> {
@@ -435,11 +431,7 @@ pub fn replace(
         ));
     }
     write_memory_body(&path, &entries)?;
-    Ok(MutationResult::ok(
-        usage(candidate.len(), limit),
-        path,
-        false,
-    ))
+    Ok(MutationResult::ok(usage(candidate.len(), limit), path, false))
 }
 
 /// Remove the first entry (or substring) matching `old_text`.
@@ -512,11 +504,7 @@ pub fn remove(
     }
     write_memory_body(&path, &entries)?;
     let candidate = join_entries(&entries);
-    Ok(MutationResult::ok(
-        usage(candidate.len(), limit),
-        path,
-        false,
-    ))
+    Ok(MutationResult::ok(usage(candidate.len(), limit), path, false))
 }
 
 /// Migrate legacy `memory.md` bullets into `memories/MEMORY.md` once.
@@ -536,15 +524,15 @@ pub fn migrate_legacy(project_dir: &Path, home: &Path) -> Result<usize, HotApexE
         project_dir,
         home,
     )?;
-    moved += migrate_one_file(
-        &home.join(".stateroot").join(LEGACY_USER_MEMORY),
-        project_dir,
-        home,
-    )?;
+    moved += migrate_one_file(&home.join(".stateroot").join(LEGACY_USER_MEMORY), project_dir, home)?;
     Ok(moved)
 }
 
-fn migrate_one_file(legacy: &Path, project_dir: &Path, home: &Path) -> Result<usize, HotApexError> {
+fn migrate_one_file(
+    legacy: &Path,
+    project_dir: &Path,
+    home: &Path,
+) -> Result<usize, HotApexError> {
     if !legacy.is_file() {
         return Ok(0);
     }
@@ -556,13 +544,7 @@ fn migrate_one_file(legacy: &Path, project_dir: &Path, home: &Path) -> Result<us
     }
     let mut count = 0usize;
     for bullet in bullets {
-        let result = add(
-            project_dir,
-            home,
-            "memory",
-            &bullet,
-            bullet.contains(PRIVATE_MARKER),
-        )?;
+        let result = add(project_dir, home, "memory", &bullet, bullet.contains(PRIVATE_MARKER))?;
         if result.success && !result.noop {
             count += 1;
         }
@@ -635,9 +617,7 @@ mod tests {
         assert!(!body.contains("8080"));
         let r4 = remove(project.path(), home.path(), "memory", "9090").unwrap();
         assert!(r4.success);
-        assert!(
-            split_entries(&read_text(project.path(), home.path(), "memory").unwrap()).is_empty()
-        );
+        assert!(split_entries(&read_text(project.path(), home.path(), "memory").unwrap()).is_empty());
     }
 
     #[test]
@@ -645,14 +625,8 @@ mod tests {
         let (project, home) = dirs();
         let big = "x".repeat(MEMORY_CHAR_LIMIT - 10);
         add(project.path(), home.path(), "memory", &big, false).unwrap();
-        let r = add(
-            project.path(),
-            home.path(),
-            "memory",
-            "another fact that is long enough",
-            false,
-        )
-        .unwrap();
+        let r = add(project.path(), home.path(), "memory", "another fact that is long enough", false)
+            .unwrap();
         assert!(!r.success);
         assert!(r.error.as_ref().unwrap().contains("exceed"));
         assert!(r.current_entries.is_some());

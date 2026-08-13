@@ -166,18 +166,22 @@ pub async fn show(ctx: &Ctx, slug: &str) -> Result<()> {
 pub async fn promote(ctx: &Ctx, slug: &str, rationale: Option<&str>) -> Result<()> {
     ctx.require_project()?;
     let home = home(ctx)?;
-    let scope =
-        if stateroot_core::skill_federation::activate_skill(&ctx.cwd, &home, "project", slug)
-            .map_err(|e| anyhow!(e))?
-        {
-            "project"
-        } else if stateroot_core::skill_federation::activate_skill(&ctx.cwd, &home, "user", slug)
-            .map_err(|e| anyhow!(e))?
-        {
-            "user"
-        } else {
-            anyhow::bail!("skill '{slug}' not found in project or user store");
-        };
+    let scope = if stateroot_core::skill_federation::activate_skill(
+        &ctx.cwd,
+        &home,
+        "project",
+        slug,
+    )
+    .map_err(|e| anyhow!(e))?
+    {
+        "project"
+    } else if stateroot_core::skill_federation::activate_skill(&ctx.cwd, &home, "user", slug)
+        .map_err(|e| anyhow!(e))?
+    {
+        "user"
+    } else {
+        anyhow::bail!("skill '{slug}' not found in project or user store");
+    };
     let options = stateroot_core::skill_federation::SyncOptions {
         dry_run: false,
         push: true,

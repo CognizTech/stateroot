@@ -40,8 +40,8 @@ pub fn add(ctx: &Ctx, target: &str, content: &str, private: bool) -> Result<()> 
     ctx.require_project()?;
     let home = home()?;
     hot_apex::ensure_migrated(&ctx.cwd, &home);
-    let r =
-        hot_apex::add(&ctx.cwd, &home, target, content, private).map_err(|e| anyhow::anyhow!(e))?;
+    let r = hot_apex::add(&ctx.cwd, &home, target, content, private)
+        .map_err(|e| anyhow::anyhow!(e))?;
     let _ = memory_index::rebuild_if_needed(&ctx.cwd, &home);
     print_result(&r);
     if !r.success {
@@ -82,10 +82,7 @@ pub fn show(ctx: &Ctx, target: &str) -> Result<()> {
     ctx.require_project()?;
     let home = home()?;
     hot_apex::ensure_migrated(&ctx.cwd, &home);
-    print!(
-        "{}",
-        hot_apex::show(&ctx.cwd, &home, target).map_err(|e| anyhow::anyhow!(e))?
-    );
+    print!("{}", hot_apex::show(&ctx.cwd, &home, target).map_err(|e| anyhow::anyhow!(e))?);
     Ok(())
 }
 
@@ -102,10 +99,7 @@ pub fn recall(ctx: &Ctx, query: &str, limit: usize) -> Result<()> {
     }
     for hit in hits {
         let priv_mark = if hit.private { " [private]" } else { "" };
-        println!(
-            "[{} | {} | score={:.3}]{priv_mark}",
-            hit.kind, hit.path, hit.score
-        );
+        println!("[{} | {} | score={:.3}]{priv_mark}", hit.kind, hit.path, hit.score);
         let snippet = if hit.text.len() > 400 {
             format!("{}…", &hit.text[..400])
         } else {

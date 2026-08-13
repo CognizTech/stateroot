@@ -5,6 +5,15 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+## [0.1.1] — 2026-08-13
+
+- README and public docs at https://stateroot.dev (site source is not in this
+  repository). Maintainer notes stay under repo `docs/`. Discord:
+  https://discord.gg/SfbKEPRD7
+- Tagged releases attach Linux + Windows binaries, `StateRootSetup-x64.msi`,
+  install scripts, and `checksums.txt`. Dev CI (fmt/clippy/test and the
+  rolling `nightly` prerelease) is skipped for commits marked `[skip tests]`
+  and does not re-run on `v*` tags.
 - Remove unused `login` / `logout` / `repo` / `sync` / `run` / `runs`
   commands, OAuth/keyring auth, and server-side `remove`. Agentic synthesize
   uses a local API key only.
@@ -94,4 +103,5 @@ AI-assisted work — no server anywhere.
 - Harness instruction blocks carry the two-sentence self-improvement
   guidance; install registers the stdio server into harness configs.
 
-[0.1.0]: https://github.com/stateroot/stateroot/releases/tag/v0.1.0
+[0.1.1]: https://github.com/CognizTech/stateroot/releases/tag/v0.1.1
+[0.1.0]: https://github.com/CognizTech/stateroot/releases/tag/v0.1.0

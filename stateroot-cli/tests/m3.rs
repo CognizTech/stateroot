@@ -228,8 +228,12 @@ fn learnings_lifecycle_and_distill_and_resume_surface() {
         "distill: {stdout}"
     );
 
-    let inbox = std::fs::read_to_string(project.path().join(".stateroot/memories/pages/_inbox.md"))
-        .expect("inbox");
+    let inbox = std::fs::read_to_string(
+        project
+            .path()
+            .join(".stateroot/memories/pages/_inbox.md"),
+    )
+    .expect("inbox");
     assert!(
         inbox.contains("the port is 9060"),
         "inbox should hold distilled notes: {inbox}"

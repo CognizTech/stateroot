@@ -562,7 +562,10 @@ pub fn distill(project_dir: &Path, home: &Path) -> Vec<Learning> {
 /// Mine unique statements from episodic + spool (normalized dedupe against
 /// existing learnings and existing inbox bullets). Returns
 /// `(statement, sources, confidence)`.
-pub fn distill_statements(project_dir: &Path, home: &Path) -> Vec<(String, String, f64)> {
+pub fn distill_statements(
+    project_dir: &Path,
+    home: &Path,
+) -> Vec<(String, String, f64)> {
     let mut statements: Vec<(String, String)> = Vec::new(); // (note, source)
     let episodic =
         std::fs::read_to_string(local_store::root(project_dir).join(local_store::EPISODIC_PATH))
@@ -606,12 +609,11 @@ pub fn distill_statements(project_dir: &Path, home: &Path) -> Vec<(String, Strin
         }
     }
 
-    let mut existing: std::collections::BTreeSet<String> =
-        ["user", "workspace", "project", "domain"]
-            .iter()
-            .flat_map(|scope| read_scope(project_dir, home, scope))
-            .map(|l| normalize(&l.statement))
-            .collect();
+    let mut existing: std::collections::BTreeSet<String> = ["user", "workspace", "project", "domain"]
+        .iter()
+        .flat_map(|scope| read_scope(project_dir, home, scope))
+        .map(|l| normalize(&l.statement))
+        .collect();
     // Also skip bullets already in the wiki inbox.
     let inbox = local_store::root(project_dir)
         .join(crate::wiki::PAGES_DIR)
@@ -643,8 +645,9 @@ pub fn distill_statements(project_dir: &Path, home: &Path) -> Vec<(String, Strin
 pub fn distill_to_inbox(project_dir: &Path, home: &Path) -> Result<usize, LearningsError> {
     let stmts = distill_statements(project_dir, home);
     let bullets: Vec<String> = stmts.into_iter().map(|(s, _, _)| s).collect();
-    crate::wiki::append_inbox_bullets(project_dir, &bullets)
-        .map_err(|e| LearningsError::Io(std::io::Error::other(e.to_string())))
+    crate::wiki::append_inbox_bullets(project_dir, &bullets).map_err(|e| {
+        LearningsError::Io(std::io::Error::other(e.to_string()))
+    })
 }
 
 /// Whether a scope has any **active** learning (candidates do not count —
