@@ -14,6 +14,11 @@ use include_dir::{include_dir, Dir};
 use super::blocks::ensure_marked_block;
 use super::{note, Ctx};
 
+fn home(ctx: &Ctx) -> Result<std::path::PathBuf> {
+    let _ = ctx;
+    stateroot_core::harness_install::home_dir().map_err(|e| anyhow!(e))
+}
+
 /// The bundled skill assets, embedded at compile time.
 static ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/assets/stateroot-skill");
 
@@ -156,25 +161,39 @@ pub async fn show(ctx: &Ctx, slug: &str) -> Result<()> {
     anyhow::bail!("skill '{slug}' not found locally");
 }
 
-/// `stateroot skill promote <slug>` — open a proposal to activate a
-/// quarantined skill package (M4). Nothing projects until
-/// `stateroot proposals approve` activates it.
+/// `stateroot skill promote <slug>` — activate a skill package and project
+/// it to installed harnesses. Optional audit proposal is recorded, not gated.
 pub async fn promote(ctx: &Ctx, slug: &str, rationale: Option<&str>) -> Result<()> {
     ctx.require_project()?;
-    let proposal = stateroot_core::proposals::create(
+    let home = home(ctx)?;
+    let scope =
+        if stateroot_core::skill_federation::activate_skill(&ctx.cwd, &home, "project", slug)
+            .map_err(|e| anyhow!(e))?
+        {
+            "project"
+        } else if stateroot_core::skill_federation::activate_skill(&ctx.cwd, &home, "user", slug)
+            .map_err(|e| anyhow!(e))?
+        {
+            "user"
+        } else {
+            anyhow::bail!("skill '{slug}' not found in project or user store");
+        };
+    let options = stateroot_core::skill_federation::SyncOptions {
+        dry_run: false,
+        push: true,
+        pull: false,
+        cmd_probe: None,
+    };
+    let _ = stateroot_core::skill_federation::sync_project(&ctx.cwd, &options, None);
+    let _ = stateroot_core::proposals::create(
         &ctx.cwd,
         "skill",
         &format!("activate skill {slug}"),
         rationale.unwrap_or("stateroot skill promote"),
-        serde_json::json!({"slug": slug, "scope": "project"}),
-        serde_json::json!({"route": "skill promote"}),
-    )
-    .map_err(|e| anyhow!(e))?;
-    println!("proposal {} created (pending)", &proposal.id[..8]);
-    println!(
-        "approve with: stateroot proposals approve {} — then the next `skill sync` projects it",
-        &proposal.id[..8]
+        serde_json::json!({"slug": slug, "scope": scope}),
+        serde_json::json!({"route": "skill promote", "status": "active"}),
     );
+    println!("skill '{slug}' activated and projected ({scope})");
     Ok(())
 }
 

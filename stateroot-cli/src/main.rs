@@ -11,8 +11,8 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 use cli::{
-    Command, HandoffAction, LearnAction, LearningsAction, McpAction, ProposalsAction, RepoAction,
-    RunsAction, SkillAction, SoulAction,
+    Command, HandoffAction, LearnAction, LearningsAction, McpAction, MemoryAction, ProposalsAction,
+    RulesAction, SkillAction, SoulAction, WikiAction,
 };
 use commands::Ctx;
 
@@ -32,8 +32,6 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = cli::Cli::parse();
     let ctx = Ctx::load()?;
-    // Controlled launch: cloud commands are gated behind the preview flag.
-    let cloud_preview = commands::cloud_preview_enabled(&ctx);
 
     // The updater runs only on user-facing entrypoints — never on hook or
     // mcp-stdio (harness event flows must stay fast) and never on
@@ -48,9 +46,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Init(args) => commands::init::run(&ctx, args).await?,
-        Command::Remove(args) => {
-            commands::remove::run(&ctx, args.keep_server_state, args.yes, args.dry_run).await?
-        }
+        Command::Remove(args) => commands::remove::run(&ctx, args.yes, args.dry_run).await?,
         Command::Import(args) => {
             commands::import::run(
                 &ctx,
@@ -63,13 +59,16 @@ async fn main() -> anyhow::Result<()> {
             )
             .await?;
         }
-        Command::Resume(args) => commands::resume::run(
-            &ctx,
-            args.harness.as_deref(),
-            args.no_accept,
-            args.force,
-            args.deterministic,
-        )?,
+        Command::Resume(args) => {
+            commands::resume::run(
+                &ctx,
+                args.harness.as_deref(),
+                args.no_accept,
+                args.force,
+                args.deterministic,
+            )
+            .await?
+        }
         Command::Checkpoint(args) => commands::checkpoint::run(&ctx, &args.note, &args.files)?,
         Command::Handoff(args) => match args.action {
             HandoffAction::Write(args) => {
@@ -165,51 +164,75 @@ async fn main() -> anyhow::Result<()> {
             ProposalsAction::Reject { id } => commands::proposals::reject(&ctx, &id)?,
         },
         Command::Learnings(args) => match args.action {
-            LearningsAction::List { user, status } => {
-                commands::learnings::list(&ctx, user, status.as_deref())?
-            }
-            LearningsAction::Accept { id, user } => commands::learnings::accept(&ctx, &id, user)?,
-            LearningsAction::Reject { id, user } => commands::learnings::reject(&ctx, &id, user)?,
+            LearningsAction::List {
+                user,
+                workspace,
+                domain,
+                status,
+            } => commands::learnings::list(
+                &ctx,
+                user,
+                workspace,
+                domain.as_deref(),
+                status.as_deref(),
+            )?,
+            LearningsAction::Accept {
+                id,
+                user,
+                workspace,
+                domain,
+            } => commands::learnings::accept(&ctx, &id, user, workspace, domain.as_deref())?,
+            LearningsAction::Reject {
+                id,
+                user,
+                workspace,
+                domain,
+            } => commands::learnings::reject(&ctx, &id, user, workspace, domain.as_deref())?,
             LearningsAction::Edit {
                 id,
                 statement,
                 user,
-            } => commands::learnings::edit(&ctx, &id, &statement, user)?,
+                workspace,
+                domain,
+            } => commands::learnings::edit(
+                &ctx,
+                &id,
+                &statement,
+                user,
+                workspace,
+                domain.as_deref(),
+            )?,
             LearningsAction::Distill => commands::learnings::distill(&ctx)?,
         },
         Command::Learn(args) => match args.action {
-            LearnAction::Record { note, user } => commands::learn::record(&ctx, &note, user)?,
+            LearnAction::Record {
+                note,
+                user,
+                workspace,
+                domain,
+            } => commands::learn::record(&ctx, &note, user, workspace, domain.as_deref())?,
         },
         Command::Synthesize { force } => commands::synthesize::run(&ctx, force).await?,
-        Command::Login { .. } if !cloud_preview => commands::cloud_coming_soon(),
-        Command::Login { via } => commands::auth::login(&ctx, &via).await?,
-        Command::Logout if !cloud_preview => commands::cloud_coming_soon(),
-        Command::Logout => commands::auth::logout(&ctx)?,
-        Command::Repo(_) if !cloud_preview => commands::cloud_coming_soon(),
-        Command::Sync(_) if !cloud_preview => commands::cloud_coming_soon(),
-        Command::Run(_) if !cloud_preview => commands::cloud_coming_soon(),
-        Command::Runs(_) if !cloud_preview => commands::cloud_coming_soon(),
-        Command::Repo(args) => match args.action {
-            RepoAction::Link { repo, layout } => {
-                commands::repo::link(&ctx, &repo, layout.as_deref()).await?
-            }
-            RepoAction::Status => commands::repo::status(&ctx)?,
+        Command::Memory(args) => match args.action {
+            MemoryAction::Add {
+                content,
+                target,
+                private,
+            } => commands::memory::add(&ctx, &target, &content, private)?,
+            MemoryAction::Replace {
+                content,
+                old,
+                target,
+                private,
+            } => commands::memory::replace(&ctx, &target, &old, &content, private)?,
+            MemoryAction::Remove { old, target } => commands::memory::remove(&ctx, &target, &old)?,
+            MemoryAction::Show { target } => commands::memory::show(&ctx, &target)?,
+            MemoryAction::Recall { query, limit } => commands::memory::recall(&ctx, &query, limit)?,
         },
-        Command::Sync(args) => commands::sync::run(&ctx, args.push, args.pull)?,
-        Command::Run(args) => {
-            commands::cloud::run(
-                &ctx,
-                &args.cloud,
-                args.from.as_deref(),
-                args.harness.as_deref(),
-                args.verification.as_deref(),
-                args.watch,
-            )
-            .await?
-        }
-        Command::Runs(args) => match args.action {
-            RunsAction::List => commands::cloud::list(&ctx).await?,
-            RunsAction::Status { id } => commands::cloud::status(&ctx, &id).await?,
+        Command::Wiki(args) => match args.action {
+            WikiAction::Show { path } => commands::wiki::show(&ctx, &path)?,
+            WikiAction::Lint => commands::wiki::lint(&ctx)?,
+            WikiAction::Compile { force } => commands::wiki::compile(&ctx, force).await?,
         },
         Command::McpStdio => commands::mcp_stdio::run(&ctx).await?,
         Command::Skill(args) => match args.action {
@@ -227,6 +250,11 @@ async fn main() -> anyhow::Result<()> {
                 commands::skill::promote(&ctx, &slug, rationale.as_deref()).await?
             }
             SkillAction::Doctor => commands::skill::doctor(&ctx)?,
+        },
+        Command::Rules(args) => match args.action {
+            RulesAction::List => commands::rules::list(&ctx)?,
+            RulesAction::Show { slug } => commands::rules::show(&ctx, &slug)?,
+            RulesAction::Sync => commands::rules::sync(&ctx)?,
         },
         Command::Mcp(args) => match args.action {
             McpAction::Scan { json } => commands::mcp::scan(&ctx, json)?,

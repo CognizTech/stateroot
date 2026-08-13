@@ -11,7 +11,6 @@ fn stateroot(config_home: &Path, user_home: &Path, cwd: &Path) -> Command {
     cmd.env("STATEROOT_HOME", config_home)
         .env("STATEROOT_TEST_HOME", user_home)
         .env("STATEROOT_TEST_CMD_PROBES", "")
-        .env("STATEROOT_CREDENTIALS", "file")
         .current_dir(cwd);
     cmd
 }

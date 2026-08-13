@@ -268,14 +268,26 @@ fn latest_matching_native_session_enriches_without_other_harness_or_invention() 
         1
     );
     let tail = packet["conversation_tail"].as_array().expect("tail");
-    assert_eq!(tail.len(), 4);
-    assert_eq!(tail[0]["text"], "real user prompt 2");
-    assert_eq!(tail[1]["text"], "real user prompt 3");
-    assert_eq!(tail[2]["text"], "assistant response 3");
-    assert!(tail[3]["text"]
+    assert!(
+        tail.len() >= 4,
+        "full uncapped tail expected, got {}",
+        tail.len()
+    );
+    assert!(
+        tail.iter().any(|e| e["text"] == "real user prompt 2"),
+        "{tail:?}"
+    );
+    assert!(
+        tail.iter().any(|e| e["text"] == "real user prompt 3"),
+        "{tail:?}"
+    );
+    assert!(
+        tail.iter().any(|e| e["text"] == "assistant response 3"),
+        "{tail:?}"
+    );
+    assert!(tail.iter().any(|e| e["text"]
         .as_str()
-        .expect("text")
-        .contains("Completed the structured"));
+        .is_some_and(|text| text.contains("Completed the structured"))));
     assert!(packet.to_string().contains("Transcript outcome: completed"));
     assert!(packet["warnings"]
         .as_array()
@@ -331,7 +343,7 @@ fn latest_matching_native_session_enriches_without_other_harness_or_invention() 
 }
 
 #[test]
-fn quality_rejections_are_atomic_and_missing_transcript_is_honest() {
+fn quality_warnings_write_anyway_unknown_destination_still_refuses() {
     let (config, home, project) = project();
     let valid = write_json(
         project.path(),
@@ -344,9 +356,6 @@ fn quality_rejections_are_atomic_and_missing_transcript_is_honest() {
         ])
         .assert()
         .success();
-    let path = project.path().join(".stateroot/handoffs/current.json");
-    let before = std::fs::read(&path).expect("before");
-    let history_before = history_count(project.path());
     let packet = current(project.path());
     assert!(packet["warnings"]
         .as_array()
@@ -356,7 +365,7 @@ fn quality_rejections_are_atomic_and_missing_transcript_is_honest() {
             .as_str()
             .is_some_and(|text| text.contains("no matching verified codex transcript"))));
 
-    for (name, bad) in [
+    for (name, soft) in [
         (
             "empty-objective",
             json!({"task":"task","context_summary":"summary","next_actions":["next"]}),
@@ -374,16 +383,20 @@ fn quality_rejections_are_atomic_and_missing_transcript_is_honest() {
             json!({"objective":"goal","task":"task","context_summary":"summary","next_actions":[]}),
         ),
     ] {
-        let input = write_json(project.path(), &format!("{name}.json"), &bad);
+        let input = write_json(project.path(), &format!("{name}.json"), &soft);
         stateroot(config.path(), home.path(), project.path())
             .args([
                 "handoff", "write", "--from", "codex", "--to", "claude", "--input", &input,
             ])
             .assert()
-            .failure();
-        assert_eq!(std::fs::read(&path).expect("after"), before, "case {name}");
-        assert_eq!(history_count(project.path()), history_before, "case {name}");
+            .success();
     }
+
+    // Snapshot after soft (warn-not-refuse) writes; only unknown destination
+    // must leave current.json untouched.
+    let path = project.path().join(".stateroot/handoffs/current.json");
+    let before = std::fs::read(&path).expect("before unknown dest");
+    let history_before = history_count(project.path());
 
     stateroot(config.path(), home.path(), project.path())
         .args([
@@ -464,15 +477,8 @@ fn stdin_windows_paths_bounds_dedupe_and_legacy_labels_are_stable() {
             .expect("summary")
             .chars()
             .count()
-            <= stateroot_core::handoff_bounds::CONTEXT_SUMMARY_MAX
+            >= 6000
     );
-    assert!(packet["warnings"]
-        .as_array()
-        .expect("warnings")
-        .iter()
-        .any(|warning| warning
-            .as_str()
-            .is_some_and(|text| text.contains("truncated to 6000"))));
 
     let minimal = write_json(
         project.path(),
@@ -654,7 +660,7 @@ fn write_without_to_leaves_routing_null_and_skips_next_actions_requirement() {
 }
 
 #[test]
-fn cross_harness_write_sets_routing_and_requires_next_actions() {
+fn cross_harness_write_sets_routing_and_warns_on_empty_next_actions() {
     let (config, home, project) = project();
     let missing = write_json(
         project.path(),
@@ -671,7 +677,8 @@ fn cross_harness_write_sets_routing_and_requires_next_actions() {
             "handoff", "write", "--from", "codex", "--to", "cursor", "--input", &missing,
         ])
         .assert()
-        .failure();
+        .success()
+        .stderr(predicates::str::contains("next_actions empty"));
 
     let valid = write_json(
         project.path(),

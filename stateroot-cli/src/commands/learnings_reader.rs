@@ -6,9 +6,6 @@ use std::path::Path;
 
 use serde_json::Value;
 
-/// Confidence floor for surfacing durable preferences in the digest.
-pub const SURFACE_THRESHOLD: f64 = 0.4;
-
 /// One learning (parsed from a category markdown file). All fields
 /// are the on-disk contract; resume reads only some today.
 #[allow(dead_code)]

@@ -62,7 +62,7 @@ Claude Code · Codex · Cursor · Kimi Code · OpenClaw · Hermes — with more 
 
 ## Privacy
 
-Your project never leaves your machine. Files matched by `.gitignore` or `.staterootignore` are excluded from state tracking, and `.stateroot/local/` is never shared.
+Your project never leaves your machine. Files matched by `.staterootignore` are excluded from snap/root sync (plus hardcoded `.git/` and `.stateroot/local/`). Root `.gitignore` is not used for sync payloads. `.stateroot/local/` is never shared.
 
 ## Docs
 

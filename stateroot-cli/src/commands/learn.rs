@@ -1,70 +1,54 @@
-//! `stateroot learn record` — the review-loop entry point (M3).
+//! `stateroot learn record` — write a learning (taste / convention / judgment).
 //!
-//! Learnings and memories activate immediately so the next harness inherits
-//! them. Soul and skill still file a proposal (identity / executable
-//! capability). Distill remains a separate, gated path for inferred notes.
+//! Always a learning. Facts go to `memory_save`. Identity stays on soul.
+//! Procedures stay on `skill_propose`. Scope comes only from flags.
 
 use anyhow::Result;
 use stateroot_core::learnings as core_learnings;
-use stateroot_core::learnings::Recorded;
-use stateroot_core::proposals as core_proposals;
 
 use super::Ctx;
 
-/// `stateroot learn record "<note>" [--user]`
-pub fn record(ctx: &Ctx, note: &str, user: bool) -> Result<()> {
+/// Resolve CLI scope flags to a learnings scope key.
+pub fn resolve_scope(user: bool, workspace: bool, domain: Option<&str>) -> Result<String> {
+    let n = usize::from(user) + usize::from(workspace) + usize::from(domain.is_some());
+    if n > 1 {
+        anyhow::bail!("use only one of --user / --workspace / --domain");
+    }
+    if user {
+        return Ok("user".into());
+    }
+    if workspace {
+        return Ok("workspace".into());
+    }
+    if let Some(slug) = domain {
+        let slug = slug.trim();
+        if slug.is_empty() {
+            anyhow::bail!("--domain requires a non-empty slug");
+        }
+        return Ok(format!("domain:{slug}"));
+    }
+    Ok("project".into())
+}
+
+/// `stateroot learn record "<note>" [--user|--workspace|--domain <slug>]`
+pub fn record(
+    ctx: &Ctx,
+    note: &str,
+    user: bool,
+    workspace: bool,
+    domain: Option<&str>,
+) -> Result<()> {
     ctx.require_project()?;
     let note = note.trim();
     if note.is_empty() {
         anyhow::bail!("empty note — nothing to record");
     }
     let home = stateroot_core::harness_install::home_dir().map_err(|e| anyhow::anyhow!(e))?;
-    let scope = if user { "user" } else { "project" };
-    let (class, recorded) =
-        core_learnings::record_note(&ctx.cwd, &home, note, scope, None, "learn record")
+    let scope = resolve_scope(user, workspace, domain)?;
+    let (id, new, category) =
+        core_learnings::record_note(&ctx.cwd, &home, note, &scope, "learn record")
             .map_err(|e| anyhow::anyhow!(e))?;
-    match recorded {
-        Recorded::Learning { id, new } => {
-            let verb = if new { "recorded" } else { "already had" };
-            println!("{verb} learning {id} [active; {scope}]");
-        }
-        Recorded::Memory { path } => {
-            println!("recorded memory [active; {scope}] → {}", path.display());
-        }
-        Recorded::NeedsProposal => {
-            let (title, payload) = match class.kind.as_str() {
-                "soul" => (
-                    "soul observation (proposed)".to_string(),
-                    serde_json::json!({"content": note, "origin": "learn record", "scope": scope}),
-                ),
-                "skill" => (
-                    format!("procedure candidate: {}", super::truncate(note, 60)),
-                    serde_json::json!({"content": note, "origin": "learn record", "scope": scope}),
-                ),
-                other => (
-                    format!("{other}: {}", super::truncate(note, 60)),
-                    serde_json::json!({"content": note, "scope": scope}),
-                ),
-            };
-            let proposal = core_proposals::create(
-                &ctx.cwd,
-                &class.kind,
-                &title,
-                &format!("classified as {} ({}; {scope})", class.kind, class.category),
-                payload,
-                serde_json::json!({"route": "learn record", "scope": scope}),
-            )
-            .map_err(|e| anyhow::anyhow!(e))?;
-            println!(
-                "recorded → proposal {} [{}; pending; {scope}]",
-                &proposal.id[..8],
-                class.kind
-            );
-            println!(
-                "review with: stateroot proposals show {}",
-                &proposal.id[..8]
-            );
-        }
-    }
+    let verb = if new { "recorded" } else { "already had" };
+    println!("{verb} learning {id} [active; {scope}; {category}]");
     Ok(())
 }

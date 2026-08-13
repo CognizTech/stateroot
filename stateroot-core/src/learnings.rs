@@ -3,16 +3,15 @@
 //! Same category-md format as the server variant:
 //! `- **statement** <!-- id: …; confidence: 0.7; label: observed; sources: …; scope: …; status: … -->`
 //!
-//! Scopes: user (`~/.stateroot/learnings/`) and project
-//! (`.stateroot/learnings/`). Explicit `learn record` / MCP `learn_record`
-//! writes learnings and memories as **active** immediately so the next
-//! harness inherits them. Distill still lands in `_candidates/` (lifecycle
-//! candidate → proposed → active, gated by local proposals) because those
-//! notes are inferred, not stated.
+//! Scopes: user (`~/.stateroot/learnings/`), workspace
+//! (`~/.stateroot/workspaces/{id}/learnings/`), project
+//! (`.stateroot/learnings/`), and domain (`~/.stateroot/domains/{slug}/learnings/`).
+//! Explicit `learn record` / MCP `learn_record` always writes a **learning**.
+//! Facts go to `memory_save` / `memory.md`. Distill persists mined notes as
+//! active project/general learnings (no keyword classification).
 //!
 //! Memory notes share the scoping ladder: `memory.md` per scope with
-//! `<!-- visibility: shared|private -->` markers on the note lines;
-//! foreign-origin `memory_save` notes land as session candidates.
+//! `<!-- visibility: shared|private -->` markers on the note lines.
 
 use std::path::{Path, PathBuf};
 
@@ -155,13 +154,78 @@ pub fn parse_bullet(line: &str, category: &str) -> Option<Learning> {
     })
 }
 
-/// Scope root for `user` (home) or `project`.
+/// Resolve workspace id for a project (registry, then manifest project_id).
+pub fn workspace_id_for(project_dir: &Path) -> Option<String> {
+    if let Ok(config_dir) = crate::config::config_dir() {
+        if let Ok(registry) = crate::config::load_registry(&config_dir) {
+            let key = project_dir
+                .canonicalize()
+                .unwrap_or_else(|_| project_dir.to_path_buf());
+            let key_s = key.to_string_lossy().to_string();
+            if let Some(entry) = registry.projects.get(&key_s) {
+                if !entry.workspace_id.is_empty() {
+                    return Some(entry.workspace_id.clone());
+                }
+            }
+            // Also try non-canonical key (tests often use temp paths as-is).
+            let raw = project_dir.to_string_lossy().to_string();
+            if let Some(entry) = registry.projects.get(&raw) {
+                if !entry.workspace_id.is_empty() {
+                    return Some(entry.workspace_id.clone());
+                }
+            }
+        }
+    }
+    local_store::read_manifest(project_dir)
+        .ok()
+        .flatten()
+        .and_then(|m| {
+            m.get("workspace_id")
+                .or_else(|| m.get("project_id"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .filter(|s| !s.is_empty())
+}
+
+/// Bound domain slug from the project manifest (`domain` field), if any.
+pub fn bound_domain(project_dir: &Path) -> Option<String> {
+    local_store::read_manifest(project_dir)
+        .ok()
+        .flatten()
+        .and_then(|m| m.get("domain").and_then(|v| v.as_str()).map(str::to_string))
+        .filter(|s| !s.is_empty())
+}
+
+/// Scope root for `user` | `workspace` | `domain:<slug>` | `project`.
 fn scope_root(project_dir: &Path, home: &Path, scope: &str) -> PathBuf {
     if scope == "user" {
-        home.join(".stateroot").join(LEARNINGS_DIR)
-    } else {
-        local_store::root(project_dir).join(LEARNINGS_DIR)
+        return home.join(".stateroot").join(LEARNINGS_DIR);
     }
+    if scope == "workspace" {
+        let ws = workspace_id_for(project_dir).unwrap_or_else(|| "default".into());
+        return home
+            .join(".stateroot")
+            .join("workspaces")
+            .join(ws)
+            .join(LEARNINGS_DIR);
+    }
+    if let Some(slug) = scope.strip_prefix("domain:") {
+        return home
+            .join(".stateroot")
+            .join("domains")
+            .join(slug)
+            .join(LEARNINGS_DIR);
+    }
+    if scope == "domain" {
+        let slug = bound_domain(project_dir).unwrap_or_else(|| "default".into());
+        return home
+            .join(".stateroot")
+            .join("domains")
+            .join(slug)
+            .join(LEARNINGS_DIR);
+    }
+    local_store::root(project_dir).join(LEARNINGS_DIR)
 }
 
 fn read_dir(dir: &Path, status_override: Option<&str>) -> Vec<Learning> {
@@ -237,9 +301,8 @@ pub fn append_candidate(
 }
 
 /// Write a learning as active immediately. Explicit `learn record` /
-/// MCP `learn_record` skips the proposal gate so the next harness inherits
-/// the note. Distill still lands in `_candidates/` until approved.
-/// Dedupes by normalized statement; promoting an existing candidate if needed.
+/// MCP `learn_record` and distill both activate so the next harness inherits
+/// the note. Dedupes by normalized statement; promoting an existing candidate if needed.
 pub fn activate_learning(
     project_dir: &Path,
     home: &Path,
@@ -449,29 +512,6 @@ fn rewrite_without_id(path: &Path, id: &str) -> Result<(), LearningsError> {
     Ok(())
 }
 
-fn infer_scope(category: &str, statement: &str) -> &'static str {
-    let lower = statement.to_lowercase();
-    let project_bound = [
-        "this repo",
-        "this project",
-        "this crate",
-        "this package",
-        ".stateroot",
-        "in this codebase",
-        "in this workspace",
-    ]
-    .iter()
-    .any(|m| lower.contains(m));
-    if project_bound {
-        return "project";
-    }
-    if category == "preferences" {
-        "user"
-    } else {
-        "project"
-    }
-}
-
 fn normalize(statement: &str) -> String {
     statement
         .to_lowercase()
@@ -483,140 +523,46 @@ fn normalize(statement: &str) -> String {
         .join(" ")
 }
 
-/// Classification of a `learn record` note (deterministic).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Classification {
-    /// `soul` | `memory` | `skill` | `learning`.
-    pub kind: String,
-    /// Learning category (for kind=learning).
-    pub category: String,
+/// Category stem for an explicit learning. Defaults to `general` — no
+/// keyword routing. Callers that already chose a stem may pass it via
+/// [`activate_learning`] directly.
+pub fn learning_category(_note: &str) -> &'static str {
+    "general"
 }
 
-/// Classify a note into a review-loop lane.
-pub fn classify_note(note: &str) -> Classification {
-    let lower = note.to_lowercase();
-    let has = |markers: &[&str]| markers.iter().any(|m| lower.contains(m));
-    if has(&[
-        "you are",
-        "your name",
-        "call yourself",
-        "persona",
-        "identity",
-        "your role",
-    ]) {
-        return Classification {
-            kind: "soul".into(),
-            category: "identity".into(),
-        };
-    }
-    if has(&[
-        "how to",
-        "steps to",
-        "procedure",
-        "workflow",
-        "recipe",
-        "playbook",
-    ]) {
-        return Classification {
-            kind: "skill".into(),
-            category: "procedures".into(),
-        };
-    }
-    if has(&["actually", "instead of", "wrong", "correction", "not that"]) {
-        return Classification {
-            kind: "learning".into(),
-            category: "corrections".into(),
-        };
-    }
-    if has(&["prefer", "always", "never", "style"]) {
-        return Classification {
-            kind: "learning".into(),
-            category: "preferences".into(),
-        };
-    }
-    if has(&[
-        "remember", "fact", "uses", "lives", "deadline", "version", "port ",
-    ]) {
-        return Classification {
-            kind: "memory".into(),
-            category: "facts".into(),
-        };
-    }
-    Classification {
-        kind: "learning".into(),
-        category: "general".into(),
-    }
-}
-
-/// Result of an explicit `learn record` / MCP `learn_record`.
-#[derive(Debug, Clone)]
-pub enum Recorded {
-    /// Written to the active learnings store.
-    Learning {
-        /// Learning id (`lrn_…`).
-        id: String,
-        /// True when a new bullet was appended.
-        new: bool,
-    },
-    /// Appended to `memory.md` for the scope.
-    Memory {
-        /// Path of the memory file.
-        path: PathBuf,
-    },
-    /// Soul / skill still go through the proposal gate.
-    NeedsProposal,
-}
-
-/// Record an explicit note. Learnings and memories activate immediately;
-/// soul and skill still return [`Recorded::NeedsProposal`].
+/// Record an explicit learning. Always a learning — the caller chose this
+/// tool. Facts belong on `memory_save`; identity on soul; procedures on
+/// `skill_propose`. Scope comes from the caller's flag, never from keywords.
 pub fn record_note(
     project_dir: &Path,
     home: &Path,
     note: &str,
     scope: &str,
-    as_kind: Option<&str>,
     origin: &str,
-) -> Result<(Classification, Recorded), LearningsError> {
-    let class = match as_kind {
-        Some(kind) => Classification {
-            kind: kind.to_string(),
-            category: match kind {
-                "soul" => "identity",
-                "skill" => "procedures",
-                "memory" => "facts",
-                "learning" => "general",
-                other => other,
-            }
-            .to_string(),
-        },
-        None => classify_note(note),
-    };
-    let recorded = match class.kind.as_str() {
-        "memory" => {
-            let path = append_memory_note(project_dir, home, scope, note)?;
-            Recorded::Memory { path }
-        }
-        "soul" | "skill" => Recorded::NeedsProposal,
-        _ => {
-            let category = if class.category.is_empty() {
-                "general"
-            } else {
-                class.category.as_str()
-            };
-            let (id, new) = activate_learning(project_dir, home, scope, note, category, origin)?;
-            Recorded::Learning { id, new }
-        }
-    };
-    if !matches!(recorded, Recorded::NeedsProposal) {
-        maybe_complete_first_run(project_dir, home)?;
-    }
-    Ok((class, recorded))
+) -> Result<(String, bool, &'static str), LearningsError> {
+    let category = learning_category(note);
+    let (id, new) = activate_learning(project_dir, home, scope, note, category, origin)?;
+    maybe_complete_first_run(project_dir, home)?;
+    Ok((id, new, category))
 }
 
-/// Deterministic distiller: mine episodic checkpoints + hook spool for
-/// recurring correction/preference statements and emit NEW candidates
-/// (dedupe against existing active + candidates in both scopes).
+/// Deterministic distiller: mine episodic checkpoints + hook spool and emit
+/// unique statement strings for the wiki inbox (does **not** activate learnings).
+/// Taste still goes through `learn_record` / `record_note`.
+/// No keyword classification into soul/skill/memory.
 pub fn distill(project_dir: &Path, home: &Path) -> Vec<Learning> {
+    distill_statements(project_dir, home)
+        .into_iter()
+        .map(|(sentence, sources, confidence)| {
+            Learning::candidate(&sentence, "general", confidence, &sources, "project")
+        })
+        .collect()
+}
+
+/// Mine unique statements from episodic + spool (normalized dedupe against
+/// existing learnings and existing inbox bullets). Returns
+/// `(statement, sources, confidence)`.
+pub fn distill_statements(project_dir: &Path, home: &Path) -> Vec<(String, String, f64)> {
     let mut statements: Vec<(String, String)> = Vec::new(); // (note, source)
     let episodic =
         std::fs::read_to_string(local_store::root(project_dir).join(local_store::EPISODIC_PATH))
@@ -643,9 +589,7 @@ pub fn distill(project_dir: &Path, home: &Path) -> Vec<Learning> {
         }
     }
 
-    // Candidate-worthy sentences: sentences containing correction/preference
-    // markers, counted for recurrence.
-    let mut counts: std::collections::BTreeMap<(String, String), (usize, String, String)> =
+    let mut counts: std::collections::BTreeMap<String, (usize, String, String)> =
         std::collections::BTreeMap::new();
     for (note, source) in &statements {
         for sentence in note.split(['.', '\n']) {
@@ -653,43 +597,54 @@ pub fn distill(project_dir: &Path, home: &Path) -> Vec<Learning> {
             if sentence.len() < 8 {
                 continue;
             }
-            let class = classify_note(sentence);
-            if class.kind != "learning" {
-                continue;
-            }
             let normalized = normalize(sentence);
-            let entry = counts
-                .entry((normalized, class.category.clone()))
-                .or_insert((0, sentence.to_string(), source.clone()));
+            let entry =
+                counts
+                    .entry(normalized)
+                    .or_insert((0, sentence.to_string(), source.clone()));
             entry.0 += 1;
         }
     }
 
-    let existing: Vec<String> = ["user", "project"]
-        .iter()
-        .flat_map(|scope| read_scope(project_dir, home, scope))
-        .map(|l| normalize(&l.statement))
-        .collect();
+    let mut existing: std::collections::BTreeSet<String> =
+        ["user", "workspace", "project", "domain"]
+            .iter()
+            .flat_map(|scope| read_scope(project_dir, home, scope))
+            .map(|l| normalize(&l.statement))
+            .collect();
+    // Also skip bullets already in the wiki inbox.
+    let inbox = local_store::root(project_dir)
+        .join(crate::wiki::PAGES_DIR)
+        .join(crate::wiki::INBOX_PAGE);
+    if let Ok(text) = std::fs::read_to_string(inbox) {
+        for line in text.lines() {
+            if let Some(b) = line.trim().strip_prefix("- ") {
+                existing.insert(normalize(b));
+            }
+        }
+    }
 
     counts
         .into_iter()
-        .filter(|((normalized, category), (count, _, _))| {
-            // Corrections/preferences mine on first sight; neutral general
-            // notes must recur to be candidate-worthy.
-            (category != "general" || *count >= 2) && !existing.contains(normalized)
-        })
-        .map(|((normalized, category), (count, sentence, source))| {
+        .filter(|(normalized, _)| !existing.contains(normalized))
+        .map(|(_normalized, (count, sentence, source))| {
             let confidence = (0.3 + 0.2 * (count.saturating_sub(1) as f64)).min(0.85);
             let sources = if count > 1 {
                 format!("{source} ×{count}")
             } else {
                 source
             };
-            let scope = infer_scope(&category, &sentence);
-            let _ = normalized;
-            Learning::candidate(&sentence, &category, confidence, &sources, scope)
+            (sentence, sources, confidence)
         })
         .collect()
+}
+
+/// Run deterministic compile into the wiki inbox. Returns bullets added.
+pub fn distill_to_inbox(project_dir: &Path, home: &Path) -> Result<usize, LearningsError> {
+    let stmts = distill_statements(project_dir, home);
+    let bullets: Vec<String> = stmts.into_iter().map(|(s, _, _)| s).collect();
+    crate::wiki::append_inbox_bullets(project_dir, &bullets)
+        .map_err(|e| LearningsError::Io(std::io::Error::other(e.to_string())))
 }
 
 /// Whether a scope has any **active** learning (candidates do not count —
@@ -745,20 +700,20 @@ pub fn compose_instruction(status: &BootstrapStatus) -> String {
         out.push_str("## Learnings (seed now)\n\n");
         if status.first_session {
             out.push_str(
-                "You are the first harness in this project after `stateroot init`. Before other work, record learnings so later harnesses inherit them.\n\n",
+                "You are the first harness in this project after `stateroot init`. Before other work, seed learnings as **judgment rules** another harness can apply — not a stack inventory.\n\n",
             );
         }
         if status.user_needs_seed {
-            out.push_str("**Global (user) learnings are empty.** Record taste that follows the user across projects: communication, recurring methods, design/engineering judgment, boundaries. CLI: `stateroot learn record --user \"<preference>\"`. MCP: `learn_record` with `scope: \"user\"`.\n\n");
+            out.push_str("**Global (user) learnings are empty.** Record 2–7 taste notes that follow this human across projects (communication, methods, design/engineering judgment). CLI: `stateroot learn record --user \"Prefer small, reviewable diffs over rewrites. Do not restyle adjacent files.\"`. MCP: `learn_record` with `scope: \"user\"`.\n\n");
         }
         if status.project_needs_seed {
-            out.push_str("**Project learnings are empty.** Record this-repo conventions: stack, layout, constraints, how this codebase is built. CLI: `stateroot learn record \"<convention>\"`. MCP: `learn_record` with `scope: \"project\"` (default).\n\n");
+            out.push_str("**Project learnings are empty.** Record 2–7 quality bars / preferred patterns / anti-patterns for *this* repo. Not \"this is a TypeScript monorepo\" (that is `memory_save`). CLI: `stateroot learn record \"<judgment>. <when / what never>.\"`. MCP: `learn_record` with `scope: \"project\"`.\n\n");
         }
     } else {
         out.push_str("## Learnings (keep current)\n\n");
     }
     out.push_str(
-        "Every harness updates both layers. Cross-project taste → `--user` / `scope: user`. This-repo conventions → project scope. Read first (`stateroot learnings list` and `stateroot learnings list --user`); update rather than duplicate. Learnings and memories take effect immediately so the next harness inherits them. Soul and skill changes still go through `stateroot proposals`.\n",
+        "Format: `<prefer X over Y / never Z>. <when it applies and what not to do>.` Read first (`stateroot learnings list` and `stateroot learnings list --user`); update rather than duplicate. `learn record` always writes a learning. Facts go to `memory_save`.\n",
     );
     out
 }
@@ -838,32 +793,28 @@ fn read_first_run(project_dir: &Path) -> Option<serde_json::Value> {
     serde_json::from_str(&text).ok()
 }
 
-/// Memory notes: `<scope root>/memory.md` — lines with optional
-/// `<!-- visibility: private -->` marker. Shared by default for cli-authored
-/// notes; foreign-origin notes land as session candidates (M3: recorded in
-/// `_candidates/memory.md` and never rendered).
+/// Memory notes: curated hot apex at `memories/MEMORY.md` (project) via
+/// [`crate::hot_apex`]. Legacy `.stateroot/memory.md` is migrated once.
 pub fn append_memory_note(
     project_dir: &Path,
     home: &Path,
     scope: &str,
     content: &str,
 ) -> Result<PathBuf, LearningsError> {
-    let root = if scope == "user" {
-        home.join(".stateroot")
-    } else {
-        local_store::root(project_dir)
-    };
-    let path = root.join("memory.md");
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    crate::hot_apex::ensure_migrated(project_dir, home);
+    // User-scope facts still land in project MEMORY (facts are project-portable);
+    // the memory tool's `target=user` is for USER.md profile notes.
+    let _ = scope;
+    match crate::hot_apex::add(project_dir, home, "memory", content, false) {
+        Ok(result) => {
+            if let Some(path) = result.path {
+                Ok(path)
+            } else {
+                Ok(local_store::root(project_dir).join(local_store::MEMORY_CORE_PATH))
+            }
+        }
+        Err(err) => Err(LearningsError::Io(std::io::Error::other(err.to_string()))),
     }
-    let mut body = std::fs::read_to_string(&path).unwrap_or_default();
-    if !body.ends_with('\n') && !body.is_empty() {
-        body.push('\n');
-    }
-    body.push_str(&format!("- {}\n", content.trim()));
-    std::fs::write(&path, body)?;
-    Ok(path)
 }
 
 #[cfg(test)]
@@ -920,23 +871,17 @@ mod tests {
     }
 
     #[test]
-    fn classifier_lanes() {
-        assert_eq!(classify_note("you are a careful reviewer").kind, "soul");
+    fn learning_category_defaults_to_general() {
+        assert_eq!(learning_category("actually the port is 9060"), "general");
+        assert_eq!(learning_category("prefer small diffs"), "general");
         assert_eq!(
-            classify_note("how to rotate the spool safely").kind,
-            "skill"
+            learning_category("Laiq is a TypeScript/Python monorepo"),
+            "general"
         );
-        assert_eq!(classify_note("actually the port is 9060").kind, "learning");
-        assert_eq!(
-            classify_note("actually the port is 9060").category,
-            "corrections"
-        );
-        assert_eq!(classify_note("the deploy uses systemd").kind, "memory");
-        assert_eq!(classify_note("prefer small diffs").category, "preferences");
     }
 
     #[test]
-    fn distiller_mines_recurrence_and_dedupes() {
+    fn distiller_mines_notes_and_dedupes() {
         let (project, home) = dirs();
         let episodic = project.path().join(".stateroot/memories");
         std::fs::create_dir_all(&episodic).unwrap();
@@ -953,16 +898,25 @@ mod tests {
         )
         .unwrap();
         let found = distill(project.path(), home.path());
-        assert_eq!(found.len(), 1, "one new candidate: {found:?}");
-        assert!(found[0].confidence > 0.3, "recurrence bumps confidence");
         assert!(
-            found[0].sources.contains('×'),
-            "recurrence recorded: {}",
-            found[0].sources
+            found.len() >= 2,
+            "mines sentences without keyword skip: {found:?}"
         );
-        // Second distill produces nothing (already distilled content isn't re-mined? no —
-        // candidates already exist → dedupe).
-        append_candidate(project.path(), home.path(), "project", &found[0]).unwrap();
+        assert!(found
+            .iter()
+            .all(|l| l.category == "general" && l.scope == "project"));
+        // After activating, distill dedupes.
+        for note in &found {
+            activate_learning(
+                project.path(),
+                home.path(),
+                "project",
+                &note.statement,
+                "general",
+                &note.sources,
+            )
+            .unwrap();
+        }
         assert!(distill(project.path(), home.path()).is_empty());
     }
 
@@ -980,6 +934,11 @@ mod tests {
         assert!(instruction.contains("Global (user) learnings are empty"));
         assert!(instruction.contains("Project learnings are empty"));
         assert!(instruction.contains("learn record --user"));
+        assert!(instruction.contains("judgment"));
+        assert!(
+            !instruction.contains("stack, layout"),
+            "must not invite inventory dumps: {instruction}"
+        );
 
         assert!(record_first_session(project.path(), "cursor").unwrap());
         assert!(!record_first_session(project.path(), "codex").unwrap());
@@ -1016,68 +975,84 @@ mod tests {
     }
 
     #[test]
-    fn record_note_activates_learning_and_memory() {
+    fn record_note_always_writes_a_learning() {
         let (project, home) = dirs();
         std::fs::create_dir_all(project.path().join(".stateroot")).unwrap();
-        let (class, recorded) = record_note(
+        let (id, new, category) = record_note(
             project.path(),
             home.path(),
             "prefer small diffs over rewrites",
             "user",
-            None,
             "test",
         )
         .unwrap();
-        assert_eq!(class.kind, "learning");
-        let Recorded::Learning { id, new } = recorded else {
-            panic!("expected active learning, got {recorded:?}");
-        };
         assert!(new);
+        assert_eq!(category, "general");
         let active = read_scope(project.path(), home.path(), "user");
         assert!(
             active.iter().any(|l| l.id == id && l.status == "active"),
             "{active:?}"
         );
 
-        let (class, recorded) = record_note(
+        let (id, new, category) = record_note(
             project.path(),
             home.path(),
             "the deploy uses systemd",
             "project",
-            None,
             "test",
         )
         .unwrap();
-        assert_eq!(class.kind, "memory");
-        let Recorded::Memory { path } = recorded else {
-            panic!("expected memory, got {recorded:?}");
-        };
-        let body = std::fs::read_to_string(path).unwrap();
-        assert!(body.contains("deploy uses systemd"));
+        assert!(new);
+        assert_eq!(category, "general");
+        let active = read_scope(project.path(), home.path(), "project");
+        assert!(
+            active.iter().any(|l| l.id == id && l.status == "active"),
+            "{active:?}"
+        );
 
-        let (class, recorded) = record_note(
+        let (_, new, _) = record_note(
             project.path(),
             home.path(),
             "you are a careful reviewer",
             "project",
-            None,
             "test",
         )
         .unwrap();
-        assert_eq!(class.kind, "soul");
-        assert!(matches!(recorded, Recorded::NeedsProposal));
+        assert!(new);
+        let active = read_scope(project.path(), home.path(), "project");
+        assert!(
+            active
+                .iter()
+                .any(|l| l.statement.contains("careful reviewer") && l.status == "active"),
+            "{active:?}"
+        );
     }
 
     #[test]
-    fn infer_scope_splits_global_taste_from_repo_conventions() {
-        assert_eq!(infer_scope("preferences", "prefer small diffs"), "user");
-        assert_eq!(
-            infer_scope("preferences", "prefer small diffs in this repo"),
-            "project"
-        );
-        assert_eq!(
-            infer_scope("corrections", "actually the port is 9060"),
-            "project"
-        );
+    fn scope_flag_not_keyword_routing() {
+        let (project, home) = dirs();
+        std::fs::create_dir_all(project.path().join(".stateroot")).unwrap();
+        let (_, _, _) = record_note(
+            project.path(),
+            home.path(),
+            "prefer small diffs",
+            "user",
+            "test",
+        )
+        .unwrap();
+        let user = read_scope(project.path(), home.path(), "user");
+        assert!(user.iter().any(|l| l.statement.contains("prefer small")));
+        let (_, _, _) = record_note(
+            project.path(),
+            home.path(),
+            "prefer small diffs in this repo",
+            "project",
+            "test",
+        )
+        .unwrap();
+        let project_notes = read_scope(project.path(), home.path(), "project");
+        assert!(project_notes
+            .iter()
+            .any(|l| l.statement.contains("this repo")));
     }
 }

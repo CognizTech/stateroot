@@ -11,9 +11,6 @@ use std::path::Path;
 
 use super::{note, truncate, Ctx};
 
-/// Maximum characters pulled from each hot-apex memory file.
-const HOT_APEX_BUDGET: usize = 1500;
-
 /// Delivery-deduplication key when `--harness` is absent. This is local marker
 /// bookkeeping only and must never be recorded as an observed harness actor.
 const UNATTRIBUTED_CALLER: &str = "unattributed";
@@ -24,9 +21,6 @@ pub const NO_REFETCH_FOOTER: &str = "This content IS the handoff — do NOT re-f
 
 /// Session marker: suppress a second full resume for the same handoff seq.
 const RESUME_DELIVERED_MARKER: &str = "resume-delivered.json";
-
-/// Per-item cap for actionable/bug lines (rich resume — was 200).
-const ITEM_BUDGET: usize = 800;
 
 fn resume_marker_path(project_dir: &Path) -> std::path::PathBuf {
     local_store::root(project_dir).join(RESUME_DELIVERED_MARKER)
@@ -112,20 +106,18 @@ pub fn render_handoff_digest_full(
             for item in items {
                 let step = item.get("step").and_then(|v| v.as_str()).unwrap_or("");
                 let status = item.get("status").and_then(|v| v.as_str()).unwrap_or("");
-                out.push_str(&format!("- [{}] {}\n", status, truncate(step, ITEM_BUDGET)));
+                out.push_str(&format!("- [{status}] {step}\n"));
             }
             out.push('\n');
         }
     }
-    // Durable preferences (learnings synced to local files, confidence ≥
-    // the surface threshold) — after Plan State, before the synthesized tier.
+    // Durable preferences (all active learnings) — after Plan State.
     if !durable.is_empty() {
         let mut section = String::new();
         for learning in durable {
             section.push_str(&format!(
                 "- {} ({:.2})\n",
-                truncate(&learning.statement, 200),
-                learning.confidence
+                learning.statement, learning.confidence
             ));
         }
         out.push_str("## Durable Preferences\n\n");
@@ -170,7 +162,7 @@ pub fn render_handoff_digest_full(
             .and_then(|s| s.get("step").and_then(|v| v.as_str()))
             .unwrap_or("");
         if !next_step.is_empty() {
-            out.push_str(&format!("next: {}\n", truncate(next_step, 200)));
+            out.push_str(&format!("next: {next_step}\n"));
         }
         out.push_str(&format!(
             "steps: {completed} completed, {pending} pending\n"
@@ -219,7 +211,7 @@ pub fn render_handoff_digest_full(
                     if !texts.is_empty() {
                         out.push_str(&format!("## {title}\n\n"));
                         for text in texts {
-                            out.push_str(&format!("- {}\n", truncate(&text, ITEM_BUDGET)));
+                            out.push_str(&format!("- {text}\n"));
                         }
                         out.push('\n');
                     }
@@ -246,7 +238,7 @@ pub fn render_handoff_digest_full(
     if !failures.is_empty() {
         out.push_str("## Failed Approaches / Bugs\n\n");
         for text in failures {
-            out.push_str(&format!("- {}\n", truncate(&text, ITEM_BUDGET)));
+            out.push_str(&format!("- {text}\n"));
         }
         out.push('\n');
     }
@@ -265,7 +257,7 @@ pub fn render_handoff_digest_full(
                         Value::String(s) => s.clone(),
                         other => other.to_string(),
                     };
-                    out.push_str(&format!("- {}\n", truncate(&text, ITEM_BUDGET)));
+                    out.push_str(&format!("- {text}\n"));
                 }
                 out.push('\n');
             }
@@ -303,7 +295,7 @@ pub fn render_handoff_digest_full(
         if !texts.is_empty() {
             history.push_str("## Milestones\n\n");
             for text in texts {
-                history.push_str(&format!("- {}\n", truncate(text, ITEM_BUDGET)));
+                history.push_str(&format!("- {text}\n"));
             }
             history.push('\n');
         }
@@ -315,7 +307,7 @@ pub fn render_handoff_digest_full(
             for item in items {
                 let role = item.get("role").and_then(|v| v.as_str()).unwrap_or("user");
                 let text = item.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                history.push_str(&format!("**{role}:** {}\n\n", truncate(text, ITEM_BUDGET)));
+                history.push_str(&format!("**{role}:** {text}\n\n"));
             }
         }
     }
@@ -451,7 +443,7 @@ fn read_hot_apex(root: &std::path::Path, rel: &str) -> Option<String> {
     if text.is_empty() {
         return None;
     }
-    Some(truncate(text, HOT_APEX_BUDGET))
+    Some(text.to_string())
 }
 
 /// Mark the local handoff as accepted by `harness` (deduped, local-only —
@@ -533,7 +525,7 @@ pub fn fetch_handoff(cwd: &std::path::Path) -> (Option<Value>, &'static str) {
 /// Run `stateroot resume` — fully local: handoff from `.stateroot/`,
 /// durable preferences/goals from local docs, skills from federation
 /// discovery. There is no server projection or context pack in this variant.
-pub fn run(
+pub async fn run(
     ctx: &Ctx,
     harness: Option<&str>,
     no_accept: bool,
@@ -541,6 +533,11 @@ pub fn run(
     deterministic: bool,
 ) -> anyhow::Result<()> {
     let project = ctx.require_project()?;
+
+    // Dual-mode compiler: try agentic merge before rendering (non-fatal).
+    if !deterministic {
+        let _ = super::compiler::try_agentic(ctx, false).await;
+    }
 
     // An explicit resume harness is direct local evidence. Persist it before
     // duplicate-delivery suppression so even an early return refreshes the
@@ -599,39 +596,41 @@ skipping duplicate. Pass --force to reprint.)\n\n{NO_REFETCH_FOOTER}"
         let status = stateroot_core::learnings::bootstrap_status(&ctx.cwd, &home);
         out.push_str(&stateroot_core::learnings::compose_instruction(&status));
         out.push_str("\n---\n\n");
+        let _ = stateroot_core::rules::ensure_product_intent(&home);
+        out.push_str(&stateroot_core::rules::compose_section(&ctx.cwd, &home));
+        out.push_str("\n---\n\n");
+        stateroot_core::hot_apex::ensure_migrated(&ctx.cwd, &home);
+        out.push_str(&stateroot_core::wiki::compose_digest_section(&ctx.cwd));
+        out.push_str("\n---\n\n");
     }
 
-    // Durable preferences from the local learnings files (confidence ≥
-    // threshold) — propagated into the digest AND used to dedupe sections.
-    // Durable preferences: project + user scopes (user scope landed with
-    // M3's `~/.stateroot/learnings`); candidates surface nowhere.
+    // Durable preferences: all active learnings (project + user + workspace + bound domain).
     let mut durable: Vec<super::learnings_reader::Learning> =
         super::learnings_reader::read_local_learnings(&ctx.cwd)
             .into_iter()
-            .filter(|l| {
-                l.status == "active"
-                    && l.scope != "session_candidate"
-                    && l.confidence >= super::learnings_reader::SURFACE_THRESHOLD
-            })
+            .filter(|l| l.status == "active" && l.scope != "session_candidate")
             .collect();
     if let Ok(home) = stateroot_core::harness_install::home_dir() {
         let mut seen: std::collections::BTreeSet<String> =
             durable.iter().map(|l| l.id.clone()).collect();
-        for learning in stateroot_core::learnings::read_scope(&ctx.cwd, &home, "user") {
-            if learning.status == "active"
-                && learning.confidence >= super::learnings_reader::SURFACE_THRESHOLD
-                && seen.insert(learning.id.clone())
-            {
-                durable.push(super::learnings_reader::Learning {
-                    id: learning.id,
-                    statement: learning.statement,
-                    category: learning.category,
-                    confidence: learning.confidence,
-                    label: learning.label,
-                    sources: learning.sources,
-                    scope: learning.scope,
-                    status: learning.status,
-                });
+        let mut scopes = vec!["user".to_string(), "workspace".to_string()];
+        if let Some(slug) = stateroot_core::learnings::bound_domain(&ctx.cwd) {
+            scopes.push(format!("domain:{slug}"));
+        }
+        for scope in scopes {
+            for learning in stateroot_core::learnings::read_scope(&ctx.cwd, &home, &scope) {
+                if learning.status == "active" && seen.insert(learning.id.clone()) {
+                    durable.push(super::learnings_reader::Learning {
+                        id: learning.id,
+                        statement: learning.statement,
+                        category: learning.category,
+                        confidence: learning.confidence,
+                        label: learning.label,
+                        sources: learning.sources,
+                        scope: learning.scope,
+                        status: learning.status,
+                    });
+                }
             }
         }
     }
@@ -671,7 +670,15 @@ skipping duplicate. Pass --force to reprint.)\n\n{NO_REFETCH_FOOTER}"
 
     if memory_md.is_some() {
         out.push_str("\n## Memory (hot apex)\n");
-        if let Some(memory) = memory_md {
+        if let Ok(home) = stateroot_core::harness_install::home_dir() {
+            if let Some(block) =
+                stateroot_core::hot_apex::render_for_digest(&ctx.cwd, &home, "memory")
+            {
+                out.push_str(&format!("\n{block}\n"));
+            } else if let Some(memory) = memory_md {
+                out.push_str(&format!("\n### MEMORY.md\n\n{memory}\n"));
+            }
+        } else if let Some(memory) = memory_md {
             out.push_str(&format!("\n### MEMORY.md\n\n{memory}\n"));
         }
     }
@@ -987,9 +994,9 @@ mod tests {
     }
 
     #[test]
-    fn hot_apex_preserves_full_user_profile() {
+    fn hot_apex_preserves_full_memory() {
         let home = tempfile::tempdir().expect("home");
-        let long_user = format!("Fellow Daoist Han — {}", "u".repeat(HOT_APEX_BUDGET + 300));
+        let long_user = format!("Fellow Daoist Han — {}", "u".repeat(2000));
         std::fs::create_dir_all(home.path().join(".stateroot/user")).expect("user dir");
         std::fs::write(home.path().join(".stateroot/user/USER.md"), &long_user).expect("user");
 
@@ -997,16 +1004,15 @@ mod tests {
             stateroot_core::user_profile::read(home.path()).filter(|text| !text.trim().is_empty());
         let user = user_md.expect("user profile");
         assert_eq!(user.len(), long_user.len());
-        assert!(user.contains(&"u".repeat(HOT_APEX_BUDGET + 50)));
+        assert!(user.contains(&"u".repeat(1800)));
 
         let project = tempfile::tempdir().expect("project");
         let root = local_store::root(project.path());
         std::fs::create_dir_all(root.join("memories")).expect("mem dir");
-        let long_memory = "m".repeat(HOT_APEX_BUDGET + 400);
+        let long_memory = "m".repeat(2500);
         std::fs::write(root.join("memories/MEMORY.md"), &long_memory).expect("memory");
         let memory_md = read_hot_apex(&root, local_store::MEMORY_CORE_PATH).expect("memory");
-        assert!(memory_md.chars().count() <= HOT_APEX_BUDGET);
-        assert!(!memory_md.contains(&"m".repeat(HOT_APEX_BUDGET + 50)));
+        assert_eq!(memory_md, long_memory);
     }
 
     #[test]

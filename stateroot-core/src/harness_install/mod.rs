@@ -539,8 +539,7 @@ pub fn install_quirk_full(home: &Path, quirk: &registry::HarnessQuirk, block: &s
     }
     let tier_actions = if quirk.id == "crush" {
         Ok(vec![
-            "crush: managed harness — hook support planned; no files written (placeholder)"
-                .to_string(),
+            "crush: instruction file carries digest protocol; native hooks planned".to_string(),
         ])
     } else if quirk.hooks.is_some() {
         hooks::install_hooks(home, quirk)

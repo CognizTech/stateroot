@@ -45,6 +45,14 @@ Compact strict example (no envelope or provenance keys):
 
 Write the JSON to a normal path only when flags are insufficient (Windows paths are supported) and pass that path to `--input`. `--input -` may read stdin when convenient, but shell piping is optional. Do not paste giant transcript or state dumps into `--note`; unstructured notes become only the summary, while exact legacy section labels receive conservative migration.
 
+## Learnings quality (taste)
+
+Full bar, examples, and anti-examples: `references/learnings.md`. Short version:
+
+- Write a **judgment** (`prefer X over Y` / `never Z`) plus when it applies. Another harness must be able to apply it with no transcript.
+- Do not record inventories, facts, slogans, or README dumps as learnings. Facts go to `memory_save`.
+- Seed an empty layer with 2–7 evidenced notes, then stop. Read `learnings list` first.
+
 ## Offline Outbox Semantics
 
 1. When the server is unreachable, the CLI writes operations to a local outbox under `.stateroot/` and still exits successfully. Queued operations sync automatically when connectivity returns.

@@ -33,7 +33,11 @@ fn cache_path(ctx: &Ctx) -> PathBuf {
 }
 
 fn api_base() -> String {
-    super::auth::api_base()
+    std::env::var("STATEROOT_GITHUB_API_BASE")
+        .ok()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "https://api.github.com".into())
 }
 
 /// True when auto-update is disabled (config off or env opt-out).

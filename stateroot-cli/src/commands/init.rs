@@ -79,6 +79,14 @@ pub async fn run(ctx: &Ctx, args: crate::cli::InitArgs) -> Result<()> {
     {
         note!("warning: product projection refresh failed ({err})");
     }
+    match stateroot_core::rules::sync(&dir, &home) {
+        Ok(report) => println!(
+            "  rules: product-intent {} · imported {}",
+            if report.seeded { "seeded" } else { "current" },
+            report.imported
+        ),
+        Err(err) => note!("warning: rules sync failed ({err})"),
+    }
 
     // Project-level convenience layer (protocol stubs only — persona is global).
     let block = super::install::render_project_agents_block();

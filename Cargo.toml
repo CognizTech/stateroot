@@ -41,7 +41,6 @@ predicates = "3"
 git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 wiremock = "0.6"
-keyring = "3"
 
 [profile.release]
 lto = true

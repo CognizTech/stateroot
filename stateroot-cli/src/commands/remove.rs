@@ -1,24 +1,20 @@
 //! `stateroot remove` — remove a stateroot project: the `.stateroot/` tree,
 //! the `projects.toml` registry entry, the `init`-installed convenience
-//! layer, and our git plumbing refs (`refs/stateroot/*`). Dual-mode: the
-//! local removal always happens; the server-side deletion runs only when
-//! the project is linked to a server id AND the user is logged in AND the
-//! cloud preview gate is on AND a cloud base_url is configured.
+//! layer, and our git plumbing refs (`refs/stateroot/*`). Fully local.
 //!
-//! Safety model (ported from the monorepo): destructive actions require
-//! `--yes`, an interactive confirmation (default NO), or are previewed with
-//! `--dry-run`. User files and machine-level installs are never touched.
-//! Stub files are deleted only when byte-identical to the bundled asset
-//! (modified = kept with a note). AGENTS.md keeps foreign content — the
-//! marked block is excised, the file deleted only when block-only.
+//! Safety model: destructive actions require `--yes`, an interactive
+//! confirmation (default NO), or are previewed with `--dry-run`. User files
+//! and machine-level installs are never touched. Stub files are deleted only
+//! when byte-identical to the bundled asset (modified = kept with a note).
+//! AGENTS.md keeps foreign content — the marked block is excised, the file
+//! deleted only when block-only.
 
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
 use stateroot_core::config::{self, ProjectEntry};
 use stateroot_core::local_store;
 
-use super::{auth as gh, blocks, note, skill, stdin_is_tty, Ctx};
+use super::{blocks, skill, stdin_is_tty, Ctx};
 
 /// What to do with AGENTS.md.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,10 +46,6 @@ struct Plan {
     registered: bool,
     /// Refs under refs/stateroot/* present in the project's repo.
     stateroot_refs: Vec<String>,
-    /// Server deletion applies (all gates on) and is not skipped.
-    server: bool,
-    /// The server path would apply but --keep-server-state skipped it.
-    server_kept: bool,
 }
 
 /// Resolve the project for removal: walk up from cwd for `.stateroot/`
@@ -171,23 +163,7 @@ fn collect_stateroot_refs(project_dir: &Path) -> Vec<String> {
     refs
 }
 
-/// Server deletion applies only when every gate is on (corrected scope):
-/// known project id, logged-in credential, cloud preview, configured
-/// base_url. Otherwise the removal is silently local-only.
-fn server_applies(ctx: &Ctx, entry: &ProjectEntry, keep_server_state: bool) -> (bool, bool) {
-    if entry.project_id.is_empty() {
-        return (false, false);
-    }
-    let would_apply = gh::github_token(ctx).is_some()
-        && super::cloud_preview_enabled(ctx)
-        && !super::cloud::base_url(ctx).trim().is_empty();
-    if !would_apply {
-        return (false, false);
-    }
-    (!keep_server_state, keep_server_state)
-}
-
-fn build_plan(ctx: &Ctx, keep_server_state: bool) -> anyhow::Result<Plan> {
+fn build_plan(ctx: &Ctx) -> anyhow::Result<Plan> {
     let (project_dir, entry) = resolve_project(ctx)?;
     let stateroot_dir = local_store::root(&project_dir).is_dir();
     let stubs = [
@@ -206,7 +182,6 @@ fn build_plan(ctx: &Ctx, keep_server_state: bool) -> anyhow::Result<Plan> {
     let registered = config::lookup_project(&ctx.config_dir, &project_dir)
         .map_err(|e| anyhow::anyhow!(e))?
         .is_some();
-    let (server, server_kept) = server_applies(ctx, &entry, keep_server_state);
     let stateroot_refs = collect_stateroot_refs(&project_dir);
     let agents_md = agents_md_action(&project_dir);
     Ok(Plan {
@@ -217,8 +192,6 @@ fn build_plan(ctx: &Ctx, keep_server_state: bool) -> anyhow::Result<Plan> {
         agents_md,
         stubs,
         registered,
-        server,
-        server_kept,
     })
 }
 
@@ -264,25 +237,11 @@ fn print_plan(plan: &Plan) {
     if plan.registered {
         println!("  - unregister from projects.toml");
     }
-    if plan.server {
-        println!(
-            "  - server: DELETE /stateroot/projects/{}?confirm=true",
-            plan.entry.project_id
-        );
-    } else if plan.server_kept {
-        println!("  - server: kept (--keep-server-state)");
-    }
-    // Gates off: no mention of servers at all (the coming-soon story).
 }
 
 /// Run `stateroot remove`.
-pub async fn run(
-    ctx: &Ctx,
-    keep_server_state: bool,
-    yes: bool,
-    dry_run: bool,
-) -> anyhow::Result<()> {
-    let plan = build_plan(ctx, keep_server_state)?;
+pub async fn run(ctx: &Ctx, yes: bool, dry_run: bool) -> anyhow::Result<()> {
+    let plan = build_plan(ctx)?;
 
     if dry_run {
         print_plan(&plan);
@@ -307,14 +266,12 @@ pub async fn run(
         }
     }
 
-    // --- local removal ---
     if plan.stateroot_dir {
         let root = local_store::root(&plan.project_dir);
         std::fs::remove_dir_all(&root)?;
         println!("  deleted {}", root.display());
     }
 
-    // --- git refs (our lineage; the user's branches are never touched) ---
     if !plan.stateroot_refs.is_empty() {
         if let Ok(repo) = git2::Repository::open(&plan.project_dir) {
             let mut removed = 0usize;
@@ -368,73 +325,6 @@ pub async fn run(
         println!("  unregistered from projects.toml");
     }
 
-    // --- server removal (gated; failure never blocks the local half) ---
-    if plan.server {
-        remove_server_state(ctx, &plan).await;
-    } else if plan.server_kept {
-        println!("  server: kept (--keep-server-state)");
-    }
-
     println!("removed project {}", plan.entry.project_id);
     Ok(())
-}
-
-/// Server-side deletion; failures are warnings, not fatal — the local half
-/// is already done by the time this runs.
-async fn remove_server_state(ctx: &Ctx, plan: &Plan) {
-    let Some(token) = gh::github_token(ctx) else {
-        return; // gate guarantees a token, but stay honest
-    };
-    let base = super::cloud::base_url(ctx);
-    let url = format!(
-        "{base}/stateroot/projects/{}?confirm=true",
-        plan.entry.project_id
-    );
-    let result = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| anyhow::anyhow!(e))
-        .unwrap_or_else(|_| reqwest::Client::new())
-        .delete(&url)
-        .bearer_auth(token)
-        .header("User-Agent", "stateroot-cli")
-        .send()
-        .await;
-    match result {
-        Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND => {
-            println!("  server: already clean (404 — nothing to delete)");
-        }
-        Ok(resp) if resp.status().is_success() => {
-            println!("  server: project deleted");
-            if let Ok(body) = resp.json::<Value>().await {
-                let data = body.get("data").cloned().unwrap_or(body);
-                if let Some(tables) = data
-                    .get("deleted")
-                    .and_then(|d| d.get("tables"))
-                    .and_then(|t| t.as_object())
-                {
-                    for (table, count) in tables {
-                        println!("    {table}: {}", fmt_count(count));
-                    }
-                }
-                if let Some(fs) = data.get("deleted").and_then(|d| d.get("filesystem")) {
-                    if !fs.is_null() {
-                        println!("    filesystem: {}", fmt_count(fs));
-                    }
-                }
-            }
-        }
-        Ok(resp) => {
-            note!("warning: server deletion returned HTTP {} (server state may remain)", resp.status());
-        }
-        Err(err) => note!("warning: server unreachable — local removal is complete; server state may remain ({err})"),
-    }
-}
-
-/// Compact rendering for one count value (number, or raw JSON otherwise).
-fn fmt_count(value: &Value) -> String {
-    match value {
-        Value::Number(n) => n.to_string(),
-        other => other.to_string(),
-    }
 }

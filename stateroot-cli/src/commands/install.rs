@@ -172,6 +172,14 @@ pub async fn install(ctx: &Ctx) -> Result<()> {
     if let Err(err) = stateroot_core::skill_federation::refresh_product_projections(&home, None) {
         note!("warning: product projection refresh failed ({err})");
     }
+    match stateroot_core::rules::sync(&ctx.cwd, &home) {
+        Ok(report) => println!(
+            "  rules: product-intent {} · imported {}",
+            if report.seeded { "seeded" } else { "current" },
+            report.imported
+        ),
+        Err(err) => note!("warning: rules sync failed ({err})"),
+    }
 
     // Record for `init`'s one-time global install + `uninstall`.
     let mut config = ctx.config.clone();

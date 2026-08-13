@@ -103,6 +103,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # macOS (aarch64-apple-darwin) intentionally omitted — costly runners;
+        # re-add when shipping a macOS release.
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
@@ -110,9 +112,6 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: stateroot-windows-x64.exe
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            artifact: stateroot-macos-aarch64
     steps:
       - uses: actions/checkout@v7
 
@@ -231,6 +230,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # macOS (aarch64-apple-darwin) intentionally omitted — costly runners;
+        # re-add when shipping a macOS release.
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
@@ -238,9 +239,6 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: stateroot-windows-x64.exe
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            artifact: stateroot-macos-aarch64
     steps:
       - uses: actions/checkout@v7
 

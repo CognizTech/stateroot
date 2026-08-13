@@ -1,4 +1,4 @@
-//! Coming-soon gate + auto-update tests (all network mocked via wiremock).
+//! Auto-update tests (all network mocked via wiremock).
 
 use std::path::Path;
 
@@ -12,7 +12,6 @@ fn stateroot(config_home: &Path, user_home: &Path, cwd: &Path) -> Command {
     cmd.env("STATEROOT_HOME", config_home)
         .env("STATEROOT_TEST_HOME", user_home)
         .env("STATEROOT_TEST_CMD_PROBES", "")
-        .env("STATEROOT_CREDENTIALS", "file")
         .current_dir(cwd);
     cmd
 }
@@ -33,57 +32,6 @@ fn init_project(config_home: &Path, user_home: &Path, project: &Path) {
         .assert()
         .success();
 }
-
-// --- A: coming-soon gate -------------------------------------------------
-
-#[test]
-fn cloud_commands_coming_soon_when_gated_off() {
-    let config_home = tempfile::tempdir().expect("config home");
-    seed_config(config_home.path(), "");
-    let user_home = tempfile::tempdir().expect("user home");
-    let project = tempfile::tempdir().expect("project");
-    init_project(config_home.path(), user_home.path(), project.path());
-
-    for args in [
-        vec!["login", "--via", "github"],
-        vec!["logout"],
-        vec!["repo", "status"],
-        vec!["sync"],
-        vec!["run", "--cloud", "x"],
-        vec!["runs", "list"],
-    ] {
-        let out = stateroot(config_home.path(), user_home.path(), project.path())
-            .args(&args)
-            .assert()
-            .success();
-        let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-        assert!(
-            stdout.contains("coming soon") && stdout.contains("fully local today"),
-            "{args:?} must print the coming-soon message: {stdout}"
-        );
-    }
-}
-
-#[test]
-fn cloud_preview_flag_enables_real_behavior() {
-    let config_home = tempfile::tempdir().expect("config home");
-    seed_config(config_home.path(), "");
-    let user_home = tempfile::tempdir().expect("user home");
-    let project = tempfile::tempdir().expect("project");
-    init_project(config_home.path(), user_home.path(), project.path());
-
-    // With the preview on, `sync` runs the real path — which honestly
-    // reports the missing repo link (NOT the coming-soon message).
-    let out = stateroot(config_home.path(), user_home.path(), project.path())
-        .env("STATEROOT_CLOUD_PREVIEW", "1")
-        .arg("sync")
-        .assert()
-        .failure();
-    let stderr = String::from_utf8(out.get_output().stderr.clone()).expect("utf8");
-    assert!(stderr.contains("not linked"), "{stderr}");
-}
-
-// --- B: auto-update ------------------------------------------------------
 
 fn release_body(tag: &str, asset_url: &str, checksums_url: &str) -> serde_json::Value {
     // Include every platform asset name the CLI looks up — Windows CI

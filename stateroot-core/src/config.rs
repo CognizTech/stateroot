@@ -21,10 +21,6 @@ pub const ENV_HOME: &str = "STATEROOT_HOME";
 pub const CONFIG_FILE: &str = "config.toml";
 /// File name of the project registry inside the config dir.
 pub const PROJECTS_FILE: &str = "projects.toml";
-/// File name of the credential file fallback inside the config dir.
-pub const CREDENTIALS_FILE: &str = "credentials.json";
-/// Pointer file recording the account email for keyring lookups.
-pub const ACCOUNT_FILE: &str = "account.json";
 
 /// Environment variable overriding the agentdrive home directory.
 pub const ENV_DRIVE_HOME: &str = "AGENTDRIVE_HOME";
@@ -109,59 +105,9 @@ impl Default for SynthesisConfig {
             api_url: String::new(),
             model: "gpt-4o-mini".into(),
             extra_body: serde_json::Value::Object(serde_json::Map::new()),
-            min_interval_seconds: 600,
-            daily_cap: 20,
-        }
-    }
-}
-
-/// GitHub integration (`[github]` in config.toml).
-///
-/// The OAuth App is registered by the project owner; until then the
-/// client_id ships as a documented placeholder and every flow errors
-/// honestly. Env overrides: `STATEROOT_GITHUB_CLIENT_ID`,
-/// `STATEROOT_GITHUB_WEB_BASE` (device flow), `STATEROOT_GITHUB_API_BASE`
-/// (REST), `STATEROOT_GITHUB_GIT_BASE` (clone/push URLs).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct GithubConfig {
-    /// OAuth App client id (placeholder until registered — see README).
-    pub client_id: String,
-    /// OAuth scope: `repo` (private repos, default) — `public_repo` is the
-    /// variant for users who only sync public repos.
-    pub scope: String,
-}
-
-impl Default for GithubConfig {
-    fn default() -> Self {
-        Self {
-            client_id: "STATEROOT_GITHUB_CLIENT_ID_PLACEHOLDER".into(),
-            scope: "repo".into(),
-        }
-    }
-}
-
-/// Cloud runs configuration (`[cloud]` in config.toml).
-///
-/// `base_url` is the StateSmith deployment that hosts the cloud-runs API
-/// (agent-21 builds the server side); env override `STATEROOT_CLOUD_URL`.
-/// Auth uses the Phase-1 login credential (GitHub token) as the bearer.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct CloudConfig {
-    /// Cloud API base URL.
-    pub base_url: String,
-    /// Preview gate for cloud features (login/repo/sync/cloud runs) during
-    /// the controlled launch — default OFF; `STATEROOT_CLOUD_PREVIEW=1`
-    /// overrides.
-    pub preview: bool,
-}
-
-impl Default for CloudConfig {
-    fn default() -> Self {
-        Self {
-            base_url: "https://api.statesmith.dev".into(),
-            preview: false,
+            // 0 = uncapped (product-intent: do not rate-limit the compiler).
+            min_interval_seconds: 0,
+            daily_cap: 0,
         }
     }
 }
@@ -189,19 +135,11 @@ impl Default for UpdateConfig {
     }
 }
 
-/// Service endpoint configuration.
+/// Local-first service configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct AppConfig {
-    /// StateSmith Cloud base URL (stateroot REST; optional paid add-on).
-    pub server_url: String,
-    /// Auth microservice base URL.
-    pub auth_url: String,
-    /// FileSystem microservice base URL.
-    pub filesystem_url: String,
-    /// Dashboard webapp base URL (used by the dashboard-first login flow).
-    pub dashboard_url: String,
-    /// Logical user id used for the `X-User-ID` dev fallback header.
+    /// Logical user id (local identity label; unused by cloud).
     pub user_id: String,
     /// Agent whose prompt profile provides the persona (v1.1).
     pub agent_id: String,
@@ -214,12 +152,6 @@ pub struct AppConfig {
     /// Synthesis layer (`synthesis.enabled`, default true).
     #[serde(default)]
     pub synthesis: SynthesisConfig,
-    /// GitHub integration (`[github]`).
-    #[serde(default)]
-    pub github: GithubConfig,
-    /// Cloud runs (`[cloud]`).
-    #[serde(default)]
-    pub cloud: CloudConfig,
     /// Auto-update (`[update]`).
     #[serde(default)]
     pub update: UpdateConfig,
@@ -228,17 +160,11 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            server_url: "http://localhost:8080".to_string(),
-            auth_url: "http://localhost:8000".to_string(),
-            filesystem_url: "http://localhost:19051".to_string(),
-            dashboard_url: "http://localhost:3100".to_string(),
             user_id: "default".to_string(),
             agent_id: "default".to_string(),
             installed_harnesses: Vec::new(),
             fire_drill: None,
             synthesis: SynthesisConfig::default(),
-            github: GithubConfig::default(),
-            cloud: CloudConfig::default(),
             update: UpdateConfig::default(),
         }
     }
@@ -569,7 +495,7 @@ mod tests {
     fn config_roundtrip() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let cfg = AppConfig {
-            server_url: "http://example.test:9999".to_string(),
+            user_id: "alice".to_string(),
             ..Default::default()
         };
         save_config(tmp.path(), &cfg).expect("save");
@@ -581,10 +507,9 @@ mod tests {
     fn missing_config_yields_defaults() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let loaded = load_config(tmp.path()).expect("load");
-        assert_eq!(loaded.server_url, "http://localhost:8080");
-        assert_eq!(loaded.auth_url, "http://localhost:8000");
-        assert_eq!(loaded.filesystem_url, "http://localhost:19051");
         assert_eq!(loaded.user_id, "default");
+        assert_eq!(loaded.agent_id, "default");
+        assert!(loaded.synthesis.enabled);
     }
 
     #[test]

@@ -26,111 +26,41 @@ pub enum HandoffOrigin {
     Automatic,
 }
 
-/// Handoff quality bounds at write (plan P4.1).
-const SUMMARY_MAX: usize = stateroot_core::handoff_bounds::CONTEXT_SUMMARY_MAX;
-const TEXT_MAX: usize = 3000;
-const ITEM_MAX: usize = 1500;
-const LIST_ITEMS_MAX: usize = 20;
-const LIST_TOTAL_MAX: usize = 6000;
-const FILES_ITEMS_MAX: usize = 512;
-const FILES_TOTAL_MAX: usize = 4000;
-
-/// Apply the quality bounds to a packet in place, warning on stderr about
-/// everything truncated. Returns the packet for chaining.
-fn bound_packet(mut packet: Value) -> Value {
-    for (key, max) in [
-        ("task", TEXT_MAX),
-        ("objective", TEXT_MAX),
-        ("current_phase", ITEM_MAX),
-        ("implementation_status", ITEM_MAX),
-        ("context_summary", SUMMARY_MAX),
-    ] {
-        if let Some(text) = packet.get(key).and_then(|v| v.as_str()) {
-            if text.chars().count() > max {
-                note!("warning: {key} exceeded {max} chars — truncated with an ellipsis marker");
-                packet[key] = Value::String(truncate(text, max));
-                if key == "context_summary" {
-                    let marker = format!("context_summary truncated to {max} characters");
-                    if let Some(warnings) = packet.get_mut("warnings").and_then(Value::as_array_mut)
-                    {
-                        if !warnings.iter().any(|item| item.as_str() == Some(&marker)) {
-                            warnings.push(Value::String(marker));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    let list_keys = [
-        "decisions",
-        "changed_files",
-        "tests_run",
-        "failures",
-        "bugs_found",
-        "blockers",
-        "open_questions",
-        "next_actions",
-        "warnings",
-        "relevant_memories",
-        "relevant_skills",
-        "artifacts",
-        "traces",
-        "progress_summaries",
-        "milestones",
-    ];
-    for key in list_keys {
-        let item_cap = if key == "changed_files" {
-            FILES_ITEMS_MAX
-        } else {
-            LIST_ITEMS_MAX
-        };
-        let total_cap = if key == "changed_files" {
-            FILES_TOTAL_MAX
-        } else {
-            LIST_TOTAL_MAX
-        };
-        if let Some(arr) = packet.get_mut(key).and_then(|v| v.as_array_mut()) {
-            let original_len = arr.len();
-            if original_len > item_cap {
-                note!(
-                    "warning: {key} had {original_len} items (>{item_cap}) — truncated to {item_cap}"
-                );
-            }
-            let mut total = 0usize;
-            let mut kept: Vec<Value> = Vec::new();
-            let mut dropped_for_total = 0usize;
-            for (i, item) in std::mem::take(arr).into_iter().enumerate() {
-                if kept.len() >= item_cap {
-                    dropped_for_total += 1;
-                    continue;
-                }
-                let mut text = match item {
-                    Value::String(s) => s,
-                    other => serde_json::to_string(&other).unwrap_or_default(),
-                };
-                if text.chars().count() > ITEM_MAX {
-                    note!("warning: {key}[{i}] exceeded {ITEM_MAX} chars — truncated");
-                    text = truncate(&text, ITEM_MAX);
-                }
-                if text.trim().is_empty()
-                    || kept.iter().any(|existing| existing.as_str() == Some(&text))
-                {
-                    continue;
-                }
-                total += text.chars().count();
-                if total > total_cap {
-                    dropped_for_total += 1;
-                    continue;
-                }
-                kept.push(Value::String(text));
-            }
-            if dropped_for_total > 0 {
-                note!("warning: {key} dropped {dropped_for_total} item(s) over quality bounds");
-            }
-            *arr = kept;
-        }
-    }
+/// Apply soft quality warnings without truncating agent-facing content.
+/// Returns the packet unchanged (continuity beats form-filling).
+fn bound_packet(packet: Value) -> Value {
     packet
+}
+
+/// Warn on thin fields; never refuse the write (product-intent §11 / §22).
+fn validate_packet(packet: &Value, handing_to_another: bool) -> anyhow::Result<()> {
+    let required = |key: &str| {
+        packet
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+    };
+    for key in ["objective", "task", "context_summary"] {
+        if required(key).is_empty() {
+            note!("warning: handoff {key} is empty — writing anyway");
+        }
+    }
+    if !required("task").is_empty()
+        && !required("context_summary").is_empty()
+        && required("task").eq_ignore_ascii_case(required("context_summary"))
+    {
+        note!("warning: task and context_summary are identical — writing anyway");
+    }
+    if handing_to_another
+        && packet
+            .get("next_actions")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+    {
+        note!("warning: next_actions empty when handing off to another harness — writing anyway");
+    }
+    Ok(())
 }
 
 /// CLI flag overrides for `handoff write` (authoritative over `--input`).
@@ -523,26 +453,12 @@ fn parse_legacy_note(note: &str) -> LegacyNote {
 }
 
 pub(crate) fn compact_tail(session: &TranscriptSession) -> Vec<Value> {
-    let mut user_remaining = 2usize;
-    let mut assistant_remaining = 2usize;
-    let mut keep = vec![false; session.conversation_tail.len()];
-    for (index, entry) in session.conversation_tail.iter().enumerate().rev() {
-        let remaining = match entry.role {
-            "user" => &mut user_remaining,
-            "assistant" => &mut assistant_remaining,
-            _ => continue,
-        };
-        if *remaining > 0 {
-            keep[index] = true;
-            *remaining -= 1;
-        }
-    }
+    // Full uncapped tail — product-intent forbids truncating agent-facing
+    // continuity. Name kept for call sites / import path.
     session
         .conversation_tail
         .iter()
-        .zip(keep)
-        .filter(|(_, keep)| *keep)
-        .map(|(entry, _)| json!({"role": entry.role, "text": entry.text}))
+        .map(|entry| json!({"role": entry.role, "text": entry.text}))
         .collect()
 }
 
@@ -771,37 +687,6 @@ fn assemble_packet(
     packet = bound_packet(packet);
     validate_packet(&packet, context.handing_to_another)?;
     Ok(packet)
-}
-
-fn validate_packet(packet: &Value, handing_to_another: bool) -> anyhow::Result<()> {
-    let required = |key: &str| {
-        packet
-            .get(key)
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .trim()
-    };
-    for key in ["objective", "task", "context_summary"] {
-        if required(key).is_empty() {
-            anyhow::bail!("handoff quality check failed: {key} must not be empty");
-        }
-    }
-    if required("task").eq_ignore_ascii_case(required("context_summary")) {
-        anyhow::bail!(
-            "handoff quality check failed: task and context_summary must describe different things"
-        );
-    }
-    if handing_to_another
-        && packet
-            .get("next_actions")
-            .and_then(Value::as_array)
-            .is_none_or(Vec::is_empty)
-    {
-        anyhow::bail!(
-            "handoff quality check failed: next_actions must not be empty when handing off to another harness"
-        );
-    }
-    Ok(())
 }
 
 /// Durably append immutable history before replacing `current.json`.
@@ -1193,7 +1078,7 @@ mod tests {
     use stateroot_core::transcripts::{PlanStep, TailEntry};
 
     #[test]
-    fn bounds_truncate_summary_items_lists_and_files() {
+    fn bounds_preserve_full_content() {
         let mut packet = json!({
             "schema_version": "stateroot.handoff.v1",
             "project_id": "p",
@@ -1206,29 +1091,9 @@ mod tests {
             "created_at": "2026-07-18T00:00:00Z",
             "created_by_harness": "codex",
         });
+        let original = packet.clone();
         packet = bound_packet(packet);
-
-        let task = packet["task"].as_str().expect("task");
-        assert!(
-            task.chars().count() <= 3001,
-            "task len {}",
-            task.chars().count()
-        );
-        let summary = packet["context_summary"].as_str().expect("summary");
-        assert!(summary.chars().count() <= SUMMARY_MAX + 1);
-        assert_eq!(summary.chars().count(), SUMMARY_MAX);
-
-        let actions = packet["next_actions"].as_array().expect("arr");
-        assert_eq!(actions.len(), 20);
-        let bugs = packet["bugs_found"].as_array().expect("arr");
-        let bug = bugs[0].as_str().expect("bug");
-        assert!(
-            bug.chars().count() <= 1501,
-            "bug len {}",
-            bug.chars().count()
-        );
-        let files = packet["changed_files"].as_array().expect("arr");
-        assert!(files.len() <= 512);
+        assert_eq!(packet, original, "bound_packet must not truncate");
     }
 
     #[test]
@@ -1243,7 +1108,7 @@ mod tests {
     }
 
     #[test]
-    fn task_falls_back_to_first_noncompleted_plan_item_and_tail_is_role_capped() {
+    fn task_falls_back_to_first_noncompleted_plan_item_and_full_tail() {
         let session = TranscriptSession {
             harness: "codex",
             session_id: "s".into(),
@@ -1310,6 +1175,8 @@ mod tests {
         assert_eq!(
             packet["conversation_tail"],
             json!([
+                {"role":"user","text":"u1"},
+                {"role":"assistant","text":"a1"},
                 {"role":"user","text":"u2"},
                 {"role":"assistant","text":"a2"},
                 {"role":"user","text":"u3"},

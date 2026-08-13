@@ -5,11 +5,41 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
-- `learn record` / MCP `learn_record` activate learnings and memories
-  immediately so the next harness inherits them. Soul and skill still file
-  a proposal. Distill remains gated (inferred notes).
+- Remove unused `login` / `logout` / `repo` / `sync` / `run` / `runs`
+  commands, OAuth/keyring auth, and server-side `remove`. Agentic synthesize
+  uses a local API key only.
+- Scalable memory layers: curated hot-apex `memories/MEMORY.md` (add/replace/remove,
+  8000-char write cap) and USER.md (4000-char tool cap); legacy `.stateroot/memory.md`
+  migrates once. Distill / session_end compile into wiki inbox + pages instead of
+  activating learnings. Digest injects wiki `index.md` + recent `log.md` (not page
+  bodies). Local SQLite FTS at `.stateroot/local/memory.sqlite` powers `memory_recall`.
+  CLI: `stateroot memory …`, `stateroot wiki …`. MCP: `memory`, `wiki_show`. Soul /
+  USER injection and resolve order unchanged.
+- CI: drop macOS (`macos-latest` / `aarch64-apple-darwin`) from preview and
+  tagged release build matrices — Linux + Windows only until a macOS release.
+- Dual-mode context compiler: agentic when a local synthesis API key is
+  present (OpenAI-compatible); otherwise a full uncapped deterministic
+  digest. Wired into session_start hooks and `resume`. No agent-facing
+  character truncation.
+- Soul / skill / memory activate immediately — proposals are an optional audit
+  log, not a blocking gate. Foreign skills land active and project. Session_end
+  runs wiki ingest (deterministic inbox; agentic when keyed), not learnings dump.
+- No keyword classifiers for learnings (`learning_category` defaults to
+  `general`). Distill mines into the wiki inbox without soul/skill/memory
+  routing. Scope comes only from flags (`--user` / `--workspace` /
+  `--domain` / project).
+- Shared rules digest injects **full** product-intent + imported rule bodies;
+  `rules sync` on session_start; one-line Cursor rules import (`MIN_CHARS=1`).
+- Workspace and domain learnings scopes; McpPull harnesses print/capture the
+  digest (OpenClaw `before_prompt_build` injects); Copilot/Crush get
+  instruction files. Sync ignore is `.staterootignore` only (plus hardcoded
+  `.git/` and `.stateroot/local/`) — root `.gitignore` is not unioned for
+  snap/root trees. Handoff quality is warn-not-refuse.
+- `config.installed_harnesses` counts as detected for federation projection
+  in PATH-less sandboxes.
 
 ## [0.1.0] — 2026-08 (first public release)
+
 
 The local-first, open-source StateRoot variant: a fully local substrate for
 AI-assisted work — no server anywhere.

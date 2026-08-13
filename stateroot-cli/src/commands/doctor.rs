@@ -131,6 +131,23 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
             },
             hard: false,
         });
+        match stateroot_core::rules::ensure_product_intent(&home) {
+            Ok(_) => {
+                let n = stateroot_core::rules::list_all(&ctx.cwd, &home).len();
+                checks.push(Check {
+                    label: "shared rules".into(),
+                    ok: true,
+                    detail: format!("{n} rule(s); product-intent always on"),
+                    hard: false,
+                });
+            }
+            Err(err) => checks.push(Check {
+                label: "shared rules".into(),
+                ok: false,
+                detail: err.to_string(),
+                hard: false,
+            }),
+        }
     }
 
     let mut hard_failures = 0;

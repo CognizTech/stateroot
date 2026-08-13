@@ -2,36 +2,41 @@
 //!
 //! Line-delimited JSON-RPC over stdin/stdout, backed ENTIRELY by local
 //! stores (memory files, learnings, proposals, soul). No HTTP anywhere.
-//! The six tools mirror the server's W8 surface with identical
-//! names/semantics. `learn_record` activates learnings and memories
-//! immediately. Soul/skill and foreign `memory_save` still go through
-//! quarantine / proposals.
 
 use serde_json::{json, Value};
 
 use super::Ctx;
 
-/// Tool definitions shared by `tools/list` and `stateroot mcp tools`
-/// (name, description for agent consumption, input schema).
+/// Tool definitions shared by `tools/list` and `stateroot mcp tools`.
 pub const TOOL_DEFS: &[(&str, &str, &str)] = &[
     (
         "memory_save",
-        "Save a durable fact for future sessions. Call when the user states a fact worth remembering (deadline, version, preference of record). External-harness writes are quarantined (session-candidate, private) until approved.",
-        r#"{"type":"object","properties":{"content":{"type":"string"},"scope":{"type":"string","enum":["user","project"]},"visibility":{"type":"string","enum":["shared","private"]}},"required":["content"]}"#,
+        "Save a durable fact into curated MEMORY.md (add alias). Prefer the `memory` tool for replace/remove. Not taste — those go to learn_record.",
+        r#"{"type":"object","properties":{"content":{"type":"string"},"scope":{"type":"string","enum":["user","project"]},"visibility":{"type":"string","enum":["shared","private"]},"target":{"type":"string","enum":["memory","user"]}},"required":["content"]}"#,
+    ),
+    (
+        "memory",
+        "Curate hot-apex MEMORY.md or USER.md. Actions: add, replace, remove, show. Caps: MEMORY 8000 / USER 4000 chars — overflow errors so you consolidate. Never writes soul.",
+        r#"{"type":"object","properties":{"action":{"type":"string","enum":["add","replace","remove","show"]},"target":{"type":"string","enum":["memory","user"]},"content":{"type":"string"},"old_text":{"type":"string"},"visibility":{"type":"string","enum":["shared","private"]}},"required":["action"]}"#,
     ),
     (
         "memory_recall",
-        "Recall durable facts relevant to the current task. Call before answering from memory: returns only what your harness is permitted to see (scoped gates).",
+        "Recall durable facts from curated memory, wiki pages, episodic, and transcripts (FTS). Call before answering from memory.",
         r#"{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer"}},"required":["query"]}"#,
     ),
     (
+        "wiki_show",
+        "Read one compiled wiki page body (path like memories/pages/auth.md or a slug).",
+        r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#,
+    ),
+    (
         "learn_record",
-        "Record a correction or lesson. Use scope=user for global taste that follows the user across projects; scope=project (default) for this-repo conventions. Call after the user corrects you, on first session after init if learnings are empty, and whenever a durable preference appears. Learnings and memories take effect immediately so the next harness inherits them. Soul and skill changes still file a proposal.",
-        r#"{"type":"object","properties":{"note":{"type":"string"},"scope":{"type":"string","enum":["user","project"]},"as_kind":{"type":"string","enum":["soul","memory","skill","learning"]}},"required":["note"]}"#,
+        "Record one durable preference (taste). Format: '<prefer X over Y / never Z>. <when…>.' scope=user|workspace|project|domain:<slug>. Activates immediately. Facts go to memory_save / memory.",
+        r#"{"type":"object","properties":{"note":{"type":"string"},"scope":{"type":"string"}},"required":["note"]}"#,
     ),
     (
         "skill_propose",
-        "Propose a reusable skill from a procedure that worked end-to-end. Creates a quarantined candidate + approval proposal; never activates anything.",
+        "Propose a reusable skill from a procedure that worked end-to-end. Activates and projects immediately.",
         r#"{"type":"object","properties":{"slug":{"type":"string"},"name":{"type":"string"},"skill_md":{"type":"string"},"rationale":{"type":"string"}},"required":["slug","skill_md"]}"#,
     ),
     (
@@ -41,8 +46,8 @@ pub const TOOL_DEFS: &[(&str, &str, &str)] = &[
     ),
     (
         "learnings_list",
-        "List learnings (durable preferences, corrections) for self-orientation. Active notes are inherited by every harness. Distill candidates stay hidden until approved.",
-        r#"{"type":"object","properties":{"scope":{"type":"string","enum":["user","project"]},"status":{"type":"string"},"limit":{"type":"integer"}}}"#,
+        "List learnings (durable preferences, corrections) for self-orientation. Active notes are inherited by every harness.",
+        r#"{"type":"object","properties":{"scope":{"type":"string"},"status":{"type":"string"},"limit":{"type":"integer"}}}"#,
     ),
 ];
 
@@ -51,6 +56,9 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
     let home = stateroot_core::harness_install::home_dir().map_err(|e| anyhow::anyhow!(e))?;
+    stateroot_core::hot_apex::ensure_migrated(&ctx.cwd, &home);
+    let _ = stateroot_core::wiki::ensure_layout(&ctx.cwd);
+    let _ = stateroot_core::memory_index::rebuild(&ctx.cwd, &home);
     let mut caller_harness = "statesmith".to_string();
     let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
     let mut stdout = tokio::io::stdout();
@@ -59,7 +67,7 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<()> {
         line.clear();
         let read = reader.read_line(&mut line).await?;
         if read == 0 {
-            break; // EOF — client closed the transport
+            break;
         }
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -117,7 +125,7 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<()> {
                     &args,
                 ))
             }
-            _ if is_notification => None, // notifications get no reply
+            _ if is_notification => None,
             _ => Some(error_fallback(
                 id,
                 -32601,
@@ -167,8 +175,10 @@ fn call_tool(
     args: &Value,
 ) -> Value {
     let text = match name {
-        "memory_save" => memory_save(ctx, home, external, args),
+        "memory_save" => memory_save(ctx, home, args),
+        "memory" => memory_tool(ctx, home, args),
         "memory_recall" => memory_recall(ctx, home, external, args),
+        "wiki_show" => wiki_show(ctx, args),
         "learn_record" => learn_record(ctx, home, args),
         "skill_propose" => skill_propose(ctx, home, caller, args),
         "soul_read" => soul_read(home, caller),
@@ -178,7 +188,20 @@ fn call_tool(
     ok(id, json!({"content": [{"type": "text", "text": text}]}))
 }
 
-fn memory_save(ctx: &Ctx, home: &std::path::Path, external: bool, args: &Value) -> String {
+fn mutation_json(r: stateroot_core::hot_apex::MutationResult) -> Value {
+    json!({
+        "success": r.success,
+        "saved": r.success,
+        "noop": r.noop,
+        "error": r.error,
+        "usage": r.usage,
+        "path": r.path.as_ref().map(|p| p.display().to_string()),
+        "current_entries": r.current_entries,
+        "quarantined": false,
+    })
+}
+
+fn memory_save(ctx: &Ctx, home: &std::path::Path, args: &Value) -> String {
     let content = args
         .get("content")
         .and_then(|v| v.as_str())
@@ -187,98 +210,113 @@ fn memory_save(ctx: &Ctx, home: &std::path::Path, external: bool, args: &Value) 
     if content.is_empty() {
         return json!({"error": "content is required"}).to_string();
     }
-    let (scope, visibility, quarantined) = if external {
-        // Foreign writes are always quarantined — recorded honestly.
-        ("session_candidate", "private", true)
-    } else {
-        (
-            args.get("scope")
-                .and_then(|v| v.as_str())
-                .unwrap_or("project"),
-            args.get("visibility")
-                .and_then(|v| v.as_str())
-                .unwrap_or("shared"),
-            false,
-        )
-    };
-    let path = if quarantined {
-        let dir = stateroot_core::local_store::root(&ctx.cwd).join("learnings/_candidates");
-        let _ = std::fs::create_dir_all(&dir);
-        dir.join("memory.md")
-    } else if scope == "user" {
-        home.join(".stateroot/memory.md")
-    } else {
-        stateroot_core::local_store::root(&ctx.cwd).join("memory.md")
-    };
-    let marker = if visibility == "private" || quarantined {
-        " <!-- visibility: private -->"
-    } else {
-        ""
-    };
-    let mut body = std::fs::read_to_string(&path).unwrap_or_default();
-    if !body.ends_with('\n') && !body.is_empty() {
-        body.push('\n');
+    // Facts always land in curated MEMORY.md (not USER.md / soul).
+    let target = args
+        .get("target")
+        .and_then(|v| v.as_str())
+        .unwrap_or("memory");
+    let target = if target == "user" { "user" } else { "memory" };
+    let private = args.get("visibility").and_then(|v| v.as_str()) == Some("private");
+    let scope = args
+        .get("scope")
+        .and_then(|v| v.as_str())
+        .unwrap_or("project");
+    stateroot_core::hot_apex::ensure_migrated(&ctx.cwd, home);
+    // Legacy scope=user wrote ~/.stateroot/memory.md — that migrates into project
+    // MEMORY. New writes with target=memory always hit MEMORY.md.
+    let write_target = if target == "user" { "user" } else { "memory" };
+    match stateroot_core::hot_apex::add(&ctx.cwd, home, write_target, content, private) {
+        Ok(r) => {
+            let _ = stateroot_core::memory_index::rebuild_if_needed(&ctx.cwd, home);
+            let mut v = mutation_json(r);
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("scope".into(), json!(scope));
+                obj.insert(
+                    "visibility".into(),
+                    json!(if private { "private" } else { "shared" }),
+                );
+            }
+            v.to_string()
+        }
+        Err(err) => json!({"error": format!("{err}")}).to_string(),
     }
-    body.push_str(&format!("- {content}{marker}\n"));
-    match std::fs::write(&path, body) {
-        Ok(()) => json!({
-            "saved": true,
-            "quarantined": quarantined,
-            "scope": scope,
-            "visibility": visibility,
-            "path": path.display().to_string(),
-        })
-        .to_string(),
-        Err(err) => json!({"error": format!("write failed: {err}")}).to_string(),
+}
+
+fn memory_tool(ctx: &Ctx, home: &std::path::Path, args: &Value) -> String {
+    let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    let target = args
+        .get("target")
+        .and_then(|v| v.as_str())
+        .unwrap_or("memory");
+    let private = args.get("visibility").and_then(|v| v.as_str()) == Some("private");
+    let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    let old = args
+        .get("old_text")
+        .or_else(|| args.get("old"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    stateroot_core::hot_apex::ensure_migrated(&ctx.cwd, home);
+    let result = match action {
+        "add" => stateroot_core::hot_apex::add(&ctx.cwd, home, target, content, private),
+        "replace" => {
+            stateroot_core::hot_apex::replace(&ctx.cwd, home, target, old, content, private)
+        }
+        "remove" => stateroot_core::hot_apex::remove(&ctx.cwd, home, target, old),
+        "show" => {
+            return match stateroot_core::hot_apex::show(&ctx.cwd, home, target) {
+                Ok(text) => json!({"text": text}).to_string(),
+                Err(err) => json!({"error": format!("{err}")}).to_string(),
+            };
+        }
+        _ => return json!({"error": "action must be add|replace|remove|show"}).to_string(),
+    };
+    match result {
+        Ok(r) => {
+            let _ = stateroot_core::memory_index::rebuild_if_needed(&ctx.cwd, home);
+            mutation_json(r).to_string()
+        }
+        Err(err) => json!({"error": format!("{err}")}).to_string(),
     }
 }
 
 fn memory_recall(ctx: &Ctx, home: &std::path::Path, external: bool, args: &Value) -> String {
-    let query = args
-        .get("query")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_lowercase();
+    let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
-    let terms: Vec<&str> = query.split_whitespace().filter(|t| t.len() > 2).collect();
-    let mut hits: Vec<Value> = Vec::new();
-    let mut scan = |path: &std::path::Path, scope: &str| {
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return;
-        };
-        for line in text.lines() {
-            let line = line.trim();
-            if !line.starts_with('-') {
-                continue;
-            }
-            let private = line.contains("<!-- visibility: private -->");
-            if external && private {
-                continue; // foreign harnesses never see private notes
-            }
-            let lower = line.to_lowercase();
-            let score = terms.iter().filter(|t| lower.contains(*t)).count();
-            if score > 0 || terms.is_empty() {
-                hits.push(json!({
-                    "note": line.trim_start_matches('-').trim(),
-                    "scope": scope,
-                    "visibility": if private { "private" } else { "shared" },
-                    "score": score,
-                }));
-            }
+    stateroot_core::hot_apex::ensure_migrated(&ctx.cwd, home);
+    match stateroot_core::memory_index::search(&ctx.cwd, home, query, limit, !external) {
+        Ok(hits) => {
+            let hits: Vec<Value> = hits
+                .into_iter()
+                .map(|h| {
+                    json!({
+                        "note": h.text,
+                        "kind": h.kind,
+                        "path": h.path,
+                        "scope": if h.kind == "user" { "user" } else { "project" },
+                        "visibility": if h.private { "private" } else { "shared" },
+                        "score": h.score,
+                    })
+                })
+                .collect();
+            json!({
+                "hits": hits,
+                "gates": if external { "shared only" } else { "owner" },
+            })
+            .to_string()
         }
-    };
-    scan(
-        &stateroot_core::local_store::root(&ctx.cwd).join("memory.md"),
-        "project",
-    );
-    scan(&home.join(".stateroot/memory.md"), "user");
-    hits.sort_by(|a, b| {
-        b.get("score")
-            .and_then(|v| v.as_u64())
-            .cmp(&a.get("score").and_then(|v| v.as_u64()))
-    });
-    hits.truncate(limit);
-    json!({"hits": hits, "gates": if external { "shared only" } else { "owner" }}).to_string()
+        Err(err) => json!({"error": format!("{err}")}).to_string(),
+    }
+}
+
+fn wiki_show(ctx: &Ctx, args: &Value) -> String {
+    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    if path.is_empty() {
+        return json!({"error": "path is required"}).to_string();
+    }
+    match stateroot_core::wiki::show(&ctx.cwd, path) {
+        Ok(body) => json!({"path": path, "body": body}).to_string(),
+        Err(err) => json!({"error": format!("{err}")}).to_string(),
+    }
 }
 
 fn learn_record(ctx: &Ctx, home: &std::path::Path, args: &Value) -> String {
@@ -290,61 +328,30 @@ fn learn_record(ctx: &Ctx, home: &std::path::Path, args: &Value) -> String {
     if note.is_empty() {
         return json!({"error": "note is required"}).to_string();
     }
-    let forced = args.get("as_kind").and_then(|v| v.as_str());
     let scope = args
         .get("scope")
         .and_then(|v| v.as_str())
-        .unwrap_or("project");
-    let scope = if scope == "user" { "user" } else { "project" };
-    match stateroot_core::learnings::record_note(
-        &ctx.cwd,
-        home,
-        note,
-        scope,
-        forced,
-        "mcp learn_record",
-    ) {
-        Ok((class, stateroot_core::learnings::Recorded::Learning { id, new })) => json!({
-            "classification": {"kind": class.kind, "category": class.category},
+        .unwrap_or("project")
+        .trim();
+    let scope = match scope {
+        "" | "project" => "project",
+        "user" => "user",
+        "workspace" => "workspace",
+        other if other.starts_with("domain:") => other,
+        "domain" => "domain",
+        other => other,
+    };
+    match stateroot_core::learnings::record_note(&ctx.cwd, home, note, scope, "mcp learn_record") {
+        Ok((id, new, category)) => json!({
+            "kind": "learning",
+            "classification": {"kind": "learning", "category": category},
             "status": "active",
             "scope": scope,
             "id": id,
             "new": new,
+            "activated": true,
         })
         .to_string(),
-        Ok((class, stateroot_core::learnings::Recorded::Memory { path })) => json!({
-            "classification": {"kind": class.kind, "category": class.category},
-            "status": "active",
-            "scope": scope,
-            "path": path.display().to_string(),
-        })
-        .to_string(),
-        Ok((class, stateroot_core::learnings::Recorded::NeedsProposal)) => {
-            let payload = json!({"content": note, "scope": scope, "origin": "mcp learn_record"});
-            match stateroot_core::proposals::create(
-                &ctx.cwd,
-                &class.kind,
-                &format!(
-                    "{}: {}",
-                    class.kind,
-                    note.chars().take(60).collect::<String>()
-                ),
-                &format!(
-                    "classified as {} ({}) via mcp learn_record",
-                    class.kind, class.category
-                ),
-                payload,
-                json!({"route": "mcp learn_record"}),
-            ) {
-                Ok(proposal) => json!({
-                    "classification": {"kind": class.kind, "category": class.category},
-                    "proposal_id": proposal.id,
-                    "status": "pending",
-                })
-                .to_string(),
-                Err(err) => json!({"error": format!("proposal failed: {err}")}).to_string(),
-            }
-        }
         Err(err) => json!({"error": format!("record failed: {err}")}).to_string(),
     }
 }
@@ -368,12 +375,11 @@ fn skill_propose(ctx: &Ctx, home: &std::path::Path, caller: &str, args: &Value) 
     if slug.is_empty() || skill_md.is_empty() {
         return json!({"error": "slug and skill_md are required"}).to_string();
     }
-    // Candidate package (quarantined — lifecycle candidate, never projected).
     let root = stateroot_core::local_store::root(&ctx.cwd)
         .join("skills")
         .join(slug);
     if let Err(err) = std::fs::create_dir_all(&root) {
-        return json!({"error": format!("create candidate dir: {err}")}).to_string();
+        return json!({"error": format!("create skill dir: {err}")}).to_string();
     }
     if let Err(err) = std::fs::write(root.join("SKILL.md"), skill_md) {
         return json!({"error": format!("write SKILL.md: {err}")}).to_string();
@@ -382,7 +388,7 @@ fn skill_propose(ctx: &Ctx, home: &std::path::Path, caller: &str, args: &Value) 
         "schema_version": "stateroot.skill_package.v1",
         "slug": slug,
         "scope": "project",
-        "lifecycle": "candidate",
+        "lifecycle": "active",
         "origin": {"harness": caller, "source_kind": "mcp_proposal"},
         "ownership_class": "harness_authored",
         "native_harness": caller,
@@ -393,24 +399,29 @@ fn skill_propose(ctx: &Ctx, home: &std::path::Path, caller: &str, args: &Value) 
     ) {
         return json!({"error": format!("write sidecar: {err}")}).to_string();
     }
-    let _ = home;
-    match stateroot_core::proposals::create(
+    let _ = stateroot_core::skill_federation::activate_skill(&ctx.cwd, home, "project", slug);
+    let options = stateroot_core::skill_federation::SyncOptions {
+        dry_run: false,
+        push: true,
+        pull: false,
+        cmd_probe: None,
+    };
+    let _ = stateroot_core::skill_federation::sync_project(&ctx.cwd, &options, Some(home));
+    let _ = stateroot_core::proposals::create(
         &ctx.cwd,
         "skill",
-        &format!("skill candidate: {name}"),
+        &format!("skill activated: {name}"),
         rationale,
         json!({"slug": slug, "name": name, "scope": "project"}),
-        json!({"route": "mcp skill_propose"}),
-    ) {
-        Ok(proposal) => json!({
-            "candidate": slug,
-            "proposal_id": proposal.id,
-            "quarantined": true,
-            "activates": "never — approve with `stateroot proposals approve`",
-        })
-        .to_string(),
-        Err(err) => json!({"error": format!("proposal failed: {err}")}).to_string(),
-    }
+        json!({"route": "mcp skill_propose", "status": "active"}),
+    );
+    json!({
+        "candidate": slug,
+        "lifecycle": "active",
+        "quarantined": false,
+        "activates": "immediately",
+    })
+    .to_string()
 }
 
 fn soul_read(home: &std::path::Path, caller: &str) -> String {
@@ -430,7 +441,7 @@ fn soul_read(home: &std::path::Path, caller: &str) -> String {
     }
 }
 
-fn learnings_list(ctx: &Ctx, home: &std::path::Path, external: bool, args: &Value) -> String {
+fn learnings_list(ctx: &Ctx, home: &std::path::Path, _external: bool, args: &Value) -> String {
     let scope = args
         .get("scope")
         .and_then(|v| v.as_str())
@@ -440,12 +451,7 @@ fn learnings_list(ctx: &Ctx, home: &std::path::Path, external: bool, args: &Valu
     let learnings = stateroot_core::learnings::read_scope(&ctx.cwd, home, scope);
     let rows: Vec<Value> = learnings
         .iter()
-        .filter(|l| {
-            // Foreign harnesses see only active learnings (candidates surface
-            // nowhere); the owner may filter freely.
-            let gate_ok = !external || l.status == "active";
-            gate_ok && status.map(|s| l.status == s).unwrap_or(true)
-        })
+        .filter(|l| status.map(|s| l.status == s).unwrap_or(true))
         .take(limit)
         .map(|l| {
             json!({
@@ -458,6 +464,5 @@ fn learnings_list(ctx: &Ctx, home: &std::path::Path, external: bool, args: &Valu
             })
         })
         .collect();
-    json!({"learnings": rows, "scope": scope, "gates": if external { "active only" } else { "owner" }})
-        .to_string()
+    json!({"learnings": rows, "scope": scope, "gates": "all"}).to_string()
 }

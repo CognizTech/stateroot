@@ -146,27 +146,11 @@ pub fn transcript_digest(session: &TranscriptSession) -> String {
     format!("{}.", parts.join("; "))
 }
 
-fn compact_tail(session: &TranscriptSession) -> Vec<Value> {
-    let mut user_remaining = 2usize;
-    let mut assistant_remaining = 2usize;
-    let mut keep = vec![false; session.conversation_tail.len()];
-    for (index, entry) in session.conversation_tail.iter().enumerate().rev() {
-        let remaining = match entry.role {
-            "user" => &mut user_remaining,
-            "assistant" => &mut assistant_remaining,
-            _ => continue,
-        };
-        if *remaining > 0 {
-            keep[index] = true;
-            *remaining -= 1;
-        }
-    }
+fn full_tail(session: &TranscriptSession) -> Vec<Value> {
     session
         .conversation_tail
         .iter()
-        .zip(keep)
-        .filter(|(_, keep)| *keep)
-        .map(|(entry, _)| json!({"role": entry.role, "text": entry.text}))
+        .map(|entry| json!({"role": entry.role, "text": entry.text}))
         .collect()
 }
 
@@ -258,7 +242,7 @@ pub fn build_finalize_packet(
     if !session.milestones.is_empty() {
         packet["milestones"] = json!(session.milestones);
     }
-    let tail = compact_tail(session);
+    let tail = full_tail(session);
     if !tail.is_empty() {
         packet["conversation_tail"] = Value::Array(tail);
     }
@@ -341,25 +325,16 @@ pub fn compose_since_handoff_overlay(
             ));
         }
     }
-    let tail = compact_tail(session);
+    let tail = full_tail(session);
     if !tail.is_empty() {
         out.push_str("\nConversation tail (observed):\n");
-        for entry in tail.iter().take(4) {
+        for entry in &tail {
             let role = entry.get("role").and_then(Value::as_str).unwrap_or("?");
             let text = entry.get("text").and_then(Value::as_str).unwrap_or("");
-            out.push_str(&format!("- [{role}] {}\n", truncate_observed(text, 200)));
+            out.push_str(&format!("- [{role}] {text}\n"));
         }
     }
     out.push_str("\nThis is NOT a formal handoff packet.\n");
-    out
-}
-
-fn truncate_observed(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    let mut out = text.chars().take(max.saturating_sub(1)).collect::<String>();
-    out.push('…');
     out
 }
 

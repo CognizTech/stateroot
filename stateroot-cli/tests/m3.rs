@@ -119,7 +119,7 @@ fn soul_import_and_propose_flow() {
     );
     assert!(soul.contains("Han Li"), "soul: {soul}");
 
-    // propose → approve activates (gated evolution)
+    // propose activates immediately (optional audit proposal may exist)
     let draft = project.path().join("draft.md");
     std::fs::write(&draft, "# Soul\n\n## Principles\n\n- verify first\n").expect("draft");
     let out = stateroot(config_home.path(), user_home.path(), project.path())
@@ -128,35 +128,18 @@ fn soul_import_and_propose_flow() {
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-    assert!(stdout.contains("proposal"), "propose: {stdout}");
-
-    let out = stateroot(config_home.path(), user_home.path(), project.path())
-        .args(["proposals", "list", "--status", "pending"])
-        .assert()
-        .success();
-    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-    assert!(stdout.contains("soul"), "list: {stdout}");
-    let id: String = stdout
-        .lines()
-        .find(|l| l.contains("[soul;"))
-        .and_then(|l| l.split_whitespace().next())
-        .expect("proposal id")
-        .to_string();
-    stateroot(config_home.path(), user_home.path(), project.path())
-        .args(["proposals", "approve", &id])
-        .assert()
-        .success();
+    assert!(stdout.contains("soul written"), "propose: {stdout}");
     let soul = canonical_soul(user_home.path());
-    assert!(soul.contains("verify first"), "approved soul: {soul}");
+    assert!(soul.contains("verify first"), "activated soul: {soul}");
     // the imported version was snapshotted
     let history: Vec<_> = std::fs::read_dir(user_home.path().join(".stateroot/soul/history"))
         .expect("history dir")
         .collect();
-    assert_eq!(history.len(), 1, "one snapshot after approve");
+    assert_eq!(history.len(), 1, "one snapshot after propose");
 }
 
 #[test]
-fn learn_record_activates_learnings_and_gates_soul() {
+fn learn_record_writes_learnings_not_memory() {
     let config_home = tempfile::tempdir().expect("config home");
     seed_config_home(config_home.path(), "");
     let user_home = tempfile::tempdir().expect("user home");
@@ -164,21 +147,21 @@ fn learn_record_activates_learnings_and_gates_soul() {
     init_project(config_home.path(), user_home.path(), project.path());
 
     let out = stateroot(config_home.path(), user_home.path(), project.path())
-        .args(["learn", "record", "you are a careful reviewer"])
+        .args(["learn", "record", "Laiq is a TypeScript/Python monorepo"])
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-    assert!(
-        stdout.contains("[soul; pending; project]"),
-        "record: {stdout}"
-    );
+    assert!(stdout.contains("[active; project;"), "record: {stdout}");
+    assert!(!stdout.contains("memory"), "must not reroute: {stdout}");
 
     let out = stateroot(config_home.path(), user_home.path(), project.path())
-        .args(["learn", "record", "prefer small diffs over rewrites"])
+        .args(["learn", "record", "the deploy uses systemd"])
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-    assert!(stdout.contains("[active; project]"), "record: {stdout}");
+    assert!(stdout.contains("learning"), "uses-word: {stdout}");
+    assert!(!project.path().join(".stateroot/memory.md").is_file());
+
     stateroot(config_home.path(), user_home.path(), project.path())
         .args([
             "learn",
@@ -193,7 +176,14 @@ fn learn_record_activates_learnings_and_gates_soul() {
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-    assert!(stdout.contains("small diffs"), "project active: {stdout}");
+    assert!(
+        stdout.contains("TypeScript/Python"),
+        "project active: {stdout}"
+    );
+    assert!(
+        stdout.contains("uses systemd"),
+        "convention active: {stdout}"
+    );
     let out = stateroot(config_home.path(), user_home.path(), project.path())
         .args(["learnings", "list", "--user", "--status", "active"])
         .assert()
@@ -227,31 +217,38 @@ fn learnings_lifecycle_and_distill_and_resume_surface() {
     )
     .expect("episodic");
 
-    // distill → proposal + quarantined candidate
+    // distill → wiki inbox (does not activate learnings)
     let out = stateroot(config_home.path(), user_home.path(), project.path())
         .args(["learnings", "distill"])
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
     assert!(
-        stdout.contains("1 candidate(s) → proposals"),
+        stdout.contains("inbox") || stdout.contains("distill:"),
         "distill: {stdout}"
     );
 
+    let inbox = std::fs::read_to_string(project.path().join(".stateroot/memories/pages/_inbox.md"))
+        .expect("inbox");
+    assert!(
+        inbox.contains("the port is 9060"),
+        "inbox should hold distilled notes: {inbox}"
+    );
+
+    // explicit learn record still activates and surfaces in resume
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["learn", "record", "prefer the port is 9060 convention"])
+        .assert()
+        .success();
+
     let out = stateroot(config_home.path(), user_home.path(), project.path())
-        .args(["learnings", "list", "--status", "candidate"])
+        .args(["learnings", "list", "--status", "active"])
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-    assert!(stdout.contains("the port is 9060"), "candidate: {stdout}");
-    let id: String = stdout
-        .lines()
-        .find(|l| l.contains("the port is 9060"))
-        .and_then(|l| l.split_whitespace().next())
-        .expect("learning id")
-        .to_string();
+    assert!(stdout.contains("the port is 9060"), "active: {stdout}");
 
-    // candidates surface nowhere: resume must NOT contain it yet
+    // active notes surface in resume
     stateroot(config_home.path(), user_home.path(), project.path())
         .args([
             "handoff",
@@ -273,26 +270,15 @@ fn learnings_lifecycle_and_distill_and_resume_surface() {
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
     assert!(
-        !stdout.contains("the port is 9060"),
-        "candidate must not surface: {stdout}"
-    );
-
-    // accept → active → resume surfaces it (durable preferences)
-    stateroot(config_home.path(), user_home.path(), project.path())
-        .args(["learnings", "accept", &id])
-        .assert()
-        .success();
-    let out = stateroot(config_home.path(), user_home.path(), project.path())
-        .args(["resume", "--force"])
-        .assert()
-        .success();
-    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-    assert!(
         stdout.contains("the port is 9060"),
         "active learning must surface in resume: {stdout}"
     );
+    assert!(
+        stdout.contains("Wiki (catalog)") || stdout.contains("_inbox"),
+        "resume must include wiki catalog: {stdout}"
+    );
 
-    // user-scope learning also surfaces (memory scoping)
+    // user-scope learning also surfaces
     let user_learnings = user_home.path().join(".stateroot/learnings");
     std::fs::create_dir_all(&user_learnings).expect("user learnings");
     std::fs::write(

@@ -12,10 +12,9 @@ use stateroot_core::config::{self as core_config, AppConfig, ProjectEntry};
 use stateroot_core::local_store;
 
 pub mod active_harness;
-pub mod auth;
 pub mod blocks;
 pub mod checkpoint;
-pub mod cloud;
+pub mod compiler;
 pub mod doctor;
 pub mod handoff;
 pub mod harness_display;
@@ -28,20 +27,21 @@ pub mod learnings;
 pub mod learnings_reader;
 pub mod mcp;
 pub mod mcp_stdio;
+pub mod memory;
 pub mod persona;
 pub mod proposals;
 pub mod remove;
-pub mod repo;
 pub mod resume;
 pub mod roots;
+pub mod rules;
 pub mod setup;
 pub mod skill;
 pub mod soul;
 pub mod status;
-pub mod sync;
 pub mod synthesize;
 pub mod uninstall;
 pub mod update;
+pub mod wiki;
 
 /// Shared context built once per command invocation.
 #[derive(Clone)]
@@ -137,22 +137,4 @@ pub fn truncate(text: &str, max: usize) -> String {
         out.push('…');
         out
     }
-}
-
-/// Preview gate for cloud features (controlled launch). ON when
-/// `STATEROOT_CLOUD_PREVIEW=1` (or true/yes) or `[cloud] preview = true`.
-pub fn cloud_preview_enabled(ctx: &Ctx) -> bool {
-    let env_on = std::env::var("STATEROOT_CLOUD_PREVIEW")
-        .ok()
-        .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
-        .unwrap_or(false);
-    env_on || ctx.config.cloud.preview
-}
-
-/// The coming-soon message printed when a cloud command runs with the
-/// preview gate OFF. Warm, honest, exits 0.
-pub fn cloud_coming_soon() {
-    println!("StateSmith Cloud is coming soon.");
-    println!("StateRoot is fully local today — everything works offline.");
-    println!("Watch https://github.com/CognizTech/stateroot for the launch.");
 }

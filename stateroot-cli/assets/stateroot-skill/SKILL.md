@@ -20,6 +20,12 @@ Do not use this skill when:
 
 ## Hard Rules
 
+### 0) Shared rules (constitution)
+
+StateRoot keeps a **shared rules pool** — same idea as skills and learnings. Product-intent ships by default. Rules from other harnesses (Cursor `.mdc`, Codex/Claude `AGENTS.md`/`CLAUDE.md`, …) are pulled in on `stateroot rules sync` (also run by `init` / `install`).
+
+Before any architectural or behavioral change, read `stateroot rules show product-intent`. Preserve product intent. Do not replace agent judgment with classifiers, approval gates, or generic architecture. Do not add friction "because it seems safer." Follow imported harness rules in the pool as well (`stateroot rules list`).
+
 ### 1) Session start -> resume once
 
 At the start of every session in a stateroot project, before doing any work:
@@ -46,11 +52,13 @@ Before attempting any non-trivial approach:
 
 Before ending a session, when approaching usage limits, or when the user asks to switch harness:
 1. prefer a **flag-first** one-liner: `scripts/handoff.sh write --from <resolved-current-harness> [--to <harness>] --objective "…" --task "…" --context-summary "…" [--next "…"]` — one command, no temp JSON
-2. omit `--to` for continuity-only; use it only when orchestrating a cross-harness switch; when continuity suffices and hooks may not run, `stateroot handoff finalize` is acceptable
+2. omit `--to` for continuity-only; use it only when orchestrating a cross-harness switch; when continuity suffices and hooks may not run, `stateroot handoff finalize` is acceptable — or rely on session_end/stop hook finalize when it ran
 3. resolve `--from` to the actual current harness id; never copy a placeholder or infer it from an environment variable
 4. include the durable objective, immediate task (`--task`, not `immediate_task`), detailed continuity narrative, decisions, next actions, and truthful failures; the CLI auto-captures recent verified conversation when author content is absent
 5. use `--input <handoff.json>` only when the payload is too large for flags; never write under `.stateroot/handoffs/` by hand
-6. do not paste giant state or transcript dumps into `--note`; `--note` is only a legacy short-summary fallback
+6. thin fields warn; they do not refuse the write — continuity beats form-filling
+7. do not paste giant state or transcript dumps into `--note`; `--note` is only a legacy short-summary fallback
+8. never invent a second approval story — learnings, soul, skills, memory, and distill activate immediately
 
 ### 5) Never edit `.stateroot/` directly
 
@@ -73,7 +81,11 @@ The CLI is offline-safe: when the server is unreachable it queues operations in 
 | `stateroot handoff finalize [--from H]` | hook missed / quota exit | observed continuity from verified transcript; no routing |
 | `stateroot handoff list` / `stateroot handoff show` | inspect prior handoffs | read-only |
 | `stateroot search <query> [--kinds ...] [--top-k N]` | find decisions, failures, memories | hybrid search over project state and memory |
+| `stateroot rules list` / `show` / `sync` | shared rules pool | product-intent always on; harness rules imported |
 | `stateroot pack [--harness H] [--budget N]` | need a fresh context pack | prints the pack to stdout |
+| `stateroot learn record "…"` | durable project taste | judgment rule, not a fact — see Learnings below |
+| `stateroot learn record --user "…"` | durable global taste | follows the user across projects |
+| `stateroot learnings list` / `--user` | read before writing | update rather than duplicate |
 | `stateroot skill install [--harness H]` | install this skill into harness dirs | writes stubs from `assets/` |
 | `stateroot status` / `stateroot doctor` | diagnose auth, connectivity, project state | doctor checks outbox depth and sync health |
 | `stateroot init` | one-time per project | creates `.stateroot/`, registers the workspace, installs harness integrations |
@@ -98,17 +110,56 @@ The CLI is offline-safe: when the server is unreachable it queues operations in 
 
 Read as needed:
 - `references/protocol.md` — checkpoint cadence, handoff packet fields, offline outbox semantics
+- `references/learnings.md` — quality bar, examples, anti-examples for `learn record`
 - `references/harnesses.md` — per-harness install layout
 - `assets/` — harness stub templates used by `stateroot skill install`
 - `scripts/` — thin wrappers: `resume.sh`, `checkpoint.sh`, `handoff.sh`, `search.sh`
 
-## Self-improvement (shared)
+## Learnings (taste — not memory)
 
-Two learning layers — keep both current:
+Learnings are durable **preferences**: how the next harness should judge a choice when two valid options exist. They are the StateRoot equivalent of CommandCode taste. They are not a wiki, not a layout dump, and not a fact log.
 
-- **Global (user):** `stateroot learn record --user "<preference>"` or MCP `learn_record` with `scope: "user"` — communication, recurring methods, design/engineering judgment, boundaries.
-- **Project:** `stateroot learn record "<convention>"` or MCP `learn_record` with `scope: "project"` — stack, layout, this-repo constraints.
+`learn_record` always writes a learning. Facts go to `memory` / `memory_save` (curated MEMORY.md). Procedures go to `skill_propose`. Pull long-term knowledge with `memory_recall` or `wiki_show` — page bodies are not dumped into the digest.
 
-First session after `stateroot init`: seed whichever layer is empty before other work. Later harnesses inherit and must update both when the user corrects you.
-When a fact is durable, call `memory_save`; when a procedure worked end-to-end, propose it with `skill_propose` (via the `stateroot` MCP tools where registered).
-Learnings and memories take effect immediately — the next harness inherits them. Soul and skill changes still file a proposal.
+### Layers
+
+- **Global (user):** `stateroot learn record --user "…"` or MCP `learn_record` with `scope: "user"` — communication, recurring methods, design/engineering judgment, boundaries that follow this human across repos.
+- **Project:** `stateroot learn record "…"` or MCP `learn_record` with `scope: "project"` — this repo's quality bars, preferred patterns, anti-patterns.
+
+Read first: `stateroot learnings list` and `stateroot learnings list --user`. Update rather than duplicate.
+
+### When to write
+
+1. the user corrects you
+2. the user states a durable preference
+3. first session after `stateroot init`, if a layer is empty — seed **2–7 evidenced judgments**, then stop
+4. you just followed a rule the next harness would otherwise miss
+
+### When not to write
+
+- inventory ("this is a TypeScript/Python monorepo", "uses uv") → `memory_save` / `memory` if it must persist at all
+- facts (deadline, version, port, "the dashboard is graphite") → `memory_save` (or `memory` add/replace)
+- slogans ("write good code", "be careful", "prefer evidence")
+- session recap, directory listings, one-off notes
+- anything already in `learnings list`
+
+### Format (required)
+
+One `learn record` call per learning. The note must stand alone so another harness can apply it without this session:
+
+`<judgment>. <when it applies / what to do / what never to do>.`
+
+Good:
+
+- `Prefer small, reviewable diffs over rewrites. Touch only files that implement the asked change; do not restyle or restructure adjacent code.`
+- `Server-side tools must never include arbitrary command execution. exec belongs on the client.`
+- `Always read .gitignore before exploring a codebase so ignored trees do not pollute context.`
+- `When two designs are valid, prefer the restrained, practical one. Do not add architecture from another project without fitting this one.`
+
+Bad:
+
+- `Laiq is a TypeScript/Python monorepo` — fact
+- `prefer evidence over assertion` — too thin; no when, no never
+- `the deploy uses systemd` — inventory
+
+First session after init: seed whichever layer is empty **with this quality bar** before other work. Later harnesses inherit and must keep both current.

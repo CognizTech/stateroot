@@ -82,22 +82,6 @@ pub enum Command {
     },
     /// Guided local setup (identity, harnesses, skills).
     Setup(SetupArgs),
-    /// Log in (OAuth device flow). Currently: --via github.
-    Login {
-        /// Provider (only `github` exists).
-        #[arg(long, default_value = "github")]
-        via: String,
-    },
-    /// Clear the stored credential.
-    Logout,
-    /// GitHub repo binding for refs sync.
-    Repo(RepoArgs),
-    /// Push/pull refs/stateroot/* against the linked remote (never force).
-    Sync(SyncArgs),
-    /// Cloud run: objective executed in StateSmith cloud (requires login).
-    Run(RunArgs),
-    /// List or inspect cloud runs.
-    Runs(RunsArgs),
     /// Check for / install a newer stateroot binary (from GitHub releases).
     SelfUpdate {
         /// Only report current vs latest; do not install.
@@ -108,11 +92,11 @@ pub enum Command {
     McpStdio,
     /// Canonical soul, overlay, projections (all local).
     Soul(SoulArgs),
-    /// Local proposals (the shared approval gate).
+    /// Local proposals (optional audit log — not a blocking gate).
     Proposals(ProposalsArgs),
     /// Scoped learnings: list/accept/reject/edit/distill.
     Learnings(LearningsArgs),
-    /// Record a note into the review loop (classify → proposal).
+    /// Record a learning (active immediately; scope from flags).
     Learn(LearnArgs),
     /// Local LLM synthesis over transcript bundles (own provider key).
     Synthesize {
@@ -120,8 +104,14 @@ pub enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Curated hot-apex memory + FTS recall.
+    Memory(MemoryArgs),
+    /// Compiled wiki catalog (show / lint / compile).
+    Wiki(WikiArgs),
     /// Skill listing, inspection, and federation sync.
     Skill(SkillArgs),
+    /// Shared rules pool (product-intent plus federated harness rules).
+    Rules(RulesArgs),
     /// MCP server discovery and federation sync.
     Mcp(McpArgs),
 }
@@ -308,8 +298,7 @@ pub enum SkillAction {
         #[arg(long)]
         json: bool,
     },
-    /// Open a proposal to activate a quarantined skill (approve projects it
-    /// into harness roots).
+    /// Activate a skill package and project it to installed harnesses.
     Promote {
         /// Skill slug.
         slug: String,
@@ -319,6 +308,25 @@ pub enum SkillAction {
     },
     /// Diagnose skill federation (registry, roots, counts).
     Doctor,
+}
+
+#[derive(Debug, Args)]
+pub struct RulesArgs {
+    #[command(subcommand)]
+    pub action: RulesAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RulesAction {
+    /// List the shared rules pool (product-intent first, then imported).
+    List,
+    /// Print one rule's markdown.
+    Show {
+        /// Rule slug (`product-intent`, `cursor-no-foo`, …).
+        slug: String,
+    },
+    /// Seed product-intent and pull live harness instruction files into the pool.
+    Sync,
 }
 
 #[derive(Debug, Args)]
@@ -447,7 +455,7 @@ pub enum SoulAction {
         #[arg(long)]
         yes: bool,
     },
-    /// Propose a soul change through the gated proposals flow.
+    /// Propose a soul change (writes canonical immediately; optional audit).
     Propose {
         /// Markdown file to propose.
         #[arg(long)]
@@ -455,7 +463,7 @@ pub enum SoulAction {
         /// Read content from stdin.
         #[arg(long)]
         stdin: bool,
-        /// Optional rationale recorded on the proposal.
+        /// Optional rationale recorded on the optional audit proposal.
         #[arg(long)]
         rationale: Option<String>,
     },
@@ -497,33 +505,51 @@ pub struct LearningsArgs {
 pub enum LearningsAction {
     /// List learnings (project scope by default).
     List {
-        /// User-global scope (~/.stateroot/learnings).
-        #[arg(long)]
+        /// User-global scope (`~/.stateroot/learnings`).
+        #[arg(long, group = "scope")]
         user: bool,
+        /// Workspace scope (`~/.stateroot/workspaces/{id}/learnings`).
+        #[arg(long, group = "scope")]
+        workspace: bool,
+        /// Domain scope (`~/.stateroot/domains/{slug}/learnings`).
+        #[arg(long, group = "scope")]
+        domain: Option<String>,
         #[arg(long)]
         status: Option<String>,
     },
     /// Promote a candidate to active (user approval).
     Accept {
         id: String,
-        #[arg(long)]
+        #[arg(long, group = "scope")]
         user: bool,
+        #[arg(long, group = "scope")]
+        workspace: bool,
+        #[arg(long, group = "scope")]
+        domain: Option<String>,
     },
     /// Reject a candidate (archived for audit).
     Reject {
         id: String,
-        #[arg(long)]
+        #[arg(long, group = "scope")]
         user: bool,
+        #[arg(long, group = "scope")]
+        workspace: bool,
+        #[arg(long, group = "scope")]
+        domain: Option<String>,
     },
     /// Edit a learning's statement in place.
     Edit {
         id: String,
         #[arg(long)]
         statement: String,
-        #[arg(long)]
+        #[arg(long, group = "scope")]
         user: bool,
+        #[arg(long, group = "scope")]
+        workspace: bool,
+        #[arg(long, group = "scope")]
+        domain: Option<String>,
     },
-    /// Mine episodic + spool for new candidates (→ proposals).
+    /// Mine episodic + spool into the wiki inbox (does not activate learnings).
     Distill,
 }
 
@@ -535,80 +561,89 @@ pub struct LearnArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum LearnAction {
-    /// Record a lesson or memory (active immediately). Soul/skill still file a proposal.
+    /// Record a learning (taste, convention, judgment). Active immediately.
     Record {
         /// The note to record.
         note: String,
         /// User-global scope (`~/.stateroot/learnings`). Default is project.
-        #[arg(long)]
+        #[arg(long, group = "scope")]
         user: bool,
+        /// Workspace scope (`~/.stateroot/workspaces/{id}/learnings`).
+        #[arg(long, group = "scope")]
+        workspace: bool,
+        /// Domain scope (`~/.stateroot/domains/{slug}/learnings`).
+        #[arg(long, group = "scope")]
+        domain: Option<String>,
     },
 }
 
 #[derive(Debug, Args)]
-pub struct RepoArgs {
+pub struct MemoryArgs {
     #[command(subcommand)]
-    pub action: RepoAction,
+    pub action: MemoryAction,
 }
 
 #[derive(Debug, Subcommand)]
-pub enum RepoAction {
-    /// Bind the project to a GitHub repo (verifies access with the token).
-    Link {
-        /// owner/repo (a github.com URL works too).
-        repo: String,
-        /// `same-repo` (default; refs/stateroot/* inside the repo) or
-        /// `companion` (a dedicated <project>-stateroot repo).
+pub enum MemoryAction {
+    /// Add a curated fact (MEMORY.md) or USER.md note.
+    Add {
+        /// Entry text.
+        content: String,
+        /// `memory` (default) or `user`.
+        #[arg(long, default_value = "memory")]
+        target: String,
+        /// Mark entry private (foreign harnesses cannot recall it).
         #[arg(long)]
-        layout: Option<String>,
+        private: bool,
     },
-    /// Show the current binding + last sync.
-    Status,
+    /// Replace the first matching entry/substring.
+    Replace {
+        /// New entry text.
+        content: String,
+        /// Substring to find.
+        #[arg(long)]
+        old: String,
+        #[arg(long, default_value = "memory")]
+        target: String,
+        #[arg(long)]
+        private: bool,
+    },
+    /// Remove the first matching entry/substring.
+    Remove {
+        /// Substring to find.
+        old: String,
+        #[arg(long, default_value = "memory")]
+        target: String,
+    },
+    /// Show entries + capacity.
+    Show {
+        #[arg(long, default_value = "memory")]
+        target: String,
+    },
+    /// FTS recall over memory, wiki pages, episodic, transcripts.
+    Recall {
+        query: String,
+        #[arg(long, default_value_t = 5)]
+        limit: usize,
+    },
 }
 
 #[derive(Debug, Args)]
-pub struct SyncArgs {
-    /// Push local refs/stateroot/* (default if neither flag set).
-    #[arg(long)]
-    pub push: bool,
-    /// Fetch remote refs/stateroot/* (default if neither flag set).
-    #[arg(long)]
-    pub pull: bool,
-}
-
-#[derive(Debug, Args)]
-pub struct RunArgs {
-    /// The objective for the cloud run.
-    #[arg(long)]
-    pub cloud: String,
-    /// Start from this root (default: latest synced).
-    #[arg(long)]
-    pub from: Option<String>,
-    /// Harness to run as (default: server decides).
-    #[arg(long)]
-    pub harness: Option<String>,
-    /// Verification surface to execute in the cloud.
-    #[arg(long)]
-    pub verification: Option<String>,
-    /// Poll until the run reaches a terminal state (with an event tail).
-    #[arg(long)]
-    pub watch: bool,
-}
-
-#[derive(Debug, Args)]
-pub struct RunsArgs {
+pub struct WikiArgs {
     #[command(subcommand)]
-    pub action: RunsAction,
+    pub action: WikiAction,
 }
 
 #[derive(Debug, Subcommand)]
-pub enum RunsAction {
-    /// List cloud runs for this project.
-    List,
-    /// Show one run (status + last events).
-    Status {
-        /// Run id.
-        id: String,
+pub enum WikiAction {
+    /// Show one page body.
+    Show { path: String },
+    /// Lint index/pages consistency.
+    Lint,
+    /// Compile mined notes into inbox/pages (deterministic; agentic when keyed).
+    Compile {
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -620,7 +655,4 @@ pub struct RemoveArgs {
     /// Print the plan without touching anything.
     #[arg(long)]
     pub dry_run: bool,
-    /// Skip the server-side deletion (when the cloud path applies).
-    #[arg(long)]
-    pub keep_server_state: bool,
 }

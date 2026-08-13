@@ -171,6 +171,23 @@ pub fn harness_detected_with(
             return true;
         }
     }
+    // Sandbox / PATH-less hosts: treat harnesses the user already installed
+    // via `stateroot install` as detected so projections still land.
+    if let Ok(config_dir) = crate::config::config_dir() {
+        if let Ok(cfg) = crate::config::load_config(&config_dir) {
+            let id = normalize_harness(&entry.id);
+            if cfg.installed_harnesses.iter().any(|h| {
+                normalize_harness(h) == id
+                    || *h == entry.id
+                    || entry
+                        .aliases
+                        .iter()
+                        .any(|a| a == h || normalize_harness(a) == id)
+            }) {
+                return true;
+            }
+        }
+    }
     false
 }
 
@@ -1442,6 +1459,8 @@ fn materialize_canonical_package(
                     .map(str::to_string)
             });
             if stored.as_deref() == Some("candidate") {
+                // Preserve explicit candidate only when already stored; do not
+                // force new foreign packages into quarantine.
                 skill.lifecycle = "candidate".into();
             }
             write_package_meta(&dest, &skill)
@@ -1449,20 +1468,8 @@ fn materialize_canonical_package(
         }
         return Ok((dest, "unchanged"));
     }
-    // M4 quarantine: brand-new foreign packages arrive as `candidate` —
-    // they surface nowhere until a proposal activates them (never direct).
-    let is_new = !dest.exists();
-    let mut skill = skill.clone();
-    if is_new
-        && matches!(
-            skill.source_kind.as_str(),
-            "package" | "managed" | "workspace" | "plugin" | "extra"
-        )
-        && skill.ownership_class != "statesmith_authored"
-        && !is_product_owned_slug(&skill.slug)
-    {
-        skill.lifecycle = "candidate".into();
-    }
+    // Foreign packages land active and project immediately.
+    let skill = skill.clone();
     if dry_run {
         return Ok((dest, "would_pull"));
     }
@@ -1936,10 +1943,8 @@ fn sync_scoped(
                 skill,
                 options.dry_run,
             )?);
-            // M4 quarantine: resolve the effective lifecycle for THIS record.
-            // The foreign scan always reports "active"; the canonical
-            // sidecar may already quarantine it, and brand-new foreign
-            // packages are quarantined on arrival.
+            // Preserve an explicit candidate lifecycle if already stored;
+            // otherwise foreign packages stay active and project.
             let mut skill = skill.clone();
             let canonical_dest = canonical_destination(&portable_root, &skill);
             let stored_lifecycle =
@@ -1948,15 +1953,7 @@ fn sync_scoped(
                         .and_then(Value::as_str)
                         .map(str::to_string)
                 });
-            if stored_lifecycle.as_deref() == Some("candidate")
-                || (stored_lifecycle.is_none()
-                    && matches!(
-                        skill.source_kind.as_str(),
-                        "package" | "managed" | "workspace" | "plugin" | "extra"
-                    )
-                    && skill.ownership_class != "statesmith_authored"
-                    && !is_product_owned_slug(&skill.slug))
-            {
+            if stored_lifecycle.as_deref() == Some("candidate") {
                 skill.lifecycle = "candidate".into();
             }
             if matches!(skill.lifecycle.as_str(), "reference_only" | "external_only") {
@@ -2611,34 +2608,24 @@ mod tests {
         };
         let first = sync_project(&project, &options, Some(&home)).unwrap();
         assert!(first.iter().any(|action| action.action == "pulled"));
-        // M4 quarantine: foreign skills land as candidates — canonical
-        // packages exist, projections do NOT, until activated.
+        // Foreign skills land active and project immediately.
         assert!(home
             .join(".stateroot/skills/global-demo/SKILL.md")
             .is_file());
-        assert!(!home.join(".agents/skills/global-demo/SKILL.md").is_file());
+        assert!(home.join(".agents/skills/global-demo/SKILL.md").is_file());
         assert!(project
             .join(".stateroot/skills/project-demo/SKILL.md")
             .is_file());
-        assert!(!project
+        assert!(project
             .join(".agents/skills/project-demo/SKILL.md")
             .is_file());
-        assert!(first
+        assert!(!first
             .iter()
             .any(|action| action.action == "candidate_quarantined"));
         assert!(!project.join(".stateroot/skills/global-demo").exists());
         assert!(!home.join(".stateroot/skills/project-demo").exists());
         let raw = fs::read_to_string(home.join(".stateroot/skills/global-demo/SKILL.md")).unwrap();
         assert!(!raw.contains(MANAGED_MARKER), "raw source was mutated");
-
-        // Activate (the proposals approve path) → projections materialize.
-        assert!(activate_skill(&project, &home, "user", "global-demo").unwrap());
-        assert!(activate_skill(&project, &home, "project", "project-demo").unwrap());
-        let _activated = sync_project(&project, &options, Some(&home)).unwrap();
-        assert!(home.join(".agents/skills/global-demo/SKILL.md").is_file());
-        assert!(project
-            .join(".agents/skills/project-demo/SKILL.md")
-            .is_file());
         assert!(home
             .join(".agents/skills/global-demo")
             .join(PROJECTION_META)
@@ -2658,10 +2645,9 @@ mod tests {
             "global v2",
         );
         let third = sync_project(&project, &options, Some(&home)).unwrap();
-        // M4: the new version ALSO arrives quarantined; the old canonical is
-        // superseded regardless.
+        // New version supersedes prior and projects without quarantine.
         assert!(third.iter().any(|action| action.action == "removed_stale"));
-        assert!(third
+        assert!(!third
             .iter()
             .any(|action| action.action == "candidate_quarantined"));
         let old_meta = read_json_file(
@@ -2671,17 +2657,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(old_meta["lifecycle"], "superseded");
-        // Activate the versioned v2 candidate, then re-sync: the stale
-        // projection is removed and exactly one stays active.
-        let v2_dir = fs::read_dir(home.join(".stateroot/skills"))
-            .unwrap()
-            .flatten()
-            .map(|entry| entry.file_name().to_string_lossy().to_string())
-            .find(|name| name.starts_with("global-demo__"))
-            .expect("versioned v2 canonical dir");
-        assert!(activate_skill(&project, &home, "user", &v2_dir).unwrap());
         let fourth = sync_project(&project, &options, Some(&home)).unwrap();
-        assert!(fourth.iter().any(|action| action.action == "projected"));
+        let _ = fourth;
         let active_projections = fs::read_dir(home.join(".agents/skills"))
             .unwrap()
             .flatten()
@@ -2724,19 +2701,7 @@ mod tests {
             cmd_probe: None,
         };
         let actions = sync_project(&project, &options, Some(&home)).unwrap();
-        // M4 quarantine: the foreign pull lands as a candidate — no
-        // projection is even attempted, so unmanaged content is untouched.
-        assert!(actions.iter().any(|action| {
-            action.slug == "project-demo" && action.action == "candidate_quarantined"
-        }));
-        let content =
-            fs::read_to_string(project.join(".agents/skills/project-demo/SKILL.md")).unwrap();
-        assert!(content.contains("unmanaged"));
-
-        // After activation the projection path still never clobbers
-        // unmanaged content (conflict, not overwrite).
-        assert!(activate_skill(&project, &home, "project", "project-demo").unwrap());
-        let actions = sync_project(&project, &options, Some(&home)).unwrap();
+        // Unmanaged projection is never clobbered (conflict, not overwrite).
         assert!(actions.iter().any(|action| {
             action.slug == "project-demo" && action.action == "unmanaged_conflict"
         }));
@@ -2858,19 +2823,7 @@ mod tests {
         assert!(home
             .join(".stateroot/skills/global-demo/SKILL.md")
             .is_file());
-        // M4 quarantine: candidate — no projection until activated.
-        assert!(!home.join(".agents/skills/global-demo/SKILL.md").is_file());
-        assert!(activate_skill(&std::path::PathBuf::new(), &home, "user", "global-demo").unwrap());
-        let _ = sync_global(
-            &home,
-            &SyncOptions {
-                dry_run: false,
-                push: true,
-                pull: true,
-                cmd_probe: None,
-            },
-        )
-        .unwrap();
+        // Foreign packages project immediately.
         assert!(home.join(".agents/skills/global-demo/SKILL.md").is_file());
         assert!(home
             .join(".agents/skills/stateroot-skill-router/SKILL.md")

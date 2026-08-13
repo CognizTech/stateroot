@@ -33,8 +33,6 @@ use stateroot_core::local_store::now_rfc3339;
 
 use super::{note, truncate, Ctx};
 
-/// Max digest size printed on resume events.
-const DIGEST_BUDGET: usize = 4000;
 /// Marker under `.stateroot/` — suppresses duplicate resume injection for the
 /// same harness + handoff seq within a session.
 const RESUME_DELIVERED_MARKER: &str = "hook-resume-delivered.json";
@@ -174,8 +172,8 @@ fn append_handoff_work(work: &mut String, handoff: &Value, project_dir: &Path) {
     }
     if !failures.is_empty() {
         work.push_str("Failed approaches / bugs:\n");
-        for text in failures.iter().take(6) {
-            work.push_str(&format!("- {}\n", truncate(text, 180)));
+        for text in &failures {
+            work.push_str(&format!("- {text}\n"));
         }
     }
     for (key, title) in [
@@ -187,26 +185,34 @@ fn append_handoff_work(work: &mut String, handoff: &Value, project_dir: &Path) {
         if let Some(items) = handoff.get(key).and_then(|v| v.as_array()) {
             if !items.is_empty() {
                 work.push_str(&format!("{title}:\n"));
-                for item in items.iter().take(6) {
+                for item in items {
                     let text = match item {
                         Value::String(s) => s.clone(),
                         other => other.to_string(),
                     };
-                    work.push_str(&format!("- {}\n", truncate(&text, 180)));
+                    work.push_str(&format!("- {text}\n"));
                 }
             }
         }
     }
     let summary = get_str("context_summary");
     if !summary.is_empty() {
-        work.push_str(&format!("Summary: {}\n", truncate(summary, 300)));
+        work.push_str(&format!("Summary: {summary}\n"));
     }
 
     for rel in [local_store::MEMORY_CORE_PATH] {
+        if let Ok(home) = stateroot_core::harness_install::home_dir() {
+            if let Some(block) =
+                stateroot_core::hot_apex::render_for_digest(project_dir, &home, "memory")
+            {
+                work.push_str(&format!("\n(apex {rel})\n{block}\n"));
+                continue;
+            }
+        }
         if let Ok(text) = std::fs::read_to_string(local_store::root(project_dir).join(rel)) {
             let text = text.trim();
             if !text.is_empty() {
-                work.push_str(&format!("\n(apex {rel})\n{}\n", truncate(text, 400)));
+                work.push_str(&format!("\n(apex {rel})\n{text}\n"));
             }
         }
     }
@@ -226,9 +232,8 @@ fn append_handoff_work(work: &mut String, handoff: &Value, project_dir: &Path) {
     }
 }
 
-/// Build the bounded hook digest. Identity (persona + USER) is always full
-/// and emitted even without a handoff; `DIGEST_BUDGET` applies only to the
-/// work/handoff body.
+/// Build the full hook digest. Identity (persona + USER) and work body are
+/// both uncapped — product-intent forbids char truncation on the compiler path.
 pub fn hook_digest(config_dir: &Path, project_dir: &Path, harness_id: &str) -> Option<String> {
     let handoff = local_store::read_handoff_local(project_dir).ok().flatten();
     let mut work = String::new();
@@ -248,15 +253,13 @@ pub fn hook_digest(config_dir: &Path, project_dir: &Path, harness_id: &str) -> O
         let status = stateroot_core::learnings::bootstrap_status(project_dir, home);
         stateroot_core::learnings::compose_instruction(&status)
     });
+    let rules = home
+        .as_ref()
+        .map(|home| stateroot_core::rules::compose_section(project_dir, home));
     let work = work.trim().to_string();
-    if identity.trim().is_empty() && work.is_empty() && learnings.is_none() {
+    if identity.trim().is_empty() && work.is_empty() && learnings.is_none() && rules.is_none() {
         return None;
     }
-    let budgeted_work = if work.is_empty() {
-        String::new()
-    } else {
-        truncate(&work, DIGEST_BUDGET)
-    };
     let mut digest = identity;
     if let Some(learnings) = learnings.filter(|text| !text.trim().is_empty()) {
         if !digest.is_empty() && !digest.ends_with('\n') {
@@ -265,11 +268,27 @@ pub fn hook_digest(config_dir: &Path, project_dir: &Path, harness_id: &str) -> O
         digest.push_str(learnings.trim());
         digest.push('\n');
     }
-    if !budgeted_work.is_empty() {
+    if let Some(rules) = rules.filter(|text| !text.trim().is_empty()) {
         if !digest.is_empty() && !digest.ends_with('\n') {
             digest.push('\n');
         }
-        digest.push_str(&budgeted_work);
+        digest.push_str(rules.trim());
+        digest.push('\n');
+    }
+    // Wiki catalog (index + recent log) — never page bodies.
+    let wiki = stateroot_core::wiki::compose_digest_section(project_dir);
+    if !wiki.trim().is_empty() {
+        if !digest.is_empty() && !digest.ends_with('\n') {
+            digest.push('\n');
+        }
+        digest.push_str(wiki.trim());
+        digest.push('\n');
+    }
+    if !work.is_empty() {
+        if !digest.is_empty() && !digest.ends_with('\n') {
+            digest.push('\n');
+        }
+        digest.push_str(&work);
     }
     Some(digest.trim().to_string())
 }
@@ -299,10 +318,10 @@ fn print_hook_injection(quirk: &registry::HarnessQuirk, canonical: &str, digest:
             let envelope = json!({ "additional_context": digest });
             println!("{envelope}");
         }
-        Injection::StdoutText | Injection::UserPromptSubmit => {
+        Injection::StdoutText | Injection::UserPromptSubmit | Injection::McpPull => {
             println!("{digest}");
         }
-        Injection::None | Injection::McpPull => {}
+        Injection::None => {}
     }
 }
 
@@ -415,6 +434,22 @@ async fn resume_output(
         {
             note!("warning: MCP federation sync skipped: {err}");
         }
+        // Session-boundary rules federation (product-intent + harness imports).
+        if let Ok(home) = stateroot_core::harness_install::home_dir() {
+            if let Err(err) = stateroot_core::rules::sync(project_dir, &home) {
+                note!("warning: rules sync skipped: {err}");
+            }
+        }
+        // Dual-mode compiler: agentic when keyed/logged-in; never fails the hook.
+        let hook_ctx = Ctx {
+            cwd: project_dir.to_path_buf(),
+            config_dir: ctx.config_dir.clone(),
+            config: ctx.config.clone(),
+        };
+        match super::compiler::try_agentic(&hook_ctx, false).await {
+            Ok(_) => {}
+            Err(err) => note!("warning: compiler skipped: {err}"),
+        }
     }
     let digest = hook_digest(&ctx.config_dir, project_dir, quirk.id);
     let Some(digest) = digest else {
@@ -427,7 +462,15 @@ async fn resume_output(
         }
     }
     match quirk.injection {
-        Injection::None | Injection::McpPull => Ok(0),
+        Injection::None => Ok(0),
+        Injection::McpPull => {
+            // Plugins (OpenClaw, etc.) and MCP-pull adapters capture stdout.
+            print_hook_injection(quirk, canonical, &digest);
+            if let Some(seq) = handoff_seq(project_dir) {
+                mark_resume_delivered(project_dir, quirk.id, seq, session_id.as_deref());
+            }
+            Ok(0)
+        }
         Injection::UserPromptSubmit => {
             if canonical == "user_prompt_submit" {
                 print_hook_injection(quirk, canonical, &digest);
@@ -662,7 +705,11 @@ async fn checkpoint_from_spool(
     // context (registry `compact_injection`), pre/post-compaction ALSO print
     // the bounded hook digest — state re-injected at the moment of
     // compaction. Unsupported harnesses: checkpoint only.
+    // Pre-compact: extract into wiki/memory BEFORE re-injecting the digest.
     if quirk.compact_injection && matches!(canonical, "pre_compact" | "post_compaction") {
+        if canonical == "pre_compact" {
+            let _ = super::compiler::try_ingest(&hook_ctx, false).await;
+        }
         if let Some(digest) = hook_digest(&hook_ctx.config_dir, project_dir, quirk.id) {
             print_hook_injection(quirk, canonical, &digest);
         }
@@ -676,6 +723,11 @@ async fn checkpoint_from_spool(
             note!("finalized observed session into handoff continuity");
         } else if !tail.is_empty() {
             note!("checkpoint recorded; existing structured handoff preserved");
+        }
+        // Compile mined notes into wiki inbox / pages (not into learnings).
+        match super::compiler::try_ingest(&hook_ctx, false).await {
+            Ok(summary) => note!("{summary}"),
+            Err(err) => note!("ingest skipped: {err}"),
         }
         let path = spool_path(project_dir);
         if path.exists() {
@@ -849,12 +901,12 @@ mod tests {
     }
 
     #[test]
-    fn digest_budget_applies_to_work_body_not_identity() {
+    fn digest_keeps_full_work_body_uncapped() {
         let home = tempfile::tempdir().expect("home");
         let project = tempfile::tempdir().expect("project");
         let root = local_store::root(project.path());
         std::fs::create_dir_all(root.join("handoffs")).expect("mkdir");
-        let huge_summary = "W".repeat(DIGEST_BUDGET + 500);
+        let huge_summary = "W".repeat(5000);
         let packet = json!({
             "schema_version": "stateroot.handoff.v1",
             "objective": "ship",
@@ -868,20 +920,15 @@ mod tests {
         .expect("write");
         std::fs::write(
             home.path().join("persona.md"),
-            "Identity marker line must survive budget\n",
+            "Identity marker line must survive\n",
         )
         .expect("persona");
 
         let digest = hook_digest(home.path(), project.path(), "codex").expect("digest");
-        assert!(digest.contains("Identity marker line must survive budget"));
+        assert!(digest.contains("Identity marker line must survive"));
         assert!(
-            !digest.contains(&huge_summary),
-            "work body should be budgeted: {}",
-            digest.len()
-        );
-        assert!(
-            digest.contains("Summary: W"),
-            "truncated summary prefix should remain: {}",
+            digest.contains(&"W".repeat(5000)),
+            "work body must not be char-truncated: {}",
             digest.len()
         );
     }

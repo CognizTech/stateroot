@@ -13,10 +13,10 @@
 //!
 //! Cleaning (cut only pure noise): reasoning items, token-count events,
 //! base/developer instructions, injected envelopes, image blocks
-//! (`[image omitted]`); tool calls/outputs truncated to 500 chars; the
+//! (`[image omitted]`); tool calls/outputs kept in full; the
 //! LATEST `update_plan` snapshot COMPLETE (all statuses); `create_goal`
-//! arguments COMPLETE. Budget guard: middle-elision with a marker, never
-//! touching plan_state, goals, or the final ~200k chars.
+//! arguments COMPLETE. Budget guard only elides when an explicit finite
+//! max is passed (compiler uses `usize::MAX` = uncapped).
 
 use std::path::Path;
 
@@ -25,12 +25,10 @@ use serde_json::{json, Value};
 use super::codex::is_injected;
 use super::{clean, cwd_matches, event_timestamp, walk_files, TranscriptReader, TranscriptSession};
 
-/// Default soft bundle cap (~900k tokens).
+/// Default soft bundle cap (~900k tokens). Compiler paths pass `usize::MAX`.
 pub const DEFAULT_MAX_BUNDLE_CHARS: usize = 3_500_000;
 /// Chars of message text that are never elided (measured from the end).
 const TAIL_PROTECT_CHARS: usize = 200_000;
-/// Tool call/output text cap.
-const TOOL_TEXT_MAX: usize = 500;
 
 /// Build synthesis bundles for the project from the harness transcript
 /// stores. `session_ids`: restrict to those sessions when given.
@@ -349,7 +347,7 @@ fn clean_event_message(event: &Value, messages: &mut Vec<Value>) {
             };
             messages.push(json!({
                 "role": "tool",
-                "text": format!("[call] {name}: {}", clean(raw, TOOL_TEXT_MAX)),
+                "text": format!("[call] {name}: {}", clean(raw, usize::MAX)),
             }));
         }
         ("response_item", "function_call_output")
@@ -359,7 +357,7 @@ fn clean_event_message(event: &Value, messages: &mut Vec<Value>) {
                 Some(other) => other.to_string(),
                 None => String::new(),
             };
-            let text = clean(&output, TOOL_TEXT_MAX);
+            let text = clean(&output, usize::MAX);
             if !text.is_empty() {
                 messages.push(json!({"role": "tool", "text": format!("[output] {text}")}));
             }
@@ -479,7 +477,7 @@ fn bundle_claude_session(file: &Path, project_dir: &Path) -> Option<Value> {
                             if block_type == "tool_result" {
                                 let content =
                                     block.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                                let text = clean(content, TOOL_TEXT_MAX);
+                                let text = clean(content, usize::MAX);
                                 if !text.is_empty() {
                                     messages.push(
                                         json!({"role": "tool", "text": format!("[output] {text}")}),
@@ -523,7 +521,7 @@ fn bundle_claude_session(file: &Path, project_dir: &Path) -> Option<Value> {
                                     .unwrap_or_default();
                                 messages.push(json!({
                                     "role": "tool",
-                                    "text": format!("[call] {name}: {}", clean(&input, TOOL_TEXT_MAX)),
+                                    "text": format!("[call] {name}: {}", clean(&input, usize::MAX)),
                                 }));
                             }
                             Some("thinking") => {} // reasoning dropped
@@ -654,7 +652,7 @@ fn bundle_kimi_wire(
                             .unwrap_or("");
                         messages.push(json!({
                             "role": "tool",
-                            "text": format!("[call] {name}: {}", clean(arguments, TOOL_TEXT_MAX)),
+                            "text": format!("[call] {name}: {}", clean(arguments, usize::MAX)),
                         }));
                     }
                 }
@@ -668,7 +666,7 @@ fn bundle_kimi_wire(
                         }
                     }
                 }
-                let text = clean(&parts.join("\n"), TOOL_TEXT_MAX);
+                let text = clean(&parts.join("\n"), usize::MAX);
                 if !text.is_empty() {
                     messages.push(json!({"role": "tool", "text": format!("[output] {text}")}));
                 }
@@ -826,6 +824,9 @@ fn bundle_from_transcript_session(session: &TranscriptSession) -> Value {
 /// MIDDLE of the message stream with a marker — never touching plan_state,
 /// goals, compaction summaries, or the final ~200k chars of message text.
 fn budget_guard(sessions: &mut [Value], max_chars: usize) {
+    if max_chars == usize::MAX {
+        return;
+    }
     let total = serde_json::to_string(&sessions)
         .map(|s| s.chars().count())
         .unwrap_or(0);

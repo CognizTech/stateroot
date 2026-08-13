@@ -72,10 +72,11 @@ pub enum Injection {
     /// Stdout is discarded on SessionStart; resume fires on UserPromptSubmit
     /// (kimi-code).
     UserPromptSubmit,
-    /// Harness pulls via MCP (`handoff_read`) — hook stdout is ignored
-    /// (grok, zero, openclaw).
+    /// Harness/plugin pulls digest: hook still prints stdout for capture
+    /// (openclaw, grok, zero, hermes).
     McpPull,
-    /// No resume injection channel (vscode-copilot, crush).
+    /// No hook stdout channel — instruction file carries the digest protocol
+    /// (vscode-copilot, crush).
     None,
 }
 
@@ -522,12 +523,13 @@ pub const ADAPTERS: &[HarnessQuirk] = &[
         tier: Tier::C,
         detect: &[".vscode"],
         detect_cmds: &["code"],
-        instruction_file: None,
+        instruction_file: Some(".github/copilot-instructions.md"),
         mcp: Some(McpTarget {
             path: ".vscode/mcp.json",
             shape: McpShape::ServersJson,
         }),
         hooks: None,
+        // Instruction file carries the digest protocol; MCP tools remain.
         injection: Injection::None,
         compact_injection: false,
         events: 0,
@@ -540,7 +542,7 @@ pub const ADAPTERS: &[HarnessQuirk] = &[
         tier: Tier::C,
         detect: &[".config/crush"],
         detect_cmds: &["crush"],
-        instruction_file: None,
+        instruction_file: Some(".config/crush/STATEROOT.md"),
         mcp: None,
         hooks: None,
         injection: Injection::None,

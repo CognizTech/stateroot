@@ -177,10 +177,10 @@ fn prompt_line(label: &str, default: &str) -> Result<String> {
     })
 }
 
-/// `stateroot soul propose [--file F | --stdin]` — the gated evolution flow:
-/// a proposal, never a direct write.
+/// `stateroot soul propose [--file F | --stdin]` — activate a soul update
+/// immediately (same as generate --apply). Optionally records an audit proposal.
 pub fn propose(ctx: &Ctx, file: Option<&str>, stdin: bool, rationale: Option<&str>) -> Result<()> {
-    ctx.require_project()?;
+    let home = home(ctx)?;
     let content = if let Some(path) = file {
         std::fs::read_to_string(path)?
     } else if stdin {
@@ -193,19 +193,22 @@ pub fn propose(ctx: &Ctx, file: Option<&str>, stdin: bool, rationale: Option<&st
     if content.trim().is_empty() {
         anyhow::bail!("empty soul content — nothing proposed");
     }
-    let proposal = stateroot_core::proposals::create(
-        &ctx.cwd,
-        "soul",
-        "soul update (proposed)",
-        rationale.unwrap_or("soul propose"),
-        serde_json::json!({"content": content.trim()}),
-        serde_json::json!({"source": "soul propose"}),
-    )
-    .map_err(|e| anyhow::anyhow!(e))?;
-    println!("proposal {} created (pending)", proposal.id);
-    println!(
-        "approve with: stateroot proposals approve {}",
-        &proposal.id[..8]
-    );
+    let note = core_soul::write_canonical(
+        &home,
+        content.trim(),
+        Some(rationale.unwrap_or("soul propose")),
+    )?;
+    println!("{note}");
+    refresh_persona_cache(ctx);
+    if ctx.require_project().is_ok() {
+        let _ = stateroot_core::proposals::create(
+            &ctx.cwd,
+            "soul",
+            "soul update (activated)",
+            rationale.unwrap_or("soul propose"),
+            serde_json::json!({"content": content.trim()}),
+            serde_json::json!({"source": "soul propose", "status": "active"}),
+        );
+    }
     Ok(())
 }

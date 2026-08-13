@@ -1,6 +1,6 @@
 //! M4 integration tests — stdio MCP server round-trips, federation
-//! candidate→approve→projected flow, instruction block content, install
-//! registration. Offline (the stdio server is a child process, no network).
+//! pull→project flow, instruction block content, install registration.
+//! Offline (the stdio server is a child process, no network).
 
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::Path;
@@ -95,7 +95,7 @@ fn stdio_round_trips_all_six_tools() {
         .args(["soul", "generate", "--yes", "--apply"])
         .assert()
         .success();
-    // seed memory: one shared, one private
+    // seed memory: one shared, one private (legacy memory.md migrates into MEMORY.md)
     let memory = project.path().join(".stateroot/memory.md");
     std::fs::write(
         &memory,
@@ -120,6 +120,8 @@ fn stdio_round_trips_all_six_tools() {
     for expected in [
         "memory_save",
         "memory_recall",
+        "memory",
+        "wiki_show",
         "learn_record",
         "skill_propose",
         "soul_read",
@@ -131,18 +133,21 @@ fn stdio_round_trips_all_six_tools() {
         );
     }
 
-    // memory_save from a foreign harness → quarantined honestly
+    // memory_save writes curated MEMORY.md (no quarantine)
     let saved = client.call(
         "tools/call",
         json!({"name": "memory_save", "arguments": {"content": "release train is fridays", "scope": "user", "visibility": "shared"}}),
     );
     let saved = McpClient::tool_text(&saved);
-    assert_eq!(saved["quarantined"], json!(true), "{saved}");
-    assert_eq!(saved["scope"], json!("session_candidate"), "{saved}");
-    assert!(project
-        .path()
-        .join(".stateroot/learnings/_candidates/memory.md")
-        .is_file());
+    assert_eq!(saved["quarantined"], json!(false), "{saved}");
+    assert_eq!(saved["success"], json!(true), "{saved}");
+    assert!(
+        project
+            .path()
+            .join(".stateroot/memories/MEMORY.md")
+            .is_file(),
+        "MEMORY.md must exist after save"
+    );
 
     // memory_recall (external): shared hit visible, private invisible
     let recall = client.call(
@@ -163,41 +168,31 @@ fn stdio_round_trips_all_six_tools() {
         "private must not leak: {recall}"
     );
 
-    // learn_record → classification + active learning (no approval gate)
+    // learn_record → always a learning (no keyword reroute)
     let learned = client.call(
         "tools/call",
         json!({"name": "learn_record", "arguments": {"note": "actually the build uses --locked"}}),
     );
     let learned = McpClient::tool_text(&learned);
-    assert_eq!(
-        learned["classification"]["kind"],
-        json!("learning"),
-        "{learned}"
-    );
+    assert_eq!(learned["kind"], json!("learning"), "{learned}");
     assert_eq!(learned["status"], json!("active"), "{learned}");
     assert!(learned["id"].as_str().is_some(), "{learned}");
 
-    // skill_propose → quarantined candidate, never projected
+    // skill_propose → activates and projects immediately
     let proposed = client.call(
         "tools/call",
         json!({"name": "skill_propose", "arguments": {"slug": "pdf-fu", "name": "Pdf Fu", "skill_md": "---\nname: pdf-fu\n---\n# Pdf Fu\n"}}),
     );
     let proposed = McpClient::tool_text(&proposed);
-    assert_eq!(proposed["quarantined"], json!(true), "{proposed}");
+    assert_eq!(proposed["quarantined"], json!(false), "{proposed}");
+    assert_eq!(proposed["lifecycle"], json!("active"), "{proposed}");
     let sidecar = std::fs::read_to_string(
         project
             .path()
             .join(".stateroot/skills/pdf-fu/skill.federation.json"),
     )
     .expect("sidecar");
-    assert!(
-        sidecar.contains("\"lifecycle\": \"candidate\""),
-        "{sidecar}"
-    );
-    assert!(
-        !project.path().join(".agents/skills/pdf-fu").exists(),
-        "candidate must not project"
-    );
+    assert!(sidecar.contains("\"lifecycle\": \"active\""), "{sidecar}");
 
     // soul_read returns the caller-harness projection
     let soul = client.call("tools/call", json!({"name": "soul_read", "arguments": {}}));
@@ -211,17 +206,17 @@ fn stdio_round_trips_all_six_tools() {
         "{soul}"
     );
 
-    // learnings_list (external): active only
+    // learnings_list: all statuses visible
     let listed = client.call(
         "tools/call",
         json!({"name": "learnings_list", "arguments": {"scope": "project"}}),
     );
     let listed = McpClient::tool_text(&listed);
-    assert_eq!(listed["gates"], json!("active only"), "{listed}");
+    assert_eq!(listed["gates"], json!("all"), "{listed}");
 }
 
 #[test]
-fn federation_candidate_promote_approve_projects() {
+fn federation_foreign_pull_projects_immediately() {
     let config_home = tempfile::tempdir().expect("config home");
     let user_home = tempfile::tempdir().expect("user home");
     let project = tempfile::tempdir().expect("project");
@@ -236,58 +231,16 @@ fn federation_candidate_promote_approve_projects() {
     )
     .expect("skill md");
 
-    // pull → candidate quarantined (canonical exists, no projection)
+    // pull → active + projected
     let out = stateroot(config_home.path(), user_home.path(), project.path())
         .args(["skill", "sync"])
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-    assert!(stdout.contains("candidate_quarantined"), "sync: {stdout}");
-    // harness-root skills are global scope: canonical + projection live in
-    // the user-home store, not the project store.
-    let sidecar = std::fs::read_to_string(
-        user_home
-            .path()
-            .join(".stateroot/skills/dep-lint/skill.federation.json"),
-    )
-    .expect("sidecar");
     assert!(
-        sidecar.contains("\"lifecycle\": \"candidate\""),
-        "{sidecar}"
+        !stdout.contains("candidate_quarantined"),
+        "sync must not quarantine: {stdout}"
     );
-    assert!(!user_home.path().join(".agents/skills/dep-lint").exists());
-
-    // list shows lifecycle honestly
-    let out = stateroot(config_home.path(), user_home.path(), project.path())
-        .args(["skill", "list"])
-        .assert()
-        .success();
-    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-    assert!(stdout.contains("candidate"), "list: {stdout}");
-
-    // promote → proposal → approve → active + projected
-    stateroot(config_home.path(), user_home.path(), project.path())
-        .args(["skill", "promote", "dep-lint"])
-        .assert()
-        .success();
-    let out = stateroot(config_home.path(), user_home.path(), project.path())
-        .args(["proposals", "list", "--status", "pending"])
-        .assert()
-        .success();
-    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-    let id: String = stdout
-        .lines()
-        .find(|l| l.contains("[skill;"))
-        .and_then(|l| l.split_whitespace().next())
-        .expect("proposal id")
-        .to_string();
-    let out = stateroot(config_home.path(), user_home.path(), project.path())
-        .args(["proposals", "approve", &id])
-        .assert()
-        .success();
-    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-    assert!(stdout.contains("activated"), "approve: {stdout}");
-
     let sidecar = std::fs::read_to_string(
         user_home
             .path()
@@ -300,8 +253,16 @@ fn federation_candidate_promote_approve_projects() {
             .path()
             .join(".agents/skills/dep-lint/SKILL.md")
             .is_file(),
-        "approved skill must project to harness roots"
+        "foreign skill must project immediately"
     );
+
+    // promote is idempotent activation
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["skill", "promote", "dep-lint"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(stdout.contains("activated"), "promote: {stdout}");
 }
 
 #[test]
@@ -325,7 +286,17 @@ fn instruction_block_and_install_register_stdio_mcp() {
     assert!(block.contains("learn_record"), "block: {block}");
     assert!(block.contains("memory_save"), "block: {block}");
     assert!(block.contains("skill_propose"), "block: {block}");
-    assert!(block.contains("take effect immediately"), "block: {block}");
+    assert!(
+        block.contains("Do not put taste in memory"),
+        "block: {block}"
+    );
+    assert!(block.contains("product-intent"), "block: {block}");
+    assert!(
+        block.contains("no approve gate")
+            || block.contains("activates immediately")
+            || !block.contains("classify→approve"),
+        "block must not invent an approval story: {block}"
+    );
 
     // the harness MCP config registers the local stdio server (cursor has an
     // MCP target; codex's adapter deliberately registers none upstream)

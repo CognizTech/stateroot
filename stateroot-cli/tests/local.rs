@@ -48,6 +48,13 @@ fn init_creates_project_and_convenience_layer() {
     assert!(project.path().join(".stateroot/manifest.json").is_file());
     assert!(project.path().join(".stateroot/first-run.json").is_file());
     assert!(project.path().join(".stateroot/learnings").is_dir());
+    let rules =
+        std::fs::read_to_string(user_home.path().join(".stateroot/rules/product-intent.md"))
+            .expect("product-intent");
+    assert!(
+        rules.contains("Product Intent Is a Hard Constraint"),
+        "shipped constitution missing: {rules}"
+    );
     assert!(project
         .path()
         .join(".stateroot/project/state.json")
@@ -63,6 +70,55 @@ fn init_creates_project_and_convenience_layer() {
         .arg("init")
         .assert()
         .success();
+}
+
+#[test]
+fn rules_sync_imports_harness_files() {
+    let config_home = tempfile::tempdir().expect("config home");
+    seed_config_home(config_home.path());
+    let user_home = tempfile::tempdir().expect("user home");
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+
+    std::fs::create_dir_all(user_home.path().join(".cursor/rules")).expect("cursor rules");
+    std::fs::write(
+        user_home.path().join(".cursor/rules/no-foo.mdc"),
+        "# Never introduce foo\n\nPrefer existing helpers over a new foo crate.\n",
+    )
+    .expect("cursor rule");
+    std::fs::write(
+        project.path().join("AGENTS.md"),
+        "# Project agents\n\nKeep the parser table-driven. Do not invent a second parser.\n",
+    )
+    .expect("project agents");
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["rules", "sync"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(stdout.contains("product-intent"), "sync: {stdout}");
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["rules", "list"])
+        .assert()
+        .success();
+    let list = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(list.contains("product-intent"), "list: {list}");
+    assert!(
+        list.contains("no-foo") || list.contains("cursor"),
+        "list: {list}"
+    );
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["rules", "show", "product-intent"])
+        .assert()
+        .success();
+    let shown = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        shown.contains("Product Intent Is a Hard Constraint"),
+        "show: {shown}"
+    );
 }
 
 #[test]

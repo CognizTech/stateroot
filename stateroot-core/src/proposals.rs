@@ -1,9 +1,8 @@
-//! Local proposals — the shared approval gate (M3).
+//! Local proposals — optional audit trail (M3).
 //!
-//! Every evolution of identity, learnings, skills, or memory passes through a
-//! proposal file: `.stateroot/proposals/<id>.json`. Nothing activates until
-//! `stateroot proposals approve` (or `learnings accept`, which is the user's
-//! own approval). Rejection keeps the file for audit (append-only history).
+//! Explicit agent writes (learn_record, soul propose, skill propose, distill)
+//! activate immediately. This module remains for optional review records and
+//! the `stateroot proposals` CLI — it is **not** a blocking gate.
 
 use std::path::Path;
 

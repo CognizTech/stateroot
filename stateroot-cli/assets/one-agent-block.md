@@ -10,8 +10,10 @@
 - Session start: prefer the auto-injected StateRoot digest from harness hooks when present. Only run `{{RESUME_CMD}}` if no StateRoot resume/handoff digest appeared yet. Never run resume twice in the same session (the CLI dedupes; pass `--force` only if the user asks to reprint).
 - After any state-changing step: `stateroot checkpoint --note "<what changed>"`.
 - Before retrying an approach: check "Failed approaches / bugs" in the resume digest.
-- Before stopping or when nearing limits: run `stateroot handoff write --from {{CURRENT_HARNESS}} [--to <next-harness>] --objective "…" --task "…" --context-summary "…" [--next "…"]`. Prefer flags (one command, no temp JSON). Omit `--to` for continuity-only; use it only when orchestrating a cross-harness switch. Use `--input` only when the payload is large. Never write under `.stateroot/handoffs/` by hand. Field is `--task`, not `immediate_task`.
-- Privacy: files matching `.staterootignore` (or `.gitignore`) never sync to the cloud. If the user works with sensitive files, suggest adding patterns with `stateroot ignore add`.
+- Before stopping or when nearing limits: run `stateroot handoff write --from {{CURRENT_HARNESS}} [--to <next-harness>] --objective "…" --task "…" --context-summary "…" [--next "…"]`, **or** rely on the session_end/stop hook finalize when it ran. Prefer flags (one command, no temp JSON). Omit `--to` for continuity-only; use it only when orchestrating a cross-harness switch. Use `--input` only when the payload is large. Never write under `.stateroot/handoffs/` by hand. Field is `--task`, not `immediate_task`. Thin fields warn; they do not refuse the write.
+- Privacy: files matching `.staterootignore` never sync to the cloud (snap/root trees). Root `.gitignore` is not used for sync. If the user works with sensitive files, suggest adding patterns with `stateroot ignore add`.
+- Shared rules: product-intent is always on (full body in the digest). Other harness instruction files join the pool via `stateroot rules sync`. Preserve product intent; do not add classifiers, approval gates, or generic architecture.
+- Self-improvement activates immediately: `learn_record`, soul propose, skill propose, and memory add/replace honor the caller's intent — no approve gate. Distill compiles into the wiki inbox (not learnings).
 
 ### Capabilities
 
@@ -22,11 +24,12 @@ named `stateroot` is registered, via its tools (`state_get/put`,
 
 ### Self-improvement (shared)
 
-Two learning layers — keep both current:
+Learnings are **taste** (CommandCode durable preferences), not facts. Each note is a judgment another harness can apply: prefer X over Y, or never Z, plus when it applies.
 
-- **Global (user):** taste that follows the user across projects (communication, recurring methods, design/engineering judgment, boundaries). `stateroot learn record --user "<preference>"` or MCP `learn_record` with `scope: "user"`.
-- **Project:** this-repo conventions (stack, layout, constraints). `stateroot learn record "<convention>"` or MCP `learn_record` with `scope: "project"`.
+- **Global (user):** communication, methods, design/engineering judgment. `stateroot learn record --user "Prefer small, reviewable diffs over rewrites. Do not restyle adjacent files."` or MCP `learn_record` with `scope: "user"`.
+- **Workspace:** shared taste across projects in a workspace. `stateroot learn record --workspace "…"`.
+- **Project:** this-repo quality bars, preferred patterns, anti-patterns — not a stack inventory. `stateroot learn record "…"` or MCP `learn_record` with `scope: "project"`.
+- **Domain:** cross-project domain taste. `stateroot learn record --domain <slug> "…"`.
 
-First session after `stateroot init`: if either layer is empty, seed it in this session before other work. Every later harness reads both (`learnings list` / `learnings list --user`) and updates rather than duplicating.
-When the user corrects you, call `learn_record` with the right scope; when a fact is durable, call `memory_save`; when a procedure worked end-to-end, propose it with `skill_propose` (via the `stateroot` MCP tools where registered).
-Learnings and memories take effect immediately — the next harness inherits them. Soul and skill changes still file a proposal.
+First session after `stateroot init`: if a layer is empty, seed **2–7 evidenced judgments** (not one layout sentence), then stop. Read `learnings list` / `learnings list --user` first; update rather than duplicate.
+When the user corrects you, call `learn_record`. When a **fact** is durable (deadline, version, port, "this is a TypeScript monorepo"), call `memory_save` or MCP `memory` (add/replace/remove on MEMORY.md). Recall with `memory_recall` / `wiki_show` — do not expect the full archive in the digest. Procedures: `skill_propose`. Do not put taste in memory or facts in learnings. Explicit writes activate immediately — there is no classify→approve story.
