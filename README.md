@@ -2,10 +2,17 @@
 
 **Context that follows you across coding agents.**
 
-[![Release](https://img.shields.io/github/v/release/CognizTech/stateroot?color=7ee0c8&labelColor=0c1016&logo=github&style=flat-square)](https://github.com/CognizTech/stateroot/releases)
-[![License](https://img.shields.io/badge/license-Apache--2.0-7ee0c8?labelColor=0c1016&style=flat-square)](LICENSE)
-
-[stateroot.dev](https://stateroot.dev) · [Docs](https://stateroot.dev/docs/intro) · [Quickstart](https://stateroot.dev/docs/getting-started/quickstart) · [CLI reference](https://stateroot.dev/docs/reference/cli) · [Discord](https://discord.gg/SfbKEPRD7) · [Releases](https://github.com/CognizTech/stateroot/releases)
+<p align="center">
+  <a href="https://github.com/CognizTech/stateroot/releases"><img src="https://img.shields.io/github/v/release/CognizTech/stateroot?color=7ee0c8&labelColor=0c1016&logo=github&style=for-the-badge" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-7ee0c8?labelColor=0c1016&style=for-the-badge" alt="License"></a>
+</p>
+<p align="center">
+  <a href="https://stateroot.dev"><img src="https://img.shields.io/badge/Website-stateroot.dev-7ee0c8?style=for-the-badge&labelColor=0c1016" alt="Website"></a>
+  <a href="https://stateroot.dev/docs/intro"><img src="https://img.shields.io/badge/Docs-7ee0c8?style=for-the-badge&labelColor=0c1016" alt="Docs"></a>
+  <a href="https://stateroot.dev/docs/getting-started/quickstart"><img src="https://img.shields.io/badge/Quickstart-7ee0c8?style=for-the-badge&labelColor=0c1016" alt="Quickstart"></a>
+  <a href="https://stateroot.dev/docs/reference/cli"><img src="https://img.shields.io/badge/CLI-7ee0c8?style=for-the-badge&labelColor=0c1016" alt="CLI reference"></a>
+  <a href="https://discord.gg/SfbKEPRD7"><img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord"></a>
+</p>
 
 StateRoot is a local CLI that sits beside Git and beside the coding agents you already use. It shares personality, skills, tools, memories, and project notes across those agents — and snapshots the work so you can continue, branch, or restore.
 
