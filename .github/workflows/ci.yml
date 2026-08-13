@@ -222,7 +222,9 @@ jobs:
             **Windows installation:** download and run `StateRootSetup-x64.msi`.
             `stateroot-windows-x64.exe` is the portable command-line binary, not an installer.
 
-            These preview artifacts are unsigned. Permanent `v*` releases are signed and immutable.
+            These preview artifacts are unsigned. Tagged `v*` Windows
+            installers are unsigned until Azure Artifact Signing is
+            re-enabled on the `release` environment.
           prerelease: true
           make_latest: false
           overwrite_files: true
@@ -278,11 +280,17 @@ jobs:
             strip dist/${{ matrix.artifact }} || true
           fi
 
-      # Windows releases fail closed until CognizTech's Artifact Signing
-      # identity and GitHub OIDC credentials are configured. The inner CLI
-      # must be signed before WiX embeds it in the MSI.
+      # Authenticode is opt-in until Azure identity validation completes.
+      # Set AZURE_ARTIFACT_SIGNING_ENABLED=true on the `release` environment
+      # to sign the CLI before WiX embeds it, then sign the MSI.
+      - name: Skip Authenticode signing
+        if: runner.os == 'Windows' && vars.AZURE_ARTIFACT_SIGNING_ENABLED != 'true'
+        shell: pwsh
+        run: |
+          Write-Host "AZURE_ARTIFACT_SIGNING_ENABLED is not true; shipping unsigned Windows CLI and MSI."
+
       - name: Sign in to Azure for Artifact Signing
-        if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/v')
+        if: runner.os == 'Windows' && vars.AZURE_ARTIFACT_SIGNING_ENABLED == 'true'
         uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -290,7 +298,7 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Sign Windows CLI
-        if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/v')
+        if: runner.os == 'Windows' && vars.AZURE_ARTIFACT_SIGNING_ENABLED == 'true'
         uses: azure/artifact-signing-action@v2
         with:
           endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
@@ -303,7 +311,7 @@ jobs:
           timestamp-digest: SHA256
 
       - name: Verify Windows CLI signature
-        if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/v')
+        if: runner.os == 'Windows' && vars.AZURE_ARTIFACT_SIGNING_ENABLED == 'true'
         shell: pwsh
         run: |
           $signature = Get-AuthenticodeSignature 'dist/stateroot-windows-x64.exe'
@@ -332,7 +340,7 @@ jobs:
       # Sign the finished container separately. This signature covers the MSI
       # itself; it does not replace the signature on the embedded CLI above.
       - name: Sign Windows GUI installer
-        if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/v')
+        if: runner.os == 'Windows' && vars.AZURE_ARTIFACT_SIGNING_ENABLED == 'true'
         uses: azure/artifact-signing-action@v2
         with:
           endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
@@ -345,7 +353,7 @@ jobs:
           timestamp-digest: SHA256
 
       - name: Verify Windows GUI installer signature
-        if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/v')
+        if: runner.os == 'Windows' && vars.AZURE_ARTIFACT_SIGNING_ENABLED == 'true'
         shell: pwsh
         run: |
           $signature = Get-AuthenticodeSignature 'dist/StateRootSetup-x64.msi'
@@ -400,6 +408,9 @@ jobs:
           body: |
             **Windows installation:** download and run `StateRootSetup-x64.msi`.
             `stateroot-windows-x64.exe` is the portable command-line binary, not an installer.
+
+            Windows assets are currently unsigned. SmartScreen may warn;
+            that is expected until Authenticode signing is re-enabled.
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

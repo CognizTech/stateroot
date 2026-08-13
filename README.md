@@ -1,16 +1,16 @@
 # StateRoot
 
-**Version control for AI-assisted work.**
-**Switch agents. Nothing is lost.**
-**Local-first. No account required.**
+**Context that follows you across coding agents.**
 
 [![Release](https://img.shields.io/github/v/release/CognizTech/stateroot?color=7ee0c8&labelColor=0c1016&logo=github&style=flat-square)](https://github.com/CognizTech/stateroot/releases)
 [![CI](https://img.shields.io/github/actions/workflow/status/CognizTech/stateroot/ci.yml?branch=main&label=CI&labelColor=0c1016&style=flat-square)](https://github.com/CognizTech/stateroot/actions)
 [![License](https://img.shields.io/badge/license-Apache--2.0-7ee0c8?labelColor=0c1016&style=flat-square)](LICENSE)
 
-Website · [Docs](https://stateroot.dev/docs/intro) · [CLI reference](https://stateroot.dev/docs/reference/cli) · [Discord](https://discord.gg/SfbKEPRD7) · [Releases](https://github.com/CognizTech/stateroot/releases) · [Issues](https://github.com/CognizTech/stateroot/issues)
+[stateroot.dev](https://stateroot.dev) · [Docs](https://stateroot.dev/docs/intro) · [Quickstart](https://stateroot.dev/docs/getting-started/quickstart) · [CLI reference](https://stateroot.dev/docs/reference/cli) · [Discord](https://discord.gg/SfbKEPRD7) · [Releases](https://github.com/CognizTech/stateroot/releases)
 
-StateRoot is the local continuity layer for AI-assisted work. It sits beside Git and beside the coding agents you already use. Git versions trees. StateRoot versions *agentic work* — the snapshots agents create, the handoffs they leave, and the memory and working identity that should follow you from Claude Code to Codex to Cursor without a rebuild.
+StateRoot is a local CLI that sits beside Git and beside the coding agents you already use. It shares personality, skills, tools, memories, and project notes across those agents — and snapshots the work so you can continue, branch, or restore.
+
+Each agent keeps its own transcripts, rules, skills, and MCP configs. Switching tools usually means rebuilding context by hand. StateRoot gives a project one place for that context. Everything runs on your machine.
 
 ```text
 Claude Code ──→ State A ──→ State B
@@ -20,24 +20,27 @@ Claude Code ──→ State A ──→ State B
                              └── restore an earlier state
 ```
 
-One binary. No account. No hosted server. Your project stays on your machine.
-
-## What StateRoot is
+## What it shares
 
 | | |
 | --- | --- |
-| **Work lineage** | Append-only roots (Git plumbing, never your branches). Inspect, diff, fork, restore. |
-| **Cross-agent continuity** | Checkpoints, structured handoffs, and a resume digest injected at session start. |
-| **Portable working identity** | Soul + USER.md delivered in full — not truncated to fit a token budget. |
-| **Layered memory** | Curated hot-apex facts, a compiled wiki, local FTS recall. Taste stays learnings. |
-| **Federation** | Skills, MCP servers, and harness rules pooled across tools; conflicts are not overwritten. |
-| **Honest provenance** | Verified (git) vs observed (transcripts) vs synthesized (LLM) — empty stays empty. |
+| **Personality** | Soul + USER.md, injected in full — not truncated to fit a token budget. |
+| **Memory** | Curated facts, a compiled wiki, local search. The next session can look things up. |
+| **Preferences** | Record “prefer X over Y” once. Every agent on the machine sees it. |
+| **Skills and tools** | SKILL.md packages and MCP servers sync across agent configs. Conflicts are left alone. |
+| **Session handoffs** | Objective, current task, what to do next. Hooks inject the brief so you are not pasting transcripts. |
 
-It is not a hosted agent, not a Git replacement, and not a cloud account.
+## What it snapshots
 
-Full capability map: **[stateroot.dev](https://stateroot.dev/docs/intro)**.
+Git versions the commits you make. StateRoot snapshots the working tree during agent work, stored with Git *plumbing* under `refs/stateroot`. Your branches are never rewritten.
+
+Restores and digests say where information came from: **verified** (Git), **observed** (transcripts), or **synthesized** (LLM). Empty stays empty.
+
+Full map: **[stateroot.dev/docs](https://stateroot.dev/docs/intro)**.
 
 ## Install
+
+Current releases ship **Linux x64** and **Windows x64**. One binary, no extra runtime. macOS: [build from source](https://stateroot.dev/docs/getting-started/installation) until a release asset is published.
 
 ### Linux
 
@@ -45,15 +48,17 @@ Full capability map: **[stateroot.dev](https://stateroot.dev/docs/intro)**.
 curl -sSfL https://github.com/CognizTech/stateroot/releases/latest/download/install.sh | sh
 ```
 
-### Windows (PowerShell)
+Installs to `~/.local/bin`. Put that directory on your `PATH`.
+
+### Windows
+
+Download [**StateRootSetup-x64.msi**](https://github.com/CognizTech/stateroot/releases/latest/download/StateRootSetup-x64.msi) from [Releases](https://github.com/CognizTech/stateroot/releases), or:
 
 ```powershell
 irm https://github.com/CognizTech/stateroot/releases/latest/download/install.ps1 | iex
 ```
 
-Prefer **`StateRootSetup-x64.msi`** from [Releases](https://github.com/CognizTech/stateroot/releases). `stateroot-windows-x64.exe` is the portable CLI, not an installer.
-
-Current tagged builds ship **Linux x64** and **Windows x64**. macOS: build from source until a release asset is published.
+`stateroot-windows-x64.exe` is the portable CLI, not an installer. Current Windows assets are **unsigned**; SmartScreen may warn until Authenticode signing is enabled.
 
 ```bash
 stateroot --version
@@ -68,15 +73,22 @@ stateroot init
 stateroot setup      # once per machine: identity, harnesses, skills
 ```
 
-Keep working in your usual agent. Session hooks inject a digest. When you switch tools — or hit a usage limit mid-task — the next agent picks up the same state of record:
+Work in your usual agent. Session hooks inject a digest. You do not need to paste anything.
 
 ```bash
 stateroot status
 stateroot log
 stateroot resume --harness cursor
-stateroot checkpoint --note "what changed — why — what it unblocks" --files src/lib.rs
-stateroot handoff write --from cursor --objective "…" --task "…" --context-summary "…"
+stateroot checkpoint --note "wired auth middleware — unblocks handlers" --files src/auth.rs
+stateroot handoff write --from cursor \
+  --objective "Ship local handoffs" \
+  --task "Finish adversarial CLI tests" \
+  --context-summary "Structured write path is in; remaining work is workspace checks."
 ```
+
+If a digest did not appear, run `stateroot resume --harness <id>` with the harness you are actually in (`claude`, `codex`, `cursor`, `kimi`, `openclaw`, `hermes`).
+
+Walkthrough: [Quickstart](https://stateroot.dev/docs/getting-started/quickstart).
 
 ## Supported harnesses
 
@@ -88,23 +100,25 @@ Per-harness notes: [Harnesses](https://stateroot.dev/docs/harnesses/overview).
 
 ## Documentation
 
-All user docs live at **[stateroot.dev](https://stateroot.dev)**:
+User docs live at **[stateroot.dev](https://stateroot.dev)**. This repository is the CLI.
 
 | Section | Contents |
 | --- | --- |
+| [Install](https://stateroot.dev/docs/getting-started/installation) | Linux, Windows MSI, from source |
 | [Quickstart](https://stateroot.dev/docs/getting-started/quickstart) | Init → setup → first resume |
 | [Concepts](https://stateroot.dev/docs/concepts/overview) | Roots, continuity, identity, memory, provenance |
-| [Capabilities](https://stateroot.dev/docs/features/roots) | Lineage, handoffs, memory, wiki, skills, MCP, rules, compiler |
+| [Capabilities](https://stateroot.dev/docs/features/roots) | Lineage, handoffs, memory, wiki, skills, MCP, rules |
 | [Harnesses](https://stateroot.dev/docs/harnesses/overview) | Per-tool install and protocol |
 | [CLI reference](https://stateroot.dev/docs/reference/cli) | Every command |
 | [MCP tools](https://stateroot.dev/docs/reference/mcp-tools) | Local stdio server |
-| [Architecture](https://stateroot.dev/docs/developer-guide/architecture) | Crates and planes |
 
 Machine-readable index: [stateroot.dev/llms.txt](https://stateroot.dev/llms.txt).
 
 ## Privacy
 
-Your project never leaves the machine unless you copy it. Snap/root payloads honor `.staterootignore` plus hardcoded `.git/` and `.stateroot/local/`. Root `.gitignore` is **not** unioned into lineage trees. Optional LLM synthesis calls only *your* OpenAI-compatible endpoint, and only if you set a key.
+Project data stays in the repo (`.stateroot/`). Persona and USER.md live in `~/.stateroot/`. Search stays in `.stateroot/local/` and is never included in snapshots.
+
+Snapshots honor `.staterootignore`, plus `.git/` and `local/`. Root `.gitignore` is **not** mixed into snaps. Optional LLM synthesis calls only *your* OpenAI-compatible endpoint, and only if you set a key.
 
 Details: [Privacy](https://stateroot.dev/docs/guides/privacy).
 
@@ -116,9 +130,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-Docs: **[stateroot.dev](https://stateroot.dev/docs/developer-guide/contributing)**.
+Rust 1.85+. libgit2 is vendored. Docs: [Contributing](https://stateroot.dev/docs/developer-guide/contributing).
 
-Please preserve [product intent](https://stateroot.dev/docs/features/rules): do not replace agent judgment with classifiers, or truncate identity to look conservative.
+Please preserve [product intent](https://stateroot.dev/docs/features/rules): inject full persona/USER.md, warn on thin handoffs instead of refusing, do not auto-categorize learnings, and do not trim identity to save tokens.
 
 ## License
 

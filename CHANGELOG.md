@@ -7,6 +7,11 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## [0.1.1] — 2026-08-13
 
+- README aligned with https://stateroot.dev product copy (what it shares,
+  what it snapshots, install, quickstart). Docs stay on the site.
+- Tagged Windows CI builds the MSI without Authenticode unless
+  `AZURE_ARTIFACT_SIGNING_ENABLED=true` on the `release` environment.
+
 - README and public docs at https://stateroot.dev (site source is not in this
   repository). Maintainer notes stay under repo `docs/`. Discord:
   https://discord.gg/SfbKEPRD7
