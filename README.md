@@ -3,7 +3,6 @@
 **Context that follows you across coding agents.**
 
 [![Release](https://img.shields.io/github/v/release/CognizTech/stateroot?color=7ee0c8&labelColor=0c1016&logo=github&style=flat-square)](https://github.com/CognizTech/stateroot/releases)
-[![CI](https://img.shields.io/github/actions/workflow/status/CognizTech/stateroot/ci.yml?branch=main&label=CI&labelColor=0c1016&style=flat-square)](https://github.com/CognizTech/stateroot/actions)
 [![License](https://img.shields.io/badge/license-Apache--2.0-7ee0c8?labelColor=0c1016&style=flat-square)](LICENSE)
 
 [stateroot.dev](https://stateroot.dev) · [Docs](https://stateroot.dev/docs/intro) · [Quickstart](https://stateroot.dev/docs/getting-started/quickstart) · [CLI reference](https://stateroot.dev/docs/reference/cli) · [Discord](https://discord.gg/SfbKEPRD7) · [Releases](https://github.com/CognizTech/stateroot/releases)
