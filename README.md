@@ -58,7 +58,7 @@ Download [**StateRootSetup-x64.msi**](https://github.com/CognizTech/stateroot/re
 irm https://github.com/CognizTech/stateroot/releases/latest/download/install.ps1 | iex
 ```
 
-`stateroot-windows-x64.exe` is the portable CLI, not an installer. Current Windows assets are **unsigned**; SmartScreen may warn until Authenticode signing is enabled.
+`stateroot-windows-x64.exe` is the portable CLI, not an installer. Windows assets are unsigned for now. SmartScreen may warn.
 
 ```bash
 stateroot --version

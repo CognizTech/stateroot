@@ -222,9 +222,7 @@ jobs:
             **Windows installation:** download and run `StateRootSetup-x64.msi`.
             `stateroot-windows-x64.exe` is the portable command-line binary, not an installer.
 
-            These preview artifacts are unsigned. Tagged `v*` Windows
-            installers are unsigned until Azure Artifact Signing is
-            re-enabled on the `release` environment.
+            These preview artifacts are unsigned.
           prerelease: true
           make_latest: false
           overwrite_files: true
@@ -415,8 +413,7 @@ jobs:
             **Windows installation:** download and run `StateRootSetup-x64.msi`.
             `stateroot-windows-x64.exe` is the portable command-line binary, not an installer.
 
-            Windows assets are currently unsigned. SmartScreen may warn;
-            that is expected until Authenticode signing is re-enabled.
+            Windows assets are unsigned for now. SmartScreen may warn.
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
