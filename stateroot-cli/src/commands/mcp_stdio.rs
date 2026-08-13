@@ -25,8 +25,8 @@ pub const TOOL_DEFS: &[(&str, &str, &str)] = &[
     ),
     (
         "learn_record",
-        "Record a correction or lesson into the learning loop. Call after the user corrects you or when a procedure worked. Files a proposal — never a direct write.",
-        r#"{"type":"object","properties":{"note":{"type":"string"},"as_kind":{"type":"string","enum":["soul","memory","skill","learning"]}},"required":["note"]}"#,
+        "Record a correction or lesson. Use scope=user for global taste that follows the user across projects; scope=project (default) for this-repo conventions. Call after the user corrects you, on first session after init if learnings are empty, and whenever a durable preference appears. Files a proposal — never a direct write.",
+        r#"{"type":"object","properties":{"note":{"type":"string"},"scope":{"type":"string","enum":["user","project"]},"as_kind":{"type":"string","enum":["soul","memory","skill","learning"]}},"required":["note"]}"#,
     ),
     (
         "skill_propose",
@@ -168,7 +168,7 @@ fn call_tool(
     let text = match name {
         "memory_save" => memory_save(ctx, home, external, args),
         "memory_recall" => memory_recall(ctx, home, external, args),
-        "learn_record" => learn_record(ctx, args),
+        "learn_record" => learn_record(ctx, home, args),
         "skill_propose" => skill_propose(ctx, home, caller, args),
         "soul_read" => soul_read(home, caller),
         "learnings_list" => learnings_list(ctx, home, external, args),
@@ -280,7 +280,7 @@ fn memory_recall(ctx: &Ctx, home: &std::path::Path, external: bool, args: &Value
     json!({"hits": hits, "gates": if external { "shared only" } else { "owner" }}).to_string()
 }
 
-fn learn_record(ctx: &Ctx, args: &Value) -> String {
+fn learn_record(ctx: &Ctx, home: &std::path::Path, args: &Value) -> String {
     let note = args
         .get("note")
         .and_then(|v| v.as_str())
@@ -303,6 +303,11 @@ fn learn_record(ctx: &Ctx, args: &Value) -> String {
         },
         None => stateroot_core::learnings::classify_note(note),
     };
+    let scope = args
+        .get("scope")
+        .and_then(|v| v.as_str())
+        .unwrap_or("project");
+    let scope = if scope == "user" { "user" } else { "project" };
     let payload = match class.kind.as_str() {
         "learning" => {
             let candidate = stateroot_core::learnings::Learning::candidate(
@@ -310,8 +315,10 @@ fn learn_record(ctx: &Ctx, args: &Value) -> String {
                 &class.category,
                 0.45,
                 "mcp learn_record",
-                "project",
+                scope,
             );
+            let _ = stateroot_core::learnings::append_candidate(&ctx.cwd, home, scope, &candidate);
+            let _ = stateroot_core::learnings::maybe_complete_first_run(&ctx.cwd, home);
             json!({
                 "id": candidate.id,
                 "statement": candidate.statement,
@@ -322,7 +329,7 @@ fn learn_record(ctx: &Ctx, args: &Value) -> String {
                 "scope": candidate.scope,
             })
         }
-        _ => json!({"content": note, "scope": "project", "origin": "mcp learn_record"}),
+        _ => json!({"content": note, "scope": scope, "origin": "mcp learn_record"}),
     };
     match stateroot_core::proposals::create(
         &ctx.cwd,

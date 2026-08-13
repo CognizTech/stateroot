@@ -539,6 +539,9 @@ pub enum LearnAction {
     Record {
         /// The note to record.
         note: String,
+        /// User-global scope (`~/.stateroot/learnings`). Default is project.
+        #[arg(long)]
+        user: bool,
     },
 }
 

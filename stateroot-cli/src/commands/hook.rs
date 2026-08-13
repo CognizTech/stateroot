@@ -244,8 +244,12 @@ pub fn hook_digest(config_dir: &Path, project_dir: &Path, harness_id: &str) -> O
         .as_ref()
         .map(|home| hook_identity_prefix(config_dir, home, project_dir, harness_id))
         .unwrap_or_else(|| hook_identity_prefix(config_dir, config_dir, project_dir, harness_id));
+    let learnings = home.as_ref().map(|home| {
+        let status = stateroot_core::learnings::bootstrap_status(project_dir, home);
+        stateroot_core::learnings::compose_instruction(&status)
+    });
     let work = work.trim().to_string();
-    if identity.trim().is_empty() && work.is_empty() {
+    if identity.trim().is_empty() && work.is_empty() && learnings.is_none() {
         return None;
     }
     let budgeted_work = if work.is_empty() {
@@ -254,6 +258,13 @@ pub fn hook_digest(config_dir: &Path, project_dir: &Path, harness_id: &str) -> O
         truncate(&work, DIGEST_BUDGET)
     };
     let mut digest = identity;
+    if let Some(learnings) = learnings.filter(|text| !text.trim().is_empty()) {
+        if !digest.is_empty() && !digest.ends_with('\n') {
+            digest.push('\n');
+        }
+        digest.push_str(learnings.trim());
+        digest.push('\n');
+    }
     if !budgeted_work.is_empty() {
         if !digest.is_empty() && !digest.ends_with('\n') {
             digest.push('\n');
@@ -366,6 +377,9 @@ async fn resume_output(
     // W5: session_start queues a draft heartbeat for the server root model.
     // Fire-and-forget — replayed (best-effort) by the next online command.
     if canonical == "session_start" {
+        if let Err(err) = stateroot_core::learnings::record_first_session(project_dir, quirk.id) {
+            note!("warning: could not record first-run harness: {err}");
+        }
         if let Some(project_id) = manifest_project_id(project_dir) {
             let op = json!({
                 "ts": now_rfc3339(),
@@ -741,6 +755,29 @@ mod tests {
         let actions_at = digest.find("Next actions").expect("actions");
         let summary_at = digest.find("Summary:").expect("summary");
         assert!(actions_at < summary_at);
+    }
+
+    #[test]
+    fn digest_seeds_global_and_project_learnings_on_first_run() {
+        let _guard = TEST_HOME_ENV.lock().expect("env lock");
+        let home = tempfile::tempdir().expect("home");
+        let project = tempfile::tempdir().expect("project");
+        local_store::init_skeleton(project.path(), "p1", "demo", "default").expect("init");
+        std::fs::write(home.path().join("persona.md"), "You are YinYue.\n").expect("persona");
+        let prior = std::env::var("STATEROOT_TEST_HOME").ok();
+        unsafe { std::env::set_var("STATEROOT_TEST_HOME", home.path()) };
+        let digest = hook_digest(home.path(), project.path(), "cursor").expect("digest");
+        match prior {
+            Some(value) => unsafe { std::env::set_var("STATEROOT_TEST_HOME", value) },
+            None => unsafe { std::env::remove_var("STATEROOT_TEST_HOME") },
+        }
+        assert!(digest.contains("first harness"), "{digest}");
+        assert!(
+            digest.contains("Global (user) learnings are empty"),
+            "{digest}"
+        );
+        assert!(digest.contains("Project learnings are empty"), "{digest}");
+        assert!(digest.contains("learn record --user"), "{digest}");
     }
 
     #[test]

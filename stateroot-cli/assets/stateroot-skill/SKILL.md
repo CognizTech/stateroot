@@ -104,5 +104,11 @@ Read as needed:
 
 ## Self-improvement (shared)
 
-When the user corrects you, call `learn_record`; when a fact is durable, call `memory_save`; when a procedure worked end-to-end, propose it with `skill_propose` (via the `stateroot` MCP tools where registered).
+Two learning layers — keep both current:
+
+- **Global (user):** `stateroot learn record --user "<preference>"` or MCP `learn_record` with `scope: "user"` — communication, recurring methods, design/engineering judgment, boundaries.
+- **Project:** `stateroot learn record "<convention>"` or MCP `learn_record` with `scope: "project"` — stack, layout, this-repo constraints.
+
+First session after `stateroot init`: seed whichever layer is empty before other work. Later harnesses inherit and must update both when the user corrects you.
+When a fact is durable, call `memory_save`; when a procedure worked end-to-end, propose it with `skill_propose` (via the `stateroot` MCP tools where registered).
 Writes from harnesses stay quarantined (session-candidate/private) until a human approves them — never present your own proposals as already active.

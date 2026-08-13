@@ -46,6 +46,8 @@ fn init_creates_project_and_convenience_layer() {
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
     assert!(stdout.contains("initialized"), "stdout: {stdout}");
     assert!(project.path().join(".stateroot/manifest.json").is_file());
+    assert!(project.path().join(".stateroot/first-run.json").is_file());
+    assert!(project.path().join(".stateroot/learnings").is_dir());
     assert!(project
         .path()
         .join(".stateroot/project/state.json")

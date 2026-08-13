@@ -44,6 +44,8 @@ pub const USER_PROFILE_PATH: &str = "user/USER.md";
 pub const MEMORY_CORE_PATH: &str = "memories/MEMORY.md";
 /// Offline outbox path relative to `.stateroot/`.
 pub const OUTBOX_PATH: &str = "outbox.jsonl";
+/// First-run marker written by `init`; first harness session consumes it.
+pub const FIRST_RUN_PATH: &str = "first-run.json";
 
 /// Schema version strings (canonical; must not drift).
 pub const SCHEMA_MANIFEST_V1: &str = "stateroot.manifest.v1";
@@ -191,6 +193,21 @@ pub fn init_skeleton(
         &mut created,
     )?;
     write_text_if_absent(&root.join(EPISODIC_PATH), "", &mut created)?;
+
+    let first_run = serde_json::json!({
+        "schema_version": "stateroot.first_run.v1",
+        "pending": true,
+        "created_at": now,
+        "first_harness": null,
+        "first_session_at": null,
+    });
+    write_json_if_absent(&root.join(FIRST_RUN_PATH), &first_run, &mut created)?;
+
+    let learnings_dir = root.join("learnings");
+    if !learnings_dir.exists() {
+        std::fs::create_dir_all(&learnings_dir).map_err(io_err(&learnings_dir))?;
+        created.push(learnings_dir.to_string_lossy().to_string());
+    }
 
     // History directory starts empty but must exist for later writes.
     let history_dir = root.join(HANDOFF_HISTORY_DIR);
@@ -510,6 +527,7 @@ mod tests {
             INSTRUCTIONS_PATH,
             MEMORY_CORE_PATH,
             EPISODIC_PATH,
+            FIRST_RUN_PATH,
         ] {
             assert!(root.join(rel).is_file(), "missing {rel}");
         }

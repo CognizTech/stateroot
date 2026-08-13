@@ -595,6 +595,12 @@ skipping duplicate. Pass --force to reprint.)\n\n{NO_REFETCH_FOOTER}"
         out.push_str("\n\n---\n\n");
     }
 
+    if let Ok(home) = stateroot_core::harness_install::home_dir() {
+        let status = stateroot_core::learnings::bootstrap_status(&ctx.cwd, &home);
+        out.push_str(&stateroot_core::learnings::compose_instruction(&status));
+        out.push_str("\n---\n\n");
+    }
+
     // Durable preferences from the local learnings files (confidence ≥
     // threshold) — propagated into the digest AND used to dedupe sections.
     // Durable preferences: project + user scopes (user scope landed with

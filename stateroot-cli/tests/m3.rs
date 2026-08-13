@@ -168,13 +168,43 @@ fn learn_record_classifies_and_approves_through_proposals() {
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-    assert!(stdout.contains("[soul; pending]"), "record: {stdout}");
+    assert!(
+        stdout.contains("[soul; pending; project]"),
+        "record: {stdout}"
+    );
 
     // learning lane → candidate quarantined via proposal approve
     stateroot(config_home.path(), user_home.path(), project.path())
         .args(["learn", "record", "prefer small diffs over rewrites"])
         .assert()
         .success();
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args([
+            "learn",
+            "record",
+            "--user",
+            "prefer evidence over assertion",
+        ])
+        .assert()
+        .success();
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["learnings", "list", "--status", "candidate"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains("small diffs"),
+        "project candidate: {stdout}"
+    );
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["learnings", "list", "--user", "--status", "candidate"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains("evidence over assertion"),
+        "user candidate: {stdout}"
+    );
     // quarantine the candidate on disk the way distill does, then accept it
     let out = stateroot(config_home.path(), user_home.path(), project.path())
         .args(["learnings", "list", "--status", "pending"])

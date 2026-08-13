@@ -22,5 +22,11 @@ named `stateroot` is registered, via its tools (`state_get/put`,
 
 ### Self-improvement (shared)
 
-When the user corrects you, call `learn_record`; when a fact is durable, call `memory_save`; when a procedure worked end-to-end, propose it with `skill_propose` (via the `stateroot` MCP tools where registered).
+Two learning layers — keep both current:
+
+- **Global (user):** taste that follows the user across projects (communication, recurring methods, design/engineering judgment, boundaries). `stateroot learn record --user "<preference>"` or MCP `learn_record` with `scope: "user"`.
+- **Project:** this-repo conventions (stack, layout, constraints). `stateroot learn record "<convention>"` or MCP `learn_record` with `scope: "project"`.
+
+First session after `stateroot init`: if either layer is empty, seed it in this session before other work. Every later harness reads both (`learnings list` / `learnings list --user`) and updates rather than duplicating.
+When the user corrects you, call `learn_record` with the right scope; when a fact is durable, call `memory_save`; when a procedure worked end-to-end, propose it with `skill_propose` (via the `stateroot` MCP tools where registered).
 Writes from harnesses stay quarantined (session-candidate/private) until a human approves them — never present your own proposals as already active.

@@ -118,10 +118,11 @@ pub fn distill(ctx: &Ctx) -> Result<()> {
         .map_err(|e| anyhow::anyhow!(e))?;
         // Distilled candidates are quarantined on disk immediately (they
         // surface nowhere until activated); the proposal is the gate.
-        let _ = core::append_candidate(&ctx.cwd, &home, "project", candidate);
+        let _ = core::append_candidate(&ctx.cwd, &home, &candidate.scope, candidate);
         proposed += 1;
         let _ = proposal;
     }
+    let _ = core::maybe_complete_first_run(&ctx.cwd, &home);
     println!("distill: {proposed} candidate(s) → proposals (pending)");
     println!("review with: stateroot proposals list --status pending");
     Ok(())

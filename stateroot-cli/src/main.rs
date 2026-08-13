@@ -178,7 +178,7 @@ async fn main() -> anyhow::Result<()> {
             LearningsAction::Distill => commands::learnings::distill(&ctx)?,
         },
         Command::Learn(args) => match args.action {
-            LearnAction::Record { note } => commands::learn::record(&ctx, &note)?,
+            LearnAction::Record { note, user } => commands::learn::record(&ctx, &note, user)?,
         },
         Command::Synthesize { force } => commands::synthesize::run(&ctx, force).await?,
         Command::Login { .. } if !cloud_preview => commands::cloud_coming_soon(),

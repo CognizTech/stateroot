@@ -405,6 +405,29 @@ fn rewrite_without_id(path: &Path, id: &str) -> Result<(), LearningsError> {
     Ok(())
 }
 
+fn infer_scope(category: &str, statement: &str) -> &'static str {
+    let lower = statement.to_lowercase();
+    let project_bound = [
+        "this repo",
+        "this project",
+        "this crate",
+        "this package",
+        ".stateroot",
+        "in this codebase",
+        "in this workspace",
+    ]
+    .iter()
+    .any(|m| lower.contains(m));
+    if project_bound {
+        return "project";
+    }
+    if category == "preferences" {
+        "user"
+    } else {
+        "project"
+    }
+}
+
 fn normalize(statement: &str) -> String {
     statement
         .to_lowercase()
@@ -553,11 +576,156 @@ pub fn distill(project_dir: &Path, home: &Path) -> Vec<Learning> {
             } else {
                 source
             };
-            let scope = "project";
+            let scope = infer_scope(&category, &sentence);
             let _ = normalized;
             Learning::candidate(&sentence, &category, confidence, &sources, scope)
         })
         .collect()
+}
+
+/// Whether a scope has any candidate or active learning.
+pub fn scope_has_learnings(project_dir: &Path, home: &Path, scope: &str) -> bool {
+    read_scope(project_dir, home, scope)
+        .iter()
+        .any(|l| l.status == "active" || l.status == "candidate" || l.status == "proposed")
+}
+
+/// First-run / empty-scope status used to instruct harnesses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootstrapStatus {
+    /// No project-scope learnings yet.
+    pub project_needs_seed: bool,
+    /// No user-global learnings yet.
+    pub user_needs_seed: bool,
+    /// This is the first harness session after `stateroot init`.
+    pub first_session: bool,
+}
+
+/// Inspect project + user scopes (and the init first-run marker).
+pub fn bootstrap_status(project_dir: &Path, home: &Path) -> BootstrapStatus {
+    if !local_store::is_stateroot_dir(project_dir) {
+        return BootstrapStatus {
+            project_needs_seed: false,
+            user_needs_seed: false,
+            first_session: false,
+        };
+    }
+    let marker = read_first_run(project_dir);
+    let pending = marker
+        .as_ref()
+        .and_then(|v| v.get("pending").and_then(|p| p.as_bool()))
+        .unwrap_or(true);
+    let first_harness = marker
+        .as_ref()
+        .and_then(|v| v.get("first_harness"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    BootstrapStatus {
+        project_needs_seed: !scope_has_learnings(project_dir, home, "project"),
+        user_needs_seed: !scope_has_learnings(project_dir, home, "user"),
+        first_session: pending && first_harness.is_none(),
+    }
+}
+
+/// Instruction injected on session start / resume. Empty string is never
+/// returned for a live project — at least the keep-current reminder is present.
+pub fn compose_instruction(status: &BootstrapStatus) -> String {
+    let mut out = String::new();
+    if status.first_session || status.project_needs_seed || status.user_needs_seed {
+        out.push_str("## Learnings (seed now)\n\n");
+        if status.first_session {
+            out.push_str(
+                "You are the first harness in this project after `stateroot init`. Before other work, record learnings so later harnesses inherit them.\n\n",
+            );
+        }
+        if status.user_needs_seed {
+            out.push_str("**Global (user) learnings are empty.** Record taste that follows the user across projects: communication, recurring methods, design/engineering judgment, boundaries. CLI: `stateroot learn record --user \"<preference>\"`. MCP: `learn_record` with `scope: \"user\"`.\n\n");
+        }
+        if status.project_needs_seed {
+            out.push_str("**Project learnings are empty.** Record this-repo conventions: stack, layout, constraints, how this codebase is built. CLI: `stateroot learn record \"<convention>\"`. MCP: `learn_record` with `scope: \"project\"` (default).\n\n");
+        }
+    } else {
+        out.push_str("## Learnings (keep current)\n\n");
+    }
+    out.push_str(
+        "Every harness updates both layers. Cross-project taste → `--user` / `scope: user`. This-repo conventions → project scope. Read first (`stateroot learnings list` and `stateroot learnings list --user`); update rather than duplicate. Writes stay quarantined until approved.\n",
+    );
+    out
+}
+
+/// Record which harness ran first after init (idempotent).
+pub fn record_first_session(project_dir: &Path, harness: &str) -> Result<bool, LearningsError> {
+    let path = local_store::root(project_dir).join(local_store::FIRST_RUN_PATH);
+    let mut marker = read_first_run(project_dir).unwrap_or_else(|| {
+        serde_json::json!({
+            "schema_version": "stateroot.first_run.v1",
+            "pending": true,
+        })
+    });
+    let already = marker
+        .get("first_harness")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .is_some();
+    if already {
+        return Ok(false);
+    }
+    if let Some(obj) = marker.as_object_mut() {
+        obj.insert("first_harness".into(), serde_json::json!(harness));
+        obj.insert(
+            "first_session_at".into(),
+            serde_json::json!(local_store::now_rfc3339()),
+        );
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(
+        &path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&marker).unwrap_or_default()
+        ),
+    )?;
+    Ok(true)
+}
+
+/// Clear the pending first-run flag once both scopes have at least one learning,
+/// or once the missing scope is the only one still empty after a seed attempt
+/// is no longer first-session. Called after learnings are written.
+pub fn maybe_complete_first_run(project_dir: &Path, home: &Path) -> Result<(), LearningsError> {
+    let status = bootstrap_status(project_dir, home);
+    if status.project_needs_seed || status.user_needs_seed {
+        return Ok(());
+    }
+    let path = local_store::root(project_dir).join(local_store::FIRST_RUN_PATH);
+    let Some(mut marker) = read_first_run(project_dir) else {
+        return Ok(());
+    };
+    if marker.get("pending").and_then(|v| v.as_bool()) == Some(false) {
+        return Ok(());
+    }
+    if let Some(obj) = marker.as_object_mut() {
+        obj.insert("pending".into(), serde_json::json!(false));
+        obj.insert(
+            "completed_at".into(),
+            serde_json::json!(local_store::now_rfc3339()),
+        );
+    }
+    std::fs::write(
+        path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&marker).unwrap_or_default()
+        ),
+    )?;
+    Ok(())
+}
+
+fn read_first_run(project_dir: &Path) -> Option<serde_json::Value> {
+    let path = local_store::root(project_dir).join(local_store::FIRST_RUN_PATH);
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
 }
 
 /// Memory notes: `<scope root>/memory.md` — lines with optional
@@ -686,5 +854,55 @@ mod tests {
         // candidates already exist → dedupe).
         append_candidate(project.path(), home.path(), "project", &found[0]).unwrap();
         assert!(distill(project.path(), home.path()).is_empty());
+    }
+
+    #[test]
+    fn bootstrap_seeds_both_scopes_until_populated() {
+        let project = tempfile::tempdir().expect("project");
+        let home = tempfile::tempdir().expect("home");
+        crate::local_store::init_skeleton(project.path(), "p1", "demo", "default").unwrap();
+        let status = bootstrap_status(project.path(), home.path());
+        assert!(status.project_needs_seed);
+        assert!(status.user_needs_seed);
+        assert!(status.first_session);
+        let instruction = compose_instruction(&status);
+        assert!(instruction.contains("first harness"));
+        assert!(instruction.contains("Global (user) learnings are empty"));
+        assert!(instruction.contains("Project learnings are empty"));
+        assert!(instruction.contains("learn record --user"));
+
+        assert!(record_first_session(project.path(), "cursor").unwrap());
+        assert!(!record_first_session(project.path(), "codex").unwrap());
+        let after = bootstrap_status(project.path(), home.path());
+        assert!(!after.first_session);
+        assert!(after.project_needs_seed);
+
+        let project_learning =
+            Learning::candidate("this repo uses uv", "general", 0.5, "test", "project");
+        append_candidate(project.path(), home.path(), "project", &project_learning).unwrap();
+        let user_learning =
+            Learning::candidate("prefer small diffs", "preferences", 0.5, "test", "user");
+        append_candidate(project.path(), home.path(), "user", &user_learning).unwrap();
+        maybe_complete_first_run(project.path(), home.path()).unwrap();
+        let done = bootstrap_status(project.path(), home.path());
+        assert!(!done.project_needs_seed);
+        assert!(!done.user_needs_seed);
+        let keep = compose_instruction(&done);
+        assert!(keep.contains("keep current"));
+        assert!(keep.contains("--user"));
+        assert!(!keep.contains("are empty"));
+    }
+
+    #[test]
+    fn infer_scope_splits_global_taste_from_repo_conventions() {
+        assert_eq!(infer_scope("preferences", "prefer small diffs"), "user");
+        assert_eq!(
+            infer_scope("preferences", "prefer small diffs in this repo"),
+            "project"
+        );
+        assert_eq!(
+            infer_scope("corrections", "actually the port is 9060"),
+            "project"
+        );
     }
 }

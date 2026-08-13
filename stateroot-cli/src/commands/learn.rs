@@ -10,26 +10,28 @@ use stateroot_core::proposals as core_proposals;
 
 use super::Ctx;
 
-/// `stateroot learn record "<note>"`
-pub fn record(ctx: &Ctx, note: &str) -> Result<()> {
+/// `stateroot learn record "<note>" [--user]`
+pub fn record(ctx: &Ctx, note: &str, user: bool) -> Result<()> {
     ctx.require_project()?;
     let note = note.trim();
     if note.is_empty() {
         anyhow::bail!("empty note — nothing to record");
     }
+    let home = stateroot_core::harness_install::home_dir().map_err(|e| anyhow::anyhow!(e))?;
+    let scope = if user { "user" } else { "project" };
     let class = core_learnings::classify_note(note);
     let (title, payload) = match class.kind.as_str() {
         "soul" => (
             "soul observation (proposed)".to_string(),
-            serde_json::json!({"content": note, "origin": "learn record"}),
+            serde_json::json!({"content": note, "origin": "learn record", "scope": scope}),
         ),
         "memory" => (
             format!("memory note: {}", super::truncate(note, 60)),
-            serde_json::json!({"content": note, "scope": "project"}),
+            serde_json::json!({"content": note, "scope": scope}),
         ),
         "skill" => (
             format!("procedure candidate: {}", super::truncate(note, 60)),
-            serde_json::json!({"content": note, "origin": "learn record"}),
+            serde_json::json!({"content": note, "origin": "learn record", "scope": scope}),
         ),
         _ => {
             let candidate = core_learnings::Learning::candidate(
@@ -37,8 +39,9 @@ pub fn record(ctx: &Ctx, note: &str) -> Result<()> {
                 &class.category,
                 0.45,
                 "learn record",
-                "project",
+                scope,
             );
+            let _ = core_learnings::append_candidate(&ctx.cwd, &home, scope, &candidate);
             (
                 format!("learning: {}", super::truncate(note, 60)),
                 serde_json::json!({
@@ -57,13 +60,14 @@ pub fn record(ctx: &Ctx, note: &str) -> Result<()> {
         &ctx.cwd,
         &class.kind,
         &title,
-        &format!("classified as {} ({})", class.kind, class.category),
+        &format!("classified as {} ({}; {scope})", class.kind, class.category),
         payload,
-        serde_json::json!({"route": "learn record"}),
+        serde_json::json!({"route": "learn record", "scope": scope}),
     )
     .map_err(|e| anyhow::anyhow!(e))?;
+    let _ = core_learnings::maybe_complete_first_run(&ctx.cwd, &home);
     println!(
-        "recorded → proposal {} [{}; pending]",
+        "recorded → proposal {} [{}; pending; {scope}]",
         &proposal.id[..8],
         class.kind
     );
