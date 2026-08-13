@@ -134,7 +134,10 @@ async fn disabled_paths_and_placeholder_repo() {
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
     assert!(stdout.contains("auto-update is disabled"), "{stdout}");
 
-    // placeholder repo → honest "not configured"
+    seed_config(
+        config_home.path(),
+        "[update]\nrepo = \"OWNER/placeholder\"\n",
+    );
     let out = stateroot(config_home.path(), user_home.path(), cwd.path())
         .args(["self-update", "--check"])
         .assert()
