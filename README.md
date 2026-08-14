@@ -1,6 +1,8 @@
 # StateRoot
 
-**Context that follows you across coding agents.**
+**One persistent working intelligence across all your coding agents.**
+
+Memory, personality, coding rules, skills, MCPs, learnings and project state — shared across Codex, Cursor, Kimi, Claude Code and other compatible harnesses.
 
 <p align="center">
   <a href="https://github.com/CognizTech/stateroot/releases"><img src="https://img.shields.io/github/v/release/CognizTech/stateroot?color=7ee0c8&labelColor=0c1016&logo=github&style=for-the-badge" alt="Release"></a>
