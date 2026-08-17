@@ -5,7 +5,8 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
-- Agent skill lives at `skill/` (setup still embeds it; the folder can ship on its own).
+- Marketplace skill at `skill/` covers install and first setup. Session
+  protocol stays embedded from `stateroot-cli/assets/stateroot-skill/`.
 
 ## [0.1.1] — 2026-08-13
 

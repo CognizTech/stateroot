@@ -1,21 +1,21 @@
 {
   "schema_version": "agent.native_skill.v1",
-  "slug": "stateroot",
-  "name": "StateRoot",
-  "description": "Install the StateRoot CLI and initialize a project so coding agents share memory, personality, skills, and session handoffs.",
-  "version": "1.0.0",
   "input_types": [
-    "text"
+    "text",
+    "filesystem_path"
   ],
   "output_types": [
-    "text"
+    "text",
+    "filesystem_mutation"
   ],
   "execution_locality": "client_local",
   "profile_family": "general",
-  "required_binaries": [],
+  "required_binaries": [
+    "stateroot"
+  ],
   "required_python_packages": [],
   "required_node_packages": [],
-  "allowed_network": "unrestricted",
+  "allowed_network": "none",
   "workspace_io_mode": "none",
   "persistent_state_mode": "none",
   "artifact_outputs": [],
