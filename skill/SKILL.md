@@ -1,118 +1,186 @@
 ---
 name: stateroot
-description: Install the StateRoot CLI and initialize a project so coding agents share memory, personality, skills, and session handoffs. Use when the user asks to install or set up StateRoot, when `stateroot` is missing from PATH, or when a project has no `.stateroot/` yet and the user wants persistent cross-harness state. Do not use this skill for the session protocol after the CLI is already installed in an initialized project.
+description: >-
+  Bootstrap-only: install the StateRoot CLI from official GitHub release
+  assets and run once-per-machine `stateroot setup` so harnesses get hooks
+  and the built-in session skill. Use when the user asks to install or set
+  up StateRoot, when `stateroot` is missing from PATH, or when setup has
+  not been run yet. Do not use after the CLI is installed and harnesses are
+  interfaced — that built-in skill (`stateroot skill show stateroot`) is
+  then the default. Not for resume, checkpoint, handoff, memory, or daily
+  workflow.
+metadata:
+  homepage: https://stateroot.dev
+  source: https://github.com/CognizTech/stateroot
+  openclaw:
+    emoji: "🌱"
+    required_env: []
+    optional_env:
+      - name: STATEROOT_HOME
+        description: Override config directory (config.toml, projects.toml). Default is ~/.config/stateroot on Linux.
+      - name: STATEROOT_SYNTHESIS_API_KEY
+        description: Optional. OpenAI-compatible key for the local context compiler. Not required for install or setup.
+    required_binaries: []
+    writes_to_disk: true
+    network_access:
+      - "github.com (official release assets and checksums during install/self-update only)"
+    data_handling:
+      uploads_to_external: false
+      requires_user_confirmation: true
+      deletes_files: false
+      modifies_files: false
 ---
 
-# StateRoot
+# StateRoot (bootstrap)
 
-StateRoot is a local CLI. This skill gets it onto the machine and into a project. After that, follow the session skill the CLI writes — do not invent a protocol here.
+This skill installs the CLI and runs **global** `stateroot setup`. That wires harnesses. After that, **this skill expires**. The CLI-embedded session skill becomes the default — do not keep using these bootstrap instructions, and do not copy the session protocol into this file.
 
-Site: https://stateroot.dev
-Install docs: https://stateroot.dev/docs/getting-started/installation
+Docs: https://stateroot.dev/docs/getting-started/installation · https://stateroot.dev/docs/getting-started/setup  
 Releases: https://github.com/CognizTech/stateroot/releases
 
-## When To Use
+## Expire first
 
-1. the user asks to install, set up, or start using StateRoot
-2. `stateroot` is not on PATH (`command not found`)
-3. this project has no `.stateroot/` directory and the user wants shared agent state
-
-## When Not To Use
-
-1. `stateroot` is on PATH and `.stateroot/` already exists — resume / checkpoint / handoff via the installed CLI skill
-2. the user only asked an unrelated question
-
-## Check first
+Run the check next to this `SKILL.md` (never writes):
 
 ```bash
-stateroot --version
+sh scripts/check.sh
 ```
 
-If that works, skip install. Run `stateroot doctor`, then go to **Project** or **Machine** below.
+If `scripts/check.sh` is not on disk, equivalent:
 
-## Install
+```bash
+command -v stateroot && stateroot --version
+```
 
-Official assets only — latest GitHub release. Do not invent other download URLs. Current releases ship **Linux x64** and **Windows x64**. macOS: build from source until a release asset is published.
+**Stop using this skill** when all of the following are true:
 
-Ask before piping a remote script to a shell. Prefer that the user run the installer themselves if they hesitate.
+1. `stateroot` is on `PATH`
+2. `stateroot setup` has already been run on this machine (harness hooks / identity exist; `stateroot doctor` is not a hard fail)
+3. harnesses are interfaced (`stateroot install` is the non-interactive half of the same wiring; setup already does it)
 
-### Linux
+Then follow the built-in skill only:
+
+```bash
+stateroot skill show stateroot
+```
+
+That skill is what setup/init wrote into the harness. Resume, checkpoint, handoff, memory, learnings, wiki, roots — all of it lives there. If this bootstrap skill is still in context, ignore it.
+
+**Keep using this skill** only when:
+
+1. the user asked to install or set up StateRoot
+2. `stateroot` is missing (`command not found`)
+3. the binary exists but **setup has not been run** yet
+
+Unrelated questions: do not load this skill.
+
+## What this skill does
+
+Three commands, in order. Exact commands — do not substitute package managers, random GitHub clones, or invented download URLs.
+
+| Step | Scope | Command |
+| --- | --- | --- |
+| 1. Install | machine | official `install.sh` / MSI / `install.ps1` |
+| 2. Setup | machine (required after install) | `stateroot setup` |
+| 3. Init | **project**, only if this repo should be a StateRoot project | `stateroot init` |
+
+After step 2, StateRoot can be used. Step 3 is not a substitute for setup. Never create `.stateroot/` with file tools.
+
+Platform install details: [references/install.md](references/install.md)  
+What gets written / privacy: [references/disclosure.md](references/disclosure.md)  
+Failures: [references/failures.md](references/failures.md)
+
+## Step 1 — Install
+
+Skip if `stateroot --version` works.
+
+Ask before piping a remote script to a shell. Prefer that the user run the installer themselves if they hesitate. Official assets only.
+
+**Linux (x86_64):**
 
 ```bash
 curl -sSfL https://github.com/CognizTech/stateroot/releases/latest/download/install.sh | sh
 ```
 
-Installs to `~/.local/bin`. If `stateroot` is still not found, add that directory to `PATH` and retry in a new shell.
+Installs to `~/.local/bin`. Put that directory on `PATH` if `stateroot` is still not found.
 
-### Windows
-
-Prefer the MSI: [StateRootSetup-x64.msi](https://github.com/CognizTech/stateroot/releases/latest/download/StateRootSetup-x64.msi).
-
-Or PowerShell:
+**Windows:** prefer the MSI: https://github.com/CognizTech/stateroot/releases/latest/download/StateRootSetup-x64.msi
 
 ```powershell
 irm https://github.com/CognizTech/stateroot/releases/latest/download/install.ps1 | iex
 ```
 
-`stateroot-windows-x64.exe` is the portable CLI, not an installer. Windows assets are unsigned for now. SmartScreen may warn.
+`stateroot-windows-x64.exe` is the portable CLI, not an installer. Assets are unsigned; SmartScreen may warn.
 
-### macOS / from source
+**macOS:** current releases are Linux and Windows. Do not guess a macOS binary URL. Build from source per [references/install.md](references/install.md).
 
-Follow https://stateroot.dev/docs/getting-started/installation — do not guess a macOS binary URL.
-
-### Verify
+Verify:
 
 ```bash
 stateroot --version
 stateroot doctor
 ```
 
-`doctor` should pass with zero config and zero keys. If it fails, quote the CLI output; do not work around a broken install by writing `.stateroot/` by hand.
+`doctor` is designed to pass with zero config and zero keys. If it fails, quote the CLI output. Do not work around a broken install by writing state files.
 
-## Machine (once)
+## Step 2 — Setup (global, required)
 
-Once per machine, after the binary works:
+Once per machine, immediately after the binary works. Without this, harnesses are not interfaced and the built-in skill is not the default.
+
+Interactive is preferred:
 
 ```bash
 stateroot setup
 ```
 
-Interactive is preferred. In a non-TTY agent shell, `stateroot setup --yes` accepts defaults (same as a non-interactive run). `--dry-run` prints planned writes only.
+Sections: **identity**, **harnesses**, **skills**.
 
-## Project (once per repo)
+- identity — canonical soul / USER.md (import OpenClaw or Hermes if present, or a deterministic draft)
+- harnesses — detect agents, write session hooks
+- skills — seed the built-in StateRoot skill into detected agent directories
 
-From the project root:
+Non-TTY agent shell (same as `--yes`; do not use interactive `read`):
+
+```bash
+stateroot setup --yes
+```
+
+Optional:
+
+```bash
+stateroot setup --dry-run
+stateroot setup --only identity,harnesses,skills
+stateroot setup --config answers.yaml
+```
+
+Do **not** run `--blank-slate` unless the user asked to reconfigure.
+
+`stateroot install` is the non-interactive harness-integration half if identity is already done. Setup is the full onboarding flow. Use setup after a fresh install.
+
+When setup finishes, this bootstrap skill is done for the machine. Tell the user to keep using their usual agent. The built-in skill is now the default.
+
+## Step 3 — Init (project, only if needed)
+
+`stateroot init` is **not** global setup. Use it only from a project root that has no `.stateroot/` and that the user wants as a StateRoot project.
 
 ```bash
 stateroot init
 ```
 
-Creates `.stateroot/`, registers the workspace, and installs harness integrations. Never create `.stateroot/` with file tools.
+Creates `.stateroot/`, registers the directory in `projects.toml`, seeds project stubs (Cursor rule, Claude command, AGENTS.md block). Never `mkdir .stateroot`.
 
-Then tell the user to keep using their usual agent. Session hooks inject a digest. If no digest appears:
+Then expire this skill.
 
-```bash
-stateroot resume --harness <id>
-```
+## After expiry
 
-Use the harness you are actually in: `claude`, `codex`, `cursor`, `kimi`, `openclaw`, `hermes`.
+Do not continue from this file. Do not summarize a homemade session protocol. Run `stateroot skill show stateroot` (or follow the copy setup already wrote into the harness) and stop.
 
-## After install
+## Anti-patterns
 
-The CLI embeds the session contract. Mechanically:
-
-1. session start → prefer the injected digest; otherwise `stateroot resume --harness <id>` once
-2. after any state-changing step → `stateroot checkpoint --note "…"`
-3. before ending or switching harness → `stateroot handoff write --from <current-harness> …`
-4. never edit `.stateroot/` directly
-
-Do not duplicate the full protocol in this skill. Point at `stateroot --help` and https://stateroot.dev/docs/getting-started/quickstart.
-
-## Failure modes
-
-| Symptom | Action |
-|---|---|
-| `command not found: stateroot` | install, then ensure `~/.local/bin` (Linux) is on PATH |
-| SmartScreen / unsigned warning | expected on Windows for now; use the MSI from the GitHub release |
-| "not a stateroot project" | `stateroot init` from the repo root |
-| doctor fails | quote the output; do not hand-write state files |
+- Inventing download URLs or installing via `npm` / `pip` / a random clone
+- Guessing a macOS release asset
+- Piping `install.sh` without asking
+- Creating or editing `.stateroot/` or `~/.stateroot/` with file tools
+- Running `setup --blank-slate` unprompted
+- Teaching resume / checkpoint / handoff / memory here after setup succeeded
+- Staying on this marketplace skill once harnesses are interfaced

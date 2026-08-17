@@ -1,14 +1,19 @@
 name: CI
 
+# CI deactivated. No push/PR/tag runs. Jobs are gated with `if: false`.
+# To re-enable, restore:
+#   on:
+#     push:
+#       branches: [main]
+#       tags: ["v*"]
+#     pull_request:
+#     workflow_dispatch:
+# and the original per-job `if:` conditions.
 on:
-  push:
-    branches: [main]
-    tags: ["v*"]
-  pull_request:
   workflow_dispatch:
     inputs:
       version:
-        description: Optional base version for manually built preview artifacts
+        description: Optional base version for manually built preview artifacts (no-op while CI is deactivated)
         required: false
         type: string
 
@@ -28,14 +33,7 @@ jobs:
     name: fmt + clippy + test (${{ matrix.os }})
     # PRs and ordinary main pushes only. Skip on v* tags (the tagged release
     # builds its own binaries) and when the commit message contains [skip tests].
-    if: |
-      github.event_name == 'pull_request' ||
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
-      (
-        github.event_name == 'push' &&
-        github.ref == 'refs/heads/main' &&
-        !contains(github.event.head_commit.message, '[skip tests]')
-      )
+    if: false
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -72,10 +70,7 @@ jobs:
 
   preview-version:
     name: calculate rolling preview version
-    if: |
-      github.ref == 'refs/heads/main' &&
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
-      (github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip tests]'))
+    if: false
     runs-on: ubuntu-latest
     outputs:
       display: ${{ steps.version.outputs.display }}
@@ -111,7 +106,7 @@ jobs:
   build-preview:
     name: preview ${{ matrix.artifact }}
     needs: [test, preview-version]
-    if: needs.preview-version.result == 'success'
+    if: false
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -185,7 +180,7 @@ jobs:
   rolling-prerelease:
     name: publish rolling prerelease
     needs: [preview-version, build-preview]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: false
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -234,11 +229,7 @@ jobs:
   build-release:
     name: build ${{ matrix.artifact }}
     needs: test
-    if: |
-      always() &&
-      !cancelled() &&
-      startsWith(github.ref, 'refs/tags/v') &&
-      (needs.test.result == 'success' || needs.test.result == 'skipped')
+    if: false
     runs-on: ${{ matrix.os }}
     environment: release
     permissions:
@@ -380,11 +371,7 @@ jobs:
     needs: build-release
     # always() is required: on v* tags the test job is skipped, and GitHub
     # otherwise skips this job even when both build-release legs succeeded.
-    if: |
-      always() &&
-      !cancelled() &&
-      startsWith(github.ref, 'refs/tags/v') &&
-      needs.build-release.result == 'success'
+    if: false
     runs-on: ubuntu-latest
     permissions:
       contents: write

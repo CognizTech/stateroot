@@ -5,8 +5,14 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
-- Marketplace skill at `skill/` covers install and first setup. Session
-  protocol stays embedded from `stateroot-cli/assets/stateroot-skill/`.
+- Marketplace skill at `skill/` is bootstrap-only: official install, then
+  required global `stateroot setup`. It expires once the CLI is installed
+  and harnesses are interfaced. Session protocol stays in the built-in
+  skill from `stateroot-cli/assets/stateroot-skill/` (`stateroot skill show
+  stateroot`). `stateroot init` remains project-scoped, not a setup
+  substitute.
+- GitHub Actions CI is deactivated (no push/PR tests, rolling preview, or
+  tagged release jobs) until the workflow `on:` / job `if:` gates are restored.
 
 ## [0.1.1] — 2026-08-13
 
