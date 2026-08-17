@@ -20,7 +20,7 @@ fn home(ctx: &Ctx) -> Result<std::path::PathBuf> {
 }
 
 /// The bundled skill assets, embedded at compile time.
-static ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/assets/stateroot-skill");
+static ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../skill");
 
 fn embedded_file(rel: &str) -> Result<&'static [u8]> {
     ASSETS

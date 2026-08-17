@@ -20,7 +20,7 @@ pub use stateroot_core::harness_install::{
     all_specs, home_dir, spec_exists, HarnessSpec, InstallToggles, ENV_TEST_HOME,
 };
 
-static ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/assets/stateroot-skill");
+static ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../skill");
 
 /// The one-agent block template (a CLI-managed asset, intentionally outside
 /// the drift-guarded canonical skill bundle).
@@ -29,7 +29,7 @@ const ONE_AGENT_BLOCK_TEMPLATE: &str = include_str!("../../assets/one-agent-bloc
 /// Project-local AGENTS.md block: portable protocol without a session-start
 /// resume instruction (resume lives only on harness-specific surfaces).
 const AGENTS_BLOCK_TEMPLATE: &str =
-    include_str!("../../assets/stateroot-skill/assets/agents-block.md");
+    include_str!("../../../skill/assets/agents-block.md");
 
 /// Render the one-agent block with an optional persona section and a
 /// harness-specific resume command (`stateroot resume --harness <id>`).

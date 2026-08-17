@@ -5,6 +5,8 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- Agent skill lives at `skill/` (setup still embeds it; the folder can ship on its own).
+
 ## [0.1.1] — 2026-08-13
 
 - README aligned with https://stateroot.dev product copy (what it shares,
