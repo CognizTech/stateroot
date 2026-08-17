@@ -2,12 +2,16 @@
 //! harness lifecycle hook calls.
 //!
 //! Rules of engagement (plan P1.2): hooks must NEVER break the harness —
-//! unknown harness/event/project exits 0 silently. Event normalization uses
-//! the registry's per-harness vocabulary; behavior per event kind:
+//! unknown harness/event exits 0 silently. Capture/checkpoint still no-op
+//! outside a `.stateroot/` project. Resume still injects **identity**
+//! (persona + USER.md) with no project — working identity is global.
+//! Event normalization uses the registry's per-harness vocabulary; behavior
+//! per event kind:
 //!
 //! - resume (`session_start`, and `user_prompt_submit` only for kimi-code):
 //!   print the bounded hook digest (local reads only — persona cache, local
 //!   handoff actionables-first, hot-apex excerpt, "do NOT re-fetch" footer).
+//!   Outside a project, print identity only (no handoff/wiki/checkpoint).
 //!   Output shape follows the harness's injection channel (`hookSpecificOutput`
 //!   JSON envelope, plain text, UserPromptSubmit-only, or nothing for MCP-pull
 //!   harnesses). `user_prompt_submit` is capture-only for most harnesses (W3
@@ -87,12 +91,6 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
             .and_then(|_| ctx.cwd.canonicalize().ok())
             .filter(|cwd| local_store::is_stateroot_dir(cwd))
     });
-    let Some(project_dir) = project_dir else {
-        return Ok(0); // unknown project — silent
-    };
-    if let Err(err) = super::active_harness::record(&project_dir, quirk.id) {
-        note!("warning: could not record active harness: {err}");
-    }
     let Some(canonical) = normalize_event(quirk, event) else {
         return Ok(0);
     };
@@ -102,19 +100,43 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
     let payload = read_payload();
 
     match kind {
-        EventKind::Resume => resume_output(ctx, quirk, canonical, &project_dir, &payload).await,
-        EventKind::Capture => {
-            let code = capture_observation(quirk, canonical, &project_dir, &payload)?;
-            // kimi-code: SessionStart stdout is discarded — prompt-submit is the
-            // only resume injection channel for that harness.
-            if canonical == "user_prompt_submit" && quirk.injection == Injection::UserPromptSubmit {
-                resume_output(ctx, quirk, canonical, &project_dir, &payload).await?;
+        EventKind::Resume => match project_dir.as_ref() {
+            Some(project_dir) => {
+                if let Err(err) = super::active_harness::record(project_dir, quirk.id) {
+                    note!("warning: could not record active harness: {err}");
+                }
+                resume_output(ctx, quirk, canonical, project_dir, &payload).await
             }
-            Ok(code)
-        }
-        EventKind::Checkpoint => {
-            checkpoint_from_spool(ctx, quirk, canonical, &project_dir, &payload).await
-        }
+            None => resume_identity_only(ctx, quirk, canonical),
+        },
+        EventKind::Capture => match project_dir.as_ref() {
+            Some(project_dir) => {
+                if let Err(err) = super::active_harness::record(project_dir, quirk.id) {
+                    note!("warning: could not record active harness: {err}");
+                }
+                let code = capture_observation(quirk, canonical, project_dir, &payload)?;
+                // kimi-code: SessionStart stdout is discarded — prompt-submit is the
+                // only resume injection channel for that harness.
+                if canonical == "user_prompt_submit"
+                    && quirk.injection == Injection::UserPromptSubmit
+                {
+                    resume_output(ctx, quirk, canonical, project_dir, &payload).await?;
+                }
+                Ok(code)
+            }
+            None if canonical == "user_prompt_submit"
+                && quirk.injection == Injection::UserPromptSubmit =>
+            {
+                resume_identity_only(ctx, quirk, canonical)
+            }
+            None => Ok(0),
+        },
+        EventKind::Checkpoint => match project_dir.as_ref() {
+            Some(project_dir) => {
+                checkpoint_from_spool(ctx, quirk, canonical, project_dir, &payload).await
+            }
+            None => Ok(0),
+        },
     }
 }
 
@@ -126,14 +148,14 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
 fn hook_identity_prefix(
     config_dir: &Path,
     home: &Path,
-    project_dir: &Path,
+    project_dir: Option<&Path>,
     harness_id: &str,
 ) -> String {
     let mut out = String::new();
     out.push_str(super::persona::IDENTITY_ACTIVATION);
     out.push_str("\n\n");
     if let Some(persona) =
-        super::persona::resolve_in_project(config_dir, Some(project_dir), Some(harness_id))
+        super::persona::resolve_in_project(config_dir, project_dir, Some(harness_id))
     {
         out.push_str(persona.trim());
         out.push_str("\n\n");
@@ -144,6 +166,41 @@ fn hook_identity_prefix(
         out.push('\n');
     }
     out
+}
+
+/// Persona + USER.md for harnesses that fired a resume hook outside any
+/// initialized project. No handoff, wiki, learnings seed, or protocol.
+fn identity_only_digest(config_dir: &Path, harness_id: &str) -> Option<String> {
+    let home = stateroot_core::harness_install::home_dir().ok();
+    let home_ref = home.as_deref().unwrap_or(config_dir);
+    let digest = hook_identity_prefix(config_dir, home_ref, None, harness_id);
+    let digest = digest.trim();
+    if digest.is_empty() || digest == super::persona::IDENTITY_ACTIVATION {
+        return None;
+    }
+    Some(digest.to_string())
+}
+
+fn resume_identity_only(
+    ctx: &Ctx,
+    quirk: &registry::HarnessQuirk,
+    canonical: &str,
+) -> anyhow::Result<u8> {
+    let Some(digest) = identity_only_digest(&ctx.config_dir, quirk.id) else {
+        return Ok(0);
+    };
+    match quirk.injection {
+        Injection::None => Ok(0),
+        Injection::UserPromptSubmit if canonical != "user_prompt_submit" => Ok(0),
+        Injection::StdoutJson
+        | Injection::CursorJson
+        | Injection::StdoutText
+        | Injection::McpPull
+        | Injection::UserPromptSubmit => {
+            print_hook_injection(quirk, canonical, &digest);
+            Ok(0)
+        }
+    }
 }
 
 fn append_handoff_work(work: &mut String, handoff: &Value, project_dir: &Path) {
@@ -247,8 +304,10 @@ pub fn hook_digest(config_dir: &Path, project_dir: &Path, harness_id: &str) -> O
     let home = stateroot_core::harness_install::home_dir().ok();
     let identity = home
         .as_ref()
-        .map(|home| hook_identity_prefix(config_dir, home, project_dir, harness_id))
-        .unwrap_or_else(|| hook_identity_prefix(config_dir, config_dir, project_dir, harness_id));
+        .map(|home| hook_identity_prefix(config_dir, home, Some(project_dir), harness_id))
+        .unwrap_or_else(|| {
+            hook_identity_prefix(config_dir, config_dir, Some(project_dir), harness_id)
+        });
     let learnings = home.as_ref().map(|home| {
         let status = stateroot_core::learnings::bootstrap_status(project_dir, home);
         stateroot_core::learnings::compose_instruction(&status)
@@ -848,6 +907,29 @@ mod tests {
     }
 
     #[test]
+    fn identity_only_digest_needs_no_project() {
+        let _guard = TEST_HOME_ENV.lock().expect("env lock");
+        let home = tempfile::tempdir().expect("home");
+        std::fs::write(
+            home.path().join("persona.md"),
+            "## Working relationship\n\nYou are Yinyue.\n",
+        )
+        .expect("persona");
+        let prior = std::env::var("STATEROOT_TEST_HOME").ok();
+        // SAFETY: serialized by TEST_HOME_ENV.
+        unsafe { std::env::set_var("STATEROOT_TEST_HOME", home.path()) };
+        let digest = identity_only_digest(home.path(), "cursor").expect("digest");
+        match prior {
+            Some(value) => unsafe { std::env::set_var("STATEROOT_TEST_HOME", value) },
+            None => unsafe { std::env::remove_var("STATEROOT_TEST_HOME") },
+        }
+        assert!(digest.contains("Active identity"), "{digest}");
+        assert!(digest.contains("You are Yinyue."), "{digest}");
+        assert!(!digest.contains("Objective:"), "{digest}");
+        assert!(!digest.contains("learnings are empty"), "{digest}");
+    }
+
+    #[test]
     fn cursor_registry_uses_native_json_injection() {
         let quirk = registry::quirk("cursor").expect("cursor");
         assert_eq!(quirk.injection, Injection::CursorJson);
@@ -895,7 +977,7 @@ mod tests {
         assert!(digest.contains("Persona voice line 19: stay in character always"));
         assert!(digest.contains(&long_user));
         assert!(
-            hook_identity_prefix(home.path(), home.path(), project.path(), "cursor")
+            hook_identity_prefix(home.path(), home.path(), Some(project.path()), "cursor")
                 .contains(&long_user)
         );
     }

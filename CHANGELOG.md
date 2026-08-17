@@ -5,6 +5,10 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- Session-start hooks inject persona + USER.md even outside a `stateroot
+  init` project. Capture/checkpoint stay project-scoped. Cursor's
+  `~/.cursor/AGENTS.md` is not loaded into Agent chats; identity has to
+  ride the hook `additional_context` channel.
 - Marketplace skill at `skill/` is bootstrap-only: official install, then
   required global `stateroot setup`. It expires once the CLI is installed
   and harnesses are interfaced. Session protocol stays in the built-in

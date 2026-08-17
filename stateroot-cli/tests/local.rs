@@ -300,6 +300,47 @@ fn hook_session_start_injects_digest_once() {
 }
 
 #[test]
+fn hook_session_start_injects_identity_outside_a_project() {
+    let config_home = tempfile::tempdir().expect("config home");
+    seed_config_home(config_home.path());
+    std::fs::write(
+        config_home.path().join("persona.md"),
+        "## Working relationship\n\nYou are Yinyue.\n",
+    )
+    .expect("persona");
+    let user_home = tempfile::tempdir().expect("user home");
+    let cwd = tempfile::tempdir().expect("cwd");
+
+    let out = stateroot(config_home.path(), user_home.path(), cwd.path())
+        .args(["hook", "sessionStart", "--harness", "cursor"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains("additional_context"),
+        "cursor identity hook must use native JSON: {stdout}"
+    );
+    assert!(
+        stdout.contains("You are Yinyue."),
+        "session_start outside a project must still inject persona: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Objective:"),
+        "identity-only digest must not invent project work: {stdout}"
+    );
+
+    let capture = stateroot(config_home.path(), user_home.path(), cwd.path())
+        .args(["hook", "postToolUse", "--harness", "cursor"])
+        .assert()
+        .success();
+    let capture_out = String::from_utf8(capture.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        capture_out.trim().is_empty(),
+        "capture hooks stay silent without a project: {capture_out}"
+    );
+}
+
+#[test]
 fn handoff_source_attribution_is_explicit_or_locally_observed() {
     let config_home = tempfile::tempdir().expect("config home");
     seed_config_home(config_home.path());
