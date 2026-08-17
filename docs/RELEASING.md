@@ -21,7 +21,10 @@ Pre-1.0: minor versions per milestone (0.1.0 = M1–M4). After 1.0: semver.
    pushes skip those jobs and run `build-release` + `release` only.
 5. CI (`release` job) builds `stateroot-linux-x64` and
    `stateroot-windows-x64.exe`, plus `StateRootSetup-x64.msi`, and attaches
-   them with `checksums.txt` and the install scripts. Windows Authenticode
+   them with `checksums.txt` and the install scripts. Linux is linked with
+   `cargo zigbuild` for **glibc 2.17** (Ubuntu 16.04 / Debian 9 / RHEL 7
+   and newer); `packaging/linux/check-glibc.sh` fails the job if the binary
+   needs a newer glibc. Windows Authenticode
    signing runs only when the GitHub `release` environment variable
    `AZURE_ARTIFACT_SIGNING_ENABLED` is `true`. Leave it unset to ship
    unsigned CLI + MSI while Azure identity validation is in progress.

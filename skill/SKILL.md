@@ -102,7 +102,7 @@ Ask before piping a remote script to a shell. Prefer that the user run the insta
 curl -sSfL https://github.com/CognizTech/stateroot/releases/latest/download/install.sh | sh
 ```
 
-Installs to `~/.local/bin`. Put that directory on `PATH` if `stateroot` is still not found.
+Installs to `~/.local/bin`. Put that directory on `PATH` if `stateroot` is still not found. Needs glibc 2.17 or newer (Ubuntu 16.04, Debian 9, RHEL 7, and later).
 
 **Windows:** prefer the MSI: https://github.com/CognizTech/stateroot/releases/latest/download/StateRootSetup-x64.msi
 

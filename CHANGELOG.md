@@ -11,8 +11,13 @@ StateRoot is pre-1.0 and milestones land as minor versions.
   skill from `stateroot-cli/assets/stateroot-skill/` (`stateroot skill show
   stateroot`). `stateroot init` remains project-scoped, not a setup
   substitute.
-- GitHub Actions CI is deactivated (no push/PR tests, rolling preview, or
-  tagged release jobs) until the workflow `on:` / job `if:` gates are restored.
+
+## [0.1.2] — 2026-08-17
+
+- Linux release binaries are linked for **glibc 2.17** (Ubuntu 16.04,
+  Debian 9, RHEL 7, and newer) instead of GitHub `ubuntu-latest` (glibc
+  2.39). Tagged release jobs are on; push/PR tests and the rolling
+  preview stay off.
 
 ## [0.1.1] — 2026-08-13
 
@@ -117,5 +122,6 @@ AI-assisted work — no server anywhere.
 - Harness instruction blocks carry the two-sentence self-improvement
   guidance; install registers the stdio server into harness configs.
 
+[0.1.2]: https://github.com/CognizTech/stateroot/releases/tag/v0.1.2
 [0.1.1]: https://github.com/CognizTech/stateroot/releases/tag/v0.1.1
 [0.1.0]: https://github.com/CognizTech/stateroot/releases/tag/v0.1.0

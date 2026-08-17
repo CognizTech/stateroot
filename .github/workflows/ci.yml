@@ -1,19 +1,15 @@
 name: CI
 
-# CI deactivated. No push/PR/tag runs. Jobs are gated with `if: false`.
-# To re-enable, restore:
-#   on:
-#     push:
-#       branches: [main]
-#       tags: ["v*"]
-#     pull_request:
-#     workflow_dispatch:
-# and the original per-job `if:` conditions.
+# Push/PR tests and the rolling nightly preview stay off.
+# Tagged v* pushes still build and publish release artifacts.
+# Linux binaries are linked with cargo-zigbuild for glibc 2.17.
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       version:
-        description: Optional base version for manually built preview artifacts (no-op while CI is deactivated)
+        description: Optional base version for manually built preview artifacts (unused while preview jobs stay off)
         required: false
         type: string
 
@@ -116,6 +112,7 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            glibc: "2.17"
             artifact: stateroot-linux-x64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -128,10 +125,28 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install Zig
+        if: runner.os == 'Linux'
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
+
+      - name: Install cargo-zigbuild
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
       - name: Build release binary
         env:
           STATEROOT_BUILD_VERSION: ${{ needs.preview-version.outputs.display }}
-        run: cargo build --release --target ${{ matrix.target }} -p stateroot-cli
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            cargo zigbuild --release --target ${{ matrix.target }}.${{ matrix.glibc }} -p stateroot-cli
+          else
+            cargo build --release --target ${{ matrix.target }} -p stateroot-cli
+          fi
 
       - name: Package artifact
         shell: bash
@@ -141,6 +156,7 @@ jobs:
             cp target/${{ matrix.target }}/release/stateroot.exe dist/${{ matrix.artifact }}
           else
             cp target/${{ matrix.target }}/release/stateroot dist/${{ matrix.artifact }}
+            ./packaging/linux/check-glibc.sh dist/${{ matrix.artifact }} ${{ matrix.glibc }}
             strip dist/${{ matrix.artifact }} || true
           fi
 
@@ -229,7 +245,11 @@ jobs:
   build-release:
     name: build ${{ matrix.artifact }}
     needs: test
-    if: false
+    if: |
+      always() &&
+      !cancelled() &&
+      startsWith(github.ref, 'refs/tags/v') &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped')
     runs-on: ${{ matrix.os }}
     environment: release
     permissions:
@@ -243,6 +263,7 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            glibc: "2.17"
             artifact: stateroot-linux-x64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -255,8 +276,26 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install Zig
+        if: runner.os == 'Linux'
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
+
+      - name: Install cargo-zigbuild
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }} -p stateroot-cli
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            cargo zigbuild --release --target ${{ matrix.target }}.${{ matrix.glibc }} -p stateroot-cli
+          else
+            cargo build --release --target ${{ matrix.target }} -p stateroot-cli
+          fi
 
       - name: Package artifact
         shell: bash
@@ -266,6 +305,7 @@ jobs:
             cp target/${{ matrix.target }}/release/stateroot.exe dist/${{ matrix.artifact }}
           else
             cp target/${{ matrix.target }}/release/stateroot dist/${{ matrix.artifact }}
+            ./packaging/linux/check-glibc.sh dist/${{ matrix.artifact }} ${{ matrix.glibc }}
             strip dist/${{ matrix.artifact }} || true
           fi
 
@@ -371,7 +411,11 @@ jobs:
     needs: build-release
     # always() is required: on v* tags the test job is skipped, and GitHub
     # otherwise skips this job even when both build-release legs succeeded.
-    if: false
+    if: |
+      always() &&
+      !cancelled() &&
+      startsWith(github.ref, 'refs/tags/v') &&
+      needs.build-release.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -399,6 +443,8 @@ jobs:
           body: |
             **Windows installation:** download and run `StateRootSetup-x64.msi`.
             `stateroot-windows-x64.exe` is the portable command-line binary, not an installer.
+
+            Linux binaries require glibc 2.17 or newer (Ubuntu 16.04, Debian 9, RHEL 7, and later).
 
             Windows assets are unsigned for now. SmartScreen may warn.
           generate_release_notes: true

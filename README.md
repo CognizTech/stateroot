@@ -56,7 +56,7 @@ Current releases ship **Linux x64** and **Windows x64**. One binary, no extra ru
 curl -sSfL https://github.com/CognizTech/stateroot/releases/latest/download/install.sh | sh
 ```
 
-Installs to `~/.local/bin`. Put that directory on your `PATH`.
+Installs to `~/.local/bin`. Put that directory on your `PATH`. The binary needs glibc 2.17 or newer (Ubuntu 16.04, Debian 9, RHEL 7, and later).
 
 ### Windows
 
