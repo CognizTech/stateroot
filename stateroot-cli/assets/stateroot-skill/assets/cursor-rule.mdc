@@ -14,4 +14,4 @@ This project uses StateRoot for persistent, harness-neutral project state (`.sta
 5. Learnings are taste, not facts. Write a judgment (`prefer X over Y` / `never Z`) plus when it applies — not a stack inventory. Scopes: `--user`, `--workspace`, project, `--domain <slug>`. Facts go to `memory_save`. Everything activates immediately — no classify→approve story.
 6. Shared rules: product-intent is always on (full body in the digest). `stateroot rules sync` imports other harness rules into the same pool. Do not add classifiers, approval gates, or generic architecture.
 7. Never edit files under `.stateroot/` directly; all state access goes through the `stateroot` CLI. The CLI is offline-safe and queues operations locally when the network is down.
-8. Privacy: `.staterootignore` only (plus hardcoded `.git/` and `.stateroot/local/`) gates snap/root sync — not root `.gitignore`.
+8. Privacy: root `.gitignore` and `.staterootignore` (plus hardcoded `.git/` and `.stateroot/local/`) gate snap/root trees. `.staterootignore` is extra patterns for things git still tracks.

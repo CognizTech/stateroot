@@ -11,7 +11,7 @@
 - After any state-changing step: `stateroot checkpoint --note "<what changed>"`.
 - Before retrying an approach: check "Failed approaches / bugs" in the resume digest.
 - Before stopping or when nearing limits: run `stateroot handoff write --from {{CURRENT_HARNESS}} [--to <next-harness>] --objective "…" --task "…" --context-summary "…" [--next "…"]`, **or** rely on the session_end/stop hook finalize when it ran. Prefer flags (one command, no temp JSON). Omit `--to` for continuity-only; use it only when orchestrating a cross-harness switch. Use `--input` only when the payload is large. Never write under `.stateroot/handoffs/` by hand. Field is `--task`, not `immediate_task`. Thin fields warn; they do not refuse the write.
-- Privacy: files matching `.staterootignore` never sync to the cloud (snap/root trees). Root `.gitignore` is not used for sync. If the user works with sensitive files, suggest adding patterns with `stateroot ignore add`.
+- Privacy: files matching root `.gitignore` or `.staterootignore` never enter snap/root trees (plus hardcoded `.git/` and `.stateroot/local/`). `.staterootignore` is extra patterns for things git still tracks.
 - Shared rules: product-intent is always on (full body in the digest). Other harness instruction files join the pool via `stateroot rules sync`. Preserve product intent; do not add classifiers, approval gates, or generic architecture.
 - Self-improvement activates immediately: `learn_record`, soul propose, skill propose, and memory add/replace honor the caller's intent — no approve gate. Distill compiles into the wiki inbox (not learnings).
 

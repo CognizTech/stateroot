@@ -10,7 +10,7 @@ This project uses StateRoot for persistent, harness-neutral project state (`.sta
 5. **Learnings are taste, not facts.** Each note is a judgment (`prefer X over Y` / `never Z`) plus when it applies. Scopes: `--user`, `--workspace`, project (default), `--domain <slug>`. After init, seed an empty layer with 2–7 evidenced judgments. Facts go to `memory_save`. All activate immediately — no classify→approve story.
 6. **Shared rules** — product-intent ships by default (full body in the digest). `stateroot rules sync` pulls Cursor/Codex/Claude/Gemini instruction files into the same pool. Preserve product intent; do not replace agent judgment with classifiers or approval gates.
 7. **Never edit `.stateroot/` directly** — all state access goes through the `stateroot` CLI. The CLI is offline-safe: when the network is down it queues operations in a local outbox and still succeeds.
-8. **Privacy** — files matching `.staterootignore` never sync to the cloud (snap/root trees). Root `.gitignore` is not used for sync. If the user works with sensitive files, suggest adding patterns with `stateroot ignore add`.
+8. **Privacy** — files matching root `.gitignore` or `.staterootignore` never enter snap/root trees (plus hardcoded `.git/` and `.stateroot/local/`). `.staterootignore` is extra patterns for things git still tracks.
 
 Session-start resume is harness-specific (global integration / Cursor rule / Claude command). Run it **once** per session — never from this block *and* another surface.
 

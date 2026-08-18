@@ -5,6 +5,9 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- Snap/root trees honor root `.gitignore` **and** `.staterootignore` again
+  (plus hardcoded `.git/` and `.stateroot/local/`). Dropping `.gitignore`
+  from that union was an unauthorized regression.
 - Dev CI (`fmt` + `clippy` + `test` on Ubuntu and Windows) runs again on
   `main` pushes, pull requests, and manual dispatch. Rolling preview
   publishes the `nightly` prerelease on `main` pushes. Crate version

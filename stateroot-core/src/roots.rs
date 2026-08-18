@@ -1,8 +1,8 @@
 //! Git-plumbing roots (M2) — the files-first centerpiece.
 //!
 //! A **root** is a `git commit-tree` of the working state: project files
-//! (honoring `.staterootignore` via [`crate::sync_engine::ignore`], plus
-//! hardcoded `.git/` / `.stateroot/local/` — root `.gitignore` is not unioned)
+//! (honoring root `.gitignore` and `.staterootignore` via
+//! [`crate::sync_engine::ignore`], plus hardcoded `.git/` / `.stateroot/local/`)
 //! plus the `.stateroot/` tree itself. Commits live under
 //! `refs/stateroot/roots/<hash>` with `refs/stateroot/latest` as the head
 //! pointer; the user's branch log and index are never touched (plumbing
@@ -1040,17 +1040,19 @@ mod tests {
             .refname_to_id(&format!("{ROOTS_REF_PREFIX}{}", manifest.id))
             .is_ok());
 
-        // Files change coverage. Root `.gitignore` is NOT used for snap;
-        // only `.staterootignore` (+ hardcoded `.git/` / `.stateroot/local/`).
+        // Files change coverage. Root `.gitignore` and `.staterootignore`
+        // are both honored (+ hardcoded `.git/` / `.stateroot/local/`).
         write(&dir, "src/main.rs", "fn main() {}\n");
         write(&dir, "node_modules/junk/index.js", "junk");
+        write(&dir, ".venv/lib/foo.py", "venv");
+        write(&dir, ".gitignore", ".venv/\n");
         write(&dir, ".staterootignore", "node_modules/\nsecret.txt\n");
         write(&dir, "secret.txt", "nope");
         let (m2, t2) = create_root(&dir, "cli", "second", None).expect("snap2");
         assert_eq!(m2.coverage, "full");
         assert_eq!(
-            m2.files_pinned, 2,
-            "src/main.rs + .staterootignore pinned; ignored files are not"
+            m2.files_pinned, 3,
+            "src/main.rs + .gitignore + .staterootignore pinned; ignored files are not"
         );
         assert_eq!(m2.parents, vec![manifest.id.clone()]);
         assert_eq!(t2.from_root, manifest.id);
@@ -1061,6 +1063,7 @@ mod tests {
         let tree = commit.tree().unwrap();
         assert!(tree.get_path(Path::new("secret.txt")).is_err());
         assert!(tree.get_path(Path::new("node_modules")).is_err());
+        assert!(tree.get_path(Path::new(".venv")).is_err());
         assert!(tree.get_path(Path::new("src/main.rs")).is_ok());
         assert!(tree.get_path(Path::new(".stateroot")).is_ok());
     }

@@ -126,7 +126,7 @@ Machine-readable index: [stateroot.dev/llms.txt](https://stateroot.dev/llms.txt)
 
 Project data stays in the repo (`.stateroot/`). Persona and USER.md live in `~/.stateroot/`. Search stays in `.stateroot/local/` and is never included in snapshots.
 
-Snapshots honor `.staterootignore`, plus `.git/` and `local/`. Root `.gitignore` is **not** mixed into snaps. Optional LLM synthesis calls only *your* OpenAI-compatible endpoint, and only if you set a key.
+Snapshots honor root `.gitignore` and `.staterootignore`, plus `.git/` and `local/`. Optional LLM synthesis calls only *your* OpenAI-compatible endpoint, and only if you set a key.
 
 Details: [Privacy](https://stateroot.dev/docs/guides/privacy).
 

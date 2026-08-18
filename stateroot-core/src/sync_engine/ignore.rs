@@ -1,11 +1,12 @@
-//! Ignore rules for the sync root (snap / lineage trees only).
+//! Ignore rules for the sync root (snap / lineage trees).
 //!
-//! Sources:
-//! - `.staterootignore` at the sync root (gitignore syntax)
+//! Sources (same syntax; a path is excluded if either file matches):
+//! - `.gitignore` at the sync root
+//! - `.staterootignore` at the sync root (extra patterns for things git
+//!   still tracks that StateRoot should not)
 //! - hardcoded: `.git/` and `.stateroot/local/` are never synced
 //!
-//! Root `.gitignore` is **not** unioned — that only affects local agent
-//! filesystem access, not StateRoot sync payloads.
+//! Nested `.gitignore` files in subfolders are not loaded.
 
 use std::path::{Path, PathBuf};
 
@@ -27,11 +28,14 @@ pub struct IgnoreRules {
 }
 
 impl IgnoreRules {
-    /// Load rules from `<root>/.staterootignore` when present.
+    /// Load rules from `<root>/.gitignore` and `<root>/.staterootignore` when present.
     pub fn load(root: &Path) -> Self {
         let mut sets = Vec::new();
-        let file = root.join(STATEROOTIGNORE);
-        if file.is_file() {
+        for name in [".gitignore", STATEROOTIGNORE] {
+            let file = root.join(name);
+            if !file.is_file() {
+                continue;
+            }
             let (gitignore, err) = Gitignore::new(&file);
             if let Some(err) = err {
                 tracing::warn!("failed to parse {}: {err}", file.display());
@@ -44,10 +48,14 @@ impl IgnoreRules {
         Self { sets }
     }
 
-    /// Build rules from inline `.staterootignore` content (tests).
-    pub fn from_contents(root: &Path, staterootignore: Option<&str>) -> Self {
+    /// Build rules from inline content (tests).
+    pub fn from_contents(
+        root: &Path,
+        gitignore: Option<&str>,
+        staterootignore: Option<&str>,
+    ) -> Self {
         let mut sets = Vec::new();
-        if let Some(content) = staterootignore {
+        for content in [gitignore, staterootignore].into_iter().flatten() {
             let mut builder = GitignoreBuilder::new(root);
             for line in content.lines() {
                 let _ = builder.add_line(None, line);
@@ -121,13 +129,20 @@ mod tests {
     }
 
     #[test]
-    fn staterootignore_patterns_only() {
-        let rules = IgnoreRules::from_contents(Path::new("/root"), Some("secrets/\n*.pem\n"));
+    fn gitignore_and_staterootignore_are_unioned() {
+        let rules = IgnoreRules::from_contents(
+            Path::new("/root"),
+            Some("target/\n*.log\nnode_modules\n"),
+            Some("secrets/\n*.pem\n"),
+        );
+        assert!(rules.is_ignored("target", true));
+        assert!(rules.is_ignored("target/debug/a", false));
+        assert!(rules.is_ignored("app.log", false));
+        assert!(rules.is_ignored("node_modules", true));
         assert!(rules.is_ignored("secrets", true));
         assert!(rules.is_ignored("secrets/key", false));
         assert!(rules.is_ignored("cert.pem", false));
-        // Root .gitignore is not loaded — target/ is not ignored unless listed.
-        assert!(!rules.is_ignored("target", true));
+        // `.stateroot/` always syncs — ignore rules never exclude it.
         assert!(!rules.is_ignored(".stateroot/outbox.jsonl", false));
         assert!(!rules.is_ignored("src/main.rs", false));
     }
