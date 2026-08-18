@@ -537,8 +537,8 @@ pub fn fetch_handoff(cwd: &std::path::Path) -> (Option<Value>, &'static str) {
 }
 
 /// Run `stateroot resume` — fully local: handoff from `.stateroot/`,
-/// durable preferences/goals from local docs, skills from federation
-/// discovery. There is no server projection or context pack in this variant.
+/// observed context pack from the repo, durable preferences/goals from local
+/// docs, skills from federation discovery.
 pub async fn run(
     ctx: &Ctx,
     harness: Option<&str>,
@@ -616,6 +616,11 @@ skipping duplicate. Pass --force to reprint.)\n\n{NO_REFETCH_FOOTER}"
         stateroot_core::hot_apex::ensure_migrated(&ctx.cwd, &home);
         out.push_str(&stateroot_core::wiki::compose_digest_section(&ctx.cwd));
         out.push_str("\n---\n\n");
+    }
+    let pack_md = stateroot_core::context_pack::build(&ctx.cwd).render_markdown();
+    if !pack_md.trim().is_empty() {
+        out.push_str(&pack_md);
+        out.push_str("---\n\n");
     }
 
     // Durable preferences: all active learnings (project + user + workspace + bound domain).

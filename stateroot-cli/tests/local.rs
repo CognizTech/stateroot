@@ -10,6 +10,10 @@ fn stateroot(config_home: &Path, user_home: &Path, cwd: &Path) -> Command {
     cmd.env("STATEROOT_HOME", config_home)
         .env("STATEROOT_TEST_HOME", user_home)
         .env("STATEROOT_TEST_CMD_PROBES", "")
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("STATEROOT_SYNTHESIS_API_KEY")
+        .env_remove("STATEROOT_SYNTHESIS_API_BASE")
         .current_dir(cwd);
     cmd
 }
@@ -222,6 +226,44 @@ fn checkpoint_handoff_resume_and_log_flow() {
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
     assert!(stdout.contains("wired the parser"), "log: {stdout}");
     assert!(stdout.contains("## Handoffs (1)"), "log: {stdout}");
+}
+
+#[test]
+fn resume_injects_observed_context_pack() {
+    let config_home = tempfile::tempdir().expect("config home");
+    seed_config_home(config_home.path());
+    let user_home = tempfile::tempdir().expect("user home");
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    std::fs::write(
+        project.path().join("README.md"),
+        "# SiderAgents\n\nUpgrade this live tree.\n",
+    )
+    .expect("readme");
+    std::fs::write(
+        project.path().join("YAgents_OVERVIEW.md"),
+        "# Overview\n\nDefunct product direction.\n",
+    )
+    .expect("overview");
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["resume", "--force"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains("## Context pack (observed)"),
+        "pack heading: {stdout}"
+    );
+    assert!(
+        stdout.contains("Repo: README.md (observed)"),
+        "readme: {stdout}"
+    );
+    assert!(
+        stdout.contains("Upgrade this live tree"),
+        "readme body: {stdout}"
+    );
+    assert!(stdout.contains("YAgents_OVERVIEW.md"), "overview: {stdout}");
 }
 
 #[test]

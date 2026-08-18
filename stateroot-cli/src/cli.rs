@@ -102,7 +102,8 @@ pub enum Command {
     Learnings(LearningsArgs),
     /// Record a learning (active immediately; scope from flags).
     Learn(LearnArgs),
-    /// Local LLM synthesis over transcript bundles (own provider key).
+    /// Local LLM synthesis over the observed context pack and transcript
+    /// bundles when `DEEPSEEK_API_KEY` or `OPENAI_API_KEY` is set.
     Synthesize {
         /// Re-run even when the bundle hash is unchanged.
         #[arg(long)]

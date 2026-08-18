@@ -18,8 +18,10 @@ metadata:
     optional_env:
       - name: STATEROOT_HOME
         description: Override config directory (config.toml, projects.toml). Default is ~/.config/stateroot on Linux.
-      - name: STATEROOT_SYNTHESIS_API_KEY
-        description: Optional. OpenAI-compatible key for the local context compiler. Not required for install or setup.
+      - name: DEEPSEEK_API_KEY
+        description: Optional. Preferred key for the local context compiler (DeepSeek deepseek-v4-flash). Not required for install or setup.
+      - name: OPENAI_API_KEY
+        description: Optional. Used when DEEPSEEK_API_KEY is unset (OpenAI gpt-5.6-luna). Not required for install or setup.
     required_binaries: []
     writes_to_disk: true
     network_access:

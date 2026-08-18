@@ -77,8 +77,8 @@ pub struct FireDrillRecord {
 pub struct SynthesisConfig {
     /// Master switch for the LLM synthesis pass (import + manual synthesize).
     pub enabled: bool,
-    /// OpenAI-compatible API key (empty = unavailable; env
-    /// `STATEROOT_SYNTHESIS_API_KEY` wins when set).
+    /// Bearer token from `DEEPSEEK_API_KEY` or `OPENAI_API_KEY` (empty in config;
+    /// those env vars are the only enablement path).
     pub api_key: String,
     /// Base URL of the OpenAI-compatible endpoint (`{base_url}/chat/completions`
     /// is called — DeepSeek/OpenAI/Ollama/litellm all work).

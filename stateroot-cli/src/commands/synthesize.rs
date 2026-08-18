@@ -21,7 +21,7 @@ pub async fn run(ctx: &Ctx, force: bool) -> Result<()> {
     match compiler::mode(ctx) {
         CompilerMode::Deterministic => {
             println!(
-                "synthesis unavailable — no API key (set synthesis.api_key / STATEROOT_SYNTHESIS_API_KEY); deterministic digest intact"
+                "synthesis unavailable — no DEEPSEEK_API_KEY or OPENAI_API_KEY; deterministic digest intact"
             );
             Ok(())
         }

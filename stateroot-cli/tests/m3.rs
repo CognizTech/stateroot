@@ -13,7 +13,10 @@ fn stateroot(config_home: &Path, user_home: &Path, cwd: &Path) -> Command {
     cmd.env("STATEROOT_HOME", config_home)
         .env("STATEROOT_TEST_HOME", user_home)
         .env("STATEROOT_TEST_CMD_PROBES", "")
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("OPENAI_API_KEY")
         .env_remove("STATEROOT_SYNTHESIS_API_KEY")
+        .env_remove("STATEROOT_SYNTHESIS_API_BASE")
         .current_dir(cwd);
     cmd
 }
@@ -318,10 +321,7 @@ async fn synthesize_merges_sections_and_governance_skips() {
     let config_home = tempfile::tempdir().expect("config home");
     seed_config_home(
         config_home.path(),
-        &format!(
-            "\n[synthesis]\napi_key = \"test-key\"\nbase_url = \"{}\"\nmodel = \"mock-model\"\nmin_interval_seconds = 0\n",
-            server.uri()
-        ),
+        "\n[synthesis]\nenabled = true\nmin_interval_seconds = 0\n",
     );
     let user_home = tempfile::tempdir().expect("user home");
     let project = tempfile::tempdir().expect("project");
@@ -356,6 +356,8 @@ async fn synthesize_merges_sections_and_governance_skips() {
         .success();
 
     let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .env("DEEPSEEK_API_KEY", "test-key")
+        .env("STATEROOT_SYNTHESIS_API_BASE", server.uri())
         .arg("synthesize")
         .assert()
         .success();
@@ -365,10 +367,15 @@ async fn synthesize_merges_sections_and_governance_skips() {
     let handoff = std::fs::read_to_string(project.path().join(".stateroot/handoffs/current.json"))
         .expect("handoff");
     assert!(handoff.contains("parser shipped"), "handoff: {handoff}");
-    assert!(handoff.contains("mock-model"), "provenance: {handoff}");
+    assert!(
+        handoff.contains("deepseek-v4-flash"),
+        "provenance: {handoff}"
+    );
 
     // hash-idempotent: second run skips, provider hit exactly once
     let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .env("DEEPSEEK_API_KEY", "test-key")
+        .env("STATEROOT_SYNTHESIS_API_BASE", server.uri())
         .arg("synthesize")
         .assert()
         .success();
@@ -377,6 +384,8 @@ async fn synthesize_merges_sections_and_governance_skips() {
 
     // --force re-runs against the same mock (provider hit twice total)
     stateroot(config_home.path(), user_home.path(), project.path())
+        .env("DEEPSEEK_API_KEY", "test-key")
+        .env("STATEROOT_SYNTHESIS_API_BASE", server.uri())
         .args(["synthesize", "--force"])
         .assert()
         .success();
@@ -386,7 +395,10 @@ async fn synthesize_merges_sections_and_governance_skips() {
 #[tokio::test]
 async fn synthesize_without_key_is_honest_unavailability() {
     let config_home = tempfile::tempdir().expect("config home");
-    seed_config_home(config_home.path(), "\n[synthesis]\napi_key = \"\"\n");
+    seed_config_home(
+        config_home.path(),
+        "\n[synthesis]\napi_key = \"config-only-must-not-enable\"\n",
+    );
     let user_home = tempfile::tempdir().expect("user home");
     let project = tempfile::tempdir().expect("project");
     init_project(config_home.path(), user_home.path(), project.path());
@@ -408,4 +420,51 @@ async fn synthesize_without_key_is_honest_unavailability() {
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
     assert!(stdout.contains("synthesis unavailable"), "no-key: {stdout}");
+}
+
+#[tokio::test]
+async fn synthesize_uses_observed_pack_when_no_transcripts() {
+    let server = MockServer::start().await;
+    let sections = json!({
+        "progress_report": ["README describes a FastAPI multi-agent platform"],
+        "decisions_and_amendments": [],
+        "residual_work": ["upgrade the live codebase"],
+        "resolutions": []
+    });
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"content": sections.to_string()}}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let config_home = tempfile::tempdir().expect("config home");
+    seed_config_home(config_home.path(), "");
+    let user_home = tempfile::tempdir().expect("user home");
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    std::fs::write(
+        project.path().join("README.md"),
+        "# SiderAgents\n\nFastAPI multi-agent platform.\n",
+    )
+    .expect("readme");
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .env("OPENAI_API_KEY", "test-key")
+        .env("STATEROOT_SYNTHESIS_API_BASE", server.uri())
+        .arg("synthesize")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(stdout.contains("synthesis merged"), "pack synth: {stdout}");
+    let handoff = std::fs::read_to_string(project.path().join(".stateroot/handoffs/current.json"))
+        .expect("handoff");
+    assert!(
+        handoff.contains("FastAPI multi-agent platform"),
+        "handoff: {handoff}"
+    );
+    assert!(handoff.contains("gpt-5.6-luna"), "model: {handoff}");
+    server.verify().await;
 }

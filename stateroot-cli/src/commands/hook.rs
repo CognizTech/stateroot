@@ -373,6 +373,14 @@ pub fn hook_digest(config_dir: &Path, project_dir: &Path, harness_id: &str) -> O
         digest.push_str(wiki.trim());
         digest.push('\n');
     }
+    let pack_md = stateroot_core::context_pack::build(project_dir).render_markdown();
+    if !pack_md.trim().is_empty() {
+        if !digest.is_empty() && !digest.ends_with('\n') {
+            digest.push('\n');
+        }
+        digest.push_str(pack_md.trim());
+        digest.push('\n');
+    }
     if !work.is_empty() {
         if !digest.is_empty() && !digest.ends_with('\n') {
             digest.push('\n');

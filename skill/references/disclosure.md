@@ -29,7 +29,7 @@ Setup does not delete, move, or rewrite the user's Git branches. `init` may `git
 
 - **Install / self-update:** GitHub releases (`CognizTech/stateroot`) for the binary and `checksums.txt`. Ask before piping `install.sh`.
 - **Setup / init:** local disk. No StateRoot server.
-- **Optional later:** if the user sets `STATEROOT_SYNTHESIS_API_KEY` or `[synthesis].api_key`, resume/compile may call *their* OpenAI-compatible endpoint. Not required for bootstrap. Failure falls back to deterministic. This skill must not demand a key.
+- **Optional later:** if `DEEPSEEK_API_KEY` or `OPENAI_API_KEY` is set, resume/compile may call DeepSeek (`deepseek-v4-flash`, preferred) or OpenAI (`gpt-5.6-luna`). Not required for bootstrap. Failure falls back to the deterministic observed context pack. This skill must not demand a key.
 
 ## What is not uploaded
 

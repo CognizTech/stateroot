@@ -5,6 +5,12 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- Resume/hooks inject a **local observed context pack**: repo-root
+  `README.md` / `PROGRESS.md` / `ARCHITECTURE.md` / `TODO.md`, plus
+  overview/use-case markdown, `.stateroot` project docs, and a top-level
+  tree. Optional LLM synthesis runs only when `DEEPSEEK_API_KEY`
+  (`deepseek-v4-flash`, preferred) or `OPENAI_API_KEY` (`gpt-5.6-luna`)
+  is set; it can compile that pack even with no transcripts.
 - Snap/root trees honor root `.gitignore` **and** `.staterootignore` again
   (plus hardcoded `.git/` and `.stateroot/local/`). Dropping `.gitignore`
   from that union was an unauthorized regression.

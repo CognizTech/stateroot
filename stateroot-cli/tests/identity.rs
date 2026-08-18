@@ -8,6 +8,10 @@ fn stateroot(config: &Path, home: &Path, cwd: &Path) -> Command {
     cmd.env("STATEROOT_HOME", config)
         .env("STATEROOT_TEST_HOME", home)
         .env("STATEROOT_TEST_CMD_PROBES", "")
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("STATEROOT_SYNTHESIS_API_KEY")
+        .env_remove("STATEROOT_SYNTHESIS_API_BASE")
         .env_remove("HERMES_HOME")
         .current_dir(cwd);
     cmd

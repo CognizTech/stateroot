@@ -1,8 +1,10 @@
-//! Dual-mode context compiler — agentic when a local synthesis API key is
-//! present, otherwise a full uncapped deterministic digest.
+//! Dual-mode context compiler — agentic when `DEEPSEEK_API_KEY` or
+//! `OPENAI_API_KEY` is set, otherwise a full uncapped deterministic digest
+//! (including the local observed context pack).
 //!
-//! Agentic backend: local OpenAI-compatible key
-//! (`STATEROOT_SYNTHESIS_API_KEY` / `[synthesis].api_key`).
+//! Provider order: DeepSeek (`deepseek-v4-flash`) wins when `DEEPSEEK_API_KEY`
+//! is set; otherwise OpenAI (`gpt-5.6-luna`) when `OPENAI_API_KEY` is set.
+//! `STATEROOT_SYNTHESIS_API_BASE` overrides the chat-completions origin (tests).
 //!
 //! Failure falls back to deterministic. Never truncates.
 
@@ -12,6 +14,11 @@ use sha2::Digest as _;
 use stateroot_core::local_store::{self, now_rfc3339};
 
 use super::Ctx;
+
+const DEEPSEEK_BASE: &str = "https://api.deepseek.com/v1";
+const DEEPSEEK_MODEL: &str = "deepseek-v4-flash";
+const OPENAI_BASE: &str = "https://api.openai.com/v1";
+const OPENAI_MODEL: &str = "gpt-5.6-luna";
 
 const GOV_PATH: &str = "synthesis-gov.json";
 
@@ -48,15 +55,62 @@ fn save_governance(ctx: &Ctx, gov: &Governance) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the local OpenAI-compatible synthesis key (env wins).
-pub fn resolved_key(ctx: &Ctx) -> String {
-    if let Ok(env) = std::env::var("STATEROOT_SYNTHESIS_API_KEY") {
-        let env = env.trim().to_string();
-        if !env.is_empty() {
-            return env;
-        }
+/// Resolved chat-completions endpoint for the optional compiler.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SynthesisEndpoint {
+    /// `deepseek` or `openai`.
+    pub provider: &'static str,
+    /// Bearer token.
+    pub api_key: String,
+    /// `{base}/chat/completions`.
+    pub base_url: String,
+    /// Model id sent in the request.
+    pub model: String,
+}
+
+fn nonempty_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Build the endpoint from explicit values (tests).
+pub fn endpoint_from(
+    deepseek_key: Option<&str>,
+    openai_key: Option<&str>,
+    base_override: Option<&str>,
+) -> Option<SynthesisEndpoint> {
+    let override_base = base_override
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.trim_end_matches('/').to_string());
+    if let Some(api_key) = deepseek_key.map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(SynthesisEndpoint {
+            provider: "deepseek",
+            api_key: api_key.to_string(),
+            base_url: override_base.unwrap_or_else(|| DEEPSEEK_BASE.into()),
+            model: DEEPSEEK_MODEL.into(),
+        });
     }
-    ctx.config.synthesis.api_key.clone()
+    if let Some(api_key) = openai_key.map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(SynthesisEndpoint {
+            provider: "openai",
+            api_key: api_key.to_string(),
+            base_url: override_base.unwrap_or_else(|| OPENAI_BASE.into()),
+            model: OPENAI_MODEL.into(),
+        });
+    }
+    None
+}
+
+/// Resolve DeepSeek-or-OpenAI from the environment.
+pub fn resolved_endpoint() -> Option<SynthesisEndpoint> {
+    endpoint_from(
+        nonempty_env("DEEPSEEK_API_KEY").as_deref(),
+        nonempty_env("OPENAI_API_KEY").as_deref(),
+        nonempty_env("STATEROOT_SYNTHESIS_API_BASE").as_deref(),
+    )
 }
 
 /// Choose agentic vs deterministic.
@@ -64,7 +118,7 @@ pub fn mode(ctx: &Ctx) -> CompilerMode {
     if !ctx.config.synthesis.enabled {
         return CompilerMode::Deterministic;
     }
-    if !resolved_key(ctx).is_empty() {
+    if resolved_endpoint().is_some() {
         CompilerMode::Agentic
     } else {
         CompilerMode::Deterministic
@@ -146,7 +200,7 @@ async fn call_local_provider(
     model: &str,
     bundle_json: &str,
 ) -> Result<String> {
-    let system = "You are the StateRoot synthesizer. Read the session bundle and produce a STRICT JSON object with exactly these keys: progress_report (array of strings), decisions_and_amendments (array of strings), residual_work (array of strings), resolutions (array of strings). No prose outside the JSON.";
+    let system = "You are the StateRoot synthesizer. Read the observed context pack and any session bundle. Produce a STRICT JSON object with exactly these keys: progress_report (array of strings), decisions_and_amendments (array of strings), residual_work (array of strings), resolutions (array of strings). Use only substance present in the input. If there are no sessions, summarize the observed repo docs as product context. Never invent files, decisions, or history. Empty stays empty. No prose outside the JSON.";
     let mut body = json!({
         "model": model,
         "messages": [
@@ -183,12 +237,36 @@ async fn call_local_provider(
 }
 
 fn merge_into_handoff(ctx: &Ctx, synthesized: &Value) -> Result<()> {
+    if local_store::read_handoff_local(&ctx.cwd)
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        let project_id = local_store::read_manifest(&ctx.cwd)
+            .ok()
+            .flatten()
+            .and_then(|m| {
+                m.get("project_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "local".into());
+        let shell = json!({
+            "schema_version": local_store::SCHEMA_HANDOFF_V1,
+            "project_id": project_id,
+            "seq": 1,
+            "from": "cli",
+            "created_by_harness": "cli",
+            "created_at": now_rfc3339(),
+            "objective": "",
+            "task": "",
+            "context_summary": "",
+            "next_actions": [],
+        });
+        local_store::write_handoff_local(&ctx.cwd, &shell).map_err(|e| anyhow::anyhow!(e))?;
+    }
     let path = local_store::root(&ctx.cwd).join(local_store::HANDOFF_CURRENT_PATH);
-    let text = std::fs::read_to_string(&path).map_err(|_| {
-        anyhow::anyhow!(
-            "no local handoff to merge into — write one first (`stateroot handoff write` or `stateroot import`)"
-        )
-    })?;
+    let text = std::fs::read_to_string(&path)?;
     let mut packet: Value = serde_json::from_str(&text)?;
     packet["synthesized"] = synthesized.clone();
     std::fs::write(
@@ -214,27 +292,30 @@ pub async fn try_agentic(ctx: &Ctx, force: bool) -> Result<AgenticOutcome> {
     if mode(ctx) != CompilerMode::Agentic {
         return Ok(AgenticOutcome::Deterministic);
     }
+    let Some(endpoint) = resolved_endpoint() else {
+        return Ok(AgenticOutcome::Deterministic);
+    };
     let home = match stateroot_core::harness_install::home_dir() {
         Ok(h) => h,
         Err(_) => return Ok(AgenticOutcome::Deterministic),
     };
-    // Uncapped bundle — no char budget for the compiler.
     let bundles =
         stateroot_core::transcripts::bundle::build_bundles(&home, &ctx.cwd, None, usize::MAX);
-    if bundles.is_empty() {
+    let pack = stateroot_core::context_pack::build(&ctx.cwd);
+    if bundles.is_empty() && pack.is_empty() {
         return Ok(AgenticOutcome::Deterministic);
     }
     let sessions = Value::Array(bundles);
     let bundle_json = serde_json::to_string(&json!({
         "schema_version": "stateroot.synth_bundle.v1",
         "sessions": sessions,
+        "context_pack": pack.to_synth_value(),
     }))?;
     let bundle_sha = format!("{:x}", sha2::Sha256::digest(bundle_json.as_bytes()));
     let mut gov = load_governance(ctx);
     if !force && gov.last_bundle_sha256 == bundle_sha {
         return Ok(AgenticOutcome::Unchanged);
     }
-    // Rate governance only when caps are > 0 (default 0 = uncapped).
     let now = now_rfc3339();
     let today = &now[..10.min(now.len())];
     if gov.day != today {
@@ -255,25 +336,15 @@ pub async fn try_agentic(ctx: &Ctx, force: bool) -> Result<AgenticOutcome> {
         }
     }
 
-    let api_key = resolved_key(ctx);
-    if api_key.is_empty() {
-        return Ok(AgenticOutcome::Deterministic);
-    }
-    let base_url = if ctx.config.synthesis.base_url.trim().is_empty() {
-        ctx.config
-            .synthesis
-            .api_url
-            .trim_end_matches('/')
-            .to_string()
-    } else {
-        ctx.config
-            .synthesis
-            .base_url
-            .trim_end_matches('/')
-            .to_string()
-    };
-    let model = ctx.config.synthesis.model.clone();
-    let content = match call_local_provider(ctx, &base_url, &api_key, &model, &bundle_json).await {
+    let content = match call_local_provider(
+        ctx,
+        &endpoint.base_url,
+        &endpoint.api_key,
+        &endpoint.model,
+        &bundle_json,
+    )
+    .await
+    {
         Ok(c) => c,
         Err(_) => return Ok(AgenticOutcome::Deterministic),
     };
@@ -285,10 +356,11 @@ pub async fn try_agentic(ctx: &Ctx, force: bool) -> Result<AgenticOutcome> {
         &sections,
         json!({
             "bundle_sha256": bundle_sha,
-            "model": model,
+            "model": endpoint.model,
+            "provider": endpoint.provider,
             "generated_at": now_rfc3339(),
             "labeled": "synthesized — not verified",
-            "backend": "local",
+            "backend": endpoint.provider,
         }),
     );
 
@@ -487,23 +559,16 @@ pub async fn try_ingest(ctx: &Ctx, force: bool) -> Result<String> {
             "inbox": inbox,
             "index": stateroot_core::wiki::read_index(&ctx.cwd),
         }))?;
-        let api_key = resolved_key(ctx);
-        if !api_key.is_empty() {
-            let base_url = if ctx.config.synthesis.base_url.trim().is_empty() {
-                ctx.config
-                    .synthesis
-                    .api_url
-                    .trim_end_matches('/')
-                    .to_string()
-            } else {
-                ctx.config
-                    .synthesis
-                    .base_url
-                    .trim_end_matches('/')
-                    .to_string()
-            };
-            let model = ctx.config.synthesis.model.clone();
-            if let Ok(content) = call_local_ingest(ctx, &base_url, &api_key, &model, &payload).await
+        let api_key = resolved_endpoint();
+        if let Some(endpoint) = api_key {
+            if let Ok(content) = call_local_ingest(
+                ctx,
+                &endpoint.base_url,
+                &endpoint.api_key,
+                &endpoint.model,
+                &payload,
+            )
+            .await
             {
                 if let Ok(parsed) = parse_ingest_json(&content) {
                     if let Ok(agentic) = apply_agentic_ingest(ctx, &home, &parsed) {
@@ -518,4 +583,39 @@ pub async fn try_ingest(ctx: &Ctx, force: bool) -> Result<String> {
     gov.last_run_at = now_rfc3339();
     let _ = save_ingest_gov(ctx, &gov);
     Ok(summary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deepseek_wins_over_openai() {
+        let ep = endpoint_from(Some("ds"), Some("oa"), None).expect("endpoint");
+        assert_eq!(ep.provider, "deepseek");
+        assert_eq!(ep.model, DEEPSEEK_MODEL);
+        assert_eq!(ep.base_url, DEEPSEEK_BASE);
+        assert_eq!(ep.api_key, "ds");
+    }
+
+    #[test]
+    fn openai_luna_when_no_deepseek() {
+        let ep = endpoint_from(None, Some("oa"), None).expect("endpoint");
+        assert_eq!(ep.provider, "openai");
+        assert_eq!(ep.model, OPENAI_MODEL);
+        assert_eq!(ep.base_url, OPENAI_BASE);
+    }
+
+    #[test]
+    fn blank_keys_are_absent() {
+        assert!(endpoint_from(Some("  "), Some(""), None).is_none());
+        assert!(endpoint_from(None, None, Some("http://x")).is_none());
+    }
+
+    #[test]
+    fn base_override_strips_trailing_slash() {
+        let ep = endpoint_from(Some("ds"), None, Some("http://127.0.0.1:9/")).expect("endpoint");
+        assert_eq!(ep.base_url, "http://127.0.0.1:9");
+        assert_eq!(ep.model, DEEPSEEK_MODEL);
+    }
 }
