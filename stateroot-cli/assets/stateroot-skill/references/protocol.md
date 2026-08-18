@@ -2,6 +2,20 @@
 
 Operational details behind the rules in `SKILL.md`. Read this when the top-level rules leave a question open.
 
+## Resume digest (never truncate)
+
+`stateroot resume` and the session-start hook digest are the project state of record. Run them as a bare command — no pipe, pager, or line/byte cap.
+
+Forbidden (including equivalents):
+
+```bash
+stateroot resume --harness kimi 2>&1 | head -100
+stateroot resume --harness cursor | tail -50
+stateroot resume | less
+```
+
+Do not invent `--budget`. The CLI already sized the digest. A 2–3 sentence user summary after you have ingested every section is fine; clipping the digest itself is not. If a tool UI offers "limit output" or auto-pipes through `head`, disable it for `resume`, `status`, `doctor`, `log`, and `handoff show`.
+
 ## Checkpoint Cadence
 
 1. Checkpoint after every step that changes project state:

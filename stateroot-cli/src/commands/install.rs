@@ -274,6 +274,10 @@ mod tests {
         assert!(block.contains("stateroot resume --harness codex"));
         assert!(block.contains("stateroot handoff write --from codex"));
         assert!(block.contains("auto-injected") || block.contains("Never run resume twice"));
+        assert!(
+            block.contains("head") && block.contains("line"),
+            "one-agent block must forbid truncating resume: {block}"
+        );
         assert!(!block.contains("{{RESUME_CMD}}"));
         assert!(!block.contains("{{CURRENT_HARNESS}}"));
     }

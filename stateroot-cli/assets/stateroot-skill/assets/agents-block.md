@@ -2,7 +2,7 @@
 
 This project uses StateRoot for persistent, harness-neutral project state (`.stateroot/`). Follow this protocol mechanically, every session:
 
-1. **Prefer the hook digest** at session start. Only run `stateroot resume --harness <id>` if no StateRoot digest appeared yet.
+1. **Prefer the hook digest** at session start. Only run `stateroot resume --harness <id>` if no StateRoot digest appeared yet. Run it **unpiped and untruncated** — never `2>&1 | head -100`, `| tail`, or any line limiter. The full digest is the state of record.
 2. **After every state-changing step** — files written, decisions made, milestones reached, blockers discovered — run `stateroot checkpoint --note "<what changed and why>" [--files a,b]`. Hooks do not fire on every write.
 3. **Before attempting an approach** — run `stateroot memory recall "failed approach <topic>"` (or read `failed_approaches` in the current handoff) and do not repeat recorded failures.
 4. **After meaningful real-tree changes** — run `stateroot snap`; use `stateroot revert` / `stateroot fork` for verified restoration or divergent work.

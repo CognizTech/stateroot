@@ -1,6 +1,6 @@
 ---
 name: stateroot
-description: Persistent project state and cross-harness handoffs via the `stateroot` CLI. Use when working in a project that has a `.stateroot/` directory — run `stateroot resume --harness <id>` once at session start (harness-specific integration), `stateroot checkpoint` after every state-changing step, check the failed-approaches log before attempting an approach, and run `stateroot handoff write` before ending a session or switching agent harnesses.
+description: Persistent project state and cross-harness handoffs via the `stateroot` CLI. Use when working in a project that has a `.stateroot/` directory — run `stateroot resume --harness <id>` once at session start (unpiped; never `| head` / `| tail` / line limits — the full digest is the state of record), `stateroot checkpoint` after every state-changing step, check the failed-approaches log before attempting an approach, and run `stateroot handoff write` before ending a session or switching agent harnesses.
 ---
 
 # StateRoot
@@ -30,10 +30,11 @@ Before any architectural or behavioral change, read `stateroot rules show produc
 
 At the start of every session in a stateroot project, before doing any work:
 1. prefer the auto-injected StateRoot digest from harness hooks when present
-2. only run the harness-specific resume (e.g. `stateroot resume --harness cursor` / `--harness codex` / `--harness claude`) — or `scripts/resume.sh --harness <id>` — if no digest appeared yet
-3. treat that output — current handoff, hot-apex memory, context pack — as the project state of record
-4. do not run resume again in the same session unless the user explicitly asks (`--force` reprints)
-5. do not re-derive project state by scanning the tree when resume already answers the question
+2. only run the harness-specific resume (e.g. `stateroot resume --harness cursor` / `--harness codex` / `--harness claude` / `--harness kimi`) — or `scripts/resume.sh --harness <id>` — if no digest appeared yet
+3. treat that **entire** output — current handoff, hot-apex memory, context pack — as the project state of record
+4. **never truncate resume or the hook digest.** Run the command as-is. Do not pipe it through `head`, `tail`, `less`, `sed`, `awk`, `cut`, `wc`, or any line/byte limiter. Do not add `--budget`. The CLI already sized the digest. A clipped resume is a corrupted state of record.
+5. do not run resume again in the same session unless the user explicitly asks (`--force` reprints)
+6. do not re-derive project state by scanning the tree when resume already answers the question
 
 ### 2) State-changing step -> checkpoint
 
@@ -84,7 +85,7 @@ The CLI is offline-safe: when the server is unreachable it queues operations in 
 
 | Command | When | Notes |
 |---|---|---|
-| `stateroot resume [--harness H] [--budget N]` | session start | prints handoff + hot-apex memory + context pack as markdown |
+| `stateroot resume [--harness H]` | session start | prints the **full** digest (handoff + memory + context pack). Never pipe through `head`/`tail` or any limiter |
 | `stateroot checkpoint --note "..." [--files a,b]` | after any state-changing step | appends an episodic record and updates handoff state |
 | `stateroot handoff write --from CURRENT_HARNESS [--to H] [--task …] [--context-summary …] [--next …]` | session end / harness switch | prefer flags near limits; `--to` optional (routing only); `--input` for large payloads |
 | `stateroot handoff finalize [--from H]` | hook missed / quota exit | observed continuity from verified transcript; no routing |
@@ -96,7 +97,7 @@ The CLI is offline-safe: when the server is unreachable it queues operations in 
 | `stateroot revert <root>` | verified restoration | append-only — creates a new root |
 | `stateroot fork <root>` | divergent work | branch lineage from an earlier root |
 | `stateroot rules list` / `show` / `sync` | shared rules pool | product-intent always on; harness rules imported |
-| `stateroot pack [--harness H] [--budget N]` | need a fresh context pack | prints the pack to stdout |
+| *(no stateroot pack command)* | — | resume already injects the observed context pack. Do not invent a truncated pack |
 | `stateroot learn record "…"` | durable project taste | judgment rule, not a fact — see Learnings below |
 | `stateroot learn record --user "…"` | durable global taste | follows the user across projects |
 | `stateroot learn record --workspace "…"` | org/workspace taste | shared across projects in the same workspace |
@@ -118,9 +119,10 @@ The CLI is offline-safe: when the server is unreachable it queues operations in 
 
 ## Output Discipline
 
-1. after resume: tell the user the objective, current state, and next actions in 2-3 sentences
+1. after resume: tell the user the objective, current state, and next actions in 2-3 sentences. That summary does **not** replace reading the full digest — you must ingest every section, including the observed context pack.
 2. after checkpoint or handoff: confirm in one line what was recorded
 3. never paste raw `.stateroot/` file contents into the transcript — quote CLI output instead
+4. never clip CLI state commands (`resume`, `status`, `doctor`, `log`, `handoff show`) with `head`/`tail`/pagers. If a tool UI offers "limit output", disable it for these commands.
 
 ## References And Assets
 

@@ -5,6 +5,9 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- Session skill and harness stubs forbid truncating `stateroot resume` /
+  hook digests (`| head`, `| tail`, pagers, invented `--budget`). The
+  full digest is the state of record.
 - Resume/hooks inject a **local observed context pack**: repo-root
   `README.md` / `PROGRESS.md` / `ARCHITECTURE.md` / `TODO.md`, plus
   overview/use-case markdown, `.stateroot` project docs, and a top-level

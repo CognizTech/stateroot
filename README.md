@@ -94,7 +94,7 @@ stateroot handoff write --from cursor \
   --context-summary "Structured write path is in; remaining work is workspace checks."
 ```
 
-If a digest did not appear, run `stateroot resume --harness <id>` with the harness you are actually in (`claude`, `codex`, `cursor`, `kimi`, `openclaw`, `hermes`).
+If a digest did not appear, run `stateroot resume --harness <id>` with the harness you are actually in (`claude`, `codex`, `cursor`, `kimi`, `openclaw`, `hermes`). Run it unpiped — never `| head` / `| tail`. The full digest is the state of record.
 
 Walkthrough: [Quickstart](https://stateroot.dev/docs/getting-started/quickstart).
 

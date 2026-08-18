@@ -7,7 +7,7 @@
 
 ### Protocol (always)
 
-- Session start: prefer the auto-injected StateRoot digest from harness hooks when present. Only run `{{RESUME_CMD}}` if no StateRoot resume/handoff digest appeared yet. Never run resume twice in the same session (the CLI dedupes; pass `--force` only if the user asks to reprint).
+- Session start: prefer the auto-injected StateRoot digest from harness hooks when present. Only run `{{RESUME_CMD}}` if no StateRoot resume/handoff digest appeared yet. Never run resume twice in the same session (the CLI dedupes; pass `--force` only if the user asks to reprint). Run it **unpiped**. Never pipe `resume` (or the hook digest) through `head`, `tail`, `less`, or any line/byte limiter (`2>&1 | head -100` is forbidden) — read the entire output.
 - After any state-changing step: `stateroot checkpoint --note "<what changed>"`.
 - Before retrying an approach: check "Failed approaches / bugs" in the resume digest.
 - Before stopping or when nearing limits: run `stateroot handoff write --from {{CURRENT_HARNESS}} [--to <next-harness>] --objective "…" --task "…" --context-summary "…" [--next "…"]`, **or** rely on the session_end/stop hook finalize when it ran. Prefer flags (one command, no temp JSON). Omit `--to` for continuity-only; use it only when orchestrating a cross-harness switch. Use `--input` only when the payload is large. Never write under `.stateroot/handoffs/` by hand. Field is `--task`, not `immediate_task`. Thin fields warn; they do not refuse the write.

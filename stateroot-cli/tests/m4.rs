@@ -300,6 +300,10 @@ fn instruction_block_and_install_register_stdio_mcp() {
     );
     assert!(block.contains("product-intent"), "block: {block}");
     assert!(
+        block.contains("unpiped") || block.contains("| head"),
+        "instruction block must forbid truncating resume: {block}"
+    );
+    assert!(
         block.contains("no approve gate")
             || block.contains("activates immediately")
             || !block.contains("classify→approve"),

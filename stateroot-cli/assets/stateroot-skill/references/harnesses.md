@@ -18,6 +18,7 @@
 - Marked block appended to the project `AGENTS.md` — from `assets/agents-block.md`.
 - The block is delimited by `<!-- stateroot:begin -->` / `<!-- stateroot:end -->` so `stateroot skill install` can update it idempotently without touching hand-written content.
 - One block per `AGENTS.md`; re-installing replaces the block in place.
+- Kimi (and every other harness) must run `stateroot resume` **unpiped**. Never `2>&1 | head -N`. The CLI already sized the digest.
 
 ## StateSmith (native)
 
