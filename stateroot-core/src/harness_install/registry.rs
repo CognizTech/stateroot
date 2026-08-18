@@ -607,10 +607,7 @@ pub fn adapters() -> &'static [HarnessQuirk] {
 
 /// True when the harness is detected under `home`.
 pub fn quirk_detected(home: &Path, quirk: &HarnessQuirk) -> bool {
-    quirk.detect.iter().any(|marker| {
-        let path = home.join(marker);
-        path.is_dir() || path.is_file()
-    })
+    super::paths::quirk_detected(home, quirk)
 }
 
 /// Normalize a harness-native event name to the canonical vocabulary.

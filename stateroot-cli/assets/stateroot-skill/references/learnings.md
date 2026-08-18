@@ -84,18 +84,20 @@ Slogans. Discard them.
 
 ## Seeding an empty layer
 
-After `stateroot init`, if `learnings list` (project) or `learnings list --user` (global) is empty:
+After `stateroot init`, if `learnings list` (project), `learnings list --user` (global), `learnings list --workspace`, or `learnings list --domain <slug>` is empty for the layer you need:
 
 1. Read the repo (or the user's stated preferences) until you have **evidence**
 2. Write **2–7** learnings that meet the bar above — not one inventory sentence
 3. Stop. Do not pad. Do not duplicate. Do not dump the README
 
 Global seed: how this human wants agents to work everywhere.
+Workspace seed: org-wide bars shared across projects in the same workspace.
+Domain seed: taste shared across repos bound to the same domain slug.
 Project seed: how *this* codebase should be built and what it punishes.
 
 ## Maintenance
 
-- Read both layers before writing.
+- Read all relevant scopes before writing (`list`, `--user`, `--workspace`, `--domain`).
 - If a new note is the same judgment as an existing one, skip it.
 - If the user corrected you, record the **rule**, not the incident.
 - One note per `learn record` call.

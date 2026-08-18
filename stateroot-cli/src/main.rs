@@ -11,8 +11,8 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 use cli::{
-    Command, HandoffAction, LearnAction, LearningsAction, McpAction, MemoryAction, ProposalsAction,
-    RulesAction, SkillAction, SoulAction, WikiAction,
+    Command, HandoffAction, LearnAction, LearningsAction, McpAction, MemoryAction,
+    ObservationsAction, ProposalsAction, RulesAction, SkillAction, SoulAction, WikiAction,
 };
 use commands::Ctx;
 
@@ -229,6 +229,44 @@ async fn main() -> anyhow::Result<()> {
             MemoryAction::Show { target } => commands::memory::show(&ctx, &target)?,
             MemoryAction::Recall { query, limit } => commands::memory::recall(&ctx, &query, limit)?,
         },
+        Command::Observations(args) => match args.action {
+            ObservationsAction::List {
+                kind,
+                harness,
+                since,
+                until,
+                limit,
+            } => commands::observations::list(
+                &ctx,
+                kind.as_deref(),
+                harness.as_deref(),
+                since.as_deref(),
+                until.as_deref(),
+                limit,
+            )?,
+            ObservationsAction::Show { id } => commands::observations::show(&ctx, &id)?,
+            ObservationsAction::Search {
+                query,
+                kind,
+                harness,
+                limit,
+            } => commands::observations::search(
+                &ctx,
+                &query,
+                kind.as_deref(),
+                harness.as_deref(),
+                limit,
+            )?,
+        },
+        Command::Transplant(args) => commands::transplant::run(
+            &ctx,
+            &args.from,
+            &args.to,
+            args.dry_run,
+            args.confirm,
+            args.harness.as_deref(),
+            args.reason.as_deref(),
+        )?,
         Command::Wiki(args) => match args.action {
             WikiAction::Show { path } => commands::wiki::show(&ctx, &path)?,
             WikiAction::Lint => commands::wiki::lint(&ctx)?,

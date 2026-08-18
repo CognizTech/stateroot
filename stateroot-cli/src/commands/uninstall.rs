@@ -52,9 +52,9 @@ fn remove_harness_registrations(ctx: &Ctx, home: &Path) -> Result<()> {
             Ok(removed) => actions.extend(removed),
             Err(err) => note!("  ! {} hook removal failed: {err:#}", quirk.id),
         }
-        if let Some(rel) = quirk.instruction_file {
-            match core::remove_marked_block(&home.join(rel)) {
-                Ok(true) => actions.push(format!("block removed ({rel})")),
+        for file in core::paths::instruction_file_candidates(home, quirk) {
+            match core::remove_marked_block(&file) {
+                Ok(true) => actions.push(format!("block removed ({})", file.display())),
                 Ok(false) => {}
                 Err(err) => note!("  ! {} block removal failed: {err:#}", quirk.id),
             }
@@ -71,10 +71,9 @@ fn remove_harness_registrations(ctx: &Ctx, home: &Path) -> Result<()> {
         }
     }
     // Claude extras (skill copy + slash stub) — legacy spec surface.
-    for rel in [".claude/skills/stateroot", ".claude/commands/stateroot.md"] {
-        let path = home.join(rel);
+    for path in core::paths::claude_extras_candidates(home) {
         if remove_path(&path) {
-            println!("  claude-code: removed {rel}");
+            println!("  claude-code: removed {}", path.display());
         }
     }
     // Home-level product leftovers.

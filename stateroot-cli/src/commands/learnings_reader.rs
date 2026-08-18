@@ -92,6 +92,7 @@ fn parse_bullet(line: &str, category: &str) -> Option<Learning> {
 
 /// Read all local learnings from `.stateroot/learnings/*.md` (any `*.md`
 /// file's stem becomes its category). Also reads `_candidates/`.
+#[allow(dead_code)]
 pub fn read_local_learnings(project_dir: &Path) -> Vec<Learning> {
     let dir = stateroot_core::local_store::root(project_dir).join("learnings");
     let mut out = read_learnings_dir(&dir, None);
@@ -107,6 +108,7 @@ pub fn read_local_learnings(project_dir: &Path) -> Vec<Learning> {
     out
 }
 
+#[allow(dead_code)]
 fn read_learnings_dir(dir: &Path, status_override: Option<&str>) -> Vec<Learning> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();

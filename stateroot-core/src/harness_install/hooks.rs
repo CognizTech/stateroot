@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 
+use super::paths;
 use super::registry::{HarnessQuirk, HookFormat};
 use super::{io_err, HarnessError};
 
@@ -33,7 +34,7 @@ fn bak_path(path: &Path) -> PathBuf {
 }
 
 fn command_for(quirk: &HarnessQuirk, canonical: &str) -> String {
-    format!("stateroot hook {canonical} --harness {}", quirk.id)
+    paths::hook_command(quirk.id, canonical)
 }
 
 fn nested_entries(quirk: &HarnessQuirk) -> Map<String, Value> {
@@ -147,7 +148,8 @@ pub fn install_hooks(home: &Path, quirk: &HarnessQuirk) -> Result<Vec<String>, H
     let Some(target) = quirk.hooks else {
         return Ok(Vec::new());
     };
-    let path = home.join(target.path);
+    let path = paths::hook_target_path(home, quirk)
+        .ok_or_else(|| HarnessError::Invalid(format!("{}: no hook target path", quirk.id)))?;
     match target.format {
         HookFormat::NestedJson => {
             // `settings.json`-style files wrap entries in a top-level `hooks`
@@ -379,109 +381,111 @@ fn install_named_groups(path: &Path, quirk: &HarnessQuirk) -> Result<Vec<String>
 
 /// Remove stateroot-managed hook entries for one harness (full uninstall).
 /// Foreign entries survive verbatim in every format. Idempotent; a missing
-/// file is a no-op.
+/// file is a no-op. Sweeps relocated and legacy default hook paths.
 pub fn remove_hooks(home: &Path, quirk: &HarnessQuirk) -> Result<Vec<String>, HarnessError> {
     let Some(target) = quirk.hooks else {
         return Ok(Vec::new());
     };
-    let path = home.join(target.path);
     if target.format == HookFormat::NativePlugin {
+        let path = home.join(target.path);
         if path.is_dir() {
             std::fs::remove_dir_all(&path).map_err(io_err(&path))?;
             return Ok(vec![format!("plugin removed → {}", path.display())]);
         }
         return Ok(Vec::new());
     }
-    if !path.is_file() {
-        return Ok(Vec::new());
-    }
-    let changed = match target.format {
-        HookFormat::TomlHooks => {
-            let existing = std::fs::read_to_string(&path).unwrap_or_default();
-            let stripped = strip_stateroot_toml_hooks(&existing);
-            if stripped != existing {
-                backup_once(&path)?;
-                std::fs::write(&path, stripped).map_err(io_err(&path))?;
-                true
-            } else {
-                false
-            }
+    let mut actions = Vec::new();
+    for path in paths::hook_target_candidates(home, quirk) {
+        if !path.is_file() {
+            continue;
         }
-        HookFormat::ZeroExecJson => {
-            let mut doc = read_json_file(&path)?;
-            let mut changed = false;
-            if let Some(arr) = doc.get_mut("hooks").and_then(Value::as_array_mut) {
-                let before = arr.len();
-                arr.retain(|entry| {
-                    entry
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .map(|id| !id.starts_with("stateroot-"))
-                        .unwrap_or(true)
-                });
-                changed = arr.len() != before;
-            }
-            if changed {
-                backup_once(&path)?;
-                let _ = write_json_if_changed(&path, &doc)?;
-            }
-            changed
-        }
-        HookFormat::NamedGroupsJson => {
-            let mut doc = read_json_file(&path)?;
-            let had = doc.get("stateroot").is_some();
-            if had {
-                if let Some(root) = doc.as_object_mut() {
-                    root.remove("stateroot");
+        let changed = match target.format {
+            HookFormat::TomlHooks => {
+                let existing = std::fs::read_to_string(&path).unwrap_or_default();
+                let stripped = strip_stateroot_toml_hooks(&existing);
+                if stripped != existing {
+                    backup_once(&path)?;
+                    std::fs::write(&path, stripped).map_err(io_err(&path))?;
+                    true
+                } else {
+                    false
                 }
-                backup_once(&path)?;
-                let _ = write_json_if_changed(&path, &doc)?;
             }
-            had
-        }
-        // NestedJson + FlatJson share the "hooks object of arrays" shape.
-        _ => {
-            let mut doc = read_json_file(&path)?;
-            let wrap = path.file_name() != Some("hooks.v1.json".as_ref());
-            let mut changed = false;
-            let target_obj = if matches!(target.format, HookFormat::FlatJson) || wrap {
-                doc.get_mut("hooks")
-            } else {
-                Some(&mut doc)
-            };
-            if let Some(Value::Object(map)) = target_obj {
-                let mut empty_keys = Vec::new();
-                for (key, value) in map.iter_mut() {
-                    if let Some(arr) = value.as_array_mut() {
-                        let before = arr.len();
-                        arr.retain(|entry| {
-                            !is_stateroot_entry(entry)
-                                && !entry.to_string().contains("stateroot hook")
-                        });
-                        if arr.len() != before {
-                            changed = true;
-                        }
-                        if arr.is_empty() {
-                            empty_keys.push(key.clone());
+            HookFormat::ZeroExecJson => {
+                let mut doc = read_json_file(&path)?;
+                let mut changed = false;
+                if let Some(arr) = doc.get_mut("hooks").and_then(Value::as_array_mut) {
+                    let before = arr.len();
+                    arr.retain(|entry| {
+                        entry
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .map(|id| !id.starts_with("stateroot-"))
+                            .unwrap_or(true)
+                    });
+                    changed = arr.len() != before;
+                }
+                if changed {
+                    backup_once(&path)?;
+                    let _ = write_json_if_changed(&path, &doc)?;
+                }
+                changed
+            }
+            HookFormat::NamedGroupsJson => {
+                let mut doc = read_json_file(&path)?;
+                let had = doc.get("stateroot").is_some();
+                if had {
+                    if let Some(root) = doc.as_object_mut() {
+                        root.remove("stateroot");
+                    }
+                    backup_once(&path)?;
+                    let _ = write_json_if_changed(&path, &doc)?;
+                }
+                had
+            }
+            // NestedJson + FlatJson share the "hooks object of arrays" shape.
+            _ => {
+                let mut doc = read_json_file(&path)?;
+                let wrap = path.file_name() != Some("hooks.v1.json".as_ref());
+                let mut changed = false;
+                let target_obj = if matches!(target.format, HookFormat::FlatJson) || wrap {
+                    doc.get_mut("hooks")
+                } else {
+                    Some(&mut doc)
+                };
+                if let Some(Value::Object(map)) = target_obj {
+                    let mut empty_keys = Vec::new();
+                    for (key, value) in map.iter_mut() {
+                        if let Some(arr) = value.as_array_mut() {
+                            let before = arr.len();
+                            arr.retain(|entry| {
+                                !is_stateroot_entry(entry)
+                                    && !entry.to_string().contains("stateroot hook")
+                            });
+                            if arr.len() != before {
+                                changed = true;
+                            }
+                            if arr.is_empty() {
+                                empty_keys.push(key.clone());
+                            }
                         }
                     }
+                    for key in empty_keys {
+                        map.remove(&key);
+                    }
                 }
-                for key in empty_keys {
-                    map.remove(&key);
+                if changed {
+                    backup_once(&path)?;
+                    let _ = write_json_if_changed(&path, &doc)?;
                 }
+                changed
             }
-            if changed {
-                backup_once(&path)?;
-                let _ = write_json_if_changed(&path, &doc)?;
-            }
-            changed
+        };
+        if changed {
+            actions.push(format!("hooks removed → {}", path.display()));
         }
-    };
-    Ok(if changed {
-        vec![format!("hooks removed → {}", path.display())]
-    } else {
-        Vec::new()
-    })
+    }
+    Ok(actions)
 }
 
 fn install_native_plugin(dir: &Path, _quirk: &HarnessQuirk) -> Result<Vec<String>, HarnessError> {

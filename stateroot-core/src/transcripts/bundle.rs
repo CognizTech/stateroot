@@ -24,6 +24,7 @@ use serde_json::{json, Value};
 
 use super::codex::is_injected;
 use super::{clean, cwd_matches, event_timestamp, walk_files, TranscriptReader, TranscriptSession};
+use crate::harness_install::paths;
 
 /// Default soft bundle cap (~900k tokens). Compiler paths pass `usize::MAX`.
 pub const DEFAULT_MAX_BUNDLE_CHARS: usize = 3_500_000;
@@ -47,8 +48,9 @@ pub fn build_bundles(
             .map(|n| n.starts_with("rollout-") && n.ends_with(".jsonl"))
             .unwrap_or(false)
     };
-    let mut files = walk_files(&home.join(".codex/sessions"), &rollout);
-    files.extend(walk_files(&home.join(".codex/archived_sessions"), &rollout));
+    let (codex_sessions, codex_archived) = paths::codex_transcript_roots(home);
+    let mut files = walk_files(&codex_sessions, &rollout);
+    files.extend(walk_files(&codex_archived, &rollout));
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for file in &files {
         let Some(bundle) = bundle_rollout(file, project_dir) else {

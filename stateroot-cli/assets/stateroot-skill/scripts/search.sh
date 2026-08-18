@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Thin wrapper for `stateroot search` — hybrid search over project state and memory.
+# Thin wrapper for `stateroot memory recall` — FTS over memory, wiki, episodic, transcripts.
 set -euo pipefail
 
 if ! command -v stateroot >/dev/null 2>&1; then
@@ -8,4 +8,4 @@ if ! command -v stateroot >/dev/null 2>&1; then
   exit 127
 fi
 
-exec stateroot search "$@"
+exec stateroot memory recall "$@"

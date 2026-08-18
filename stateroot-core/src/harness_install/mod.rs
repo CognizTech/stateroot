@@ -13,6 +13,7 @@
 
 pub mod detect;
 pub mod hooks;
+pub mod paths;
 pub mod plugins;
 pub mod registry;
 
@@ -21,7 +22,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 use thiserror::Error;
 
-use registry::{quirk_by_legacy_id, quirk_detected};
+use registry::quirk_by_legacy_id;
 
 /// Env var overriding the home directory (tests).
 pub const ENV_TEST_HOME: &str = "STATEROOT_TEST_HOME";
@@ -130,11 +131,8 @@ pub fn all_specs(home: &Path) -> Vec<HarnessSpec> {
             let quirk = quirk_by_legacy_id(legacy)?;
             Some(HarnessSpec {
                 id: legacy,
-                instruction_file: quirk.instruction_file.map(|rel| home.join(rel)),
-                mcp_files: quirk
-                    .mcp
-                    .map(|target| vec![home.join(target.path)])
-                    .unwrap_or_default(),
+                instruction_file: paths::instruction_file_path(home, quirk),
+                mcp_files: paths::mcp_target_path(home, quirk).into_iter().collect(),
                 claude_extras: quirk.id == "claude-code",
                 guidance: legacy_guidance(legacy),
             })
@@ -145,7 +143,7 @@ pub fn all_specs(home: &Path) -> Vec<HarnessSpec> {
 /// Detection markers per harness id: does this harness exist on the machine?
 pub fn spec_exists(home: &Path, id: &str) -> bool {
     match quirk_by_legacy_id(id) {
-        Some(quirk) => quirk_detected(home, quirk),
+        Some(quirk) => paths::quirk_detected(home, quirk),
         None => false,
     }
 }
@@ -477,7 +475,7 @@ pub fn install_quirk_mcp(
     let Some(target) = quirk.mcp else {
         return Ok(Vec::new());
     };
-    let path = home.join(target.path);
+    let path = paths::resolve_registry_path(home, quirk.id, target.path);
     match target.shape {
         registry::McpShape::YamlMcpServers => {
             let pre_existed = path.is_file();
@@ -525,8 +523,7 @@ pub fn install_quirk_mcp(
 /// installer path for a component get an honest note, never a failure.
 pub fn install_quirk_full(home: &Path, quirk: &registry::HarnessQuirk, block: &str) -> Vec<String> {
     let mut actions: Vec<String> = Vec::new();
-    if let Some(rel) = quirk.instruction_file {
-        let file = home.join(rel);
+    if let Some(file) = paths::instruction_file_path(home, quirk) {
         match ensure_marked_block(&file, block) {
             Ok(true) => actions.push(format!("block → {}", file.display())),
             Ok(false) => actions.push(format!("block already up to date ({})", file.display())),
@@ -656,12 +653,16 @@ pub fn uninstall_quirk_mcp(
     let Some(target) = quirk.mcp else {
         return Ok(false);
     };
-    let path = home.join(target.path);
-    match target.shape {
-        registry::McpShape::McpServersJson => uninstall_json_mcp_entry_at(&path, "mcpServers"),
-        registry::McpShape::ServersJson => uninstall_json_mcp_entry_at(&path, "servers"),
-        registry::McpShape::YamlMcpServers => uninstall_yaml_mcp_entry(&path),
+    let mut removed = false;
+    for path in paths::mcp_target_candidates(home, quirk) {
+        let outcome = match target.shape {
+            registry::McpShape::McpServersJson => uninstall_json_mcp_entry_at(&path, "mcpServers"),
+            registry::McpShape::ServersJson => uninstall_json_mcp_entry_at(&path, "servers"),
+            registry::McpShape::YamlMcpServers => uninstall_yaml_mcp_entry(&path),
+        }?;
+        removed |= outcome;
     }
+    Ok(removed)
 }
 
 // ---------------------------------------------------------------------
@@ -816,7 +817,7 @@ pub fn install_spec(
     }
     if toggles.extras && spec.claude_extras {
         if let Some(bundle) = bundle {
-            let skill_dest = home.join(".claude/skills/stateroot");
+            let skill_dest = paths::claude_skill_dest(home);
             match extract_skill_bundle(&skill_dest, bundle) {
                 Ok(count) => {
                     if let Err(err) = write_product_install_marker(&skill_dest, bundle) {
@@ -827,7 +828,7 @@ pub fn install_spec(
                 Err(err) => tracing::warn!("  ! claude skill copy failed: {err}"),
             }
             if let Some(bytes) = &bundle.claude_command_md {
-                let command_path = home.join(".claude/commands/stateroot.md");
+                let command_path = paths::claude_command_dest(home);
                 if let Some(parent) = command_path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }

@@ -1,11 +1,14 @@
 name: CI
 
-# Push/PR tests and the rolling nightly preview stay off.
+# Dev CI: fmt + clippy + test on main pushes, PRs, and manual dispatch.
+# Rolling preview / nightly prerelease stay off.
 # Tagged v* pushes still build and publish release artifacts.
 # Linux binaries are linked with cargo-zigbuild for glibc 2.17.
 on:
   push:
+    branches: [main]
     tags: ["v*"]
+  pull_request:
   workflow_dispatch:
     inputs:
       version:
@@ -29,7 +32,14 @@ jobs:
     name: fmt + clippy + test (${{ matrix.os }})
     # PRs and ordinary main pushes only. Skip on v* tags (the tagged release
     # builds its own binaries) and when the commit message contains [skip tests].
-    if: false
+    if: |
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (
+        github.event_name == 'push' &&
+        github.ref == 'refs/heads/main' &&
+        !contains(github.event.head_commit.message, '[skip tests]')
+      )
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

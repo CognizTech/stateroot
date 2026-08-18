@@ -106,6 +106,10 @@ pub enum Command {
     },
     /// Curated hot-apex memory + FTS recall.
     Memory(MemoryArgs),
+    /// Read-only observation spool audit (hook capture evidence).
+    Observations(ObservationsArgs),
+    /// Append-only adoption of session evidence between initialized projects.
+    Transplant(TransplantArgs),
     /// Compiled wiki catalog (show / lint / compile).
     Wiki(WikiArgs),
     /// Skill listing, inspection, and federation sync.
@@ -626,6 +630,63 @@ pub enum MemoryAction {
         #[arg(long, default_value_t = 5)]
         limit: usize,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct ObservationsArgs {
+    #[command(subcommand)]
+    pub action: ObservationsAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ObservationsAction {
+    /// List observations with optional filters.
+    List {
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long)]
+        harness: Option<String>,
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long)]
+        until: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    /// Show one observation by id (`obs_<line>`).
+    Show { id: String },
+    /// Search observation text/excerpt/tool fields.
+    Search {
+        query: String,
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long)]
+        harness: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct TransplantArgs {
+    /// Source initialized project directory.
+    #[arg(long)]
+    pub from: String,
+    /// Destination initialized project directory.
+    #[arg(long)]
+    pub to: String,
+    /// Print the plan without writing.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Required to perform the transplant.
+    #[arg(long)]
+    pub confirm: bool,
+    /// Optional harness filter for spool rows.
+    #[arg(long)]
+    pub harness: Option<String>,
+    /// Optional reason recorded in both receipts.
+    #[arg(long)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Args)]

@@ -850,6 +850,57 @@ fn transition_into_root(project_dir: &Path, root_hash: &str) -> Option<Transitio
         .max_by(|left, right| left.created_at.cmp(&right.created_at))
 }
 
+/// Markdown lineage block for resume/handoff digests (verified facts only).
+pub fn compose_digest_section(project_dir: &Path) -> String {
+    let Ok(Some(latest)) = latest_root(project_dir) else {
+        return String::new();
+    };
+    let mut out = String::from("## Work State Lineage\n\n");
+    out.push_str(&format!("Current root: `{}`\n", short(&latest)));
+
+    if let Ok(manifest) = get_root(project_dir, &latest) {
+        if !manifest.created_by_harness.is_empty() {
+            let reason = if manifest.created_reason.is_empty() {
+                "snap".to_string()
+            } else {
+                manifest.created_reason.clone()
+            };
+            out.push_str(&format!(
+                "Last actor: {} ({reason})\n",
+                manifest.created_by_harness
+            ));
+        }
+        if !manifest.coverage.is_empty() && manifest.coverage != "unknown" {
+            out.push_str(&format!("Coverage: {}\n", manifest.coverage));
+        }
+    }
+
+    if let Some(transition) = transition_into_root(project_dir, &latest) {
+        if !transition.from_root.is_empty() {
+            out.push_str(&format!(
+                "Prior transition: `{}` → `{}` ({}) by {}\n",
+                short(&transition.from_root),
+                short(&transition.to_root),
+                transition.kind,
+                transition.harness
+            ));
+        }
+        if let Some(count) = transition
+            .evidence
+            .get("verified")
+            .and_then(|v| v.get("files_changed"))
+            .and_then(|v| v.as_u64())
+        {
+            out.push_str(&format!("Verified tree delta at snap: {count} file(s)\n"));
+        }
+    }
+
+    out.push_str(
+        "\nRun `stateroot snap` after meaningful real-tree changes. Use `stateroot revert` for verified restoration and `stateroot fork` for divergent work. Handoff carries continuity — it does not replace lineage.\n\n",
+    );
+    out
+}
+
 /// Compare two roots for experiment semantics (markdown report).
 pub fn compare_roots(project_dir: &Path, a: &str, b: &str) -> Result<String, RootsError> {
     let manifest_a = get_root(project_dir, a)?;

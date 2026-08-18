@@ -45,8 +45,17 @@ After completing ANY step that changes project state (files written, decisions m
 ### 3) Before attempting an approach -> check failed approaches
 
 Before attempting any non-trivial approach:
-1. run `scripts/search.sh "failed approach <topic>"` or read `failed_approaches` in the current handoff
+1. run `scripts/search.sh "failed approach <topic>"` (wraps `stateroot memory recall`) or read `failed_approaches` in the current handoff
 2. if a matching failure exists, do not repeat it — state explicitly why the new attempt differs
+
+### 2b) Meaningful real-tree change -> snap
+
+After meaningful changes to the **real project tree** (not `.stateroot/` metadata alone):
+1. run `stateroot snap [--reason "..."]` to record verified work-state lineage under `refs/stateroot`
+2. use `stateroot log` / `stateroot show <root>` to inspect lineage; `stateroot diff` / `stateroot compare` for deltas
+3. use `stateroot revert <root>` only for verified restoration (append-only — creates a new root)
+4. use `stateroot fork <root>` when divergent work should branch from an earlier root
+5. handoff carries session continuity — it does **not** replace snap/revert/fork lineage
 
 ### 4) Session end / usage limit / harness switch -> handoff
 
@@ -80,12 +89,19 @@ The CLI is offline-safe: when the server is unreachable it queues operations in 
 | `stateroot handoff write --from CURRENT_HARNESS [--to H] [--task …] [--context-summary …] [--next …]` | session end / harness switch | prefer flags near limits; `--to` optional (routing only); `--input` for large payloads |
 | `stateroot handoff finalize [--from H]` | hook missed / quota exit | observed continuity from verified transcript; no routing |
 | `stateroot handoff list` / `stateroot handoff show` | inspect prior handoffs | read-only |
-| `stateroot search <query> [--kinds ...] [--top-k N]` | find decisions, failures, memories | hybrid search over project state and memory |
+| `stateroot memory recall <query> [--limit N]` | find decisions, failures, memories | FTS over memory, wiki, episodic, transcripts |
+| `stateroot snap [--reason R]` | after meaningful real-tree changes | records verified root under `refs/stateroot` |
+| `stateroot log` / `stateroot show <root>` | inspect lineage | current root, transitions, coverage |
+| `stateroot diff` / `stateroot compare A B` | inspect tree deltas | verified git diff between roots |
+| `stateroot revert <root>` | verified restoration | append-only — creates a new root |
+| `stateroot fork <root>` | divergent work | branch lineage from an earlier root |
 | `stateroot rules list` / `show` / `sync` | shared rules pool | product-intent always on; harness rules imported |
 | `stateroot pack [--harness H] [--budget N]` | need a fresh context pack | prints the pack to stdout |
 | `stateroot learn record "…"` | durable project taste | judgment rule, not a fact — see Learnings below |
 | `stateroot learn record --user "…"` | durable global taste | follows the user across projects |
-| `stateroot learnings list` / `--user` | read before writing | update rather than duplicate |
+| `stateroot learn record --workspace "…"` | org/workspace taste | shared across projects in the same workspace |
+| `stateroot learn record --domain <slug> "…"` | domain taste | shared across repos bound to that domain slug |
+| `stateroot learnings list` / `--user` / `--workspace` / `--domain` | read before writing | update rather than duplicate |
 | `stateroot skill install [--harness H]` | install this skill into harness dirs | writes stubs from `assets/` |
 | `stateroot status` / `stateroot doctor` | diagnose auth, connectivity, project state | doctor checks outbox depth and sync health |
 | `stateroot init` | one-time per project | creates `.stateroot/`, registers the workspace, installs harness integrations |
@@ -124,9 +140,11 @@ Learnings are durable **preferences**: how the next harness should judge a choic
 ### Layers
 
 - **Global (user):** `stateroot learn record --user "…"` or MCP `learn_record` with `scope: "user"` — communication, recurring methods, design/engineering judgment, boundaries that follow this human across repos.
+- **Workspace:** `stateroot learn record --workspace "…"` or MCP `scope: "workspace"` — org-wide bars shared across projects in the same workspace registry id.
+- **Domain:** `stateroot learn record --domain <slug> "…"` or MCP `scope: "domain:<slug>"` — taste shared across repos bound to that domain slug in the project manifest.
 - **Project:** `stateroot learn record "…"` or MCP `learn_record` with `scope: "project"` — this repo's quality bars, preferred patterns, anti-patterns.
 
-Read first: `stateroot learnings list` and `stateroot learnings list --user`. Update rather than duplicate.
+Read first: `stateroot learnings list`, `stateroot learnings list --user`, `stateroot learnings list --workspace`, and `stateroot learnings list --domain <slug>`. Update rather than duplicate.
 
 ### When to write
 

@@ -204,6 +204,16 @@ fn resume_identity_only(
 }
 
 fn append_handoff_work(work: &mut String, handoff: &Value, project_dir: &Path) {
+    let lineage = stateroot_core::roots::compose_digest_section(project_dir);
+    if !lineage.is_empty() {
+        work.push_str(&lineage);
+    }
+    if let Ok(home) = stateroot_core::harness_install::home_dir() {
+        if let Some(highlight) = stateroot_core::learnings::highlight_for_digest(project_dir, &home)
+        {
+            work.push_str(&format!("{highlight}\n\n"));
+        }
+    }
     let get_str = |key: &str| handoff.get(key).and_then(|v| v.as_str()).unwrap_or("");
     let objective = get_str("objective");
     let phase = get_str("current_phase");
@@ -312,11 +322,24 @@ pub fn hook_digest(config_dir: &Path, project_dir: &Path, harness_id: &str) -> O
         let status = stateroot_core::learnings::bootstrap_status(project_dir, home);
         stateroot_core::learnings::compose_instruction(&status)
     });
+    let durable = home.as_ref().map(|home| {
+        stateroot_core::learnings::compose_durable_preferences_section(
+            &stateroot_core::learnings::collect_active_for_digest(project_dir, home),
+        )
+    });
     let rules = home
         .as_ref()
         .map(|home| stateroot_core::rules::compose_section(project_dir, home));
     let work = work.trim().to_string();
-    if identity.trim().is_empty() && work.is_empty() && learnings.is_none() && rules.is_none() {
+    if identity.trim().is_empty()
+        && work.is_empty()
+        && learnings.is_none()
+        && durable
+            .as_ref()
+            .map(|t| t.trim().is_empty())
+            .unwrap_or(true)
+        && rules.is_none()
+    {
         return None;
     }
     let mut digest = identity;
@@ -325,6 +348,13 @@ pub fn hook_digest(config_dir: &Path, project_dir: &Path, harness_id: &str) -> O
             digest.push('\n');
         }
         digest.push_str(learnings.trim());
+        digest.push('\n');
+    }
+    if let Some(durable) = durable.filter(|text| !text.trim().is_empty()) {
+        if !digest.is_empty() && !digest.ends_with('\n') {
+            digest.push('\n');
+        }
+        digest.push_str(durable.trim());
         digest.push('\n');
     }
     if let Some(rules) = rules.filter(|text| !text.trim().is_empty()) {

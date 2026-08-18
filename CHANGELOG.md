@@ -5,6 +5,25 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- Dev CI (`fmt` + `clippy` + `test` on Ubuntu and Windows) runs again on
+  `main` pushes, pull requests, and manual dispatch. Rolling preview and
+  the `nightly` prerelease stay off. Crate version remains **0.1.2** until
+  a tagged production release.
+- Honor documented harness config homes (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
+  `KIMI_CODE_HOME`, `GROK_HOME`) at install, uninstall, and Codex transcript
+  import. Hook commands use an absolute `stateroot` path when the installer
+  binary is the real CLI.
+- Embedded session skill teaches `snap` / `revert` / `fork` lineage and
+  replaces the nonexistent `stateroot search` with `stateroot memory recall`.
+  Resume and session-start hooks show current root, last actor, verified
+  tree delta, and an active shared learning.
+- Cross-harness learnings: hook digests now inject the full durable
+  preferences set; workspace/domain scopes are documented and tested.
+- Agent Plugins 1.0 wrapper at `agent-plugin/` (MCP stdio + marketplace
+  skill). Harness hooks still require `stateroot install`.
+- Read-only `stateroot observations list|show|search` and MCP
+  `observations_list` over the spool. Append-only `stateroot transplant`
+  copies evidence between initialized projects with receipts on both sides.
 - Session-start hooks inject persona + USER.md even outside a `stateroot
   init` project. Capture/checkpoint stay project-scoped. Cursor's
   `~/.cursor/AGENTS.md` is not loaded into Agent chats; identity has to

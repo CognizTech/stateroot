@@ -49,6 +49,11 @@ pub const TOOL_DEFS: &[(&str, &str, &str)] = &[
         "List learnings (durable preferences, corrections) for self-orientation. Active notes are inherited by every harness.",
         r#"{"type":"object","properties":{"scope":{"type":"string"},"status":{"type":"string"},"limit":{"type":"integer"}}}"#,
     ),
+    (
+        "observations_list",
+        "Read-only audit of raw hook-captured observations from .stateroot/spool/observations.jsonl. Provenance/debug only — not primary memory.",
+        r#"{"type":"object","properties":{"kind":{"type":"string"},"harness":{"type":"string"},"query":{"type":"string"},"limit":{"type":"integer"}}}"#,
+    ),
 ];
 
 /// Run the stdio server until stdin closes.
@@ -183,6 +188,7 @@ fn call_tool(
         "skill_propose" => skill_propose(ctx, home, caller, args),
         "soul_read" => soul_read(home, caller),
         "learnings_list" => learnings_list(ctx, home, external, args),
+        "observations_list" => observations_list(ctx, args),
         _ => return error_fallback(id, -32602, &format!("unknown tool: {name}")),
     };
     ok(id, json!({"content": [{"type": "text", "text": text}]}))
@@ -339,7 +345,10 @@ fn learn_record(ctx: &Ctx, home: &std::path::Path, args: &Value) -> String {
         "workspace" => "workspace",
         other if other.starts_with("domain:") => other,
         "domain" => "domain",
-        other => other,
+        other => {
+            return json!({"error": format!("unknown scope '{other}' — use project, user, workspace, domain, or domain:<slug>")})
+                .to_string();
+        }
     };
     match stateroot_core::learnings::record_note(&ctx.cwd, home, note, scope, "mcp learn_record") {
         Ok((id, new, category)) => json!({
@@ -465,4 +474,48 @@ fn learnings_list(ctx: &Ctx, home: &std::path::Path, _external: bool, args: &Val
         })
         .collect();
     json!({"learnings": rows, "scope": scope, "gates": "all"}).to_string()
+}
+
+fn observations_list(ctx: &Ctx, args: &Value) -> String {
+    if !stateroot_core::local_store::is_stateroot_dir(&ctx.cwd) {
+        return json!({"error": "not a stateroot project — run from an initialized project root"})
+            .to_string();
+    }
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+    let rows = stateroot_core::observations::filter_spool(
+        &ctx.cwd,
+        &stateroot_core::observations::ObservationFilter {
+            kind: args
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            harness: args
+                .get("harness")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            since: None,
+            until: None,
+            query: args
+                .get("query")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            limit,
+        },
+    );
+    let payload: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            json!({
+                "id": row.id,
+                "ts": row.ts,
+                "event": row.event,
+                "harness": row.harness,
+                "kind_hint": row.kind_hint,
+                "tool": row.tool,
+                "excerpt": row.excerpt,
+                "scope_status": row.scope_status,
+            })
+        })
+        .collect();
+    json!({"observations": payload, "read_only": true}).to_string()
 }

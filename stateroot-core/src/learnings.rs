@@ -612,6 +612,13 @@ pub fn distill_statements(project_dir: &Path, home: &Path) -> Vec<(String, Strin
             .flat_map(|scope| read_scope(project_dir, home, scope))
             .map(|l| normalize(&l.statement))
             .collect();
+    if let Some(slug) = bound_domain(project_dir) {
+        existing.extend(
+            read_scope(project_dir, home, &format!("domain:{slug}"))
+                .into_iter()
+                .map(|l| normalize(&l.statement)),
+        );
+    }
     // Also skip bullets already in the wiki inbox.
     let inbox = local_store::root(project_dir)
         .join(crate::wiki::PAGES_DIR)
@@ -715,6 +722,92 @@ pub fn compose_instruction(status: &BootstrapStatus) -> String {
     out.push_str(
         "Format: `<prefer X over Y / never Z>. <when it applies and what not to do>.` Read first (`stateroot learnings list` and `stateroot learnings list --user`); update rather than duplicate. `learn record` always writes a learning. Facts go to `memory_save`.\n",
     );
+    out
+}
+
+/// One active shared learning to surface beside work-state lineage in digests.
+pub fn highlight_for_digest(project_dir: &Path, home: &Path) -> Option<String> {
+    let latest = crate::roots::latest_root(project_dir).ok().flatten();
+    let mut pool: Vec<Learning> = Vec::new();
+    for scope in ["project", "user", "workspace"] {
+        pool.extend(read_scope(project_dir, home, scope));
+    }
+    if let Some(slug) = bound_domain(project_dir) {
+        pool.extend(read_scope(project_dir, home, &format!("domain:{slug}")));
+    }
+    let active: Vec<&Learning> = pool
+        .iter()
+        .filter(|l| l.status == "active" && l.superseded_by.is_empty())
+        .collect();
+    if active.is_empty() {
+        return None;
+    }
+    let tied = latest.as_ref().and_then(|latest| {
+        active
+            .iter()
+            .find(|l| !l.active_at_root.is_empty() && l.active_at_root == *latest)
+    });
+    let pick = tied.or_else(|| {
+        active.iter().find(|l| l.scope == "user").or_else(|| {
+            active.iter().max_by(|a, b| {
+                a.confidence
+                    .partial_cmp(&b.confidence)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+        })
+    })?;
+    Some(format!(
+        "Shared learning ({}): {}",
+        pick.scope, pick.statement
+    ))
+}
+
+/// Active learnings across inherited scopes for resume/hook digests.
+pub fn collect_active_for_digest(project_dir: &Path, home: &Path) -> Vec<Learning> {
+    let mut pool: Vec<Learning> = Vec::new();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for scope in ["project", "user", "workspace"] {
+        for learning in read_scope(project_dir, home, scope) {
+            if learning.status == "active"
+                && learning.superseded_by.is_empty()
+                && seen.insert(learning.id.clone())
+            {
+                pool.push(learning);
+            }
+        }
+    }
+    if let Some(slug) = bound_domain(project_dir) {
+        for learning in read_scope(project_dir, home, &format!("domain:{slug}")) {
+            if learning.status == "active"
+                && learning.superseded_by.is_empty()
+                && seen.insert(learning.id.clone())
+            {
+                pool.push(learning);
+            }
+        }
+    }
+    pool.sort_by(|left, right| {
+        right
+            .confidence
+            .partial_cmp(&left.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    pool
+}
+
+/// Render the Durable Preferences block for resume/hook digests.
+pub fn compose_durable_preferences_section(learnings: &[Learning]) -> String {
+    if learnings.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("## Durable Preferences\n\n");
+    for learning in learnings {
+        out.push_str(&format!(
+            "- {} ({:.2}, {})\n",
+            learning.statement, learning.confidence, learning.scope
+        ));
+    }
+    out.push('\n');
     out
 }
 
@@ -1054,5 +1147,42 @@ mod tests {
         assert!(project_notes
             .iter()
             .any(|l| l.statement.contains("this repo")));
+    }
+
+    #[test]
+    fn workspace_and_domain_scopes_are_isolated() {
+        let (project, home) = dirs();
+        std::fs::create_dir_all(project.path().join(".stateroot")).unwrap();
+        let (_, new_ws, _) = record_note(
+            project.path(),
+            home.path(),
+            "workspace-wide bar",
+            "workspace",
+            "test",
+        )
+        .expect("workspace record");
+        assert!(new_ws);
+        let (_, new_dom, _) = record_note(
+            project.path(),
+            home.path(),
+            "domain-specific bar",
+            "domain:rust",
+            "test",
+        )
+        .expect("domain record");
+        assert!(new_dom);
+        assert!(read_scope(project.path(), home.path(), "workspace")
+            .iter()
+            .any(|l| l.statement.contains("workspace-wide")));
+        assert!(read_scope(project.path(), home.path(), "domain:rust")
+            .iter()
+            .any(|l| l.statement.contains("domain-specific")));
+        assert!(read_scope(project.path(), home.path(), "project")
+            .iter()
+            .all(|l| !l.statement.contains("workspace-wide")));
+        let digest = collect_active_for_digest(project.path(), home.path());
+        assert!(digest.iter().any(|l| l.scope == "workspace"));
+        // domain:rust is readable but only enters digests when the project manifest binds that slug.
+        assert!(!digest.iter().any(|l| l.scope == "domain:rust"));
     }
 }

@@ -20,6 +20,7 @@ use super::{
     clean, cwd_matches, event_timestamp, push_unique, shell_write_targets, walk_files, Outcome,
     TranscriptReader, TranscriptSession,
 };
+use crate::harness_install::paths;
 
 /// Codex rollout reader.
 pub struct CodexReader;
@@ -38,8 +39,9 @@ impl TranscriptReader for CodexReader {
                 .map(|n| n.starts_with("rollout-") && n.ends_with(".jsonl"))
                 .unwrap_or(false)
         };
-        let mut files = walk_files(&home.join(".codex/sessions"), &rollout);
-        files.extend(walk_files(&home.join(".codex/archived_sessions"), &rollout));
+        let (sessions, archived) = paths::codex_transcript_roots(home);
+        let mut files = walk_files(&sessions, &rollout);
+        files.extend(walk_files(&archived, &rollout));
         let mut by_id: std::collections::HashMap<String, TranscriptSession> =
             std::collections::HashMap::new();
         for file in &files {

@@ -69,7 +69,7 @@ pub fn render_handoff_digest(packet: &Value) -> String {
 /// [`render_handoff_digest`] with a `deterministic` switch: when true, the
 /// LLM-synthesized sections are omitted (everything else identical).
 pub fn render_handoff_digest_with(packet: &Value, deterministic: bool) -> String {
-    render_handoff_digest_full(packet, deterministic, &[], None)
+    render_handoff_digest_full(packet, deterministic, &[], None, None)
 }
 
 /// Full digest: deterministic switch + durable learnings + active goal (both
@@ -79,6 +79,7 @@ pub fn render_handoff_digest_full(
     deterministic: bool,
     durable: &[super::learnings_reader::Learning],
     active_goal: Option<&Value>,
+    project_dir: Option<&Path>,
 ) -> String {
     let mut out = String::new();
     let get_str = |key: &str| packet.get(key).and_then(|v| v.as_str()).unwrap_or("");
@@ -87,13 +88,26 @@ pub fn render_handoff_digest_full(
     if !objective.is_empty() {
         out.push_str(&format!("## Objective\n\n{objective}\n\n"));
     }
-    if let Some(root) = packet
+    let lineage = project_dir
+        .map(stateroot_core::roots::compose_digest_section)
+        .unwrap_or_default();
+    if !lineage.is_empty() {
+        out.push_str(&lineage);
+    } else if let Some(root) = packet
         .get("latest_root")
         .and_then(|v| v.as_str())
         .filter(|value| !value.is_empty())
     {
         let short: String = root.chars().take(12).collect();
         out.push_str(&format!("Continuing from root `{short}`.\n\n"));
+    }
+    if let (Some(project_dir), Ok(home)) =
+        (project_dir, stateroot_core::harness_install::home_dir())
+    {
+        if let Some(highlight) = stateroot_core::learnings::highlight_for_digest(project_dir, &home)
+        {
+            out.push_str(&format!("{highlight}\n\n"));
+        }
     }
     let phase = get_str("current_phase");
     if !phase.is_empty() {
@@ -605,35 +619,25 @@ skipping duplicate. Pass --force to reprint.)\n\n{NO_REFETCH_FOOTER}"
     }
 
     // Durable preferences: all active learnings (project + user + workspace + bound domain).
-    let mut durable: Vec<super::learnings_reader::Learning> =
-        super::learnings_reader::read_local_learnings(&ctx.cwd)
-            .into_iter()
-            .filter(|l| l.status == "active" && l.scope != "session_candidate")
-            .collect();
-    if let Ok(home) = stateroot_core::harness_install::home_dir() {
-        let mut seen: std::collections::BTreeSet<String> =
-            durable.iter().map(|l| l.id.clone()).collect();
-        let mut scopes = vec!["user".to_string(), "workspace".to_string()];
-        if let Some(slug) = stateroot_core::learnings::bound_domain(&ctx.cwd) {
-            scopes.push(format!("domain:{slug}"));
-        }
-        for scope in scopes {
-            for learning in stateroot_core::learnings::read_scope(&ctx.cwd, &home, &scope) {
-                if learning.status == "active" && seen.insert(learning.id.clone()) {
-                    durable.push(super::learnings_reader::Learning {
-                        id: learning.id,
-                        statement: learning.statement,
-                        category: learning.category,
-                        confidence: learning.confidence,
-                        label: learning.label,
-                        sources: learning.sources,
-                        scope: learning.scope,
-                        status: learning.status,
-                    });
-                }
-            }
-        }
-    }
+    let durable: Vec<super::learnings_reader::Learning> =
+        stateroot_core::harness_install::home_dir()
+            .ok()
+            .map(|home| {
+                stateroot_core::learnings::collect_active_for_digest(&ctx.cwd, &home)
+                    .into_iter()
+                    .map(|l| super::learnings_reader::Learning {
+                        id: l.id,
+                        statement: l.statement,
+                        category: l.category,
+                        confidence: l.confidence,
+                        label: l.label,
+                        sources: l.sources,
+                        scope: l.scope,
+                        status: l.status,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
     // Active goal from the local goal docs.
     let active_goal = super::learnings_reader::read_local_goals(&ctx.cwd)
         .into_iter()
@@ -646,6 +650,7 @@ skipping duplicate. Pass --force to reprint.)\n\n{NO_REFETCH_FOOTER}"
                 deterministic,
                 &durable,
                 active_goal.as_ref(),
+                Some(&ctx.cwd),
             ));
             if !out.ends_with('\n') {
                 out.push('\n');

@@ -14,6 +14,18 @@ Operational details behind the rules in `SKILL.md`. Read this when the top-level
 4. Note format: `<what changed> — <why> — <what it unblocks>`. Keep it specific and short; use `--files a,b` to name the touched files instead of listing them in prose.
 5. Checkpoints are append-only and offline-safe. When in doubt, checkpoint — a noisy log is recoverable, a missing one is not.
 
+## Work-State Lineage (snap / revert / fork)
+
+Handoff carries **session continuity**. **Root lineage** records verified project-tree state under `refs/stateroot`:
+
+1. Run `stateroot snap [--reason "..."]` after meaningful changes to the real working tree.
+2. Resume and hook digests show the current root, prior transition when available, last actor, and verified tree delta when recorded.
+3. Run `stateroot revert <root>` only for verified restoration — append-only, creates a new root.
+4. Run `stateroot fork <root>` when work should diverge from an earlier root.
+5. Use `stateroot log`, `stateroot show`, `stateroot diff`, and `stateroot compare` to inspect lineage — do not invent history the CLI has not verified.
+
+To recall prior decisions or failures, use `stateroot memory recall "<query>"` (not a separate search command).
+
 ## Handoff Packet Fields
 
 Near usage limits or harness switches, prefer a **flag-first** write (one command, no temp JSON). Use `--input` only when the payload is large.

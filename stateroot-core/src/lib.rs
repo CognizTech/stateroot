@@ -19,6 +19,7 @@ pub mod learnings;
 pub mod local_store;
 pub mod mcp_federation;
 pub mod memory_index;
+pub mod observations;
 pub mod openclaw_identity;
 pub mod presentation;
 pub mod proposals;

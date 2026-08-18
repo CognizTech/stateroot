@@ -629,3 +629,74 @@ fn install_and_setup_skills_are_local() {
         "provenance: {imported}"
     );
 }
+
+#[test]
+fn install_honors_codex_home_for_hooks_and_agents_block() {
+    let config_home = tempfile::tempdir().expect("config home");
+    seed_config_home(config_home.path());
+    let user_home = tempfile::tempdir().expect("user home");
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+
+    let codex_home = user_home.path().join("custom-codex");
+    std::fs::create_dir_all(&codex_home).expect("codex home");
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .env("CODEX_HOME", &codex_home)
+        .arg("install")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(stdout.contains("codex"), "install: {stdout}");
+
+    let hooks = codex_home.join("hooks.json");
+    assert!(hooks.is_file(), "expected hooks at {}", hooks.display());
+    assert!(
+        !user_home.path().join(".codex/hooks.json").exists(),
+        "legacy hooks path must stay empty when CODEX_HOME is set"
+    );
+    let agents = std::fs::read_to_string(codex_home.join("AGENTS.md")).expect("codex AGENTS");
+    assert!(
+        agents.contains("stateroot:begin") || agents.contains("StateRoot"),
+        "block: {agents}"
+    );
+}
+
+#[test]
+fn learning_recorded_in_cursor_appears_in_codex_hook_digest() {
+    let config_home = tempfile::tempdir().expect("config home");
+    seed_config_home(config_home.path());
+    let user_home = tempfile::tempdir().expect("user home");
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+
+    let note = "Prefer small diffs over rewrites in this repo.";
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["learn", "record", note])
+        .assert()
+        .success();
+
+    let cursor = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["hook", "session_start", "--harness", "cursor"])
+        .assert()
+        .success();
+    let cursor_out = String::from_utf8(cursor.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        cursor_out.contains(note),
+        "cursor digest missing learning: {cursor_out}"
+    );
+
+    let codex = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["hook", "session_start", "--harness", "codex"])
+        .assert()
+        .success();
+    let codex_out = String::from_utf8(codex.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        codex_out.contains(note),
+        "codex digest missing learning: {codex_out}"
+    );
+    assert!(
+        codex_out.contains("additionalContext") || codex_out.contains("hookSpecificOutput"),
+        "codex envelope: {codex_out}"
+    );
+}

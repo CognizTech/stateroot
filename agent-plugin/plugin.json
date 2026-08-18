@@ -1,0 +1,35 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "stateroot",
+  "version": "0.1.2",
+  "description": "Portable working intelligence and provable project-state lineage for coding agents. MCP stdio bridge plus bootstrap skill; lifecycle capture still requires `stateroot install` hooks.",
+  "author": {
+    "name": "CognizTech",
+    "url": "https://github.com/CognizTech"
+  },
+  "homepage": "https://github.com/CognizTech/stateroot",
+  "repository": "https://github.com/CognizTech/stateroot",
+  "license": "MIT",
+  "keywords": [
+    "stateroot",
+    "handoff",
+    "lineage",
+    "memory",
+    "learnings",
+    "mcp",
+    "hooks"
+  ],
+  "mcpServers": {
+    "stateroot": {
+      "command": "stateroot",
+      "args": ["mcp-stdio"]
+    }
+  },
+  "skills": [
+    "../skill"
+  ],
+  "notes": {
+    "hooks": "Run `stateroot install` for harness-native lifecycle hooks. Agent Plugins transport does not replace automatic capture or cross-harness projection.",
+    "session_skill": "Embedded session protocol ships inside the CLI at stateroot-cli/assets/stateroot-skill/ and is installed per harness by `stateroot init` / `stateroot install`."
+  }
+}
