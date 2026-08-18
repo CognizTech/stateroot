@@ -58,11 +58,11 @@ Not this skill's job once setup has run. The built-in skill / CLI owns daily use
 stateroot self-update
 stateroot self-update --check
 stateroot self-update --tag nightly
-stateroot self-update --tag v0.1.2
+stateroot self-update --tag v0.1.3
 stateroot self-update --check --tag nightly
 ```
 
-`self-update` without `--tag` follows the latest **production** GitHub release. `--tag nightly` is the rolling preview from `main` (prerelease; not `latest`). `--tag v0.1.2` (bare `0.1.2` accepted) installs that production tag, including a downgrade from nightly. Background auto-update never installs `nightly`.
+`self-update` without `--tag` follows the latest **production** GitHub release. `--tag nightly` is the rolling preview from `main` (prerelease; not `latest`). `--tag v0.1.3` (bare `0.1.3` accepted) installs that production tag, including a downgrade from nightly. Background auto-update never installs `nightly`.
 
 Opt out: `STATEROOT_NO_AUTO_UPDATE=1`.
 

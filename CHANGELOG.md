@@ -5,6 +5,8 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+## [0.1.3] — 2026-08-18
+
 - Session skill and harness stubs forbid truncating `stateroot resume` /
   hook digests (`| head`, `| tail`, pagers, invented `--budget`). The
   full digest is the state of record.
@@ -19,10 +21,9 @@ StateRoot is pre-1.0 and milestones land as minor versions.
   from that union was an unauthorized regression.
 - Dev CI (`fmt` + `clippy` + `test` on Ubuntu and Windows) runs again on
   `main` pushes, pull requests, and manual dispatch. Rolling preview
-  publishes the `nightly` prerelease on `main` pushes. Crate version
-  remains **0.1.2** until a tagged production release.
+  publishes the `nightly` prerelease on `main` pushes.
 - `stateroot self-update --tag nightly` installs the rolling preview;
-  `--tag v0.1.2` (or `0.1.2`) installs that production release. Bare
+  `--tag v0.1.3` (or `0.1.3`) installs this production release. Bare
   `self-update` still follows GitHub latest production only.
 - Honor documented harness config homes (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
   `KIMI_CODE_HOME`, `GROK_HOME`) at install, uninstall, and Codex transcript
@@ -160,6 +161,7 @@ AI-assisted work — no server anywhere.
 - Harness instruction blocks carry the two-sentence self-improvement
   guidance; install registers the stdio server into harness configs.
 
+[0.1.3]: https://github.com/CognizTech/stateroot/releases/tag/v0.1.3
 [0.1.2]: https://github.com/CognizTech/stateroot/releases/tag/v0.1.2
 [0.1.1]: https://github.com/CognizTech/stateroot/releases/tag/v0.1.1
 [0.1.0]: https://github.com/CognizTech/stateroot/releases/tag/v0.1.0
