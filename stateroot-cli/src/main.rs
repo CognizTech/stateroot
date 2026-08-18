@@ -309,7 +309,9 @@ async fn main() -> anyhow::Result<()> {
                 commands::mcp::accept_theirs(&ctx, &name, from.as_deref())?
             }
         },
-        Command::SelfUpdate { check } => commands::update::self_update(&ctx, check).await?,
+        Command::SelfUpdate { check, tag } => {
+            commands::update::self_update(&ctx, check, tag.as_deref()).await?
+        }
     }
     if update_allowed {
         commands::update::maybe_auto_update(&ctx).await;

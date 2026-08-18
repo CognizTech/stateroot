@@ -19,6 +19,9 @@ Pre-1.0: minor versions per milestone (0.1.0 = M1–M4). After 1.0: semver.
    `git push origin main v0.1.1`. A commit message containing `[skip tests]`
    skips fmt/clippy/test and the rolling `nightly` prerelease. Tagged `v*`
    pushes skip those jobs and run `build-release` + `release` only.
+   Ordinary `main` pushes publish the rolling `nightly` preview after tests.
+   Install it with `stateroot self-update --tag nightly`. Production stays
+   on the latest `v*` GitHub release (`stateroot self-update`, no `--tag`).
 5. CI (`release` job) builds `stateroot-linux-x64` and
    `stateroot-windows-x64.exe`, plus `StateRootSetup-x64.msi`, and attaches
    them with `checksums.txt` and the install scripts. Linux is linked with

@@ -62,6 +62,58 @@ pub fn parse_semver(tag: &str) -> Option<(u64, u64, u64)> {
     Some((major, minor, patch))
 }
 
+/// Normalize a user-supplied release tag.
+///
+/// `nightly` (any case) is the rolling preview. A three-part semver with or
+/// without a `v` prefix becomes `vMAJOR.MINOR.PATCH`. Other names are kept
+/// as typed (trimmed) so unusual tags still resolve.
+pub fn normalize_release_tag(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.eq_ignore_ascii_case("nightly") {
+        return "nightly".into();
+    }
+    if let Some((major, minor, patch)) = parse_semver(trimmed) {
+        return format!("v{major}.{minor}.{patch}");
+    }
+    trimmed.to_string()
+}
+
+/// Rolling preview GitHub tag (`nightly`).
+pub fn is_rolling_preview_tag(tag: &str) -> bool {
+    tag.eq_ignore_ascii_case("nightly")
+}
+
+fn release_api_url(repo: &str, tag: Option<&str>) -> String {
+    match tag {
+        None => format!("{}/repos/{repo}/releases/latest", api_base()),
+        Some(tag) => format!("{}/repos/{repo}/releases/tags/{tag}", api_base()),
+    }
+}
+
+fn assets_from_body(body: &Value) -> Option<ReleaseInfo> {
+    let tag = body.get("tag_name").and_then(|v| v.as_str())?.to_string();
+    let assets = body.get("assets").and_then(|v| v.as_array())?;
+    let mut asset_url = None;
+    let mut checksums_url = None;
+    for asset in assets {
+        let name = asset.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let url = asset
+            .get("browser_download_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if name == asset_name() {
+            asset_url = Some(url.to_string());
+        } else if name == "checksums.txt" {
+            checksums_url = Some(url.to_string());
+        }
+    }
+    Some(ReleaseInfo {
+        tag,
+        asset_url: asset_url?,
+        checksums_url: checksums_url?,
+    })
+}
+
 /// One release the updater can act on.
 #[derive(Debug, Clone)]
 pub struct ReleaseInfo {
@@ -114,7 +166,7 @@ pub async fn check_latest(ctx: &Ctx, force: bool) -> Option<ReleaseInfo> {
         .build()
         .ok()?;
     let resp = client
-        .get(format!("{}/repos/{repo}/releases/latest", api_base()))
+        .get(release_api_url(repo, None))
         .header("Accept", "application/vnd.github+json")
         .header("User-Agent", "stateroot-cli")
         .send()
@@ -124,22 +176,7 @@ pub async fn check_latest(ctx: &Ctx, force: bool) -> Option<ReleaseInfo> {
         return None;
     }
     let body: Value = resp.json().await.ok()?;
-    let tag = body.get("tag_name").and_then(|v| v.as_str())?.to_string();
-    let assets = body.get("assets").and_then(|v| v.as_array())?;
-    let mut asset_url = None;
-    let mut checksums_url = None;
-    for asset in assets {
-        let name = asset.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        let url = asset
-            .get("browser_download_url")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if name == asset_name() {
-            asset_url = Some(url.to_string());
-        } else if name == "checksums.txt" {
-            checksums_url = Some(url.to_string());
-        }
-    }
+    let info = assets_from_body(&body)?;
     // Always record the check timestamp so a missing platform asset does not
     // re-hit the network on every invocation within the interval.
     let _ = std::fs::create_dir_all(&ctx.config_dir);
@@ -147,16 +184,49 @@ pub async fn check_latest(ctx: &Ctx, force: bool) -> Option<ReleaseInfo> {
         cache_path(ctx),
         serde_json::to_string_pretty(&json!({
             "checked_at": stateroot_core::local_store::now_rfc3339(),
-            "latest_tag": tag,
-            "asset_url": asset_url,
-            "checksums_url": checksums_url,
+            "latest_tag": info.tag,
+            "asset_url": info.asset_url,
+            "checksums_url": info.checksums_url,
         }))
         .ok()?,
     );
-    Some(ReleaseInfo {
-        tag,
-        asset_url: asset_url?,
-        checksums_url: checksums_url?,
+    Some(info)
+}
+
+/// Fetch one GitHub release by tag (`nightly`, `v0.1.2`, …). Never writes the
+/// production `update-check.json` cache.
+pub async fn fetch_tagged_release(ctx: &Ctx, tag: &str) -> anyhow::Result<ReleaseInfo> {
+    let repo = ctx.config.update.repo.trim();
+    if repo.is_empty() || repo.contains("OWNER") || repo.contains("placeholder") {
+        anyhow::bail!("could not check for updates (no public release repo configured yet)");
+    }
+    let tag = normalize_release_tag(tag);
+    if tag.is_empty() {
+        anyhow::bail!("release tag must not be empty");
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()?;
+    let url = release_api_url(repo, Some(&tag));
+    let resp = client
+        .get(&url)
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", "stateroot-cli")
+        .send()
+        .await
+        .with_context(|| format!("requesting {url}"))?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        anyhow::bail!("no GitHub release tagged `{tag}`");
+    }
+    if !resp.status().is_success() {
+        anyhow::bail!("release lookup for `{tag}` failed (HTTP {})", resp.status());
+    }
+    let body: Value = resp.json().await.context("parsing GitHub release JSON")?;
+    assets_from_body(&body).ok_or_else(|| {
+        anyhow!(
+            "release `{tag}` has no {asset} + checksums.txt",
+            asset = asset_name()
+        )
     })
 }
 
@@ -257,28 +327,52 @@ pub async fn maybe_auto_update(ctx: &Ctx) {
     let _ = attempt;
 }
 
-/// `stateroot self-update [--check]`.
-pub async fn self_update(ctx: &Ctx, check_only: bool) -> anyhow::Result<()> {
+/// `stateroot self-update [--check] [--tag nightly|v0.1.2]`.
+///
+/// Omit `--tag` to follow the latest production release (`/releases/latest`).
+/// Pass `--tag nightly` for the rolling preview, or a production tag to
+/// install/downgrade that exact release. Background auto-update never uses
+/// `--tag` and never follows `nightly`.
+pub async fn self_update(ctx: &Ctx, check_only: bool, tag: Option<&str>) -> anyhow::Result<()> {
     if disabled(ctx) {
         println!("auto-update is disabled ([update] enabled = false or STATEROOT_NO_AUTO_UPDATE)");
         return Ok(());
     }
-    let Some(info) = check_latest(ctx, false).await else {
-        println!("could not check for updates (no public release repo configured yet)");
-        return Ok(());
+    let explicit = tag.is_some();
+    let info = if let Some(tag) = tag {
+        fetch_tagged_release(ctx, tag).await?
+    } else {
+        match check_latest(ctx, false).await {
+            Some(info) => info,
+            None => {
+                println!("could not check for updates (no public release repo configured yet)");
+                return Ok(());
+            }
+        }
     };
-    println!("current: v{CURRENT_VERSION}");
-    println!("latest:  {}", info.tag);
+    let current = crate::cli::BUILD_VERSION;
+    let channel = if is_rolling_preview_tag(&info.tag) {
+        "rolling preview"
+    } else {
+        "production"
+    };
+    println!("current:  {current}");
+    println!("release:  {} ({channel})", info.tag);
     if check_only {
-        if is_newer(&info.tag) {
+        if explicit {
+            println!(
+                "run `stateroot self-update --tag {}` to install it",
+                info.tag
+            );
+        } else if is_newer(&info.tag) {
             println!("an update is available — run `stateroot self-update` to install it");
         } else {
-            println!("already on the latest release");
+            println!("already on the latest production release");
         }
         return Ok(());
     }
-    if !is_newer(&info.tag) {
-        println!("already on the latest release");
+    if !explicit && !is_newer(&info.tag) {
+        println!("already on the latest production release");
         return Ok(());
     }
     download_and_install(ctx, &info).await.map(|_| ())
@@ -601,5 +695,16 @@ mod tests {
             99
         )));
         assert!(!is_newer("v0.0.1"));
+    }
+
+    #[test]
+    fn normalize_release_tag_maps_channels() {
+        assert_eq!(normalize_release_tag("nightly"), "nightly");
+        assert_eq!(normalize_release_tag("Nightly"), "nightly");
+        assert_eq!(normalize_release_tag("v0.1.2"), "v0.1.2");
+        assert_eq!(normalize_release_tag("0.1.2"), "v0.1.2");
+        assert_eq!(normalize_release_tag("  v1.0.0  "), "v1.0.0");
+        assert!(is_rolling_preview_tag("nightly"));
+        assert!(!is_rolling_preview_tag("v0.1.2"));
     }
 }

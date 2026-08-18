@@ -6,9 +6,12 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 ## Unreleased
 
 - Dev CI (`fmt` + `clippy` + `test` on Ubuntu and Windows) runs again on
-  `main` pushes, pull requests, and manual dispatch. Rolling preview and
-  the `nightly` prerelease stay off. Crate version remains **0.1.2** until
-  a tagged production release.
+  `main` pushes, pull requests, and manual dispatch. Rolling preview
+  publishes the `nightly` prerelease on `main` pushes. Crate version
+  remains **0.1.2** until a tagged production release.
+- `stateroot self-update --tag nightly` installs the rolling preview;
+  `--tag v0.1.2` (or `0.1.2`) installs that production release. Bare
+  `self-update` still follows GitHub latest production only.
 - Honor documented harness config homes (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
   `KIMI_CODE_HOME`, `GROK_HOME`) at install, uninstall, and Codex transcript
   import. Hook commands use an absolute `stateroot` path when the installer

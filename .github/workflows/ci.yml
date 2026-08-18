@@ -1,8 +1,8 @@
 name: CI
 
 # Dev CI: fmt + clippy + test on main pushes, PRs, and manual dispatch.
-# Rolling preview / nightly prerelease stay off.
-# Tagged v* pushes still build and publish release artifacts.
+# Rolling preview publishes the `nightly` prerelease on main pushes.
+# Tagged v* pushes still build and publish production release artifacts.
 # Linux binaries are linked with cargo-zigbuild for glibc 2.17.
 on:
   push:
@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Optional base version for manually built preview artifacts (unused while preview jobs stay off)
+        description: Optional base version for manually built preview artifacts
         required: false
         type: string
 
@@ -76,7 +76,10 @@ jobs:
 
   preview-version:
     name: calculate rolling preview version
-    if: false
+    if: |
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      (github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip tests]'))
     runs-on: ubuntu-latest
     outputs:
       display: ${{ steps.version.outputs.display }}
@@ -112,7 +115,7 @@ jobs:
   build-preview:
     name: preview ${{ matrix.artifact }}
     needs: [test, preview-version]
-    if: false
+    if: needs.preview-version.result == 'success'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -206,7 +209,7 @@ jobs:
   rolling-prerelease:
     name: publish rolling prerelease
     needs: [preview-version, build-preview]
-    if: false
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write

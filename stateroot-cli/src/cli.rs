@@ -84,9 +84,13 @@ pub enum Command {
     Setup(SetupArgs),
     /// Check for / install a newer stateroot binary (from GitHub releases).
     SelfUpdate {
-        /// Only report current vs latest; do not install.
+        /// Only report current vs latest (or `--tag`); do not install.
         #[arg(long)]
         check: bool,
+        /// GitHub release tag to install: `nightly` (rolling preview) or a
+        /// production tag such as `v0.1.2`. Bare `0.1.2` is accepted as `v0.1.2`.
+        #[arg(long)]
+        tag: Option<String>,
     },
     /// Local stdio MCP server (line-delimited JSON-RPC; W8 tools, local stores).
     McpStdio,

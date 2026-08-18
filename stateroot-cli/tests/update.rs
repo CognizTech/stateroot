@@ -119,6 +119,73 @@ async fn updater_never_runs_on_hook_but_runs_on_status() {
 }
 
 #[tokio::test]
+async fn tagged_self_update_check_hits_release_tag_not_latest() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/stateroot-dev/stateroot/releases/tags/nightly"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(release_body(
+            "nightly",
+            "http://x/asset",
+            "http://x/checksums.txt",
+        )))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/stateroot-dev/stateroot/releases/latest"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let config_home = tempfile::tempdir().expect("config home");
+    seed_config(config_home.path(), &update_config_toml());
+    let user_home = tempfile::tempdir().expect("user home");
+    let cwd = tempfile::tempdir().expect("cwd");
+
+    let out = stateroot(config_home.path(), user_home.path(), cwd.path())
+        .env("STATEROOT_GITHUB_API_BASE", server.uri())
+        .args(["self-update", "--check", "--tag", "nightly"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(stdout.contains("nightly"), "{stdout}");
+    assert!(stdout.contains("rolling preview"), "{stdout}");
+    assert!(stdout.contains("self-update --tag nightly"), "{stdout}");
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn production_tag_normalizes_bare_semver() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/stateroot-dev/stateroot/releases/tags/v0.1.2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(release_body(
+            "v0.1.2",
+            "http://x/asset",
+            "http://x/checksums.txt",
+        )))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let config_home = tempfile::tempdir().expect("config home");
+    seed_config(config_home.path(), &update_config_toml());
+    let user_home = tempfile::tempdir().expect("user home");
+    let cwd = tempfile::tempdir().expect("cwd");
+
+    let out = stateroot(config_home.path(), user_home.path(), cwd.path())
+        .env("STATEROOT_GITHUB_API_BASE", server.uri())
+        .args(["self-update", "--check", "--tag", "0.1.2"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(stdout.contains("v0.1.2"), "{stdout}");
+    assert!(stdout.contains("production"), "{stdout}");
+    server.verify().await;
+}
+
+#[tokio::test]
 async fn disabled_paths_and_placeholder_repo() {
     let config_home = tempfile::tempdir().expect("config home");
     seed_config(config_home.path(), "");
