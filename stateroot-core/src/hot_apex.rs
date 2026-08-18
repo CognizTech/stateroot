@@ -1,7 +1,9 @@
 //! Curated hot-apex memory (Hermes-style § entries).
 //!
-//! Two targets:
+//! Three internal targets:
 //! - `memory` → `.stateroot/memories/MEMORY.md` (project facts; 8000 char write cap)
+//! - `global_memory` → `~/.stateroot/memories/MEMORY.md` (user-global facts;
+//!   8000 char write cap)
 //! - `user` → `~/.stateroot/user/USER.md` via [`crate::user_profile`] (4000 char write cap)
 //!
 //! Caps are write hygiene: overflow errors so the agent consolidates. Import /
@@ -25,6 +27,8 @@ pub const ENTRY_DELIMITER: &str = "\n§\n";
 pub const MEMORY_CHAR_LIMIT: usize = 8000;
 /// Write cap for USER.md via the memory tool (chars).
 pub const USER_CHAR_LIMIT: usize = 4000;
+/// User-global memory path under `~/.stateroot/`.
+pub const GLOBAL_MEMORY_PATH: &str = ".stateroot/memories/MEMORY.md";
 
 /// Private visibility marker on an entry.
 pub const PRIVATE_MARKER: &str = "<!-- visibility: private -->";
@@ -138,8 +142,11 @@ pub fn split_entries(text: &str) -> Vec<String> {
 fn is_boilerplate_line(text: &str) -> bool {
     let t = text.trim();
     t == "# Project Memory"
+        || t == "# Global Memory"
         || t == "Curated long-term memory for this project."
+        || t == "Curated long-term memory for this scope."
         || t.eq_ignore_ascii_case("curated long-term memory for this project.")
+        || t.eq_ignore_ascii_case("curated long-term memory for this scope.")
 }
 
 /// Join entries with the § delimiter.
@@ -170,7 +177,7 @@ pub fn capacity_header(label: &str, text: &str, limit: usize) -> String {
 /// Char limit for a target.
 pub fn limit_for(target: &str) -> Result<usize, HotApexError> {
     match target {
-        "memory" => Ok(MEMORY_CHAR_LIMIT),
+        "memory" | "global_memory" => Ok(MEMORY_CHAR_LIMIT),
         "user" => Ok(USER_CHAR_LIMIT),
         other => Err(HotApexError::InvalidTarget(other.into())),
     }
@@ -180,6 +187,7 @@ pub fn limit_for(target: &str) -> Result<usize, HotApexError> {
 pub fn path_for(project_dir: &Path, home: &Path, target: &str) -> Result<PathBuf, HotApexError> {
     match target {
         "memory" => Ok(local_store::root(project_dir).join(local_store::MEMORY_CORE_PATH)),
+        "global_memory" => Ok(home.join(GLOBAL_MEMORY_PATH)),
         "user" => Ok(user_profile::path(home)),
         other => Err(HotApexError::InvalidTarget(other.into())),
     }
@@ -196,11 +204,14 @@ pub fn render_for_digest(project_dir: &Path, home: &Path, target: &str) -> Optio
     let limit = limit_for(target).ok()?;
     let text = read_text(project_dir, home, target).ok()?;
     let trimmed = text.trim();
-    if trimmed.is_empty() || (target == "memory" && is_only_skeleton(trimmed)) {
+    if trimmed.is_empty()
+        || (matches!(target, "memory" | "global_memory") && is_only_skeleton(trimmed))
+    {
         return None;
     }
     let label = match target {
         "user" => "USER PROFILE",
+        "global_memory" => "GLOBAL MEMORY (curated facts)",
         _ => "MEMORY (curated facts)",
     };
     Some(format!(
@@ -229,11 +240,16 @@ fn atomic_write_locked(path: &Path, content: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-fn write_memory_body(path: &Path, entries: &[String]) -> std::io::Result<()> {
-    let body = if entries.is_empty() {
-        "# Project Memory\n\nCurated long-term memory for this project.\n".to_string()
+fn write_memory_body(path: &Path, entries: &[String], global: bool) -> std::io::Result<()> {
+    let title = if global {
+        "Global Memory"
     } else {
-        format!("# Project Memory\n\n{}\n", join_entries(entries))
+        "Project Memory"
+    };
+    let body = if entries.is_empty() {
+        format!("# {title}\n\nCurated long-term memory for this scope.\n")
+    } else {
+        format!("# {title}\n\n{}\n", join_entries(entries))
     };
     atomic_write_locked(path, &body)
 }
@@ -293,7 +309,7 @@ pub fn add(
             Some(current),
         ));
     }
-    write_memory_body(&path, &entries)?;
+    write_memory_body(&path, &entries, target == "global_memory")?;
     Ok(MutationResult::ok(
         usage(candidate.len(), limit),
         path,
@@ -434,7 +450,7 @@ pub fn replace(
             Some(split_entries(&existing)),
         ));
     }
-    write_memory_body(&path, &entries)?;
+    write_memory_body(&path, &entries, target == "global_memory")?;
     Ok(MutationResult::ok(
         usage(candidate.len(), limit),
         path,
@@ -510,7 +526,7 @@ pub fn remove(
             None,
         ));
     }
-    write_memory_body(&path, &entries)?;
+    write_memory_body(&path, &entries, target == "global_memory")?;
     let candidate = join_entries(&entries);
     Ok(MutationResult::ok(
         usage(candidate.len(), limit),
@@ -522,11 +538,7 @@ pub fn remove(
 /// Migrate legacy `memory.md` bullets into `memories/MEMORY.md` once.
 ///
 /// Project: `.stateroot/memory.md` → `.stateroot/memories/MEMORY.md`
-/// User: `~/.stateroot/memory.md` → project MEMORY is only for project scope;
-/// user-scope legacy bullets go into project MEMORY when migrating a project,
-/// and user-global legacy file bullets are appended to MEMORY of the calling
-/// project only when `migrate_user_legacy` is true — otherwise they become
-/// MEMORY entries under a synthetic note that they came from user scope.
+/// User: `~/.stateroot/memory.md` → `~/.stateroot/memories/MEMORY.md`
 ///
 /// Plan: copy unique bullets into MEMORY.md; do not merge into soul/USER.
 pub fn migrate_legacy(project_dir: &Path, home: &Path) -> Result<usize, HotApexError> {
@@ -535,16 +547,23 @@ pub fn migrate_legacy(project_dir: &Path, home: &Path) -> Result<usize, HotApexE
         &local_store::root(project_dir).join(LEGACY_PROJECT_MEMORY),
         project_dir,
         home,
+        "memory",
     )?;
     moved += migrate_one_file(
         &home.join(".stateroot").join(LEGACY_USER_MEMORY),
         project_dir,
         home,
+        "global_memory",
     )?;
     Ok(moved)
 }
 
-fn migrate_one_file(legacy: &Path, project_dir: &Path, home: &Path) -> Result<usize, HotApexError> {
+fn migrate_one_file(
+    legacy: &Path,
+    project_dir: &Path,
+    home: &Path,
+    target: &str,
+) -> Result<usize, HotApexError> {
     if !legacy.is_file() {
         return Ok(0);
     }
@@ -559,7 +578,7 @@ fn migrate_one_file(legacy: &Path, project_dir: &Path, home: &Path) -> Result<us
         let result = add(
             project_dir,
             home,
-            "memory",
+            target,
             &bullet,
             bullet.contains(PRIVATE_MARKER),
         )?;
@@ -641,6 +660,31 @@ mod tests {
     }
 
     #[test]
+    fn global_memory_is_separate_from_project_and_user_profile() {
+        let (project, home) = dirs();
+        let result = add(
+            project.path(),
+            home.path(),
+            "global_memory",
+            "standard template lives here",
+            true,
+        )
+        .unwrap();
+        assert!(result.success);
+        assert_eq!(
+            result.path.as_deref(),
+            Some(home.path().join(GLOBAL_MEMORY_PATH).as_path())
+        );
+        let global = read_text(project.path(), home.path(), "global_memory").unwrap();
+        assert!(global.contains("standard template lives here"));
+        assert!(global.contains(PRIVATE_MARKER));
+        assert!(
+            split_entries(&read_text(project.path(), home.path(), "memory").unwrap()).is_empty()
+        );
+        assert!(user_profile::read(home.path()).is_none());
+    }
+
+    #[test]
     fn overflow_errors_without_write() {
         let (project, home) = dirs();
         let big = "x".repeat(MEMORY_CHAR_LIMIT - 10);
@@ -670,6 +714,21 @@ mod tests {
         assert!(body.contains("beta fact"));
         assert!(!legacy.exists());
         assert!(legacy.with_extension("md.migrated").exists());
+    }
+
+    #[test]
+    fn migrate_user_legacy_memory_to_global_scope() {
+        let (project, home) = dirs();
+        let legacy = home.path().join(".stateroot/memory.md");
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(&legacy, "- global fact\n").unwrap();
+        let n = migrate_legacy(project.path(), home.path()).unwrap();
+        assert_eq!(n, 1);
+        let global = read_text(project.path(), home.path(), "global_memory").unwrap();
+        assert!(global.contains("global fact"));
+        assert!(
+            split_entries(&read_text(project.path(), home.path(), "memory").unwrap()).is_empty()
+        );
     }
 
     #[test]

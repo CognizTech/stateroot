@@ -11,13 +11,13 @@ use super::Ctx;
 pub const TOOL_DEFS: &[(&str, &str, &str)] = &[
     (
         "memory_save",
-        "Save a durable fact into curated MEMORY.md (add alias). Prefer the `memory` tool for replace/remove. Not taste — those go to learn_record.",
+        "Save a durable fact into curated MEMORY.md (add alias). scope=project writes the current project's memory; scope=user writes ~/.stateroot/memories/MEMORY.md. target=user writes USER.md. Prefer the `memory` tool for replace/remove. Not taste — those go to learn_record.",
         r#"{"type":"object","properties":{"content":{"type":"string"},"scope":{"type":"string","enum":["user","project"]},"visibility":{"type":"string","enum":["shared","private"]},"target":{"type":"string","enum":["memory","user"]}},"required":["content"]}"#,
     ),
     (
         "memory",
-        "Curate hot-apex MEMORY.md or USER.md. Actions: add, replace, remove, show. Caps: MEMORY 8000 / USER 4000 chars — overflow errors so you consolidate. Never writes soul.",
-        r#"{"type":"object","properties":{"action":{"type":"string","enum":["add","replace","remove","show"]},"target":{"type":"string","enum":["memory","user"]},"content":{"type":"string"},"old_text":{"type":"string"},"visibility":{"type":"string","enum":["shared","private"]}},"required":["action"]}"#,
+        "Curate project/user-scoped MEMORY.md or global USER.md. Actions: add, replace, remove, show. scope=user + target=memory writes global memory. Caps: MEMORY 8000 / USER 4000 chars — overflow errors so you consolidate. Never writes soul.",
+        r#"{"type":"object","properties":{"action":{"type":"string","enum":["add","replace","remove","show"]},"scope":{"type":"string","enum":["user","project"]},"target":{"type":"string","enum":["memory","user"]},"content":{"type":"string"},"old_text":{"type":"string"},"visibility":{"type":"string","enum":["shared","private"]}},"required":["action"]}"#,
     ),
     (
         "memory_recall",
@@ -207,6 +207,30 @@ fn mutation_json(r: stateroot_core::hot_apex::MutationResult) -> Value {
     })
 }
 
+/// Resolve the public (`scope`, `target`) pair to one hot-apex store.
+///
+/// `target=user` is the global USER.md identity/profile document. A memory
+/// target honors scope: project MEMORY.md or user-global MEMORY.md.
+fn memory_route(args: &Value) -> Result<(&'static str, &'static str), &'static str> {
+    let scope = args
+        .get("scope")
+        .and_then(|v| v.as_str())
+        .unwrap_or("project");
+    let target = args
+        .get("target")
+        .and_then(|v| v.as_str())
+        .unwrap_or("memory");
+    if !matches!(scope, "project" | "user") {
+        return Err("scope must be project|user");
+    }
+    match target {
+        "memory" if scope == "user" => Ok(("global_memory", "user")),
+        "memory" => Ok(("memory", "project")),
+        "user" => Ok(("user", "user")),
+        _ => Err("target must be memory|user"),
+    }
+}
+
 fn memory_save(ctx: &Ctx, home: &std::path::Path, args: &Value) -> String {
     let content = args
         .get("content")
@@ -216,21 +240,12 @@ fn memory_save(ctx: &Ctx, home: &std::path::Path, args: &Value) -> String {
     if content.is_empty() {
         return json!({"error": "content is required"}).to_string();
     }
-    // Facts always land in curated MEMORY.md (not USER.md / soul).
-    let target = args
-        .get("target")
-        .and_then(|v| v.as_str())
-        .unwrap_or("memory");
-    let target = if target == "user" { "user" } else { "memory" };
+    let (write_target, scope) = match memory_route(args) {
+        Ok(route) => route,
+        Err(error) => return json!({"error": error}).to_string(),
+    };
     let private = args.get("visibility").and_then(|v| v.as_str()) == Some("private");
-    let scope = args
-        .get("scope")
-        .and_then(|v| v.as_str())
-        .unwrap_or("project");
     stateroot_core::hot_apex::ensure_migrated(&ctx.cwd, home);
-    // Legacy scope=user wrote ~/.stateroot/memory.md — that migrates into project
-    // MEMORY. New writes with target=memory always hit MEMORY.md.
-    let write_target = if target == "user" { "user" } else { "memory" };
     match stateroot_core::hot_apex::add(&ctx.cwd, home, write_target, content, private) {
         Ok(r) => {
             let _ = stateroot_core::memory_index::rebuild_if_needed(&ctx.cwd, home);
@@ -250,10 +265,10 @@ fn memory_save(ctx: &Ctx, home: &std::path::Path, args: &Value) -> String {
 
 fn memory_tool(ctx: &Ctx, home: &std::path::Path, args: &Value) -> String {
     let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
-    let target = args
-        .get("target")
-        .and_then(|v| v.as_str())
-        .unwrap_or("memory");
+    let (target, scope) = match memory_route(args) {
+        Ok(route) => route,
+        Err(error) => return json!({"error": error}).to_string(),
+    };
     let private = args.get("visibility").and_then(|v| v.as_str()) == Some("private");
     let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
     let old = args
@@ -270,7 +285,7 @@ fn memory_tool(ctx: &Ctx, home: &std::path::Path, args: &Value) -> String {
         "remove" => stateroot_core::hot_apex::remove(&ctx.cwd, home, target, old),
         "show" => {
             return match stateroot_core::hot_apex::show(&ctx.cwd, home, target) {
-                Ok(text) => json!({"text": text}).to_string(),
+                Ok(text) => json!({"text": text, "scope": scope}).to_string(),
                 Err(err) => json!({"error": format!("{err}")}).to_string(),
             };
         }
@@ -279,7 +294,11 @@ fn memory_tool(ctx: &Ctx, home: &std::path::Path, args: &Value) -> String {
     match result {
         Ok(r) => {
             let _ = stateroot_core::memory_index::rebuild_if_needed(&ctx.cwd, home);
-            mutation_json(r).to_string()
+            let mut value = mutation_json(r);
+            if let Some(object) = value.as_object_mut() {
+                object.insert("scope".into(), json!(scope));
+            }
+            value.to_string()
         }
         Err(err) => json!({"error": format!("{err}")}).to_string(),
     }
@@ -298,7 +317,11 @@ fn memory_recall(ctx: &Ctx, home: &std::path::Path, external: bool, args: &Value
                         "note": h.text,
                         "kind": h.kind,
                         "path": h.path,
-                        "scope": if h.kind == "user" { "user" } else { "project" },
+                        "scope": if matches!(h.kind.as_str(), "user" | "memory_user") {
+                            "user"
+                        } else {
+                            "project"
+                        },
                         "visibility": if h.private { "private" } else { "shared" },
                         "score": h.score,
                     })

@@ -7,6 +7,12 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## [0.1.3] — 2026-08-18
 
+- MCP `memory_save` / `memory` now honor `scope`: `scope=user` +
+  `target=memory` writes `~/.stateroot/memories/MEMORY.md`, while
+  `scope=project` writes the current project's MEMORY.md. User-global
+  memory is indexed for cross-project recall; the response reports the
+  actual routed scope. Legacy user-global `memory.md` migrates globally
+  instead of leaking into whichever project happened to run first.
 - Session skill and harness stubs forbid truncating `stateroot resume` /
   hook digests (`| head`, `| tail`, pagers, invented `--budget`). The
   full digest is the state of record.

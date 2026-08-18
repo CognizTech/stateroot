@@ -106,6 +106,10 @@ fn content_fingerprint(project_dir: &Path, home: &Path) -> String {
         hasher.update(b"user");
         hasher.update(user.as_bytes());
     }
+    if let Ok(global_memory) = hot_apex::read_text(project_dir, home, "global_memory") {
+        hasher.update(b"global_memory");
+        hasher.update(global_memory.as_bytes());
+    }
     format!("{:x}", hasher.finalize())
 }
 
@@ -162,6 +166,19 @@ fn rebuild_with_conn(
                 conn,
                 "memory",
                 local_store::MEMORY_CORE_PATH,
+                &entry,
+                hot_apex::is_private(&entry),
+            )?;
+        }
+    }
+
+    // User-global MEMORY.md follows the user across projects.
+    if let Ok(text) = hot_apex::read_text(project_dir, home, "global_memory") {
+        for entry in hot_apex::split_entries(&text) {
+            insert_doc(
+                conn,
+                "memory_user",
+                hot_apex::GLOBAL_MEMORY_PATH,
                 &entry,
                 hot_apex::is_private(&entry),
             )?;

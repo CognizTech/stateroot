@@ -141,7 +141,7 @@ fn stdio_round_trips_all_six_tools() {
         );
     }
 
-    // memory_save writes curated MEMORY.md (no quarantine)
+    // memory_save honors scope: user writes global MEMORY.md, never project memory.
     let saved = client.call(
         "tools/call",
         json!({"name": "memory_save", "arguments": {"content": "release train is fridays", "scope": "user", "visibility": "shared"}}),
@@ -149,12 +149,55 @@ fn stdio_round_trips_all_six_tools() {
     let saved = McpClient::tool_text(&saved);
     assert_eq!(saved["quarantined"], json!(false), "{saved}");
     assert_eq!(saved["success"], json!(true), "{saved}");
+    assert_eq!(saved["scope"], json!("user"), "{saved}");
+    let global_memory = user_home.path().join(".stateroot/memories/MEMORY.md");
     assert!(
-        project
-            .path()
-            .join(".stateroot/memories/MEMORY.md")
-            .is_file(),
-        "MEMORY.md must exist after save"
+        global_memory.is_file(),
+        "user-scoped MEMORY.md must exist after save"
+    );
+    let global_text = std::fs::read_to_string(&global_memory).expect("global MEMORY.md");
+    assert!(
+        global_text.contains("release train is fridays"),
+        "{global_text}"
+    );
+    let project_text =
+        std::fs::read_to_string(project.path().join(".stateroot/memories/MEMORY.md"))
+            .expect("project MEMORY.md");
+    assert!(
+        !project_text.contains("release train is fridays"),
+        "user-scoped fact leaked into project memory: {project_text}"
+    );
+
+    let project_saved = client.call(
+        "tools/call",
+        json!({"name": "memory_save", "arguments": {"content": "project deploys from main", "scope": "project"}}),
+    );
+    let project_saved = McpClient::tool_text(&project_saved);
+    assert_eq!(project_saved["success"], json!(true), "{project_saved}");
+    assert_eq!(project_saved["scope"], json!("project"), "{project_saved}");
+    let project_text =
+        std::fs::read_to_string(project.path().join(".stateroot/memories/MEMORY.md"))
+            .expect("project MEMORY.md");
+    assert!(
+        project_text.contains("project deploys from main"),
+        "{project_text}"
+    );
+
+    // User-global shared memory is indexed for recall in every project.
+    let global_recall = client.call(
+        "tools/call",
+        json!({"name": "memory_recall", "arguments": {"query": "release train"}}),
+    );
+    let global_recall = McpClient::tool_text(&global_recall);
+    assert!(
+        global_recall["hits"]
+            .as_array()
+            .is_some_and(|hits| hits.iter().any(|hit| hit["scope"] == "user"
+                && hit["note"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("release train is fridays"))),
+        "{global_recall}"
     );
 
     // memory_recall (external): shared hit visible, private invisible
