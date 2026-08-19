@@ -2,6 +2,24 @@
 
 `stateroot skill install --harness H` (also run by `stateroot init`) writes the per-harness stubs from `assets/` into the project. Harness identifiers are lowercase; the server-side canonical set includes `planner`, `cursor`, `codex`, `kimi`, `opencode`, `hermes`, `openclaw`, `statesmith`, and others in the harness registry contract.
 
+After upgrading the CLI, run `stateroot install` (machine hooks/plugins) **and** `stateroot skill install` (project stubs) so identity injection stays current.
+
+## Identity delivery
+
+Automatic harnesses inject persona + USER.md + work context onto the first usable prompt (session-start and/or first-prompt fallback). Manual `stateroot resume` is the last fallback, not the primary reliability mechanism.
+
+| Harness | Delivery | Notes |
+| --- | --- | --- |
+| Claude Code, Codex, Kimi, Devin | Automatic | Session-start inject; first prompt retries if that missed |
+| Cursor | Automatic | Session-start stdout may be ignored; first prompt always injects |
+| Kimi Code | Automatic | Identity rides UserPromptSubmit |
+| OpenClaw | Automatic | `before_prompt_build` pulls digest stdout |
+| OpenCode, OMP, pi | Automatic | Generated plugin consumes hook stdout on the first prompt |
+| Gemini CLI, Antigravity | Automatic | Session-start only (no prompt-submit fallback) |
+| Hermes, VS Code Copilot, Crush, Zero | Degraded | No verified injection — run `stateroot resume` |
+
+`stateroot doctor` prints each detected harness's honest tier.
+
 ## Claude Code
 
 - Skill: `.claude/skills/stateroot/SKILL.md` (copy of this skill).

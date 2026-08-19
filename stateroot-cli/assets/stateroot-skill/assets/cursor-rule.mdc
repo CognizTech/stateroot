@@ -6,7 +6,7 @@ alwaysApply: true
 
 This project uses StateRoot for persistent, harness-neutral project state (`.stateroot/`).
 
-1. At session start, prefer the auto-injected StateRoot digest from hooks when present. Only run `stateroot resume --harness cursor` if no digest appeared yet. Do not run resume twice unless the user asks (`--force` reprints). Never pipe resume through `head`/`tail` or any line limiter — ingest the full digest.
+1. At session start, consume the auto-injected StateRoot digest from hooks (session-start and/or the first prompt — Cursor Agent chats do not load `~/.cursor/AGENTS.md`). Only run `stateroot resume --harness cursor` if no digest appeared. Manual resume is the last fallback. Do not run resume twice unless the user asks (`--force` reprints). Never pipe resume through `head`/`tail` or any line limiter — ingest the full digest.
 2. After every step that changes project state — files written, decisions made, milestones, blockers — run `stateroot checkpoint --note "<what changed and why>"`. Hooks do not fire on every write.
 3. Before attempting a non-trivial approach, check the failed-approaches log with `stateroot memory recall "failed approach <topic>"` and do not repeat recorded failures.
 4. After meaningful real-tree changes, run `stateroot snap`; use `stateroot revert` / `stateroot fork` for verified restoration or divergent work.

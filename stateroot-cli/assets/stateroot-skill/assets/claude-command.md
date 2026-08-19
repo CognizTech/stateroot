@@ -2,7 +2,7 @@
 description: Resume StateRoot project state and bind the stateroot protocol for this session
 ---
 
-Prefer the auto-injected StateRoot digest from hooks when present. Only run `stateroot resume --harness claude` if no digest appeared yet. Treat that **entire** output — current handoff, hot-apex memory, context pack — as the project state of record for this session. Do not run resume twice unless the user explicitly asks (`--force` reprints). Never pipe resume through `head`, `tail`, or any line limiter.
+Prefer the auto-injected StateRoot digest from hooks when present. Only run `stateroot resume --harness claude` if no digest appeared. Manual resume is the last fallback. Treat that **entire** output — current handoff, hot-apex memory, context pack — as the project state of record for this session. Do not run resume twice unless the user explicitly asks (`--force` reprints). Never pipe resume through `head`, `tail`, or any line limiter.
 
 Then follow the stateroot skill protocol mechanically:
 

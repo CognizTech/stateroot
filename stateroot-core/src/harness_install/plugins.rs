@@ -48,18 +48,25 @@ pub fn render_ts_plugin(quirk: &HarnessQuirk) -> String {
          return process.env.STATEROOT_BIN || \"stateroot\";\n\
          }}\n\n\
          function hook(event: string, payload: unknown): void {{\n  \
-         try {{\n    \
-         const child = execFile(\n      \
-         staterootBin(),\n      \
-         [\"hook\", event, \"--harness\", \"{}\"],\n      \
-         {{ timeout: 5000 }},\n      \
-         () => {{}},\n    \
-         );\n    \
-         child.stdin?.write(JSON.stringify(payload ?? {{}}));\n    \
-         child.stdin?.end();\n  \
-         }} catch (_e) {{\n    \
-         // Best-effort capture. Hooks must never block the agent.\n  \
-         }}\n\
+         void hookAsync(event, payload);\n\
+         }}\n\n\
+         function hookAsync(event: string, payload: unknown): Promise<string> {{\n  \
+         return new Promise((resolve) => {{\n    \
+         try {{\n      \
+         const child = execFile(\n        \
+         staterootBin(),\n        \
+         [\"hook\", event, \"--harness\", \"{}\"],\n        \
+         {{ timeout: 8000, maxBuffer: 8 * 1024 * 1024, encoding: \"utf8\" }},\n        \
+         (_err, stdout) => {{\n          \
+         resolve(typeof stdout === \"string\" ? stdout : String(stdout ?? \"\"));\n        \
+         }},\n      \
+         );\n      \
+         child.stdin?.write(JSON.stringify(payload ?? {{}}));\n      \
+         child.stdin?.end();\n    \
+         }} catch (_e) {{\n      \
+         resolve(\"\");\n    \
+         }}\n  \
+         }});\n\
          }}\n\n",
         quirk.display, quirk.id
     );
@@ -81,13 +88,18 @@ const OPENCODE_BODY: &str = r#"export const StaterootHooks = async ({ directory 
     if (event?.type === "session.compacted") hook("pre_compact", { cwd: directory, ...properties });
   },
   "chat.message": async (input: any, output: any) => {
-    hook("user_prompt_submit", {
+    const digest = (await hookAsync("user_prompt_submit", {
       cwd: directory,
       agent: input?.agent,
       model: input?.model,
       messageID: input?.messageID,
+      session_id: input?.sessionID ?? input?.session_id ?? input?.messageID,
       parts: output?.parts,
-    });
+    })).trim();
+    if (digest) {
+      const parts = Array.isArray(output?.parts) ? output.parts : [];
+      output.parts = [{ type: "text", text: digest }, ...parts];
+    }
   },
   "tool.execute.before": async (input: any, output: any) => {
     hook("pre_tool_use", { cwd: directory, tool: input?.tool, callID: input?.callID, args: output?.args });
@@ -118,7 +130,17 @@ fn omp_body(id: &str) -> String {
     format!(
         r#"export default function StaterootExtension({arg}: any): void {{
   {arg}.on("session_start", (_event: any, ctx: any) => hook("session_start", ctx));
-  {arg}.on("before_agent_start", (event: any, ctx: any) => hook("user_prompt_submit", {{ ...ctx, prompt: event?.prompt }}));
+  {arg}.on("before_agent_start", async (event: any, ctx: any) => {{
+    const digest = (await hookAsync("user_prompt_submit", {{
+      ...ctx,
+      prompt: event?.prompt,
+      session_id: ctx?.sessionId ?? ctx?.session_id ?? event?.sessionId,
+    }})).trim();
+    if (!digest) {{
+      return;
+    }}
+    return {{ prependContext: digest }};
+  }});
   {arg}.on("tool_call", (event: any, ctx: any) => hook("pre_tool_use", {{ ...ctx, tool: event?.toolName, callID: event?.toolCallId, args: event?.input }}));
   {arg}.on("tool_result", (event: any, ctx: any) => hook("post_tool_use", {{ ...ctx, tool: event?.toolName, callID: event?.toolCallId, output: event?.content, isError: event?.isError }}));
   {arg}.on("session_before_compact", (_event: any, ctx: any) => hook("pre_compact", ctx));
@@ -184,6 +206,9 @@ mod tests {
         assert!(src.contains("\"session_start\""));
         assert!(src.contains("\"user_prompt_submit\""));
         assert!(src.contains("\"pre_compact\""));
+        assert!(src.contains("hookAsync"));
+        assert!(src.contains("output.parts"));
+        assert!(src.contains("await hookAsync(\"user_prompt_submit\""));
     }
 
     #[test]
@@ -192,6 +217,9 @@ mod tests {
         assert!(src.contains("export default function StaterootExtension(api: any)"));
         assert!(src.contains("api.on(\"session_start\""));
         assert!(src.contains("api.on(\"before_agent_start\""));
+        assert!(src.contains("hookAsync"));
+        assert!(src.contains("prependContext"));
+        assert!(src.contains("await hookAsync(\"user_prompt_submit\""));
         assert!(src.contains("api.on(\"tool_call\""));
         assert!(src.contains("api.on(\"tool_result\""));
         assert!(src.contains("api.on(\"session_before_compact\""));
@@ -205,6 +233,8 @@ mod tests {
         assert!(src.contains("export default function StaterootExtension(pi: any)"));
         assert!(src.contains("pi.on(\"session_start\""));
         assert!(src.contains("--harness\", \"pi\""));
+        assert!(src.contains("hookAsync"));
+        assert!(src.contains("prependContext"));
         assert!(!src.contains(".omp"));
     }
 
@@ -224,5 +254,20 @@ mod tests {
         let content = std::fs::read_to_string(&path).expect("read");
         assert!(content.contains(MANAGED_MARKER));
         assert!(!content.contains("somebody else's plugin"));
+    }
+
+    #[test]
+    fn automatic_plugins_consume_digest_stdout_on_first_prompt() {
+        for id in ["opencode", "omp", "pi"] {
+            let src = render_ts_plugin(quirk(id).expect(id));
+            assert!(
+                src.contains("hookAsync"),
+                "{id} must capture hook stdout instead of discarding it"
+            );
+            assert!(
+                src.contains("await hookAsync(\"user_prompt_submit\""),
+                "{id} must inject on the first prompt"
+            );
+        }
     }
 }

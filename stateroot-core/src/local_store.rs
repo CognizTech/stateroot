@@ -46,6 +46,12 @@ pub const MEMORY_CORE_PATH: &str = "memories/MEMORY.md";
 pub const OUTBOX_PATH: &str = "outbox.jsonl";
 /// First-run marker written by `init`; first harness session consumes it.
 pub const FIRST_RUN_PATH: &str = "first-run.json";
+/// Machine-local digest delivery ledger (never synced).
+pub const DIGEST_DELIVERY_PATH: &str = "local/digest-delivery.v1.json";
+/// Legacy hook delivery marker (migrated into the ledger).
+pub const LEGACY_HOOK_RESUME_MARKER: &str = "hook-resume-delivered.json";
+/// Legacy CLI resume marker (migrated into the ledger).
+pub const LEGACY_RESUME_MARKER: &str = "resume-delivered.json";
 
 /// Schema version strings (canonical; must not drift).
 pub const SCHEMA_MANIFEST_V1: &str = "stateroot.manifest.v1";

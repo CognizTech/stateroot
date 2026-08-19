@@ -8,15 +8,11 @@
 //! Event normalization uses the registry's per-harness vocabulary; behavior
 //! per event kind:
 //!
-//! - resume (`session_start`, and `user_prompt_submit` only for kimi-code):
-//!   print the bounded hook digest (local reads only — persona cache, local
-//!   handoff actionables-first, hot-apex excerpt, "do NOT re-fetch" footer).
-//!   Outside a project, print identity only (no handoff/wiki/checkpoint).
-//!   Output shape follows the harness's injection channel (`hookSpecificOutput`
-//!   JSON envelope, plain text, UserPromptSubmit-only, or nothing for MCP-pull
-//!   harnesses). `user_prompt_submit` is capture-only for most harnesses (W3
-//!   correction channel); kimi-code also resumes on prompt-submit because
-//!   SessionStart stdout is discarded.
+//! - resume (`session_start`, plus `user_prompt_submit` when the harness
+//!   policy says so): print the hook digest (persona + USER.md + work body).
+//!   Outside a project, print identity only. First-prompt fallback injects
+//!   when session-start stdout was discarded or never marked delivered.
+//!   Output shape follows the harness's injection channel.
 //! - capture (`post_tool_use`, `notification`, `subagent_*`, `pre_tool_use`):
 //!   append one observation verbatim to `.stateroot/spool/observations.jsonl`
 //!   (256KB rotation), fire-and-forget.
@@ -29,6 +25,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
+use stateroot_core::digest_delivery::{self, DeliveryChannel, DeliveryIntent};
 use stateroot_core::harness_install::registry::{
     self, event_kind, normalize_event, quirk_any, EventKind, Injection,
 };
@@ -37,9 +34,6 @@ use stateroot_core::local_store::now_rfc3339;
 
 use super::{note, truncate, Ctx};
 
-/// Marker under `.stateroot/` — suppresses duplicate resume injection for the
-/// same harness + handoff seq within a session.
-const RESUME_DELIVERED_MARKER: &str = "hook-resume-delivered.json";
 /// Spool rotation threshold.
 const SPOOL_ROTATE_BYTES: u64 = 256 * 1024;
 /// Bytes kept after rotation (tail of the spool).
@@ -115,18 +109,12 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
                     note!("warning: could not record active harness: {err}");
                 }
                 let code = capture_observation(quirk, canonical, project_dir, &payload)?;
-                // kimi-code: SessionStart stdout is discarded — prompt-submit is the
-                // only resume injection channel for that harness.
-                if canonical == "user_prompt_submit"
-                    && quirk.injection == Injection::UserPromptSubmit
-                {
+                if canonical == "user_prompt_submit" && quirk.delivery().prompt_submit_injects {
                     resume_output(ctx, quirk, canonical, project_dir, &payload).await?;
                 }
                 Ok(code)
             }
-            None if canonical == "user_prompt_submit"
-                && quirk.injection == Injection::UserPromptSubmit =>
-            {
+            None if canonical == "user_prompt_submit" && quirk.delivery().prompt_submit_injects => {
                 resume_identity_only(ctx, quirk, canonical)
             }
             None => Ok(0),
@@ -189,9 +177,11 @@ fn resume_identity_only(
     let Some(digest) = identity_only_digest(&ctx.config_dir, quirk.id) else {
         return Ok(0);
     };
+    if !identity_event_prints(quirk, canonical) {
+        return Ok(0);
+    }
     match quirk.injection {
         Injection::None => Ok(0),
-        Injection::UserPromptSubmit if canonical != "user_prompt_submit" => Ok(0),
         Injection::StdoutJson
         | Injection::CursorJson
         | Injection::StdoutText
@@ -200,6 +190,24 @@ fn resume_identity_only(
             print_hook_injection(quirk, canonical, &digest);
             Ok(0)
         }
+    }
+}
+
+fn identity_event_prints(quirk: &registry::HarnessQuirk, canonical: &str) -> bool {
+    let policy = quirk.delivery();
+    match canonical {
+        "session_start" => policy.session_start_prints,
+        "user_prompt_submit" => policy.prompt_submit_injects,
+        _ => false,
+    }
+}
+
+fn identity_event_marks(quirk: &registry::HarnessQuirk, canonical: &str) -> bool {
+    let policy = quirk.delivery();
+    match canonical {
+        "session_start" => policy.session_start_marks,
+        "user_prompt_submit" => policy.prompt_submit_injects,
+        _ => false,
     }
 }
 
@@ -422,67 +430,6 @@ fn print_hook_injection(quirk: &registry::HarnessQuirk, canonical: &str, digest:
     }
 }
 
-fn session_id_from_payload(payload: &Value) -> Option<String> {
-    for key in ["session_id", "conversation_id", "generation_id"] {
-        if let Some(id) = payload.get(key).and_then(|v| v.as_str()) {
-            let id = id.trim();
-            if !id.is_empty() {
-                return Some(id.to_string());
-            }
-        }
-    }
-    None
-}
-
-fn resume_marker_path(project_dir: &Path) -> PathBuf {
-    local_store::root(project_dir).join(RESUME_DELIVERED_MARKER)
-}
-
-fn handoff_seq(project_dir: &Path) -> Option<i64> {
-    local_store::read_handoff_local(project_dir)
-        .ok()
-        .flatten()
-        .and_then(|handoff| handoff.get("seq").and_then(|v| v.as_i64()))
-}
-
-fn resume_already_delivered(
-    project_dir: &Path,
-    harness: &str,
-    seq: i64,
-    session_id: Option<&str>,
-) -> bool {
-    let path = resume_marker_path(project_dir);
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return false;
-    };
-    let Ok(marker) = serde_json::from_str::<Value>(&text) else {
-        return false;
-    };
-    if marker.get("harness").and_then(|v| v.as_str()) != Some(harness) {
-        return false;
-    }
-    if let Some(session_id) = session_id {
-        return marker.get("session_id").and_then(|v| v.as_str()) == Some(session_id);
-    }
-    marker.get("handoff_seq").and_then(|v| v.as_i64()) == Some(seq)
-}
-
-fn mark_resume_delivered(project_dir: &Path, harness: &str, seq: i64, session_id: Option<&str>) {
-    let path = resume_marker_path(project_dir);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let mut marker = json!({
-        "harness": harness,
-        "handoff_seq": seq,
-        "delivered_at": now_rfc3339(),
-    });
-    if let Some(session_id) = session_id {
-        marker["session_id"] = json!(session_id);
-    }
-    let _ = std::fs::write(path, serde_json::to_string(&marker).unwrap_or_default());
-}
-
 async fn resume_output(
     ctx: &Ctx,
     quirk: &registry::HarnessQuirk,
@@ -552,39 +499,38 @@ async fn resume_output(
     let Some(digest) = digest else {
         return Ok(0); // nothing worth injecting — silent
     };
-    let session_id = session_id_from_payload(payload);
-    if let Some(seq) = handoff_seq(project_dir) {
-        if resume_already_delivered(project_dir, quirk.id, seq, session_id.as_deref()) {
-            return Ok(0);
-        }
+    if !identity_event_prints(quirk, canonical) {
+        return Ok(0);
     }
-    match quirk.injection {
-        Injection::None => Ok(0),
-        Injection::McpPull => {
-            // Plugins (OpenClaw, etc.) and MCP-pull adapters capture stdout.
-            print_hook_injection(quirk, canonical, &digest);
-            if let Some(seq) = handoff_seq(project_dir) {
-                mark_resume_delivered(project_dir, quirk.id, seq, session_id.as_deref());
-            }
-            Ok(0)
-        }
-        Injection::UserPromptSubmit => {
-            if canonical == "user_prompt_submit" {
-                print_hook_injection(quirk, canonical, &digest);
-                if let Some(seq) = handoff_seq(project_dir) {
-                    mark_resume_delivered(project_dir, quirk.id, seq, session_id.as_deref());
-                }
-            }
-            Ok(0)
-        }
-        Injection::StdoutJson | Injection::CursorJson | Injection::StdoutText => {
-            print_hook_injection(quirk, canonical, &digest);
-            if let Some(seq) = handoff_seq(project_dir) {
-                mark_resume_delivered(project_dir, quirk.id, seq, session_id.as_deref());
-            }
-            Ok(0)
-        }
+    if quirk.injection == Injection::None {
+        return Ok(0);
     }
+    let content_fp = digest_delivery::content_fingerprint(project_dir);
+    let decision = digest_delivery::should_deliver(
+        project_dir,
+        quirk.id,
+        DeliveryIntent::Session,
+        DeliveryChannel::Hook,
+        payload,
+        &content_fp,
+        false,
+    );
+    if !decision.deliver {
+        return Ok(0);
+    }
+    print_hook_injection(quirk, canonical, &digest);
+    if identity_event_marks(quirk, canonical) {
+        digest_delivery::mark_delivered(
+            project_dir,
+            quirk.id,
+            DeliveryIntent::Session,
+            DeliveryChannel::Hook,
+            canonical,
+            payload,
+            &content_fp,
+        );
+    }
+    Ok(0)
 }
 
 // ---------------------------------------------------------------------

@@ -59,6 +59,131 @@ pub struct HookTarget {
     pub format: HookFormat,
 }
 
+/// Whether this harness can inject identity into the model automatically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryTier {
+    /// Session-start and/or first-prompt injects identity into model context.
+    Automatic,
+    /// No verified injection channel — instruction file and/or MCP pull only.
+    Degraded,
+}
+
+/// Per-harness policy for getting identity onto the first usable prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DigestDeliveryPolicy {
+    /// Canonical event that is supposed to inject first (`session_start` or
+    /// `user_prompt_submit`). Empty when the harness cannot inject.
+    pub primary_event: &'static str,
+    /// Print digest on `session_start` (side effects still always run).
+    pub session_start_prints: bool,
+    /// Count a `session_start` print as delivered. False when that stdout is
+    /// discarded by the harness (Cursor, Kimi Code, OpenClaw, McpPull).
+    pub session_start_marks: bool,
+    /// Print digest on `user_prompt_submit` when the session is still unmarked
+    /// (or this event *is* the primary injection channel).
+    pub prompt_submit_injects: bool,
+    /// Honest capability tier.
+    pub tier: DeliveryTier,
+    /// Short note for doctor/install.
+    pub note: &'static str,
+}
+
+impl DigestDeliveryPolicy {
+    /// Policy for a canonical adapter id. Unknown ids are degraded.
+    pub fn for_id(id: &str) -> Self {
+        match id {
+            "claude-code" | "codex" | "kimi" | "devin" => Self {
+                primary_event: "session_start",
+                session_start_prints: true,
+                session_start_marks: true,
+                prompt_submit_injects: true,
+                tier: DeliveryTier::Automatic,
+                note: "session-start inject; first prompt retries if that missed",
+            },
+            "cursor" => Self {
+                primary_event: "session_start",
+                session_start_prints: true,
+                session_start_marks: false,
+                prompt_submit_injects: true,
+                tier: DeliveryTier::Automatic,
+                note: "session-start may be ignored; first prompt always injects",
+            },
+            "gemini-cli" | "antigravity" => Self {
+                primary_event: "session_start",
+                session_start_prints: true,
+                session_start_marks: true,
+                prompt_submit_injects: false,
+                tier: DeliveryTier::Automatic,
+                note: "session-start inject; no prompt-submit fallback on this harness",
+            },
+            "kimi-code" => Self {
+                primary_event: "user_prompt_submit",
+                session_start_prints: false,
+                session_start_marks: false,
+                prompt_submit_injects: true,
+                tier: DeliveryTier::Automatic,
+                note: "SessionStart stdout is discarded; identity rides UserPromptSubmit",
+            },
+            "openclaw" => Self {
+                primary_event: "user_prompt_submit",
+                session_start_prints: true,
+                session_start_marks: false,
+                prompt_submit_injects: true,
+                tier: DeliveryTier::Automatic,
+                note: "before_prompt_build pulls digest; session_start stdout is discarded",
+            },
+            "grok" => Self {
+                primary_event: "session_start",
+                session_start_prints: true,
+                session_start_marks: false,
+                prompt_submit_injects: true,
+                tier: DeliveryTier::Automatic,
+                note: "McpPull session-start is unreliable; first prompt retries",
+            },
+            "opencode" | "omp" | "pi" => Self {
+                primary_event: "user_prompt_submit",
+                session_start_prints: true,
+                session_start_marks: false,
+                prompt_submit_injects: true,
+                tier: DeliveryTier::Automatic,
+                note: "generated plugin consumes hook stdout on the first prompt",
+            },
+            "zero" => Self {
+                primary_event: "session_start",
+                session_start_prints: true,
+                session_start_marks: false,
+                prompt_submit_injects: false,
+                tier: DeliveryTier::Degraded,
+                note: "no verified prompt injection; run `stateroot resume` if identity is missing",
+            },
+            "hermes" => Self {
+                primary_event: "",
+                session_start_prints: false,
+                session_start_marks: false,
+                prompt_submit_injects: false,
+                tier: DeliveryTier::Degraded,
+                note: "no hooks in v1 — resume via MCP / `stateroot resume --harness hermes`",
+            },
+            "vscode-copilot" | "crush" => Self {
+                primary_event: "",
+                session_start_prints: false,
+                session_start_marks: false,
+                prompt_submit_injects: false,
+                tier: DeliveryTier::Degraded,
+                note: "instruction-file protocol only; run `stateroot resume` at session start",
+            },
+            _ => Self {
+                primary_event: "",
+                session_start_prints: false,
+                session_start_marks: false,
+                prompt_submit_injects: false,
+                tier: DeliveryTier::Degraded,
+                note: "no verified injection channel",
+            },
+        }
+    }
+}
+
 /// How resume content reaches the model for this harness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Injection {
@@ -146,6 +271,13 @@ pub struct HarnessQuirk {
     pub legacy_id: Option<&'static str>,
     /// Harness-native event vocabulary: `(harness_event, canonical_event)`.
     pub event_map: &'static [(&'static str, &'static str)],
+}
+
+impl HarnessQuirk {
+    /// Identity/resume delivery policy for this adapter.
+    pub fn delivery(&self) -> DigestDeliveryPolicy {
+        DigestDeliveryPolicy::for_id(self.id)
+    }
 }
 
 use event_support as es;
@@ -786,5 +918,56 @@ mod tests {
         let copilot = quirk("vscode-copilot").expect("copilot");
         let mcp = copilot.mcp.expect("mcp target");
         assert_eq!(mcp.shape, McpShape::ServersJson);
+    }
+
+    #[test]
+    fn every_adapter_declares_a_truthful_delivery_policy() {
+        for quirk in ADAPTERS {
+            let policy = quirk.delivery();
+            assert_eq!(
+                policy,
+                DigestDeliveryPolicy::for_id(quirk.id),
+                "{}: delivery() must be explicit",
+                quirk.id
+            );
+            match quirk.id {
+                "kimi-code" => {
+                    assert_eq!(policy.primary_event, "user_prompt_submit");
+                    assert!(!policy.session_start_prints);
+                    assert!(policy.prompt_submit_injects);
+                    assert_eq!(policy.tier, DeliveryTier::Automatic);
+                }
+                "cursor" => {
+                    assert!(policy.session_start_prints);
+                    assert!(!policy.session_start_marks);
+                    assert!(policy.prompt_submit_injects);
+                    assert_eq!(policy.tier, DeliveryTier::Automatic);
+                }
+                "openclaw" | "opencode" | "omp" | "pi" => {
+                    assert!(policy.prompt_submit_injects);
+                    assert!(!policy.session_start_marks);
+                    assert_eq!(policy.tier, DeliveryTier::Automatic);
+                }
+                "hermes" | "vscode-copilot" | "crush" | "zero" => {
+                    assert_eq!(policy.tier, DeliveryTier::Degraded);
+                    assert!(!policy.prompt_submit_injects);
+                }
+                "claude-code" | "codex" | "kimi" | "devin" => {
+                    assert!(policy.session_start_marks);
+                    assert!(policy.prompt_submit_injects);
+                    assert_eq!(policy.tier, DeliveryTier::Automatic);
+                }
+                "gemini-cli" | "antigravity" => {
+                    assert!(policy.session_start_marks);
+                    assert!(!policy.prompt_submit_injects);
+                    assert_eq!(policy.tier, DeliveryTier::Automatic);
+                }
+                "grok" => {
+                    assert!(!policy.session_start_marks);
+                    assert!(policy.prompt_submit_injects);
+                }
+                other => panic!("add a delivery assertion for {other}"),
+            }
+        }
     }
 }

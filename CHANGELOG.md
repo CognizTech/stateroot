@@ -3,9 +3,18 @@
 All notable changes to StateRoot. Format loosely follows Keep a Changelog;
 StateRoot is pre-1.0 and milestones land as minor versions.
 
-## Unreleased
+## [0.1.4] — 2026-08-19
 
-## [0.1.3] — 2026-08-18
+- Reliable cross-harness identity delivery: session-start and first-prompt
+  share a machine-local ledger (`.stateroot/local/digest-delivery.v1.json`).
+  Automatic harnesses inject persona + USER.md onto the first usable prompt
+  even with no handoff; Cursor recovers on `beforeSubmitPrompt` when
+  session-start stdout is ignored; Kimi Code stays on UserPromptSubmit;
+  OpenClaw `before_prompt_build` pulls `user_prompt_submit` stdout.
+  Hermes / Copilot / Crush stay honestly degraded. Re-run `stateroot install`
+  and `stateroot skill install` after upgrading.
+
+## Unreleased
 
 - MCP `memory_save` / `memory` now honor `scope`: `scope=user` +
   `target=memory` writes `~/.stateroot/memories/MEMORY.md`, while

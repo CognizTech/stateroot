@@ -84,6 +84,44 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
         hard: false,
     });
 
+    // Honest identity-delivery tier for detected harnesses (soft).
+    if let Ok(home) = super::install::home_dir() {
+        let detections = stateroot_core::harness_install::detect::detect_harnesses(
+            &home,
+            &stateroot_core::harness_install::detect::SystemProber,
+        );
+        let mut any = false;
+        for detection in detections {
+            if !detection.installed() {
+                continue;
+            }
+            let Some(quirk) = stateroot_core::harness_install::registry::quirk_any(&detection.id)
+            else {
+                continue;
+            };
+            any = true;
+            let policy = quirk.delivery();
+            let tier = match policy.tier {
+                stateroot_core::harness_install::registry::DeliveryTier::Automatic => "automatic",
+                stateroot_core::harness_install::registry::DeliveryTier::Degraded => "degraded",
+            };
+            checks.push(Check {
+                label: format!("identity delivery ({})", quirk.id),
+                ok: true,
+                detail: format!("{tier} — {}", policy.note),
+                hard: false,
+            });
+        }
+        if !any {
+            checks.push(Check {
+                label: "identity delivery".into(),
+                ok: true,
+                detail: "no harnesses detected on this machine".into(),
+                hard: false,
+            });
+        }
+    }
+
     // Federation doctors (local engines).
     if local_store::is_stateroot_dir(&ctx.cwd) {
         match stateroot_core::skill_federation::doctor(&ctx.cwd, None) {

@@ -10,6 +10,7 @@
 pub mod canonical;
 pub mod config;
 pub mod context_pack;
+pub mod digest_delivery;
 pub mod error;
 pub mod handoff_bounds;
 pub mod handoff_continuity;

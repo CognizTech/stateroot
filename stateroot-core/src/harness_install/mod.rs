@@ -557,6 +557,12 @@ pub fn install_quirk_full(home: &Path, quirk: &registry::HarnessQuirk, block: &s
     if actions.is_empty() {
         actions.push("managed — no files".to_string());
     }
+    let policy = quirk.delivery();
+    let tier = match policy.tier {
+        registry::DeliveryTier::Automatic => "automatic",
+        registry::DeliveryTier::Degraded => "degraded",
+    };
+    actions.push(format!("identity delivery: {tier} — {}", policy.note));
     actions
 }
 

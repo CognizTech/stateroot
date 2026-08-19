@@ -315,6 +315,7 @@ fn hook_session_start_injects_digest_once() {
 
     let first = stateroot(config_home.path(), user_home.path(), project.path())
         .args(["hook", "SessionStart", "--harness", "claude-code"])
+        .write_stdin(r#"{"session_id":"claude-dedup-test"}"#)
         .assert()
         .success();
     let first_out = String::from_utf8(first.get_output().stdout.clone()).expect("utf8");
@@ -325,6 +326,7 @@ fn hook_session_start_injects_digest_once() {
 
     let second = stateroot(config_home.path(), user_home.path(), project.path())
         .args(["hook", "SessionStart", "--harness", "claude-code"])
+        .write_stdin(r#"{"session_id":"claude-dedup-test"}"#)
         .assert()
         .success();
     let second_out = String::from_utf8(second.get_output().stdout.clone()).expect("utf8");

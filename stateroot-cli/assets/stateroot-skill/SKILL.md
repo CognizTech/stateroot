@@ -1,6 +1,6 @@
 ---
 name: stateroot
-description: Persistent project state and cross-harness handoffs via the `stateroot` CLI. Use when working in a project that has a `.stateroot/` directory — run `stateroot resume --harness <id>` once at session start (unpiped; never `| head` / `| tail` / line limits — the full digest is the state of record), `stateroot checkpoint` after every state-changing step, check the failed-approaches log before attempting an approach, and run `stateroot handoff write` before ending a session or switching agent harnesses.
+description: Persistent project state and cross-harness handoffs via the `stateroot` CLI. Use when working in a project that has a `.stateroot/` directory — consume the auto-injected identity/resume digest on the first usable prompt, run `stateroot resume --harness <id>` only if that digest is missing (unpiped; never `| head` / `| tail` / line limits — the full digest is the state of record), `stateroot checkpoint` after every state-changing step, check the failed-approaches log before attempting an approach, and run `stateroot handoff write` before ending a session or switching agent harnesses.
 ---
 
 # StateRoot
@@ -26,11 +26,11 @@ StateRoot keeps a **shared rules pool** — same idea as skills and learnings. P
 
 Before any architectural or behavioral change, read `stateroot rules show product-intent`. Preserve product intent. Do not replace agent judgment with classifiers, approval gates, or generic architecture. Do not add friction "because it seems safer." Follow imported harness rules in the pool as well (`stateroot rules list`).
 
-### 1) Session start -> resume once
+### 1) Session start -> consume identity, resume only as fallback
 
 At the start of every session in a stateroot project, before doing any work:
-1. prefer the auto-injected StateRoot digest from harness hooks when present
-2. only run the harness-specific resume (e.g. `stateroot resume --harness cursor` / `--harness codex` / `--harness claude` / `--harness kimi`) — or `scripts/resume.sh --harness <id>` — if no digest appeared yet
+1. consume the auto-injected StateRoot digest (persona + USER.md + work body) when the harness put it in context. Automatic harnesses inject on session-start and/or the first prompt. Do not wait to be asked who you are.
+2. only run the harness-specific resume (e.g. `stateroot resume --harness cursor` / `--harness codex` / `--harness claude` / `--harness kimi`) — or `scripts/resume.sh --harness <id>` — if **no** identity/resume digest appeared. Manual resume is the last fallback, not the primary reliability mechanism. Degraded harnesses (Hermes, Copilot, Crush) need this fallback.
 3. treat that **entire** output — current handoff, hot-apex memory, context pack — as the project state of record
 4. **never truncate resume or the hook digest.** Run the command as-is. Do not pipe it through `head`, `tail`, `less`, `sed`, `awk`, `cut`, `wc`, or any line/byte limiter. Do not add `--budget`. The CLI already sized the digest. A clipped resume is a corrupted state of record.
 5. do not run resume again in the same session unless the user explicitly asks (`--force` reprints)
@@ -85,7 +85,7 @@ The CLI is offline-safe: when the server is unreachable it queues operations in 
 
 | Command | When | Notes |
 |---|---|---|
-| `stateroot resume [--harness H]` | session start | prints the **full** digest (handoff + memory + context pack). Never pipe through `head`/`tail` or any limiter |
+| `stateroot resume [--harness H]` | last fallback at session start | prints the **full** digest when hooks did not inject. Never pipe through `head`/`tail` or any limiter |
 | `stateroot checkpoint --note "..." [--files a,b]` | after any state-changing step | appends an episodic record and updates handoff state |
 | `stateroot handoff write --from CURRENT_HARNESS [--to H] [--task …] [--context-summary …] [--next …]` | session end / harness switch | prefer flags near limits; `--to` optional (routing only); `--input` for large payloads |
 | `stateroot handoff finalize [--from H]` | hook missed / quota exit | observed continuity from verified transcript; no routing |

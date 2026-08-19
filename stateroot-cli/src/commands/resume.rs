@@ -5,8 +5,8 @@
 //! server-built context pack. Diagnostics go to stderr.
 
 use serde_json::{json, Value};
+use stateroot_core::digest_delivery::{self, DeliveryChannel, DeliveryIntent};
 use stateroot_core::local_store;
-use stateroot_core::local_store::now_rfc3339;
 use std::path::Path;
 
 use super::{note, truncate, Ctx};
@@ -18,44 +18,6 @@ const UNATTRIBUTED_CALLER: &str = "unattributed";
 /// Footer appended to resume output AND the hook digest — identical wording
 /// in both (plan P4.2).
 pub const NO_REFETCH_FOOTER: &str = "This content IS the handoff — do NOT re-fetch it via tools";
-
-/// Session marker: suppress a second full resume for the same handoff seq.
-const RESUME_DELIVERED_MARKER: &str = "resume-delivered.json";
-
-fn resume_marker_path(project_dir: &Path) -> std::path::PathBuf {
-    local_store::root(project_dir).join(RESUME_DELIVERED_MARKER)
-}
-
-fn local_handoff_seq(project_dir: &Path) -> Option<i64> {
-    local_store::read_handoff_local(project_dir)
-        .ok()
-        .flatten()
-        .and_then(|handoff| handoff.get("seq").and_then(|v| v.as_i64()))
-}
-
-fn resume_already_delivered(project_dir: &Path, harness: &str, seq: i64) -> bool {
-    let Ok(text) = std::fs::read_to_string(resume_marker_path(project_dir)) else {
-        return false;
-    };
-    let Ok(marker) = serde_json::from_str::<Value>(&text) else {
-        return false;
-    };
-    marker.get("harness").and_then(|v| v.as_str()) == Some(harness)
-        && marker.get("handoff_seq").and_then(|v| v.as_i64()) == Some(seq)
-}
-
-fn mark_resume_delivered(project_dir: &Path, harness: &str, seq: i64) {
-    let path = resume_marker_path(project_dir);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let marker = json!({
-        "harness": harness,
-        "handoff_seq": seq,
-        "delivered_at": now_rfc3339(),
-    });
-    let _ = std::fs::write(path, serde_json::to_string(&marker).unwrap_or_default());
-}
 
 /// Render a handoff packet (`stateroot.handoff.v1`) as digest markdown,
 /// actionables-first: Next Actions → Open Questions / Failed Approaches →
@@ -560,16 +522,24 @@ pub async fn run(
         .map(|id| super::active_harness::record(&ctx.cwd, id))
         .transpose()?;
     let caller = recorded_harness.as_deref().unwrap_or(UNATTRIBUTED_CALLER);
-    let handoff_seq = local_handoff_seq(&ctx.cwd);
+    let content_fp = digest_delivery::content_fingerprint(&ctx.cwd);
     if !force {
-        if let Some(seq) = handoff_seq {
-            if resume_already_delivered(&ctx.cwd, caller, seq) {
-                println!(
-                    "(StateRoot resume already delivered this session for handoff seq {seq} — \
+        let decision = digest_delivery::should_deliver(
+            &ctx.cwd,
+            caller,
+            DeliveryIntent::Session,
+            DeliveryChannel::Resume,
+            &json!({}),
+            &content_fp,
+            false,
+        );
+        if !decision.deliver {
+            let seq = digest_delivery::handoff_seq(&ctx.cwd);
+            println!(
+                "(StateRoot resume already delivered this session for handoff seq {seq} — \
 skipping duplicate. Pass --force to reprint.)\n\n{NO_REFETCH_FOOTER}"
-                );
-                return Ok(());
-            }
+            );
+            return Ok(());
         }
     }
 
@@ -741,9 +711,15 @@ skipping duplicate. Pass --force to reprint.)\n\n{NO_REFETCH_FOOTER}"
     }
 
     print!("{out}");
-    if let Some(seq) = handoff_seq {
-        mark_resume_delivered(&ctx.cwd, caller, seq);
-    }
+    digest_delivery::mark_delivered(
+        &ctx.cwd,
+        caller,
+        DeliveryIntent::Session,
+        DeliveryChannel::Resume,
+        "resume",
+        &json!({}),
+        &content_fp,
+    );
     Ok(())
 }
 
