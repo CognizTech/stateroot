@@ -16,6 +16,10 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- `stateroot harness run pi` launches Pi with ambient cross-harness skill
+  discovery disabled by default, while `--skill <slug>` adds only selected
+  StateRoot packages. Use `--ambient-skills` only to opt back into Pi's native
+  `.agents/skills` discovery.
 - Verified Pi harness support: the generated `~/.pi/agent/extensions/stateroot.ts`
   extension injects identity on `before_agent_start` via Pi's session-message
   return (`customType: "stateroot"`, `display: false`). Session-start stdout is

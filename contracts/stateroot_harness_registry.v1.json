@@ -640,7 +640,12 @@
         "argv": [
           "-p",
           "{prompt}"
-        ]
+        ],
+        "skill_isolation": {
+          "isolated_by_default": true,
+          "disable_discovery_arg": "--no-skills",
+          "explicit_skill_arg": "--skill"
+        }
       },
       "reload": "session",
       "capabilities": [

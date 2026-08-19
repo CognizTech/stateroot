@@ -111,6 +111,14 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
                 detail: format!("{tier} — {}", policy.note),
                 hard: false,
             });
+            if quirk.id == "pi" {
+                checks.push(Check {
+                    label: "Pi skill isolation".into(),
+                    ok: true,
+                    detail: "StateRoot launches use `stateroot harness run pi` with ambient .agents skill discovery disabled; pass --ambient-skills to opt in".into(),
+                    hard: false,
+                });
+            }
         }
         if !any {
             checks.push(Check {

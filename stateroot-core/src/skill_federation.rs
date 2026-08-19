@@ -107,6 +107,22 @@ pub struct DelegationSpec {
     /// Absent/empty → the default `["{prompt}"]` passthrough.
     #[serde(default)]
     pub argv: Vec<String>,
+    /// Harness-specific skill discovery policy for StateRoot-owned launches.
+    #[serde(default)]
+    pub skill_isolation: SkillIsolationPolicy,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SkillIsolationPolicy {
+    /// StateRoot launches suppress ambient discovery unless explicitly opted in.
+    #[serde(default)]
+    pub isolated_by_default: bool,
+    /// Flag which disables the harness's default skill discovery.
+    #[serde(default)]
+    pub disable_discovery_arg: String,
+    /// Flag which adds one explicitly selected skill path.
+    #[serde(default)]
+    pub explicit_skill_arg: String,
 }
 
 /// Default argv template when a registry row has none: bare prompt.
@@ -125,6 +141,38 @@ pub fn build_argv_from_spec(spec: &DelegationSpec, prompt: &str) -> Option<Vec<S
     };
     let mut argv = vec![command];
     argv.extend(template.iter().map(|arg| arg.replace("{prompt}", prompt)));
+    Some(argv)
+}
+
+/// Build a StateRoot-owned harness launch. When the registry declares an
+/// isolation policy, ambient skill discovery is disabled by default and only
+/// caller-selected paths are added back.
+pub fn build_launch_argv_from_spec(
+    spec: &DelegationSpec,
+    prompt: Option<&str>,
+    skill_paths: &[String],
+    ambient_skills: bool,
+) -> Option<Vec<String>> {
+    let command = spec.command.clone()?;
+    let mut argv = vec![command];
+    let policy = &spec.skill_isolation;
+    if policy.isolated_by_default && !ambient_skills && !policy.disable_discovery_arg.is_empty() {
+        argv.push(policy.disable_discovery_arg.clone());
+    }
+    if !policy.explicit_skill_arg.is_empty() {
+        for path in skill_paths {
+            argv.push(policy.explicit_skill_arg.clone());
+            argv.push(path.clone());
+        }
+    }
+    if let Some(prompt) = prompt {
+        let template = if spec.argv.is_empty() {
+            default_delegation_argv()
+        } else {
+            spec.argv.clone()
+        };
+        argv.extend(template.iter().map(|arg| arg.replace("{prompt}", prompt)));
+    }
     Some(argv)
 }
 

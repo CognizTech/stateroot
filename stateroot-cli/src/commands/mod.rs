@@ -17,6 +17,7 @@ pub mod checkpoint;
 pub mod compiler;
 pub mod doctor;
 pub mod handoff;
+pub mod harness;
 pub mod harness_display;
 pub mod hook;
 pub mod import;

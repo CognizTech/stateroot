@@ -251,6 +251,11 @@ async fn install_registry_tiers(
             for action in stateroot_core::harness_install::install_quirk_full(home, quirk, &block) {
                 println!("    {}: {action}", quirk.id);
             }
+            if quirk.id == "pi" {
+                println!(
+                    "    pi: launch with `stateroot harness run pi` to isolate it from shared .agents skills"
+                );
+            }
             installed.push(quirk.id.to_string());
         }
     }

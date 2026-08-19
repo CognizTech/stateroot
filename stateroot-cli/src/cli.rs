@@ -66,6 +66,8 @@ pub enum Command {
     Hook(HookArgs),
     /// Install stateroot integration for detected harnesses (global).
     Install,
+    /// Run a harness through StateRoot's portable integration policy.
+    Harness(HarnessArgs),
     /// Full machine removal: harness registrations, config dir, and the
     /// binary itself (project .stateroot/ dirs are never touched).
     Uninstall {
@@ -175,6 +177,33 @@ pub struct CheckpointArgs {
     /// Comma-separated list of files touched.
     #[arg(long, value_delimiter = ',')]
     pub files: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct HarnessArgs {
+    #[command(subcommand)]
+    pub action: HarnessAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HarnessAction {
+    /// Launch a harness; Pi launches with ambient cross-harness skills disabled.
+    Run {
+        /// Harness id (for example, `pi`).
+        harness: String,
+        /// Bounded prompt for a non-interactive delegation run.
+        #[arg(long)]
+        objective: Option<String>,
+        /// StateRoot skill slug to make available (repeatable).
+        #[arg(long = "skill")]
+        skills: Vec<String>,
+        /// Let Pi discover its native shared `.agents/skills` roots.
+        #[arg(long)]
+        ambient_skills: bool,
+        /// Print the resolved command without launching it.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Debug, Args)]

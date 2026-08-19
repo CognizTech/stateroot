@@ -11,7 +11,7 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 use cli::{
-    Command, HandoffAction, LearnAction, LearningsAction, McpAction, MemoryAction,
+    Command, HandoffAction, HarnessAction, LearnAction, LearningsAction, McpAction, MemoryAction,
     ObservationsAction, ProposalsAction, RulesAction, SkillAction, SoulAction, WikiAction,
 };
 use commands::Ctx;
@@ -121,6 +121,22 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Install => commands::install::install(&ctx).await?,
+        Command::Harness(args) => match args.action {
+            HarnessAction::Run {
+                harness,
+                objective,
+                skills,
+                ambient_skills,
+                dry_run,
+            } => commands::harness::run(
+                &ctx,
+                &harness,
+                objective.as_deref(),
+                &skills,
+                ambient_skills,
+                dry_run,
+            )?,
+        },
         Command::Uninstall {
             purge,
             yes,
