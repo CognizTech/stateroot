@@ -119,7 +119,7 @@ fn detect_one(
         }
     }
 
-    let config_dir = detect.iter().any(|marker| {
+    let mut config_dir = detect.iter().any(|marker| {
         let path = home.join(marker);
         path.is_dir() || path.is_file()
     });
@@ -133,6 +133,12 @@ fn detect_one(
             .map(String::as_str)
             .unwrap_or("");
         evidence.push(format!("config ~/{marker}"));
+    } else if id == "pi" {
+        let relocated = super::paths::pi_agent_root(home);
+        if relocated != home.join(".pi/agent") && (relocated.is_dir() || relocated.is_file()) {
+            config_dir = true;
+            evidence.push(format!("config {}", relocated.display()));
+        }
     }
 
     Detection {

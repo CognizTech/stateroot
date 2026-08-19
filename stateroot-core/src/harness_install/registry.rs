@@ -140,13 +140,21 @@ impl DigestDeliveryPolicy {
                 tier: DeliveryTier::Automatic,
                 note: "McpPull session-start is unreliable; first prompt retries",
             },
-            "opencode" | "omp" | "pi" => Self {
+            "opencode" | "omp" => Self {
                 primary_event: "user_prompt_submit",
                 session_start_prints: true,
                 session_start_marks: false,
                 prompt_submit_injects: true,
                 tier: DeliveryTier::Automatic,
                 note: "generated plugin consumes hook stdout on the first prompt",
+            },
+            "pi" => Self {
+                primary_event: "user_prompt_submit",
+                session_start_prints: true,
+                session_start_marks: false,
+                prompt_submit_injects: true,
+                tier: DeliveryTier::Automatic,
+                note: "before_agent_start injects a session message on the first prompt",
             },
             "zero" => Self {
                 primary_event: "session_start",
@@ -379,6 +387,25 @@ const TIER_B_EVENTS: &[(&str, &str)] = &[
     ("post_tool_use", "post_tool_use"),
     ("pre_compact", "pre_compact"),
     ("stop", "stop"),
+    ("session_end", "session_end"),
+];
+
+/// Pi 0.84 extension events (`packages/coding-agent` `ExtensionAPI.on`).
+/// `session_start` is void for model context; identity rides `before_agent_start`.
+const PI_EVENTS: &[(&str, &str)] = &[
+    ("session_start", "session_start"),
+    ("before_agent_start", "user_prompt_submit"),
+    ("user_prompt_submit", "user_prompt_submit"),
+    ("tool_call", "pre_tool_use"),
+    ("pre_tool_use", "pre_tool_use"),
+    ("tool_result", "post_tool_use"),
+    ("post_tool_use", "post_tool_use"),
+    ("session_before_compact", "pre_compact"),
+    ("pre_compact", "pre_compact"),
+    ("session_compact", "post_compaction"),
+    ("agent_end", "stop"),
+    ("stop", "stop"),
+    ("session_shutdown", "session_end"),
     ("session_end", "session_end"),
 ];
 
@@ -638,7 +665,7 @@ pub const ADAPTERS: &[HarnessQuirk] = &[
         id: "pi",
         display: "pi",
         tier: Tier::B,
-        detect: &[".pi"],
+        detect: &[".pi/agent", ".pi"],
         detect_cmds: &["pi"],
         instruction_file: None,
         mcp: None,
@@ -647,7 +674,7 @@ pub const ADAPTERS: &[HarnessQuirk] = &[
         compact_injection: false,
         events: es::ALL,
         legacy_id: None,
-        event_map: TIER_B_EVENTS,
+        event_map: PI_EVENTS,
     },
     HarnessQuirk {
         id: "vscode-copilot",
@@ -898,6 +925,13 @@ mod tests {
         );
         let gemini = quirk("gemini-cli").expect("gemini");
         assert_eq!(normalize_event(gemini, "PreCompress"), Some("pre_compact"));
+        let pi = quirk("pi").expect("pi");
+        assert_eq!(
+            normalize_event(pi, "before_agent_start"),
+            Some("user_prompt_submit")
+        );
+        assert_eq!(normalize_event(pi, "tool_call"), Some("pre_tool_use"));
+        assert_eq!(normalize_event(pi, "agent_end"), Some("stop"));
         // Passthrough canonical names work everywhere.
         assert_eq!(normalize_event(gemini, "stop"), Some("stop"));
         assert_eq!(normalize_event(claude, "NotARealEvent"), None);
@@ -943,10 +977,21 @@ mod tests {
                     assert!(policy.prompt_submit_injects);
                     assert_eq!(policy.tier, DeliveryTier::Automatic);
                 }
-                "openclaw" | "opencode" | "omp" | "pi" => {
+                "openclaw" | "opencode" | "omp" => {
                     assert!(policy.prompt_submit_injects);
                     assert!(!policy.session_start_marks);
                     assert_eq!(policy.tier, DeliveryTier::Automatic);
+                }
+                "pi" => {
+                    assert_eq!(policy.primary_event, "user_prompt_submit");
+                    assert!(policy.session_start_prints);
+                    assert!(!policy.session_start_marks);
+                    assert!(policy.prompt_submit_injects);
+                    assert_eq!(policy.tier, DeliveryTier::Automatic);
+                    assert!(
+                        policy.note.contains("before_agent_start"),
+                        "pi note must name the verified injection event"
+                    );
                 }
                 "hermes" | "vscode-copilot" | "crush" | "zero" => {
                     assert_eq!(policy.tier, DeliveryTier::Degraded);

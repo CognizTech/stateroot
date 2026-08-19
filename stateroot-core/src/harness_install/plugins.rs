@@ -1,40 +1,82 @@
 //! Tier B harnesses — generated TypeScript plugin/extension files.
 //!
 //! Each generated file spawns `stateroot hook <event> --harness <id>` via
-//! `node:child_process.execFile`, forwarding the plugin's event payload on
-//! stdin. Files are plain-JS-compatible TypeScript, self-contained (no
-//! external type imports), with binary resolution `STATEROOT_BIN` first,
-//! then PATH. Event/API shapes extracted from the ai-memory source:
+//! `node:child_process.execFile`, forwarding a JSON payload on stdin. Files
+//! are plain-JS-compatible TypeScript, self-contained (no external type
+//! imports), with binary resolution `STATEROOT_BIN` first, then PATH.
 //!
-//! - opencode (`~/.config/opencode/plugins/ai-memory.ts`):
-//!   `export const …: Plugin = async ({ directory }) => ({ event, "chat.message",
-//!   "tool.execute.before", "tool.execute.after", "experimental.session.compacting",
-//!   dispose })` (`install_hooks.rs:1939-2031`).
-//! - OMP (`~/.omp/agent/extensions/ai-memory.ts`):
-//!   `export default function …(api: any) { api.on("session_start"|"before_agent_start"
-//!   |"tool_call"|"tool_result"|"session_before_compact"|"session_shutdown", …) }`
-//!   (`install_hooks.rs:2508-2560`).
-//! - Pi (`~/.pi/agent/extensions/ai-memory.ts`): same extension form with the
-//!   `pi` argument (`install_hooks.rs:2165-2167`).
+//! Return shapes are verified against the harness itself, not copied from
+//! other products:
 //!
-//! Idempotency: a `# stateroot managed` marker header; only absent or
-//! marker-carrying files are (re)written — foreign plugin files are left alone.
+//! - OpenCode: plugin object mutates `output.parts` on `chat.message`.
+//! - OMP: `api.on("before_agent_start")` currently returns `{ prependContext }`
+//!   (unverified against a live OMP install; left as-is until that harness
+//!   is proven the same way Pi was).
+//! - Pi 0.84 (`@earendil-works/pi-coding-agent`): `before_agent_start` may
+//!   return `{ message: { customType, content, display } }` and/or
+//!   `systemPrompt`. Identity rides the session message
+//!   (`display: false` so it is not a TUI bubble). `session_start` is void
+//!   for model context. Config dir is `$PI_CODING_AGENT_DIR` or `~/.pi/agent`.
+//!
+//! Idempotency: a `stateroot managed` marker header; only absent or
+//! marker-carrying files are (re)written — foreign plugin files are left
+//! alone except product paths named `stateroot.ts`, which are reclaimed.
 
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
+use super::paths::{self, pi_agent_root_in};
 use super::registry::HarnessQuirk;
 use super::{io_err, HarnessError};
 
 /// Marker header identifying stateroot-managed plugin files.
 const MANAGED_MARKER: &str = "// stateroot managed";
 
-/// The target file for a Tier B harness, home-relative.
+/// The target file for a Tier B harness, home-relative default.
 pub fn ts_plugin_path(quirk: &HarnessQuirk) -> Option<&'static str> {
     match quirk.id {
         "opencode" => Some(".config/opencode/plugins/stateroot.ts"),
         "omp" => Some(".omp/agent/extensions/stateroot.ts"),
         "pi" => Some(".pi/agent/extensions/stateroot.ts"),
         _ => None,
+    }
+}
+
+/// Resolved plugin install path (honors `$PI_CODING_AGENT_DIR` for Pi).
+pub fn ts_plugin_install_path_in(
+    home: &Path,
+    quirk: &HarnessQuirk,
+    pi_dir: Option<OsString>,
+) -> Option<PathBuf> {
+    let rel = ts_plugin_path(quirk)?;
+    Some(match quirk.id {
+        "pi" => pi_agent_root_in(home, pi_dir).join("extensions/stateroot.ts"),
+        _ => home.join(rel),
+    })
+}
+
+/// Resolved plugin install path using the process environment.
+pub fn ts_plugin_install_path(home: &Path, quirk: &HarnessQuirk) -> Option<PathBuf> {
+    ts_plugin_install_path_in(
+        home,
+        quirk,
+        std::env::var_os(paths::ENV_PI_CODING_AGENT_DIR),
+    )
+}
+
+/// Active plugin path plus the default when a Pi relocation env is in play.
+pub fn ts_plugin_candidates(home: &Path, quirk: &HarnessQuirk) -> Vec<PathBuf> {
+    let Some(rel) = ts_plugin_path(quirk) else {
+        return Vec::new();
+    };
+    let default = home.join(rel);
+    let Some(active) = ts_plugin_install_path(home, quirk) else {
+        return Vec::new();
+    };
+    if active == default {
+        vec![active]
+    } else {
+        vec![active, default]
     }
 }
 
@@ -72,7 +114,8 @@ pub fn render_ts_plugin(quirk: &HarnessQuirk) -> String {
     );
     match quirk.id {
         "opencode" => out.push_str(OPENCODE_BODY),
-        "omp" | "pi" => out.push_str(&omp_body(quirk.id)),
+        "omp" => out.push_str(&omp_body()),
+        "pi" => out.push_str(PI_BODY),
         _ => {}
     }
     out
@@ -125,39 +168,102 @@ const OPENCODE_BODY: &str = r#"export const StaterootHooks = async ({ directory 
 export default StaterootHooks;
 "#;
 
-fn omp_body(id: &str) -> String {
-    let arg = if id == "pi" { "pi" } else { "api" };
-    format!(
-        r#"export default function StaterootExtension({arg}: any): void {{
-  {arg}.on("session_start", (_event: any, ctx: any) => hook("session_start", ctx));
-  {arg}.on("before_agent_start", async (event: any, ctx: any) => {{
-    const digest = (await hookAsync("user_prompt_submit", {{
+fn omp_body() -> String {
+    r#"export default function StaterootExtension(api: any): void {
+  api.on("session_start", (_event: any, ctx: any) => hook("session_start", ctx));
+  api.on("before_agent_start", async (event: any, ctx: any) => {
+    const digest = (await hookAsync("user_prompt_submit", {
       ...ctx,
       prompt: event?.prompt,
       session_id: ctx?.sessionId ?? ctx?.session_id ?? event?.sessionId,
-    }})).trim();
-    if (!digest) {{
+    })).trim();
+    if (!digest) {
       return;
-    }}
-    return {{ prependContext: digest }};
-  }});
-  {arg}.on("tool_call", (event: any, ctx: any) => hook("pre_tool_use", {{ ...ctx, tool: event?.toolName, callID: event?.toolCallId, args: event?.input }}));
-  {arg}.on("tool_result", (event: any, ctx: any) => hook("post_tool_use", {{ ...ctx, tool: event?.toolName, callID: event?.toolCallId, output: event?.content, isError: event?.isError }}));
-  {arg}.on("session_before_compact", (_event: any, ctx: any) => hook("pre_compact", ctx));
-  {arg}.on("session_shutdown", (_event: any, ctx: any) => hook("session_end", ctx));
-}}
-"#
-    )
+    }
+    return { prependContext: digest };
+  });
+  api.on("tool_call", (event: any, ctx: any) => hook("pre_tool_use", { ...ctx, tool: event?.toolName, callID: event?.toolCallId, args: event?.input }));
+  api.on("tool_result", (event: any, ctx: any) => hook("post_tool_use", { ...ctx, tool: event?.toolName, callID: event?.toolCallId, output: event?.content, isError: event?.isError }));
+  api.on("session_before_compact", (_event: any, ctx: any) => hook("pre_compact", ctx));
+  api.on("session_shutdown", (_event: any, ctx: any) => hook("session_end", ctx));
 }
+"#
+    .to_string()
+}
+
+/// Pi 0.84 extension: verified against `@earendil-works/pi-coding-agent`
+/// `BeforeAgentStartEventResult`. Do not spread `ctx` into JSON — it holds
+/// methods and a live `sessionManager`.
+const PI_BODY: &str = r#"function piPayload(event: any, ctx: any, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  const sessionId =
+    (typeof ctx?.sessionManager?.getSessionId === "function" ? ctx.sessionManager.getSessionId() : undefined) ??
+    ctx?.sessionId ??
+    event?.sessionId;
+  return {
+    cwd: ctx?.cwd ?? event?.systemPromptOptions?.cwd,
+    prompt: event?.prompt,
+    session_id: sessionId,
+    reason: event?.reason,
+    ...extra,
+  };
+}
+
+export default function StaterootExtension(pi: any): void {
+  pi.on("session_start", (event: any, ctx: any) => hook("session_start", piPayload(event, ctx)));
+  pi.on("before_agent_start", async (event: any, ctx: any) => {
+    const digest = (await hookAsync("before_agent_start", piPayload(event, ctx))).trim();
+    if (!digest) {
+      return;
+    }
+    return {
+      message: {
+        customType: "stateroot",
+        content: digest,
+        display: false,
+      },
+    };
+  });
+  pi.on("tool_call", (event: any, ctx: any) =>
+    hook("tool_call", piPayload(event, ctx, { tool: event?.toolName, callID: event?.toolCallId, args: event?.input })),
+  );
+  pi.on("tool_result", (event: any, ctx: any) =>
+    hook(
+      "tool_result",
+      piPayload(event, ctx, {
+        tool: event?.toolName,
+        callID: event?.toolCallId,
+        output: event?.content,
+        isError: event?.isError,
+      }),
+    ),
+  );
+  pi.on("session_before_compact", (event: any, ctx: any) => hook("session_before_compact", piPayload(event, ctx)));
+  pi.on("session_compact", (event: any, ctx: any) => hook("session_compact", piPayload(event, ctx)));
+  pi.on("agent_end", (event: any, ctx: any) => hook("agent_end", piPayload(event, ctx)));
+  pi.on("session_shutdown", (event: any, ctx: any) => hook("session_shutdown", piPayload(event, ctx)));
+}
+"#;
 
 /// Install the TS plugin for a Tier B harness (idempotent). Product paths
 /// named `stateroot.ts` are always reclaimed; unmarked foreign files at other
 /// paths are left alone.
 pub fn install_ts_plugin(home: &Path, quirk: &HarnessQuirk) -> Result<Vec<String>, HarnessError> {
-    let Some(rel) = ts_plugin_path(quirk) else {
+    install_ts_plugin_in(
+        home,
+        quirk,
+        std::env::var_os(paths::ENV_PI_CODING_AGENT_DIR),
+    )
+}
+
+/// Install with an explicit Pi config-dir override (tests).
+pub fn install_ts_plugin_in(
+    home: &Path,
+    quirk: &HarnessQuirk,
+    pi_dir: Option<OsString>,
+) -> Result<Vec<String>, HarnessError> {
+    let Some(path) = ts_plugin_install_path_in(home, quirk, pi_dir) else {
         return Ok(Vec::new());
     };
-    let path = home.join(rel);
     let content = render_ts_plugin(quirk);
     let is_product_path = path
         .file_name()
@@ -183,6 +289,27 @@ pub fn install_ts_plugin(home: &Path, quirk: &HarnessQuirk) -> Result<Vec<String
     }
     std::fs::write(&path, content).map_err(io_err(&path))?;
     Ok(vec![format!("plugin → {}", path.display())])
+}
+
+/// Remove managed plugin files for one harness (full uninstall).
+pub fn uninstall_ts_plugin(home: &Path, quirk: &HarnessQuirk) -> Result<Vec<String>, HarnessError> {
+    let mut actions = Vec::new();
+    for path in ts_plugin_candidates(home, quirk) {
+        if !path.is_file() {
+            continue;
+        }
+        let existing = std::fs::read_to_string(&path).map_err(io_err(&path))?;
+        let is_product_path = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n == "stateroot.ts");
+        if !is_product_path && !existing.contains(MANAGED_MARKER) {
+            continue;
+        }
+        std::fs::remove_file(&path).map_err(io_err(&path))?;
+        actions.push(format!("plugin removed → {}", path.display()));
+    }
+    Ok(actions)
 }
 
 #[cfg(test)]
@@ -228,14 +355,29 @@ mod tests {
     }
 
     #[test]
-    fn pi_plugin_uses_pi_argument() {
+    fn pi_plugin_injects_session_message_on_before_agent_start() {
         let src = render_ts_plugin(quirk("pi").expect("q"));
         assert!(src.contains("export default function StaterootExtension(pi: any)"));
         assert!(src.contains("pi.on(\"session_start\""));
+        assert!(src.contains("pi.on(\"before_agent_start\""));
         assert!(src.contains("--harness\", \"pi\""));
         assert!(src.contains("hookAsync"));
-        assert!(src.contains("prependContext"));
+        assert!(src.contains("await hookAsync(\"before_agent_start\""));
+        assert!(src.contains("customType: \"stateroot\""));
+        assert!(src.contains("display: false"));
+        assert!(src.contains("sessionManager.getSessionId"));
+        assert!(src.contains("pi.on(\"tool_call\""));
+        assert!(src.contains("pi.on(\"tool_result\""));
+        assert!(src.contains("pi.on(\"session_before_compact\""));
+        assert!(src.contains("pi.on(\"session_compact\""));
+        assert!(src.contains("pi.on(\"agent_end\""));
+        assert!(src.contains("pi.on(\"session_shutdown\""));
+        assert!(!src.contains("prependContext"));
         assert!(!src.contains(".omp"));
+        assert!(
+            !src.contains("...ctx"),
+            "must not JSON-serialize the live Pi extension context"
+        );
     }
 
     #[test]
@@ -257,6 +399,41 @@ mod tests {
     }
 
     #[test]
+    fn pi_plugin_installs_under_agent_extensions() {
+        let home = tempfile::tempdir().expect("home");
+        let q = quirk("pi").expect("q");
+        let actions = install_ts_plugin(home.path(), q).expect("install");
+        assert!(actions.iter().any(|a| a.contains("plugin →")));
+        let path = home.path().join(".pi/agent/extensions/stateroot.ts");
+        assert!(path.is_file(), "{}", path.display());
+        let src = std::fs::read_to_string(&path).expect("read");
+        assert!(src.contains("customType: \"stateroot\""));
+        let removed = uninstall_ts_plugin(home.path(), q).expect("uninstall");
+        assert!(removed.iter().any(|a| a.contains("plugin removed")));
+        assert!(!path.is_file());
+    }
+
+    #[test]
+    fn pi_plugin_honors_coding_agent_dir() {
+        let home = tempfile::tempdir().expect("home");
+        let relocated = tempfile::tempdir().expect("pi dir");
+        let q = quirk("pi").expect("q");
+        let actions = install_ts_plugin_in(
+            home.path(),
+            q,
+            Some(relocated.path().as_os_str().to_os_string()),
+        )
+        .expect("install");
+        assert!(actions.iter().any(|a| a.contains("plugin →")));
+        let path = relocated.path().join("extensions/stateroot.ts");
+        assert!(path.is_file(), "{}", path.display());
+        assert!(!home
+            .path()
+            .join(".pi/agent/extensions/stateroot.ts")
+            .exists());
+    }
+
+    #[test]
     fn automatic_plugins_consume_digest_stdout_on_first_prompt() {
         for id in ["opencode", "omp", "pi"] {
             let src = render_ts_plugin(quirk(id).expect(id));
@@ -264,10 +441,13 @@ mod tests {
                 src.contains("hookAsync"),
                 "{id} must capture hook stdout instead of discarding it"
             );
-            assert!(
-                src.contains("await hookAsync(\"user_prompt_submit\""),
-                "{id} must inject on the first prompt"
-            );
         }
+        let opencode = render_ts_plugin(quirk("opencode").expect("opencode"));
+        assert!(opencode.contains("await hookAsync(\"user_prompt_submit\""));
+        let omp = render_ts_plugin(quirk("omp").expect("omp"));
+        assert!(omp.contains("await hookAsync(\"user_prompt_submit\""));
+        let pi = render_ts_plugin(quirk("pi").expect("pi"));
+        assert!(pi.contains("await hookAsync(\"before_agent_start\""));
+        assert!(pi.contains("customType: \"stateroot\""));
     }
 }

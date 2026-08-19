@@ -66,6 +66,10 @@ fn remove_harness_registrations(ctx: &Ctx, home: &Path) -> Result<()> {
                 Err(err) => note!("  ! {} MCP removal failed: {err:#}", quirk.id),
             }
         }
+        match core::plugins::uninstall_ts_plugin(home, quirk) {
+            Ok(lines) => actions.extend(lines),
+            Err(err) => note!("  ! {} plugin removal failed: {err:#}", quirk.id),
+        }
         for action in &actions {
             println!("  {}: {action}", quirk.id);
         }

@@ -380,3 +380,101 @@ fn resume_without_handoff_dedupes_until_force() {
         .success();
     assert!(contains_marid(&stdout_of(&forced)));
 }
+
+#[test]
+fn pi_missed_session_start_recovers_on_first_prompt() {
+    let config_home = tempfile::tempdir().expect("config");
+    let user_home = tempfile::tempdir().expect("home");
+    let project = tempfile::tempdir().expect("project");
+    seed_marid(config_home.path(), user_home.path());
+    init_project(config_home.path(), user_home.path(), project.path());
+
+    let prompt = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["hook", "before_agent_start", "--harness", "pi"])
+        .write_stdin(r#"{"session_id":"pi-skills","prompt":"Can you list all of the skills that you have?"}"#)
+        .assert()
+        .success();
+    let out = stdout_of(&prompt);
+    assert!(
+        contains_marid(&out),
+        "missed session-start must recover on before_agent_start: {out}"
+    );
+}
+
+#[test]
+fn pi_session_start_prints_but_does_not_mark() {
+    let config_home = tempfile::tempdir().expect("config");
+    let user_home = tempfile::tempdir().expect("home");
+    let project = tempfile::tempdir().expect("project");
+    seed_marid(config_home.path(), user_home.path());
+    init_project(config_home.path(), user_home.path(), project.path());
+
+    let start = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["hook", "session_start", "--harness", "pi"])
+        .write_stdin(r#"{"session_id":"pi-1"}"#)
+        .assert()
+        .success();
+    assert!(
+        contains_marid(&stdout_of(&start)),
+        "session_start still prints (plugin discards stdout)"
+    );
+
+    let prompt = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["hook", "before_agent_start", "--harness", "pi"])
+        .write_stdin(r#"{"session_id":"pi-1","prompt":"hello"}"#)
+        .assert()
+        .success();
+    assert!(
+        contains_marid(&stdout_of(&prompt)),
+        "first prompt must still inject because session_start is not marked delivered"
+    );
+}
+
+#[test]
+fn pi_two_session_ids_are_independent() {
+    let config_home = tempfile::tempdir().expect("config");
+    let user_home = tempfile::tempdir().expect("home");
+    let project = tempfile::tempdir().expect("project");
+    seed_marid(config_home.path(), user_home.path());
+    init_project(config_home.path(), user_home.path(), project.path());
+
+    for id in ["pi-chat-a", "pi-chat-b"] {
+        let out = stateroot(config_home.path(), user_home.path(), project.path())
+            .args(["hook", "before_agent_start", "--harness", "pi"])
+            .write_stdin(format!(r#"{{"session_id":"{id}"}}"#))
+            .assert()
+            .success();
+        let text = stdout_of(&out);
+        assert!(contains_marid(&text), "{id}: {text}");
+    }
+}
+
+#[test]
+fn pi_demo_both_chats_receive_marid_identity() {
+    let config_home = tempfile::tempdir().expect("config");
+    let user_home = tempfile::tempdir().expect("home");
+    let project = tempfile::tempdir().expect("project");
+    seed_marid(config_home.path(), user_home.path());
+    init_project(config_home.path(), user_home.path(), project.path());
+
+    let skills = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["hook", "before_agent_start", "--harness", "pi"])
+        .write_stdin(
+            r#"{"session_id":"5d08e155-3828-403b-8a87-bf05871d083d","prompt":"Can you list all of the skills that you have?"}"#,
+        )
+        .assert()
+        .success();
+    let hi = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["hook", "before_agent_start", "--harness", "pi"])
+        .write_stdin(r#"{"session_id":"5be521b7-ac2c-41f1-b2a7-676646ad3cb1","prompt":"Hi"}"#)
+        .assert()
+        .success();
+
+    let skills_out = stdout_of(&skills);
+    let hi_out = stdout_of(&hi);
+    assert!(
+        contains_marid(&skills_out),
+        "list-skills chat: {skills_out}"
+    );
+    assert!(contains_marid(&hi_out), "hi chat: {hi_out}");
+}

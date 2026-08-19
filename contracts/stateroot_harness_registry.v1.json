@@ -606,6 +606,7 @@
       "framing": "pi harness: local coding agent with PTY-friendly CLI delegation.",
       "tier": "B",
       "detect": [
+        ".pi/agent",
         ".pi"
       ],
       "detect_cmds": [
@@ -645,7 +646,8 @@
       "capabilities": [
         "skills",
         "delegation",
-        "pty"
+        "pty",
+        "hooks"
       ],
       "mcp_config": {
         "global": [],

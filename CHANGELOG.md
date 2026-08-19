@@ -16,6 +16,11 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- Verified Pi harness support: the generated `~/.pi/agent/extensions/stateroot.ts`
+  extension injects identity on `before_agent_start` via Pi's session-message
+  return (`customType: "stateroot"`, `display: false`). Session-start stdout is
+  not treated as delivered. Honors `$PI_CODING_AGENT_DIR`. Re-run
+  `stateroot install` after upgrading.
 - MCP `memory_save` / `memory` now honor `scope`: `scope=user` +
   `target=memory` writes `~/.stateroot/memories/MEMORY.md`, while
   `scope=project` writes the current project's MEMORY.md. User-global

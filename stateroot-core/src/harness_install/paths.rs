@@ -16,6 +16,8 @@ pub const ENV_CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
 pub const ENV_KIMI_CODE_HOME: &str = "KIMI_CODE_HOME";
 /// Grok Build CLI config home override.
 pub const ENV_GROK_HOME: &str = "GROK_HOME";
+/// Pi agent config directory override (`$PI_CODING_AGENT_DIR`; default `~/.pi/agent`).
+pub const ENV_PI_CODING_AGENT_DIR: &str = "PI_CODING_AGENT_DIR";
 
 /// Relocated agent config root from an env var when non-empty; else `None`.
 pub fn agent_config_home(env_override: Option<OsString>) -> Option<PathBuf> {
@@ -49,6 +51,16 @@ pub fn kimi_code_root_in(home: &Path, env: Option<OsString>) -> PathBuf {
 /// Grok config root: `$GROK_HOME` or `home/.grok`.
 pub fn grok_root_in(home: &Path, env: Option<OsString>) -> PathBuf {
     agent_config_home(env).unwrap_or_else(|| home.join(".grok"))
+}
+
+/// Pi agent config root: `$PI_CODING_AGENT_DIR` or `home/.pi/agent`.
+pub fn pi_agent_root_in(home: &Path, env: Option<OsString>) -> PathBuf {
+    agent_config_home(env).unwrap_or_else(|| home.join(".pi/agent"))
+}
+
+/// Pi agent config root using the process environment.
+pub fn pi_agent_root(home: &Path) -> PathBuf {
+    pi_agent_root_in(home, std::env::var_os(ENV_PI_CODING_AGENT_DIR))
 }
 
 fn resolve_prefixed(root: PathBuf, home: &Path, rel: &str, prefix: &str) -> PathBuf {
@@ -204,6 +216,12 @@ pub fn mcp_target_candidates(home: &Path, quirk: &HarnessQuirk) -> Vec<PathBuf> 
 
 /// True when any detection marker exists (relocated or legacy default).
 pub fn quirk_detected(home: &Path, quirk: &HarnessQuirk) -> bool {
+    if quirk.id == "pi" {
+        let root = pi_agent_root(home);
+        if root.is_dir() || root.is_file() {
+            return true;
+        }
+    }
     quirk.detect.iter().any(|marker| {
         registry_path_candidates(home, quirk.id, marker)
             .iter()
@@ -360,5 +378,18 @@ mod tests {
         let cmd = hook_command("codex", "session_start");
         assert!(cmd.starts_with("stateroot hook session_start"));
         assert!(!cmd.starts_with('/'));
+    }
+
+    #[test]
+    fn pi_agent_root_honors_env_override() {
+        let home = Path::new("/home/alice");
+        assert_eq!(
+            pi_agent_root_in(home, None),
+            PathBuf::from("/home/alice/.pi/agent")
+        );
+        assert_eq!(
+            pi_agent_root_in(home, Some(OsString::from("/stores/pi"))),
+            PathBuf::from("/stores/pi")
+        );
     }
 }

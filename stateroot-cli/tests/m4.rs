@@ -325,6 +325,7 @@ fn instruction_block_and_install_register_stdio_mcp() {
     std::fs::create_dir_all(user_home.path().join(".codex")).expect(".codex");
     std::fs::create_dir_all(user_home.path().join(".cursor")).expect(".cursor");
     std::fs::create_dir_all(user_home.path().join(".openclaw")).expect(".openclaw");
+    std::fs::create_dir_all(user_home.path().join(".pi/agent")).expect(".pi");
 
     stateroot(config_home.path(), user_home.path(), project.path())
         .arg("install")
@@ -372,6 +373,21 @@ fn instruction_block_and_install_register_stdio_mcp() {
             .join(".openclaw/plugins/stateroot")
             .exists(),
         "no legacy plugins/ debris"
+    );
+
+    let pi_plugin = user_home.path().join(".pi/agent/extensions/stateroot.ts");
+    let pi_src = std::fs::read_to_string(&pi_plugin).expect("pi plugin");
+    assert!(
+        pi_src.contains("customType: \"stateroot\""),
+        "pi plugin must inject a session message: {pi_src}"
+    );
+    assert!(
+        pi_src.contains("before_agent_start"),
+        "pi plugin must listen for before_agent_start: {pi_src}"
+    );
+    assert!(
+        !pi_src.contains("prependContext"),
+        "pi must not use the OMP prependContext return: {pi_src}"
     );
 
     // `mcp tools` lists the local surface
