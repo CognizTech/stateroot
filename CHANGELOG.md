@@ -3,6 +3,8 @@
 All notable changes to StateRoot. Format loosely follows Keep a Changelog;
 StateRoot is pre-1.0 and milestones land as minor versions.
 
+## Unreleased
+
 ## [0.1.4] — 2026-08-19
 
 - Reliable cross-harness identity delivery: session-start and first-prompt
@@ -13,9 +15,6 @@ StateRoot is pre-1.0 and milestones land as minor versions.
   OpenClaw `before_prompt_build` pulls `user_prompt_submit` stdout.
   Hermes / Copilot / Crush stay honestly degraded. Re-run `stateroot install`
   and `stateroot skill install` after upgrading.
-
-## Unreleased
-
 - `stateroot harness run pi` launches Pi with ambient cross-harness skill
   discovery disabled by default, while `--skill <slug>` adds only selected
   StateRoot packages. Use `--ambient-skills` only to opt back into Pi's native
