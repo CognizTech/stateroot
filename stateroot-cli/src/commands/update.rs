@@ -503,7 +503,11 @@ fn set_executable_if_unix(installed: &Path, source: &Path) -> anyhow::Result<()>
     use std::os::unix::fs::PermissionsExt;
     let mode = std::fs::metadata(source)
         .map(|m| m.permissions().mode())
-        .unwrap_or(0o755);
+        // HTTP downloads are materialized as regular files (normally 0644),
+        // even though their release asset is an executable. Preserve the
+        // source permissions while always making the replacement runnable.
+        .unwrap_or(0o755)
+        | 0o111;
     std::fs::set_permissions(installed, std::fs::Permissions::from_mode(mode))?;
     Ok(())
 }
@@ -566,6 +570,31 @@ mod tests {
         assert!(!dir.path().join("stateroot.exe.old").exists());
         assert!(!stale.exists());
         let _ = outcome;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn self_replace_makes_a_downloaded_non_executable_asset_runnable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tmp");
+        let installed = dir.path().join("stateroot");
+        std::fs::write(&installed, b"OLD-CONTENT").expect("old exe");
+        let Some(new_binary) = stub_binary(dir.path(), "update-download") else {
+            eprintln!("skipping: /bin/true unavailable");
+            return;
+        };
+        std::fs::set_permissions(&new_binary, std::fs::Permissions::from_mode(0o644))
+            .expect("make download non-executable");
+
+        self_replace(&installed, &new_binary).expect("self_replace");
+
+        let mode = std::fs::metadata(&installed)
+            .expect("installed metadata")
+            .permissions()
+            .mode();
+        assert_ne!(mode & 0o111, 0, "installed binary must be executable");
+        verify_binary(&installed).expect("installed binary must run");
     }
 
     #[test]
