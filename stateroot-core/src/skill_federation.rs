@@ -193,7 +193,7 @@ pub(crate) fn binary_probe(allowlist: Option<&[String]>) -> impl Fn(&str) -> boo
 /// `detect_cmds` binary on PATH, or the target already existing on disk (it
 /// was present once; updating/reclaiming it stays correct).
 pub fn harness_detected(entry: &HarnessEntry, home: &Path, existing_target: Option<&Path>) -> bool {
-    harness_detected_with(entry, home, existing_target, &binary_probe(None))
+    harness_detected_with(entry, home, existing_target, None)
 }
 
 /// [`harness_detected`] with an injectable binary probe.
@@ -201,8 +201,9 @@ pub fn harness_detected_with(
     entry: &HarnessEntry,
     home: &Path,
     existing_target: Option<&Path>,
-    probe: &dyn Fn(&str) -> bool,
+    allowlist: Option<&[String]>,
 ) -> bool {
+    let probe = binary_probe(allowlist);
     if let Some(path) = existing_target {
         if path.exists() {
             return true;
@@ -220,7 +221,12 @@ pub fn harness_detected_with(
         }
     }
     // Sandbox / PATH-less hosts: treat harnesses the user already installed
-    // via `stateroot install` as detected so projections still land.
+    // via `stateroot install` as detected so projections still land. An
+    // allowlist probe (test seam) means hermetic mode — the host's config
+    // must not leak in.
+    if allowlist.is_some() {
+        return false;
+    }
     if let Ok(config_dir) = crate::config::config_dir() {
         if let Ok(cfg) = crate::config::load_config(&config_dir) {
             let id = normalize_harness(&entry.id);
@@ -1798,7 +1804,7 @@ fn project_product_adapters(
     project_dir: Option<&Path>,
     skill: &DiscoveredSkill,
     dry_run: bool,
-    probe: &dyn Fn(&str) -> bool,
+    allowlist: Option<&[String]>,
 ) -> Result<Vec<SyncAction>, String> {
     let mut actions = Vec::new();
     let src = PathBuf::from(&skill.source_path);
@@ -1848,7 +1854,7 @@ fn project_product_adapters(
             };
             // Detection-gating (R2.1): never create configs/dirs for
             // harnesses absent from the machine.
-            if !harness_detected_with(entry, home, Some(&root), probe) {
+            if !harness_detected_with(entry, home, Some(&root), allowlist) {
                 continue;
             }
             actions.extend(prune_stale_managed_projections(&root, skill, dry_run)?);
@@ -1871,14 +1877,14 @@ pub fn refresh_product_projections(
     home: &Path,
     project_dir: Option<&Path>,
 ) -> Result<Vec<SyncAction>, String> {
-    refresh_product_projections_inner(home, project_dir, false, &binary_probe(None))
+    refresh_product_projections_inner(home, project_dir, false, None)
 }
 
 fn refresh_product_projections_inner(
     home: &Path,
     project_dir: Option<&Path>,
     dry_run: bool,
-    probe: &dyn Fn(&str) -> bool,
+    allowlist: Option<&[String]>,
 ) -> Result<Vec<SyncAction>, String> {
     let mut actions = Vec::new();
     let mut local = list_portable(&home.join(".stateroot/skills"), "global");
@@ -1900,7 +1906,7 @@ fn refresh_product_projections_inner(
             project_dir,
             &skill,
             dry_run,
-            probe,
+            allowlist,
         )?);
     }
     let router_root = project_dir
@@ -2083,7 +2089,6 @@ fn sync_scoped(
 
     if options.push {
         // Push portable packages out to adapter bridges that need harness-specific roots.
-        let probe = binary_probe(options.cmd_probe.as_deref());
         let reg = load_registry()?;
         let mut local = list_portable(&home.join(".stateroot/skills"), "global");
         if let Some(project_dir) = project_dir {
@@ -2117,7 +2122,12 @@ fn sync_scoped(
                             .join(rel)
                     };
                     // Detection-gating (R2.1): never create dirs for absent harnesses.
-                    if !harness_detected_with(entry, &home, Some(&root), &probe) {
+                    if !harness_detected_with(
+                        entry,
+                        &home,
+                        Some(&root),
+                        options.cmd_probe.as_deref(),
+                    ) {
                         continue;
                     }
                     actions.extend(prune_stale_managed_projections(
@@ -2148,7 +2158,7 @@ fn sync_scoped(
         &home,
         project_dir,
         options.dry_run,
-        &binary_probe(options.cmd_probe.as_deref()),
+        options.cmd_probe.as_deref(),
     )?);
 
     Ok(actions)

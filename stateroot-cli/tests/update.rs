@@ -66,7 +66,7 @@ async fn version_check_caches_for_24h() {
             "http://x/asset",
             "http://x/checksums.txt",
         )))
-        .expect(1)
+        .expect(3)
         .mount(&server)
         .await;
 
@@ -75,6 +75,21 @@ async fn version_check_caches_for_24h() {
     let user_home = tempfile::tempdir().expect("user home");
     let cwd = tempfile::tempdir().expect("cwd");
 
+    // BACKGROUND path honors the 24h cache: first `status` fetches (cache
+    // miss), the second is served from update-check.json (no request).
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    for _ in 0..2 {
+        stateroot(config_home.path(), user_home.path(), project.path())
+            .env("STATEROOT_GITHUB_API_BASE", server.uri())
+            .arg("status")
+            .assert()
+            .success();
+    }
+    assert!(config_home.path().join("update-check.json").is_file());
+
+    // EXPLICIT checks always refresh (never report stale metadata): each
+    // `--check` is one request regardless of the cache.
     for _ in 0..2 {
         stateroot(config_home.path(), user_home.path(), cwd.path())
             .env("STATEROOT_GITHUB_API_BASE", server.uri())
@@ -82,9 +97,8 @@ async fn version_check_caches_for_24h() {
             .assert()
             .success();
     }
-    // One network call across two invocations (cache covers the second).
+    // Total: 1 (background, first status) + 2 (explicit refreshes).
     server.verify().await;
-    assert!(config_home.path().join("update-check.json").is_file());
 }
 
 #[tokio::test]

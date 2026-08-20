@@ -318,17 +318,13 @@ fn collect_targets(
     home: &Path,
     project_dir: Option<&Path>,
 ) -> Result<Vec<(String, String, PathBuf, McpConfigTarget)>, String> {
-    collect_targets_with(
-        home,
-        project_dir,
-        &crate::skill_federation::binary_probe(None),
-    )
+    collect_targets_with(home, project_dir, None)
 }
 
 fn collect_targets_with(
     home: &Path,
     project_dir: Option<&Path>,
-    probe: &dyn Fn(&str) -> bool,
+    allowlist: Option<&[String]>,
 ) -> Result<Vec<(String, String, PathBuf, McpConfigTarget)>, String> {
     let reg = load_registry()?;
     let mut out = Vec::new();
@@ -340,7 +336,12 @@ fn collect_targets_with(
             // as detected; the product harnesses are always writable.
             let product = matches!(entry.id.as_str(), "statesmith" | "planner");
             if !product
-                && !crate::skill_federation::harness_detected_with(entry, home, Some(&path), probe)
+                && !crate::skill_federation::harness_detected_with(
+                    entry,
+                    home,
+                    Some(&path),
+                    allowlist,
+                )
             {
                 continue;
             }
@@ -360,7 +361,7 @@ fn collect_targets_with(
                         entry,
                         home,
                         Some(&path),
-                        probe,
+                        allowlist,
                     )
                 {
                     continue;
@@ -525,10 +526,10 @@ fn project_store(
     project_dir: Option<&Path>,
     scope: &str,
     dry_run: bool,
-    probe: &dyn Fn(&str) -> bool,
+    allowlist: Option<&[String]>,
 ) -> Result<Vec<SyncAction>, String> {
     let mut actions = Vec::new();
-    let targets = collect_targets_with(home, project_dir, probe)?
+    let targets = collect_targets_with(home, project_dir, allowlist)?
         .into_iter()
         .filter(|(_, s, _, _)| s == scope)
         .collect::<Vec<_>>();
@@ -680,7 +681,7 @@ fn sync_scope(
             project_dir,
             scope,
             options.dry_run,
-            &crate::skill_federation::binary_probe(options.cmd_probe.as_deref()),
+            options.cmd_probe.as_deref(),
         )?);
         if !options.dry_run {
             save_ledger(&ledger_path, &ledger)?;

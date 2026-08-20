@@ -23,6 +23,7 @@ pub mod mcp_federation;
 pub mod memory_index;
 pub mod observations;
 pub mod openclaw_identity;
+pub mod persona_injection;
 pub mod presentation;
 pub mod proposals;
 pub mod roots;

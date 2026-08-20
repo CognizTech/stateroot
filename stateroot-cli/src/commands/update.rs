@@ -125,11 +125,10 @@ pub struct ReleaseInfo {
     pub checksums_url: String,
 }
 
-/// Check for a newer release, honoring the cache (at most one network call
-/// per `check_interval_hours`). Returns None on any failure (the caller
-/// stays silent) or when the repo is a placeholder.
+/// Check for a newer release. Background checks honor the cache (at most one
+/// network call per `check_interval_hours`); an explicit caller can force a
+/// fresh lookup. Returns None on any failure or when the repo is a placeholder.
 pub async fn check_latest(ctx: &Ctx, force: bool) -> Option<ReleaseInfo> {
-    let _ = force; // kept for API stability; the cache rule always applies
     let repo = ctx.config.update.repo.trim();
     if repo.is_empty() || repo.contains("OWNER") || repo.contains("placeholder") {
         // Placeholder default: no public repo yet — honest silence.
@@ -342,7 +341,9 @@ pub async fn self_update(ctx: &Ctx, check_only: bool, tag: Option<&str>) -> anyh
     let info = if let Some(tag) = tag {
         fetch_tagged_release(ctx, tag).await?
     } else {
-        match check_latest(ctx, false).await {
+        // A user explicitly asked to check or update. Never report stale
+        // cached release metadata as the current production release.
+        match check_latest(ctx, true).await {
             Some(info) => info,
             None => {
                 println!("could not check for updates (no public release repo configured yet)");

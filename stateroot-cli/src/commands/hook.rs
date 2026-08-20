@@ -121,7 +121,37 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
         },
         EventKind::Checkpoint => match project_dir.as_ref() {
             Some(project_dir) => {
-                checkpoint_from_spool(ctx, quirk, canonical, project_dir, &payload).await
+                let code =
+                    checkpoint_from_spool(ctx, quirk, canonical, project_dir, &payload).await?;
+                // Scheduler rule 1(b): compact boundaries earn a FULL identity
+                // injection (dedupe window still applies).
+                if matches!(canonical, "pre_compact" | "post_compaction")
+                    && quirk.injection != Injection::None
+                {
+                    let home = stateroot_core::harness_install::home_dir()
+                        .unwrap_or_else(|_| ctx.config_dir.clone());
+                    let identity =
+                        hook_identity_prefix(&ctx.config_dir, &home, Some(project_dir), quirk.id);
+                    if let Some(digest) = scheduled_identity_output(
+                        &ctx.config_dir,
+                        quirk,
+                        canonical,
+                        project_dir,
+                        &payload,
+                        &identity,
+                        &|identity| {
+                            hook_digest_with_identity(
+                                &ctx.config_dir,
+                                project_dir,
+                                quirk.id,
+                                identity,
+                            )
+                        },
+                    ) {
+                        print_hook_injection(quirk, canonical, &digest);
+                    }
+                }
+                Ok(code)
             }
             None => Ok(0),
         },
@@ -180,6 +210,18 @@ fn resume_identity_only(
     if !identity_event_prints(quirk, canonical) {
         return Ok(0);
     }
+    let digest = scheduled_identity_output(
+        &ctx.config_dir,
+        quirk,
+        canonical,
+        &ctx.cwd,
+        &json!({}),
+        &digest,
+        &|identity| Some(identity.to_string()),
+    );
+    let Some(digest) = digest else {
+        return Ok(0);
+    };
     match quirk.injection {
         Injection::None => Ok(0),
         Injection::StdoutJson
@@ -200,6 +242,69 @@ fn identity_event_prints(quirk: &registry::HarnessQuirk, canonical: &str) -> boo
         "user_prompt_submit" => policy.prompt_submit_injects,
         _ => false,
     }
+}
+
+/// The scheduler's answer for one resume/identity event: what (if anything)
+/// the hook prints. FULL → the digest as-is; COMPRESSED → the pointer;
+/// NOTHING → None. State lives in the user-global local dir.
+fn scheduled_identity_output(
+    config_dir: &Path,
+    quirk: &registry::HarnessQuirk,
+    canonical: &str,
+    project_dir: &Path,
+    payload: &Value,
+    identity: &str,
+    digest_builder: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let home =
+        stateroot_core::harness_install::home_dir().unwrap_or_else(|_| config_dir.to_path_buf());
+    let hash = stateroot_core::persona_injection::content_hash(identity);
+    // Per project + harness + session: every harness gets its own start
+    // injection even inside a shared conversation.
+    let key = format!(
+        "{}:{}",
+        quirk.id,
+        stateroot_core::persona_injection::session_key(project_dir, payload)
+    );
+    // Marked = the injection actually lands for this harness/event (pi's
+    // session_start prints but is discarded → unmarked → first prompt still
+    // injects). Prompts and compact boundaries always mark.
+    let mark = match canonical {
+        "session_start" => identity_event_marks(quirk, canonical),
+        _ => true,
+    };
+    let decision = stateroot_core::persona_injection::decide_and_record(
+        &home,
+        &key,
+        canonical,
+        &hash,
+        hook_now(),
+        mark,
+    );
+    match decision {
+        stateroot_core::persona_injection::Decision::Full => digest_builder(identity),
+        stateroot_core::persona_injection::Decision::Compressed => {
+            let name = stateroot_core::persona_injection::persona_name(identity);
+            let pointer = stateroot_core::persona_injection::compressed_pointer(
+                &name,
+                &home
+                    .join(stateroot_core::soul::SOUL_DIR)
+                    .join(stateroot_core::soul::CANONICAL_FILE),
+            );
+            digest_builder(&pointer)
+        }
+        stateroot_core::persona_injection::Decision::Nothing => None,
+    }
+}
+
+/// Scheduler clock. `STATEROOT_HOOK_NOW` (epoch seconds) is a test seam —
+/// production always uses the real clock.
+fn hook_now() -> chrono::DateTime<chrono::Utc> {
+    std::env::var("STATEROOT_HOOK_NOW")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
+        .unwrap_or_else(stateroot_core::persona_injection::utc_now)
 }
 
 fn identity_event_marks(quirk: &registry::HarnessQuirk, canonical: &str) -> bool {
@@ -310,6 +415,27 @@ fn append_handoff_work(work: &mut String, handoff: &Value, project_dir: &Path) {
 /// Build the full hook digest. Identity (persona + USER) and work body are
 /// both uncapped — product-intent forbids char truncation on the compiler path.
 pub fn hook_digest(config_dir: &Path, project_dir: &Path, harness_id: &str) -> Option<String> {
+    let home = stateroot_core::harness_install::home_dir().ok();
+    let identity = home
+        .as_ref()
+        .map(|home| hook_identity_prefix(config_dir, home, Some(project_dir), harness_id))
+        .unwrap_or_else(|| {
+            hook_identity_prefix(config_dir, config_dir, Some(project_dir), harness_id)
+        });
+    hook_digest_with_identity(config_dir, project_dir, harness_id, &identity)
+}
+
+/// [`hook_digest`] with an explicit identity block (the scheduler decides
+/// what the identity section carries: full prefix, compressed pointer, or
+/// nothing).
+pub fn hook_digest_with_identity(
+    config_dir: &Path,
+    project_dir: &Path,
+    harness_id: &str,
+    identity: &str,
+) -> Option<String> {
+    let _ = (config_dir, harness_id);
+    let identity = identity.to_string();
     let handoff = local_store::read_handoff_local(project_dir).ok().flatten();
     let mut work = String::new();
     if let Some(ref handoff) = handoff {
@@ -320,12 +446,6 @@ pub fn hook_digest(config_dir: &Path, project_dir: &Path, harness_id: &str) -> O
         work.push_str(&format!("\n{}", super::resume::NO_REFETCH_FOOTER));
     }
     let home = stateroot_core::harness_install::home_dir().ok();
-    let identity = home
-        .as_ref()
-        .map(|home| hook_identity_prefix(config_dir, home, Some(project_dir), harness_id))
-        .unwrap_or_else(|| {
-            hook_identity_prefix(config_dir, config_dir, Some(project_dir), harness_id)
-        });
     let learnings = home.as_ref().map(|home| {
         let status = stateroot_core::learnings::bootstrap_status(project_dir, home);
         stateroot_core::learnings::compose_instruction(&status)
@@ -495,30 +615,36 @@ async fn resume_output(
             Err(err) => note!("warning: compiler skipped: {err}"),
         }
     }
-    let digest = hook_digest(&ctx.config_dir, project_dir, quirk.id);
-    let Some(digest) = digest else {
+    // Empty check only — the scheduler decides the printable content below.
+    if hook_digest(&ctx.config_dir, project_dir, quirk.id).is_none() {
         return Ok(0); // nothing worth injecting — silent
-    };
+    }
     if !identity_event_prints(quirk, canonical) {
         return Ok(0);
     }
     if quirk.injection == Injection::None {
         return Ok(0);
     }
-    let content_fp = digest_delivery::content_fingerprint(project_dir);
-    let decision = digest_delivery::should_deliver(
+    // Persona injection scheduler (authoritative for what prints): FULL on
+    // boundaries/change/first-call, COMPRESSED on the 15-prompt cadence,
+    // NOTHING inside the dedupe window or off-cycle.
+    let home =
+        stateroot_core::harness_install::home_dir().unwrap_or_else(|_| ctx.config_dir.clone());
+    let identity = hook_identity_prefix(&ctx.config_dir, &home, Some(project_dir), quirk.id);
+    let digest = scheduled_identity_output(
+        &ctx.config_dir,
+        quirk,
+        canonical,
         project_dir,
-        quirk.id,
-        DeliveryIntent::Session,
-        DeliveryChannel::Hook,
         payload,
-        &content_fp,
-        false,
+        &identity,
+        &|identity| hook_digest_with_identity(&ctx.config_dir, project_dir, quirk.id, identity),
     );
-    if !decision.deliver {
+    let Some(digest) = digest else {
         return Ok(0);
-    }
+    };
     print_hook_injection(quirk, canonical, &digest);
+    let content_fp = digest_delivery::content_fingerprint(project_dir);
     if identity_event_marks(quirk, canonical) {
         digest_delivery::mark_delivered(
             project_dir,
