@@ -40,6 +40,97 @@ fn api_base() -> String {
         .unwrap_or_else(|| "https://api.github.com".into())
 }
 
+// ---------------------------------------------------------------------------
+// GitHub auth (unauthenticated API calls share a 60/hr per-IP rate limit —
+// behind a shared egress that quota is gone in minutes; authenticated calls
+// get 5000/hr). Token resolution order: GH_TOKEN env → GITHUB_TOKEN env →
+// the stateroot credential store (the Phase-1 device-flow login store,
+// `<config>/credentials.json`) → the gh CLI's own hosts.yml.
+// ---------------------------------------------------------------------------
+
+/// Resolve a GitHub token for release API + asset calls. `None` is fine —
+/// public repos work unauthenticated, just rate-limited.
+fn resolve_github_token(ctx: &Ctx) -> Option<String> {
+    token_from_env()
+        .or_else(|| token_from_store(ctx))
+        .or_else(token_from_gh_hosts)
+}
+
+fn token_from_env() -> Option<String> {
+    for var in ["GH_TOKEN", "GITHUB_TOKEN"] {
+        if let Ok(value) = std::env::var(var) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn token_from_store(ctx: &Ctx) -> Option<String> {
+    let text = std::fs::read_to_string(ctx.config_dir.join("credentials.json")).ok()?;
+    parse_store_token(&text)
+}
+
+/// Lenient reader for the login credential store: a `github` object or flat
+/// keys, any of the common token field names.
+fn parse_store_token(text: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    for obj in [value.get("github"), Some(&value)].into_iter().flatten() {
+        for key in ["oauth_token", "access_token", "github_token", "token"] {
+            if let Some(token) = obj
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+            {
+                return Some(token.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn token_from_gh_hosts() -> Option<String> {
+    let home = stateroot_core::harness_install::home_dir().ok()?;
+    let text = std::fs::read_to_string(home.join(".config/gh/hosts.yml")).ok()?;
+    parse_gh_hosts_token(&text)
+}
+
+/// Lenient `~/.config/gh/hosts.yml` parse — line-based, tolerant of
+/// indentation and quotes (it is the user's own credential file, not a
+/// schema we control).
+fn parse_gh_hosts_token(text: &str) -> Option<String> {
+    for line in text.lines() {
+        if let Some(rest) = line.trim().strip_prefix("oauth_token:") {
+            let token = rest.trim().trim_matches(|c| c == '"' || c == '\'');
+            if !token.is_empty() {
+                return Some(token.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// GET against the GitHub API with the CLI's standard headers and a bearer
+/// token when one resolved.
+fn github_get(
+    client: &reqwest::Client,
+    url: &str,
+    token: Option<&str>,
+    accept: &str,
+) -> reqwest::RequestBuilder {
+    let mut req = client
+        .get(url)
+        .header("Accept", accept)
+        .header("User-Agent", "stateroot-cli");
+    if let Some(token) = token {
+        req = req.bearer_auth(token);
+    }
+    req
+}
+
 /// True when auto-update is disabled (config off or env opt-out).
 pub fn disabled(ctx: &Ctx) -> bool {
     if std::env::var("STATEROOT_NO_AUTO_UPDATE")
@@ -97,9 +188,15 @@ fn assets_from_body(body: &Value) -> Option<ReleaseInfo> {
     let mut checksums_url = None;
     for asset in assets {
         let name = asset.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        // Prefer the API asset URL: downloads go through it with
+        // `Accept: application/octet-stream` (+ bearer when a token
+        // resolved), which keeps working when the unauthenticated rate
+        // limit is exhausted. `browser_download_url` is the fallback for
+        // lean fixtures that only carry the public URL.
         let url = asset
-            .get("browser_download_url")
+            .get("url")
             .and_then(|v| v.as_str())
+            .or_else(|| asset.get("browser_download_url").and_then(|v| v.as_str()))
             .unwrap_or("");
         if name == asset_name() {
             asset_url = Some(url.to_string());
@@ -164,13 +261,16 @@ pub async fn check_latest(ctx: &Ctx, force: bool) -> Option<ReleaseInfo> {
         .timeout(std::time::Duration::from_secs(8))
         .build()
         .ok()?;
-    let resp = client
-        .get(release_api_url(repo, None))
-        .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "stateroot-cli")
-        .send()
-        .await
-        .ok()?;
+    let token = resolve_github_token(ctx);
+    let resp = github_get(
+        &client,
+        &release_api_url(repo, None),
+        token.as_deref(),
+        "application/vnd.github+json",
+    )
+    .send()
+    .await
+    .ok()?;
     if !resp.status().is_success() {
         return None;
     }
@@ -206,19 +306,40 @@ pub async fn fetch_tagged_release(ctx: &Ctx, tag: &str) -> anyhow::Result<Releas
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()?;
+    let token = resolve_github_token(ctx);
     let url = release_api_url(repo, Some(&tag));
-    let resp = client
-        .get(&url)
-        .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "stateroot-cli")
-        .send()
-        .await
-        .with_context(|| format!("requesting {url}"))?;
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+    let resp = github_get(
+        &client,
+        &url,
+        token.as_deref(),
+        "application/vnd.github+json",
+    )
+    .send()
+    .await
+    .with_context(|| format!("requesting {url}"))?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
         anyhow::bail!("no GitHub release tagged `{tag}`");
     }
-    if !resp.status().is_success() {
-        anyhow::bail!("release lookup for `{tag}` failed (HTTP {})", resp.status());
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        let body = body.trim();
+        if token.is_none() && status == reqwest::StatusCode::FORBIDDEN {
+            // Verified common cause: the unauthenticated 60/hr per-IP quota
+            // is shared per egress IP — behind a proxy it is gone fast.
+            anyhow::bail!(
+                "release lookup for `{tag}` failed (HTTP {status}): GitHub API rate limit \
+                 hit (60/hr unauthenticated). Set GH_TOKEN (e.g. `gh auth token`) for a \
+                 higher limit, or retry after the hourly window."
+            );
+        }
+        let detail = if body.is_empty() {
+            String::new()
+        } else {
+            let excerpt: String = body.chars().take(300).collect();
+            format!(" — {excerpt}")
+        };
+        anyhow::bail!("release lookup for `{tag}` failed (HTTP {status}){detail}");
     }
     let body: Value = resp.json().await.context("parsing GitHub release JSON")?;
     assets_from_body(&body).ok_or_else(|| {
@@ -248,12 +369,30 @@ pub async fn download_verified(
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()?;
-    let asset = client.get(asset_url).send().await?;
+    let token = resolve_github_token(ctx);
+    // API asset URLs require `Accept: application/octet-stream` to return
+    // the bytes (otherwise they answer JSON metadata); the bearer token
+    // keeps downloads working when the unauthenticated quota is gone.
+    let asset = github_get(
+        &client,
+        asset_url,
+        token.as_deref(),
+        "application/octet-stream",
+    )
+    .send()
+    .await?;
     if !asset.status().is_success() {
         anyhow::bail!("asset download failed (HTTP {})", asset.status());
     }
     let bytes = asset.bytes().await?;
-    let checksums = client.get(checksums_url).send().await?;
+    let checksums = github_get(
+        &client,
+        checksums_url,
+        token.as_deref(),
+        "application/octet-stream",
+    )
+    .send()
+    .await?;
     if !checksums.status().is_success() {
         anyhow::bail!(
             "checksums.txt download failed (HTTP {})",
@@ -635,8 +774,92 @@ mod tests {
         }
     }
 
+    fn test_ctx_with_repo(dir: &Path, repo: &str) -> crate::commands::Ctx {
+        let mut ctx = test_ctx(dir);
+        ctx.config.update.repo = repo.to_string();
+        ctx
+    }
+
+    static UPDATE_TEST_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// SAFETY for every set/remove below: serialized by UPDATE_TEST_ENV.
+    fn set_env(key: &str, value: Option<&str>) -> Option<String> {
+        let prior = std::env::var(key).ok();
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+        prior
+    }
+
+    /// Process-env guard for token-resolution tests: clears GH_TOKEN /
+    /// GITHUB_TOKEN and points STATEROOT_TEST_HOME at an empty temp home
+    /// (so the real ~/.config/gh/hosts.yml is never read). Restores
+    /// everything on drop.
+    struct TokenEnv {
+        priors: Vec<(&'static str, Option<String>)>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    fn clean_token_env() -> (TokenEnv, tempfile::TempDir) {
+        let guard = UPDATE_TEST_ENV.lock().expect("env lock");
+        let home = tempfile::tempdir().expect("home");
+        let home_str = home.path().to_string_lossy().into_owned();
+        let priors = vec![
+            ("GH_TOKEN", set_env("GH_TOKEN", None)),
+            ("GITHUB_TOKEN", set_env("GITHUB_TOKEN", None)),
+            (
+                "STATEROOT_TEST_HOME",
+                set_env("STATEROOT_TEST_HOME", Some(&home_str)),
+            ),
+            // Captured, not overridden — each test points it at its mock.
+            (
+                "STATEROOT_GITHUB_API_BASE",
+                std::env::var("STATEROOT_GITHUB_API_BASE").ok(),
+            ),
+        ];
+        (
+            TokenEnv {
+                priors,
+                _guard: guard,
+            },
+            home,
+        )
+    }
+
+    impl Drop for TokenEnv {
+        fn drop(&mut self) {
+            for (key, prior) in self.priors.drain(..) {
+                let _ = set_env(key, prior.as_deref());
+            }
+        }
+    }
+
+    /// Release payload carrying BOTH the API asset url and the browser url —
+    /// the updater must prefer the API one (works with octet-stream + auth).
+    fn release_json(server: &wiremock::MockServer, tag: &str) -> Value {
+        json!({
+            "tag_name": tag,
+            "assets": [
+                {
+                    "name": asset_name(),
+                    "url": format!("{}/api-asset", server.uri()),
+                    "browser_download_url": format!("{}/browser-asset", server.uri()),
+                },
+                {
+                    "name": "checksums.txt",
+                    "url": format!("{}/api-checksums", server.uri()),
+                    "browser_download_url": format!("{}/browser-checksums", server.uri()),
+                }
+            ]
+        })
+    }
+
     #[tokio::test]
     async fn checksum_mismatch_keeps_old_binary() {
+        let (_env, _home) = clean_token_env();
         let server = wiremock::MockServer::start().await;
         let asset_bytes = b"new binary content";
         wiremock::Mock::given(wiremock::matchers::method("GET"))
@@ -678,8 +901,279 @@ mod tests {
 
     #[tokio::test]
     async fn correct_checksum_passes_verification() {
+        let (_env, _home) = clean_token_env();
         use sha2::Digest as _;
         let asset_bytes = b"verified binary payload";
+        let sha = format!("{:x}", sha2::Sha256::digest(asset_bytes));
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/asset"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(asset_bytes.to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/checksums.txt"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_string(format!(
+                    "{sha}  {}
+",
+                    asset_name()
+                )),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().expect("tmp");
+        let ctx = test_ctx(dir.path());
+        let path = download_verified(
+            &ctx,
+            &format!("{}/asset", server.uri()),
+            &format!("{}/checksums.txt", server.uri()),
+        )
+        .await
+        .expect("verified download");
+        assert_eq!(std::fs::read(&path).expect("tmp"), asset_bytes);
+        server.verify().await;
+    }
+
+    #[test]
+    fn token_env_precedence_and_trim() {
+        let (_env, _home) = clean_token_env();
+        let _ = set_env("GH_TOKEN", Some("  gh-tok  "));
+        let _ = set_env("GITHUB_TOKEN", Some("github-tok"));
+        assert_eq!(token_from_env().as_deref(), Some("gh-tok"));
+        let _ = set_env("GH_TOKEN", None);
+        assert_eq!(token_from_env().as_deref(), Some("github-tok"));
+    }
+
+    #[test]
+    fn store_token_parses_nested_and_flat() {
+        assert_eq!(
+            parse_store_token(r#"{"github":{"oauth_token":"nested-tok"}}"#).as_deref(),
+            Some("nested-tok")
+        );
+        assert_eq!(
+            parse_store_token(r#"{"github_token":"flat-tok"}"#).as_deref(),
+            Some("flat-tok")
+        );
+        assert_eq!(parse_store_token("not json"), None);
+        assert_eq!(parse_store_token(r#"{"github":{}}"#), None);
+    }
+
+    #[test]
+    fn gh_hosts_token_parses_leniently() {
+        let text = "github.com:\n    oauth_token: gho_abc123\n    user: octo\n";
+        assert_eq!(parse_gh_hosts_token(text).as_deref(), Some("gho_abc123"));
+        let quoted = "github.com:\n  oauth_token: \"quoted-tok\"\n";
+        assert_eq!(parse_gh_hosts_token(quoted).as_deref(), Some("quoted-tok"));
+        assert_eq!(parse_gh_hosts_token("github.com:\n  user: octo\n"), None);
+    }
+
+    #[tokio::test]
+    async fn release_lookup_attaches_env_token() {
+        let (_env, _home) = clean_token_env();
+        let _ = set_env("GH_TOKEN", Some("env-tok"));
+        let server = wiremock::MockServer::start().await;
+        let _ = set_env("STATEROOT_GITHUB_API_BASE", Some(&server.uri()));
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/repos/o/r/releases/tags/nightly"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer env-tok",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(release_json(&server, "nightly")),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().expect("tmp");
+        let ctx = test_ctx_with_repo(dir.path(), "o/r");
+        let info = fetch_tagged_release(&ctx, "nightly")
+            .await
+            .expect("release");
+        assert_eq!(info.tag, "nightly");
+        // API asset URL preferred over browser_download_url.
+        assert!(info.asset_url.ends_with("/api-asset"), "{}", info.asset_url);
+        assert!(
+            info.checksums_url.ends_with("/api-checksums"),
+            "{}",
+            info.checksums_url
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn release_lookup_attaches_store_token() {
+        let (_env, _home) = clean_token_env();
+        let dir = tempfile::tempdir().expect("tmp");
+        std::fs::write(
+            dir.path().join("credentials.json"),
+            r#"{"github":{"oauth_token":"store-tok"}}"#,
+        )
+        .expect("credentials");
+        let server = wiremock::MockServer::start().await;
+        let _ = set_env("STATEROOT_GITHUB_API_BASE", Some(&server.uri()));
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/repos/o/r/releases/tags/nightly"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer store-tok",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(release_json(&server, "nightly")),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let ctx = test_ctx_with_repo(dir.path(), "o/r");
+        fetch_tagged_release(&ctx, "nightly")
+            .await
+            .expect("release");
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn release_lookup_attaches_gh_hosts_token() {
+        let (_env, home) = clean_token_env();
+        let gh_dir = home.path().join(".config/gh");
+        std::fs::create_dir_all(&gh_dir).expect("gh dir");
+        std::fs::write(
+            gh_dir.join("hosts.yml"),
+            "github.com:\n  oauth_token: gho_ghcli\n  user: octo\n",
+        )
+        .expect("hosts.yml");
+        let server = wiremock::MockServer::start().await;
+        let _ = set_env("STATEROOT_GITHUB_API_BASE", Some(&server.uri()));
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/repos/o/r/releases/tags/nightly"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer gho_ghcli",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(release_json(&server, "nightly")),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().expect("tmp");
+        let ctx = test_ctx_with_repo(dir.path(), "o/r");
+        fetch_tagged_release(&ctx, "nightly")
+            .await
+            .expect("release");
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn no_token_403_names_rate_limit_not_private() {
+        let (_env, _home) = clean_token_env();
+        let server = wiremock::MockServer::start().await;
+        let _ = set_env("STATEROOT_GITHUB_API_BASE", Some(&server.uri()));
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/repos/o/r/releases/tags/nightly"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(403)
+                    .set_body_string("{\"message\":\"API rate limit exceeded for 203.0.113.7.\"}"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().expect("tmp");
+        let ctx = test_ctx_with_repo(dir.path(), "o/r");
+        let err = fetch_tagged_release(&ctx, "nightly")
+            .await
+            .expect_err("403 must fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("rate limit"), "{msg}");
+        assert!(msg.contains("GH_TOKEN"), "{msg}");
+        assert!(!msg.contains("private"), "{msg}");
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn token_present_403_surfaces_real_status_and_body() {
+        let (_env, _home) = clean_token_env();
+        let _ = set_env("GH_TOKEN", Some("env-tok"));
+        let server = wiremock::MockServer::start().await;
+        let _ = set_env("STATEROOT_GITHUB_API_BASE", Some(&server.uri()));
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/repos/o/r/releases/tags/nightly"))
+            .respond_with(wiremock::ResponseTemplate::new(403).set_body_string(
+                "{\"message\":\"You have triggered an abuse detection mechanism.\"}",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().expect("tmp");
+        let ctx = test_ctx_with_repo(dir.path(), "o/r");
+        let err = fetch_tagged_release(&ctx, "nightly")
+            .await
+            .expect_err("403 must fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("HTTP 403"), "{msg}");
+        assert!(msg.contains("abuse detection"), "{msg}");
+        // The no-token rate-limit hint must NOT fire with a token attached.
+        assert!(!msg.contains("60/hr"), "{msg}");
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn asset_download_attaches_token_and_octet_stream() {
+        use sha2::Digest as _;
+        let (_env, _home) = clean_token_env();
+        let _ = set_env("GH_TOKEN", Some("dl-tok"));
+        let asset_bytes = b"download with auth";
+        let sha = format!("{:x}", sha2::Sha256::digest(asset_bytes));
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/asset"))
+            .and(wiremock::matchers::header("Authorization", "Bearer dl-tok"))
+            .and(wiremock::matchers::header(
+                "Accept",
+                "application/octet-stream",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(asset_bytes.to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/checksums.txt"))
+            .and(wiremock::matchers::header("Authorization", "Bearer dl-tok"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_string(format!(
+                    "{sha}  {}
+",
+                    asset_name()
+                )),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().expect("tmp");
+        let ctx = test_ctx(dir.path());
+        let path = download_verified(
+            &ctx,
+            &format!("{}/asset", server.uri()),
+            &format!("{}/checksums.txt", server.uri()),
+        )
+        .await
+        .expect("verified download");
+        assert_eq!(std::fs::read(&path).expect("tmp"), asset_bytes);
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn public_download_without_token_still_works() {
+        // Every token source cleared — the public path needs no auth and
+        // must behave exactly as before.
+        use sha2::Digest as _;
+        let (_env, _home) = clean_token_env();
+        let asset_bytes = b"public payload";
         let sha = format!("{:x}", sha2::Sha256::digest(asset_bytes));
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("GET"))
