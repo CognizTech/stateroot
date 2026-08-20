@@ -53,6 +53,13 @@ pub const LEGACY_HOOK_RESUME_MARKER: &str = "hook-resume-delivered.json";
 /// Legacy CLI resume marker (migrated into the ledger).
 pub const LEGACY_RESUME_MARKER: &str = "resume-delivered.json";
 
+/// New-session staleness threshold shared by the persona scheduler and the
+/// digest-delivery ledger: an idle gap past this many minutes means the old
+/// session is gone. Hook payloads without a session id share one state
+/// entry per project dir — without this rule, a new session would stay
+/// silenced by the previous session's records.
+pub const SESSION_STALE_MINUTES: i64 = 30;
+
 /// Schema version strings (canonical; must not drift).
 pub const SCHEMA_MANIFEST_V1: &str = "stateroot.manifest.v1";
 /// Project state schema version.

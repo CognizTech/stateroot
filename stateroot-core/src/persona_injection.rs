@@ -25,6 +25,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::local_store::SESSION_STALE_MINUTES;
+
 /// Decision for one hook event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
@@ -95,11 +97,9 @@ fn save_states(home: &Path, states: &BTreeMap<String, InjectionState>) -> std::i
 const DEDUPE_PROMPTS: i64 = 3;
 const DEDUPE_SECONDS: i64 = 60;
 const COMPRESSED_EVERY: i64 = 15;
-/// New-session staleness: an idle gap past this many minutes means the old
-/// session is gone (hook payloads without a session id share one state
-/// entry per project dir — without this, a new session would stay silenced
-/// by the previous session's `started=true`).
-const SESSION_STALE_MINUTES: i64 = 30;
+// SESSION_STALE_MINUTES lives in `local_store` — shared with the
+// digest-delivery ledger, which applies the same new-session staleness
+// rule to resume dedupe.
 
 fn parse_ts(ts: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::DateTime::parse_from_rfc3339(ts)

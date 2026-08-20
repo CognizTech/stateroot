@@ -13,7 +13,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::local_store;
+use crate::local_store::{self, SESSION_STALE_MINUTES};
 use crate::skill_federation::normalize_harness;
 
 /// Schema id written into the ledger.
@@ -248,10 +248,15 @@ fn decide(
 
     match channel {
         DeliveryChannel::Resume => {
-            if session_entries
-                .iter()
-                .any(|e| e.handoff_seq == seq && e.content_fp == content_fp)
-            {
+            // New-session staleness (same SESSION_STALE_MINUTES rule as the
+            // persona scheduler): a matching entry only suppresses a reprint
+            // while it is FRESH. An older match belongs to an earlier
+            // session — deliver again instead of staying silenced
+            // project-forever; a malformed timestamp counts as stale.
+            let duplicate = session_entries.iter().any(|e| {
+                e.handoff_seq == seq && e.content_fp == content_fp && is_fresh(&e.delivered_at, now)
+            });
+            if duplicate {
                 return DeliveryDecision::no("duplicate");
             }
             DeliveryDecision::yes("fresh")
@@ -282,6 +287,19 @@ fn decide(
             DeliveryDecision::yes("fresh")
         }
     }
+}
+
+/// True when `delivered_at` is less than SESSION_STALE_MINUTES older than
+/// `now`. Malformed timestamps count as stale (deliver fresh, never
+/// suppress).
+fn is_fresh(delivered_at: &str, now: &str) -> bool {
+    let Ok(then) = chrono::DateTime::parse_from_rfc3339(delivered_at) else {
+        return false;
+    };
+    let Ok(now) = chrono::DateTime::parse_from_rfc3339(now) else {
+        return false;
+    };
+    (now - then).num_minutes() < SESSION_STALE_MINUTES
 }
 
 fn within_debounce(delivered_at: &str, now: &str) -> bool {
@@ -517,6 +535,187 @@ mod tests {
         assert_eq!(resume.reason, "duplicate");
     }
 
+    /// Rewrite the single ledger entry in place (the project() fixture
+    /// records exactly one delivery per test before this runs).
+    fn edit_only_entry(dir: &tempfile::TempDir, f: impl FnOnce(&mut LedgerEntry)) {
+        let _lock = LedgerLock::acquire(dir.path());
+        let mut ledger = load_or_migrate(dir.path());
+        f(&mut ledger.entries[0]);
+        write_ledger(dir.path(), &ledger).unwrap();
+    }
+
+    fn aged_rfc3339(age_minutes: i64) -> String {
+        (chrono::Utc::now() - chrono::Duration::minutes(age_minutes)).to_rfc3339()
+    }
+
+    #[test]
+    fn resume_fresh_duplicate_is_still_suppressed() {
+        // Same-session reprint guard: a matching entry younger than the
+        // staleness threshold still collapses the duplicate.
+        let dir = project();
+        let fp = content_fingerprint(dir.path());
+        mark_delivered(
+            dir.path(),
+            "kimi",
+            DeliveryIntent::Session,
+            DeliveryChannel::Resume,
+            "resume",
+            &json!({}),
+            &fp,
+        );
+        let again = should_deliver(
+            dir.path(),
+            "kimi",
+            DeliveryIntent::Session,
+            DeliveryChannel::Resume,
+            &json!({}),
+            &fp,
+            false,
+        );
+        assert!(!again.deliver);
+        assert_eq!(again.reason, "duplicate");
+    }
+
+    #[test]
+    fn resume_stale_entry_is_a_new_session_and_delivers() {
+        // The reported regression: a matching entry older than the
+        // staleness threshold belongs to an earlier session — deliver.
+        let dir = project();
+        let fp = content_fingerprint(dir.path());
+        mark_delivered(
+            dir.path(),
+            "kimi",
+            DeliveryIntent::Session,
+            DeliveryChannel::Resume,
+            "resume",
+            &json!({}),
+            &fp,
+        );
+        edit_only_entry(&dir, |e| {
+            e.delivered_at = aged_rfc3339(SESSION_STALE_MINUTES + 5);
+        });
+        let next = should_deliver(
+            dir.path(),
+            "kimi",
+            DeliveryIntent::Session,
+            DeliveryChannel::Resume,
+            &json!({}),
+            &fp,
+            false,
+        );
+        assert!(next.deliver, "{}", next.reason);
+        assert_eq!(next.reason, "fresh");
+    }
+
+    #[test]
+    fn resume_seq_change_delivers() {
+        let dir = project();
+        let fp = content_fingerprint(dir.path());
+        mark_delivered(
+            dir.path(),
+            "kimi",
+            DeliveryIntent::Session,
+            DeliveryChannel::Resume,
+            "resume",
+            &json!({}),
+            &fp,
+        );
+        // Recorded seq no longer matches the current handoff seq.
+        edit_only_entry(&dir, |e| e.handoff_seq += 999);
+        let next = should_deliver(
+            dir.path(),
+            "kimi",
+            DeliveryIntent::Session,
+            DeliveryChannel::Resume,
+            &json!({}),
+            &fp,
+            false,
+        );
+        assert!(next.deliver, "{}", next.reason);
+    }
+
+    #[test]
+    fn resume_content_fp_change_delivers() {
+        let dir = project();
+        mark_delivered(
+            dir.path(),
+            "kimi",
+            DeliveryIntent::Session,
+            DeliveryChannel::Resume,
+            "resume",
+            &json!({}),
+            "fp-old",
+        );
+        let next = should_deliver(
+            dir.path(),
+            "kimi",
+            DeliveryIntent::Session,
+            DeliveryChannel::Resume,
+            &json!({}),
+            "fp-new",
+            false,
+        );
+        assert!(next.deliver, "{}", next.reason);
+    }
+
+    #[test]
+    fn resume_malformed_delivered_at_is_treated_as_stale() {
+        let dir = project();
+        let fp = content_fingerprint(dir.path());
+        mark_delivered(
+            dir.path(),
+            "kimi",
+            DeliveryIntent::Session,
+            DeliveryChannel::Resume,
+            "resume",
+            &json!({}),
+            &fp,
+        );
+        edit_only_entry(&dir, |e| e.delivered_at = "not-a-timestamp".into());
+        let next = should_deliver(
+            dir.path(),
+            "kimi",
+            DeliveryIntent::Session,
+            DeliveryChannel::Resume,
+            &json!({}),
+            &fp,
+            false,
+        );
+        assert!(next.deliver, "{}", next.reason);
+    }
+
+    #[test]
+    fn hook_duplicate_suppression_has_no_staleness_rule() {
+        // The Hook arm is unchanged: a session-id duplicate stays
+        // suppressed even when the entry is older than the threshold
+        // (its retry collapse is debounce-based, separate and correct).
+        let dir = project();
+        let fp = content_fingerprint(dir.path());
+        mark_delivered(
+            dir.path(),
+            "cursor",
+            DeliveryIntent::Session,
+            DeliveryChannel::Hook,
+            "session_start",
+            &json!({"session_id": "s1"}),
+            &fp,
+        );
+        edit_only_entry(&dir, |e| {
+            e.delivered_at = aged_rfc3339(SESSION_STALE_MINUTES + 5);
+        });
+        let again = should_deliver(
+            dir.path(),
+            "cursor",
+            DeliveryIntent::Session,
+            DeliveryChannel::Hook,
+            &json!({"session_id": "s1"}),
+            &fp,
+            false,
+        );
+        assert!(!again.deliver);
+        assert_eq!(again.reason, "duplicate");
+    }
+
     #[test]
     fn content_change_redelivers_same_session() {
         let dir = project();
@@ -571,9 +770,14 @@ mod tests {
     fn legacy_markers_migrate() {
         let dir = project();
         let root = local_store::root(dir.path());
+        // Fresh timestamp: a stale migrated marker would (correctly) be
+        // treated as an earlier session under the resume staleness rule.
+        let delivered_at = aged_rfc3339(5);
         fs::write(
             root.join(local_store::LEGACY_HOOK_RESUME_MARKER),
-            r#"{"harness":"claude-code","handoff_seq":0,"content_fp":"legacy","delivered_at":"2026-08-18T00:00:00Z"}"#,
+            format!(
+                r#"{{"harness":"claude-code","handoff_seq":0,"content_fp":"legacy","delivered_at":"{delivered_at}"}}"#
+            ),
         )
         .unwrap();
         let decision = should_deliver(

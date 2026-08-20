@@ -306,10 +306,13 @@ fn legacy_hook_marker_suppresses_resume() {
             .join(".stateroot/local/digest-delivery.v1.json"),
     )
     .expect("remove ledger");
+    // Fresh timestamp: a stale migrated marker would (correctly) be treated
+    // as an earlier session under the resume staleness rule and redeliver.
+    let delivered_at = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
     std::fs::write(
         project.path().join(".stateroot/hook-resume-delivered.json"),
         format!(
-            r#"{{"harness":"claude-code","handoff_seq":0,"content_fp":"{fp}","delivered_at":"2026-08-18T00:00:00Z"}}"#
+            r#"{{"harness":"claude-code","handoff_seq":0,"content_fp":"{fp}","delivered_at":"{delivered_at}"}}"#
         ),
     )
     .expect("legacy marker");
