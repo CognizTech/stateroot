@@ -105,7 +105,7 @@ The CLI is offline-safe: when the server is unreachable it queues operations in 
 | `stateroot learnings list` / `--user` / `--workspace` / `--domain` | read before writing | update rather than duplicate |
 | `stateroot skill install [--harness H]` | install this skill into harness dirs | writes stubs from `assets/` |
 | `stateroot status` / `stateroot doctor` | diagnose auth, connectivity, project state | doctor checks outbox depth and sync health |
-| `stateroot init` | one-time per project | creates `.stateroot/`, registers the workspace, installs harness integrations |
+| `stateroot init` | one-time per project | creates `.stateroot/`, registers the workspace, installs harness integrations, seeds objective/memory/first handoff from repo docs (observed; `--synthesize` opts into unverified LLM enrichment) |
 
 ## Failure Modes
 

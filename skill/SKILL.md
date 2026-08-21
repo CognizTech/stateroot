@@ -169,7 +169,7 @@ When setup finishes, this bootstrap skill is done for the machine. Tell the user
 stateroot init
 ```
 
-Creates `.stateroot/`, registers the directory in `projects.toml`, seeds project stubs (Cursor rule, Claude command, AGENTS.md block). Never `mkdir .stateroot`.
+Creates `.stateroot/`, registers the directory in `projects.toml`, seeds project stubs (Cursor rule, Claude command, AGENTS.md block), and seeds the objective / memory / first handoff from what the repo declares (README, TODO.md, git log — labeled observed; `--synthesize` opts into LLM enrichment, labeled unverified). Never `mkdir .stateroot`.
 
 Then expire this skill.
 

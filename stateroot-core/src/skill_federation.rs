@@ -178,7 +178,7 @@ pub fn build_launch_argv_from_spec(
 
 /// Binary probe used by detection-gating. `None` allowlist probes the host
 /// PATH via `SystemProber`; `Some(list)` answers from the list (test seam).
-pub(crate) fn binary_probe(allowlist: Option<&[String]>) -> impl Fn(&str) -> bool + '_ {
+pub fn binary_probe(allowlist: Option<&[String]>) -> impl Fn(&str) -> bool + '_ {
     move |cmd: &str| match allowlist {
         Some(list) => list.iter().any(|c| c == cmd),
         None => crate::harness_install::detect::Prober::probe(

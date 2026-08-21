@@ -57,6 +57,18 @@ pub async fn run(ctx: &Ctx, args: crate::cli::InitArgs) -> Result<()> {
         println!("  {action}");
     }
 
+    // Deterministic seed from what the repo declares (always; placeholder-only
+    // writes), plus opt-in LLM enrichment. Runs before the convenience layer
+    // adds its own files so an empty tree stays empty.
+    super::seed::run(
+        ctx,
+        &dir,
+        &project_id,
+        args.synthesize,
+        args.synthesize_with.as_deref(),
+    )
+    .await?;
+
     // Project registry (projects.toml) so other directories resolve it.
     let entry = core_config::ProjectEntry {
         project_id: project_id.clone(),

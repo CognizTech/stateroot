@@ -5,6 +5,21 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- `stateroot init` now **seeds** `.stateroot/` from what the repo already
+  declares instead of leaving placeholders: objective from the README title +
+  first paragraph (into `project/state.json` and `project/objectives.md`),
+  next actions from `TODO.md` checkboxes / roadmap bullets, observed memory
+  facts (layout, docs, git origin, recent commits) under `## Seed (observed
+  at init)` in `memories/MEMORY.md`, and a seq-1 `handoffs/current.json`
+  labeled `"provenance": "observed"`. Writes are placeholder-only — user
+  content is never overwritten — and empty repos stay empty.
+- Opt-in LLM enrichment: `stateroot init --synthesize [--synthesize-with
+  <backend>]`. Auto order probes local harness CLIs first (claude, codex,
+  kimi, gemini, … via the registry delegation specs, piped stdout, no
+  skills), then the DeepSeek/OpenAI API keys. Synthesized seeds replace only
+  same-origin init-seed fields and are labeled `synthesized — unverified
+  (<backend>)`; synthesis problems never fail `init`.
+
 ## [0.1.4] — 2026-08-19
 
 - Reliable cross-harness identity delivery: session-start and first-prompt

@@ -138,6 +138,15 @@ pub struct InitArgs {
     /// Project name (defaults to the directory name).
     #[arg(long)]
     pub name: Option<String>,
+    /// Enrich the deterministic init seed with an LLM backend (opt-in):
+    /// auto-picks a local harness CLI first, then DeepSeek/OpenAI API keys.
+    /// Synthesized output is labeled unverified; failures never fail init.
+    #[arg(long)]
+    pub synthesize: bool,
+    /// Force the synthesis backend: a harness id (claude, codex, kimi, …)
+    /// or `deepseek`/`openai`.
+    #[arg(long, value_name = "BACKEND", requires = "synthesize")]
+    pub synthesize_with: Option<String>,
 }
 
 #[derive(Debug, Args)]

@@ -1,1 +1,6 @@
 /target
+.stateroot/
+.claude/
+.agents/
+.cursor/
+AGENTS.md

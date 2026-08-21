@@ -8,6 +8,8 @@
 //!
 //! Failure falls back to deterministic. Never truncates.
 
+use std::path::Path;
+
 use anyhow::Result;
 use serde_json::{json, Value};
 use sha2::Digest as _;
@@ -68,7 +70,8 @@ pub struct SynthesisEndpoint {
     pub model: String,
 }
 
-fn nonempty_env(name: &str) -> Option<String> {
+/// Non-empty trimmed environment variable, or `None`.
+pub fn nonempty_env(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
         .map(|s| s.trim().to_string())
@@ -193,19 +196,21 @@ fn parse_sections(content: &str) -> Result<Value> {
     Ok(Value::Object(sections))
 }
 
-async fn call_local_provider(
+/// Shared chat-completions POST for every API-backed synthesis caller.
+///
+/// Merges `synthesis.extra_body` config into the request, then returns the
+/// first choice's message content.
+pub async fn call_provider(
     ctx: &Ctx,
-    base_url: &str,
-    api_key: &str,
-    model: &str,
-    bundle_json: &str,
+    endpoint: &SynthesisEndpoint,
+    system: &str,
+    user: &str,
 ) -> Result<String> {
-    let system = "You are the StateRoot synthesizer. Read the observed context pack and any session bundle. Produce a STRICT JSON object with exactly these keys: progress_report (array of strings), decisions_and_amendments (array of strings), residual_work (array of strings), resolutions (array of strings). Use only substance present in the input. If there are no sessions, summarize the observed repo docs as product context. Never invent files, decisions, or history. Empty stays empty. No prose outside the JSON.";
     let mut body = json!({
-        "model": model,
+        "model": endpoint.model,
         "messages": [
             {"role": "system", "content": system},
-            {"role": "user", "content": bundle_json},
+            {"role": "user", "content": user},
         ],
     });
     if let Some(extra) = ctx.config.synthesis.extra_body.as_object() {
@@ -215,8 +220,8 @@ async fn call_local_provider(
     }
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{base_url}/chat/completions"))
-        .bearer_auth(api_key)
+        .post(format!("{}/chat/completions", endpoint.base_url))
+        .bearer_auth(&endpoint.api_key)
         .json(&body)
         .send()
         .await?;
@@ -236,13 +241,36 @@ async fn call_local_provider(
     Ok(content.to_string())
 }
 
+async fn call_local_provider(
+    ctx: &Ctx,
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+    bundle_json: &str,
+) -> Result<String> {
+    let system = "You are the StateRoot synthesizer. Read the observed context pack and any session bundle. Produce a STRICT JSON object with exactly these keys: progress_report (array of strings), decisions_and_amendments (array of strings), residual_work (array of strings), resolutions (array of strings). Use only substance present in the input. If there are no sessions, summarize the observed repo docs as product context. Never invent files, decisions, or history. Empty stays empty. No prose outside the JSON.";
+    let endpoint = SynthesisEndpoint {
+        provider: "api",
+        api_key: api_key.to_string(),
+        base_url: base_url.to_string(),
+        model: model.to_string(),
+    };
+    call_provider(ctx, &endpoint, system, bundle_json).await
+}
+
 fn merge_into_handoff(ctx: &Ctx, synthesized: &Value) -> Result<()> {
-    if local_store::read_handoff_local(&ctx.cwd)
+    merge_into_handoff_at(&ctx.cwd, synthesized)
+}
+
+/// Merge a synthesized block into the local handoff of `project_dir`,
+/// writing a seq-1 shell handoff first when none exists.
+pub fn merge_into_handoff_at(project_dir: &Path, synthesized: &Value) -> Result<()> {
+    if local_store::read_handoff_local(project_dir)
         .ok()
         .flatten()
         .is_none()
     {
-        let project_id = local_store::read_manifest(&ctx.cwd)
+        let project_id = local_store::read_manifest(project_dir)
             .ok()
             .flatten()
             .and_then(|m| {
@@ -263,9 +291,9 @@ fn merge_into_handoff(ctx: &Ctx, synthesized: &Value) -> Result<()> {
             "context_summary": "",
             "next_actions": [],
         });
-        local_store::write_handoff_local(&ctx.cwd, &shell).map_err(|e| anyhow::anyhow!(e))?;
+        local_store::write_handoff_local(project_dir, &shell).map_err(|e| anyhow::anyhow!(e))?;
     }
-    let path = local_store::root(&ctx.cwd).join(local_store::HANDOFF_CURRENT_PATH);
+    let path = local_store::root(project_dir).join(local_store::HANDOFF_CURRENT_PATH);
     let text = std::fs::read_to_string(&path)?;
     let mut packet: Value = serde_json::from_str(&text)?;
     packet["synthesized"] = synthesized.clone();

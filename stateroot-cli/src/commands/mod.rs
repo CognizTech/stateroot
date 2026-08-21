@@ -36,6 +36,7 @@ pub mod remove;
 pub mod resume;
 pub mod roots;
 pub mod rules;
+pub mod seed;
 pub mod setup;
 pub mod skill;
 pub mod soul;
