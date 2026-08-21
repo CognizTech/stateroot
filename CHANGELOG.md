@@ -5,6 +5,32 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- Git-style extension subcommands: any executable named `stateroot-<name>`
+  on PATH runs as `stateroot <name> [args…]` — an agent can write a small
+  script and the CLI immediately grows a command. Discovery scans PATH (unix
+  exec bit, Windows `PATHEXT`, first hit wins, the bare `stateroot` binary
+  excluded); extensions run with inherited stdio plus an env contract
+  (`STATEROOT_HOME`, `STATEROOT_VERSION`, and `STATEROOT_PROJECT_DIR` /
+  `STATEROOT_PROJECT_ID` inside a project; `STATEROOT_DELEGATION_DEPTH`
+  passes through untouched) and their exit code becomes the CLI's. Unknown
+  subcommands now get a clap-styled did-you-mean over builtins and
+  extensions with exit code 2; builtins always win over same-named
+  extensions. `stateroot ext list` shows what is discovered and marks
+  `shadowed builtin (ignored)` entries.
+- `stateroot delegate --to <harness> --task "<bounded task>"` spawns another
+  harness CLI as a subagent: piped stdout with a timeout (`--timeout-secs`,
+  default 600), a bounded stdout tail back to the caller
+  (`--max-output-chars`, default 8000), `--skill`/`--ambient-skills`
+  passthrough per the registry policy, and `--json` for agent callers. Every
+  run persists a full log plus a `stateroot.delegation.v1` record under
+  `.stateroot/delegations/` and appends an episodic lineage note. Unknown,
+  handoff-only, or unprobed harnesses are loud errors listing the cli-mode
+  harnesses; a failed child exits with its own code and stderr tail; a
+  timeout kills the child and records `timed_out`.
+  `STATEROOT_DELEGATION_DEPTH` caps recursion — at depth ≥ 2 a subagent may
+  not spawn further subagents. The piped spawn-and-capture helper is now
+  shared between `delegate` and init synthesis (`init` seeding behavior is
+  unchanged), and the skill-router's delegation route points at `delegate`.
 - `stateroot init` now **seeds** `.stateroot/` from what the repo already
   declares instead of leaving placeholders: objective from the README title +
   first paragraph (into `project/state.json` and `project/objectives.md`),

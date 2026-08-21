@@ -14,14 +14,14 @@ use stateroot_core::skill_federation::{
 
 use super::Ctx;
 
-fn is_single_slug(slug: &str) -> bool {
+pub(crate) fn is_single_slug(slug: &str) -> bool {
     !slug.is_empty()
         && Path::new(slug)
             .components()
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
-fn canonical_skill_path(ctx: &Ctx, home: &Path, slug: &str) -> Result<PathBuf> {
+pub(crate) fn canonical_skill_path(ctx: &Ctx, home: &Path, slug: &str) -> Result<PathBuf> {
     if !is_single_slug(slug) {
         anyhow::bail!("skill must be a single StateRoot slug, got `{slug}`");
     }

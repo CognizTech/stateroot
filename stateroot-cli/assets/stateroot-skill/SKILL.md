@@ -90,6 +90,8 @@ The CLI is offline-safe: when the server is unreachable it queues operations in 
 | `stateroot handoff write --from CURRENT_HARNESS [--to H] [--task …] [--context-summary …] [--next …]` | session end / harness switch | prefer flags near limits; `--to` optional (routing only); `--input` for large payloads |
 | `stateroot handoff finalize [--from H]` | hook missed / quota exit | observed continuity from verified transcript; no routing |
 | `stateroot handoff list` / `stateroot handoff show` | inspect prior handoffs | read-only |
+| `stateroot delegate --to H --task "…"` | bounded subagent in another harness | cli-mode harnesses only; caller gets a capped tail, full log + record under `.stateroot/delegations/`; depth-capped — a subagent cannot delegate further |
+| `stateroot ext list` | extensions discovered on PATH | any `stateroot-<name>` executable on PATH runs as `stateroot <name>` — you can add commands yourself by writing one |
 | `stateroot memory recall <query> [--limit N]` | find decisions, failures, memories | FTS over memory, wiki, episodic, transcripts |
 | `stateroot snap [--reason R]` | after meaningful real-tree changes | records verified root under `refs/stateroot` |
 | `stateroot log` / `stateroot show <root>` | inspect lineage | current root, transitions, coverage |

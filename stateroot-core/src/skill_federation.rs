@@ -612,7 +612,9 @@ fn scan_skill_dir(
         .and_then(Value::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| {
-            format!("stateroot harness run {native_harness} --skill {slug} --objective <microtask>")
+            format!(
+                "stateroot delegate --to {native_harness} --skill {slug} --task \"<microtask>\""
+            )
         });
     let identity_key = if is_product {
         product_identity_key(&slug)
@@ -1627,8 +1629,8 @@ cross-harness microtask.
 
 1. Run `stateroot skill list` or `stateroot skill status --json`.
 2. Use portable packages from `.agents/skills` directly.
-3. For a reference-only capability, invoke:
-   `stateroot harness run <harness> --skill <skill> --objective "<bounded microtask>"`
+3. For a reference-only capability, delegate explicitly:
+   `stateroot delegate --to <harness> --skill <skill> --task "<bounded microtask>"`
 4. Include the working directory, expected outputs, constraints, and tests.
 5. Inspect produced files/test results; do not replay the foreign transcript.
 6. External launch is explicit-request only. GUI-only harnesses return a
@@ -1671,7 +1673,7 @@ cross-harness microtask.
             "package_digest": digest,
             "source_harness": "statesmith",
             "native_harness": "statesmith",
-            "native_invocation": "stateroot harness run <harness> --skill <skill> --objective <microtask>",
+            "native_invocation": "stateroot delegate --to <harness> --skill <skill> --task <microtask>",
         }),
     )
     .map_err(|err| format!("write router metadata {}: {err}", dest.display()))?;

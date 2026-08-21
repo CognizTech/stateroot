@@ -11,8 +11,9 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 use cli::{
-    Command, HandoffAction, HarnessAction, LearnAction, LearningsAction, McpAction, MemoryAction,
-    ObservationsAction, ProposalsAction, RulesAction, SkillAction, SoulAction, WikiAction,
+    Command, ExtAction, HandoffAction, HarnessAction, LearnAction, LearningsAction, McpAction,
+    MemoryAction, ObservationsAction, ProposalsAction, RulesAction, SkillAction, SoulAction,
+    WikiAction,
 };
 use commands::Ctx;
 
@@ -42,6 +43,7 @@ async fn main() -> anyhow::Result<()> {
             | cli::Command::McpStdio
             | cli::Command::SelfUpdate { .. }
             | cli::Command::Uninstall { .. }
+            | cli::Command::External(_)
     );
 
     match cli.command {
@@ -142,6 +144,12 @@ async fn main() -> anyhow::Result<()> {
             yes,
             msi_cleanup,
         } => commands::uninstall::run(&ctx, purge, yes, msi_cleanup)?,
+        Command::Delegate(args) => {
+            let code = commands::delegate::run(&ctx, &args)?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
         Command::Setup(args) => {
             commands::setup::run(
                 ctx.clone(),
@@ -325,6 +333,13 @@ async fn main() -> anyhow::Result<()> {
                 commands::mcp::accept_theirs(&ctx, &name, from.as_deref())?
             }
         },
+        Command::Ext(args) => match args.action {
+            ExtAction::List => commands::ext::list()?,
+        },
+        Command::External(argv) => {
+            let code = commands::ext::run_external(&ctx, &argv)?;
+            std::process::exit(code);
+        }
         Command::SelfUpdate { check, tag } => {
             commands::update::self_update(&ctx, check, tag.as_deref()).await?
         }

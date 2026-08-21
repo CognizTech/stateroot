@@ -9,8 +9,7 @@
 //! init: note + keep the deterministic seed + exit 0.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -18,10 +17,10 @@ use stateroot_core::context_pack;
 use stateroot_core::local_store::{self, now_rfc3339};
 use stateroot_core::seed::SeedDraft;
 use stateroot_core::skill_federation::{
-    binary_probe, build_launch_argv_from_spec, load_registry, normalize_harness, DelegationSpec,
+    binary_probe, load_registry, normalize_harness, DelegationSpec,
 };
 
-use super::{compiler, note, Ctx};
+use super::{compiler, harness_cli, note, Ctx};
 
 const PLACEHOLDER_OBJECTIVES: &str =
     "# Objectives\n\nDescribe the project goal and success criteria.";
@@ -451,38 +450,24 @@ async fn attempt(
 /// inherits stdio) and capture its response. 120s cap; pty-marked rows may
 /// misbehave when piped — the caller notes and falls through honestly.
 fn run_harness_cli(dir: &Path, id: &str, spec: &DelegationSpec, prompt: &str) -> Result<String> {
-    let argv = build_launch_argv_from_spec(spec, Some(prompt), &[], false)
-        .ok_or_else(|| anyhow::anyhow!("harness `{id}` has no launch command"))?;
-    let (command, args) = argv
-        .split_first()
-        .ok_or_else(|| anyhow::anyhow!("harness `{id}` produced an empty launch command"))?;
-    let mut child = Command::new(command)
-        .args(args)
-        .current_dir(dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let deadline = Instant::now() + HARNESS_TIMEOUT;
-    loop {
-        if child.try_wait()?.is_some() {
-            break;
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            anyhow::bail!("timed out after {}s", HARNESS_TIMEOUT.as_secs());
-        }
-        std::thread::sleep(Duration::from_millis(100));
+    let output = harness_cli::run_capture(
+        dir,
+        id,
+        spec,
+        prompt,
+        &harness_cli::LaunchPolicy::default(),
+        HARNESS_TIMEOUT,
+    )?;
+    if output.timed_out {
+        anyhow::bail!("timed out after {}s", HARNESS_TIMEOUT.as_secs());
     }
-    let output = child.wait_with_output()?;
     if !output.status.success() {
         anyhow::bail!("exited with {}", output.status);
     }
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if stdout.is_empty() {
+    if output.stdout.is_empty() {
         anyhow::bail!("empty stdout");
     }
-    Ok(stdout)
+    Ok(output.stdout)
 }
 
 /// Parse a backend response into a seed draft — strict JSON with the same
@@ -533,6 +518,7 @@ fn parse_seed_draft(content: &str) -> Result<SeedDraft> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stateroot_core::skill_federation::build_launch_argv_from_spec;
 
     #[test]
     fn harness_candidates_follow_preference_order_not_probe_order() {

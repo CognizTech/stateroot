@@ -16,9 +16,22 @@ pub const BUILD_VERSION: &str = match option_env!("STATEROOT_BUILD_VERSION") {
 /// StateRoot — local-first continuity for every harness.
 #[derive(Debug, Parser)]
 #[command(name = "stateroot", version = BUILD_VERSION, about, long_about = None)]
+#[command(
+    after_help = "External commands: any `stateroot-<name>` executable on PATH runs as `stateroot <name>`; see `stateroot ext list`."
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
+}
+
+/// Builtin subcommand names (for extension shadowing and did-you-mean tips).
+pub fn subcommand_names() -> Vec<String> {
+    use clap::CommandFactory;
+    Cli::command()
+        .get_subcommands()
+        .map(|c| c.get_name().to_string())
+        .filter(|n| !n.is_empty())
+        .collect()
 }
 
 #[derive(Debug, Subcommand)]
@@ -68,6 +81,8 @@ pub enum Command {
     Install,
     /// Run a harness through StateRoot's portable integration policy.
     Harness(HarnessArgs),
+    /// Delegate a bounded task to another harness CLI as a subagent.
+    Delegate(DelegateArgs),
     /// Full machine removal: harness registrations, config dir, and the
     /// binary itself (project .stateroot/ dirs are never touched).
     Uninstall {
@@ -125,6 +140,11 @@ pub enum Command {
     Rules(RulesArgs),
     /// MCP server discovery and federation sync.
     Mcp(McpArgs),
+    /// External extensions (`stateroot-<name>` executables on PATH).
+    Ext(ExtArgs),
+    /// External extension (any `stateroot-<name>` executable on PATH).
+    #[command(external_subcommand)]
+    External(Vec<String>),
 }
 
 #[derive(Debug, Args)]
@@ -213,6 +233,31 @@ pub enum HarnessAction {
         #[arg(long)]
         dry_run: bool,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct DelegateArgs {
+    /// Harness to delegate to (a registry cli-mode harness: claude, codex, …).
+    #[arg(long)]
+    pub to: String,
+    /// Bounded task for the subagent; the caller receives only its final output.
+    #[arg(long)]
+    pub task: String,
+    /// Subagent timeout in seconds; the child is killed past it.
+    #[arg(long, default_value_t = 600)]
+    pub timeout_secs: u64,
+    /// Cap on the stdout tail returned to the caller (chars).
+    #[arg(long, default_value_t = 8000)]
+    pub max_output_chars: usize,
+    /// StateRoot skill slug to make available to the subagent (repeatable).
+    #[arg(long = "skill")]
+    pub skills: Vec<String>,
+    /// Let the subagent harness use its own ambient skill discovery.
+    #[arg(long)]
+    pub ambient_skills: bool,
+    /// Machine-readable envelope (delegation record + bounded tails).
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -749,6 +794,18 @@ pub enum WikiAction {
         #[arg(long)]
         force: bool,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct ExtArgs {
+    #[command(subcommand)]
+    pub action: ExtAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ExtAction {
+    /// List discovered extensions (`stateroot-*` executables on PATH).
+    List,
 }
 
 #[derive(Debug, Args)]
