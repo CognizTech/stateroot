@@ -30,6 +30,7 @@ pub mod proposals;
 pub mod roots;
 pub mod rules;
 pub mod seed;
+pub mod sessions;
 pub mod skill_federation;
 pub mod snap_context;
 pub mod soul;

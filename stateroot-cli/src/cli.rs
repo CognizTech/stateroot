@@ -43,6 +43,8 @@ pub enum Command {
     Remove(RemoveArgs),
     /// Import sessions from native harness transcripts (all six readers).
     Import(ImportArgs),
+    /// Canonical session store (sync/list/show) and cross-harness transfer.
+    Session(SessionArgs),
     /// Print the compact resume digest for the current project.
     Resume(ResumeArgs),
     /// Append an episodic checkpoint to the local log.
@@ -180,6 +182,46 @@ pub struct ImportArgs {
     /// Print what would be imported without writing anything.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct SessionArgs {
+    #[command(subcommand)]
+    pub action: SessionAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SessionAction {
+    /// Import pi/DSH sessions into the canonical store
+    /// (`.stateroot/local/sessions/` — local-only, never synced).
+    Sync {
+        /// Restrict to one harness (pi, dsh).
+        #[arg(long)]
+        harness: Option<String>,
+    },
+    /// List canonical sessions (id, harness, span, entries, outcome).
+    List {
+        /// Restrict to one harness (pi, dsh).
+        #[arg(long)]
+        harness: Option<String>,
+    },
+    /// Show one canonical session (id or unique prefix; display is capped).
+    Show {
+        /// Session id.
+        id: String,
+    },
+    /// Transfer a canonical session into another harness's native store —
+    /// writes a real, resumable session file (pi or dsh).
+    Transfer {
+        /// Session id (prefix allowed).
+        id: String,
+        /// Target harness store: pi or dsh.
+        #[arg(long)]
+        to: String,
+        /// Print the plan + fidelity report without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Debug, Args)]

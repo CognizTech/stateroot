@@ -5,6 +5,20 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- Session canon & transfer: `stateroot session sync|list|show`
+  canonicalizes Pi and DSH sessions into `.stateroot/local/sessions/` as
+  `stateroot.session.v1` JSONL — full-fidelity entries with no content caps,
+  unmapped native types kept as `meta` with `native_type`, local-only (never
+  pinned into roots, same rule as `local/memory.sqlite`). New Pi and DSH
+  transcript readers (tree-linearizing Pi v3, torn-tail/seq-gap-aware DSH
+  v0 with chunk-row accounting) feed the import pipeline too.
+  `stateroot session transfer <id> --to pi|dsh [--dry-run]` writes a real,
+  resumable session into the target harness's native store — Pi v3 with a
+  fresh linear spine (branches flatten with provenance), DSH v0 with
+  contiguous seq and a clean tail — never mutating the source, refusing to
+  clobber, and always printing the fidelity report (native / adapted /
+  dropped). DSH `.jsonl.zstd` artifacts are counted and skipped (no zstd in
+  the dependency tree).
 - Git-style extension subcommands: any executable named `stateroot-<name>`
   on PATH runs as `stateroot <name> [args…]` — an agent can write a small
   script and the CLI immediately grows a command. Discovery scans PATH (unix

@@ -92,6 +92,8 @@ The CLI is offline-safe: when the server is unreachable it queues operations in 
 | `stateroot handoff list` / `stateroot handoff show` | inspect prior handoffs | read-only |
 | `stateroot delegate --to H --task "…"` | bounded subagent in another harness | cli-mode harnesses only; caller gets a capped tail, full log + record under `.stateroot/delegations/`; depth-capped — a subagent cannot delegate further |
 | `stateroot ext list` | extensions discovered on PATH | any `stateroot-<name>` executable on PATH runs as `stateroot <name>` — you can add commands yourself by writing one |
+| `stateroot session sync` / `list` / `show` | canonical session store | pi/DSH sessions → `.stateroot/local/sessions/` (local-only, idempotent) |
+| `stateroot session transfer <id> --to pi\|dsh` | resume a session in another harness | writes a real native session file; fidelity report (native/adapted/dropped); `--dry-run` previews |
 | `stateroot memory recall <query> [--limit N]` | find decisions, failures, memories | FTS over memory, wiki, episodic, transcripts |
 | `stateroot snap [--reason R]` | after meaningful real-tree changes | records verified root under `refs/stateroot` |
 | `stateroot log` / `stateroot show <root>` | inspect lineage | current root, transitions, coverage |

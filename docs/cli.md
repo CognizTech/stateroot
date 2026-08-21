@@ -102,3 +102,47 @@ fi
 stateroot checkpoint --note "hello extension ran ($*)"
 echo "checkpoint recorded in $STATEROOT_PROJECT_DIR"
 ```
+
+## `stateroot session` — canonical sessions & cross-harness transfer
+
+Sessions belong to StateRoot: standardized, shared, portable across
+harnesses. `stateroot session sync` canonicalizes Pi (`$PI_CODING_AGENT_DIR`
+or `~/.pi/agent/sessions`) and DSH (`$DSH_HOME` or `~/.dsh/sessions`)
+sessions into `.stateroot/local/sessions/` as `stateroot.session.v1` JSONL:
+a header line, then one full-fidelity entry per line (`message`,
+`tool_call`, `tool_result`, `compaction`, `plan`, `meta`). Entries are
+never content-capped (display paths cap); unmapped native types are kept as
+`meta` with `native_type` — nothing silently vanishes. Sync is idempotent
+(each session file is rewritten whole).
+
+- **The `local/` boundary** — canonical sessions live under
+  `.stateroot/local/`, never pinned into roots (same rule as
+  `local/memory.sqlite`): full session logs stay out of snapshots to
+  protect root size. Promotion into synced state is a later,
+  retention-tiered decision.
+- **Honest skips** — DSH `.jsonl.zstd` artifacts are counted and skipped
+  (no zstd in the dependency tree); torn tails and seq gaps are recorded,
+  not hidden; `assistant/chunk` stream deltas are skipped (assembled text
+  lives in `assistant/message`) with the omission counted.
+- `stateroot session list [--harness H]` — id, harness, span, entries,
+  outcome. `stateroot session show <id>` — header, first user message, last
+  entries (capped for display).
+
+### `stateroot session transfer <id> --to pi|dsh [--dry-run]`
+
+Transfer translates strings to strings: a canonical session becomes a real,
+resumable session file in the target harness's native store (Pi v3 tree
+with a fresh linear id/parentId spine — branches flatten to the imported
+timeline; DSH v0 event log with contiguous seq and a clean completed/
+interrupted tail). The source session is never mutated, an existing target
+is never clobbered, and the fidelity report is always printed:
+
+```
+transferred session <id> → pi
+  entries: 84 native · 6 adapted (compaction→branch_summary) · 3 dropped (model_change)
+  wrote: ~/.pi/agent/sessions/<dir>/<file>.jsonl
+  resume with: pi (in <cwd>)
+```
+
+`--dry-run` prints the same plan with `would write:` and touches nothing.
+Every transfer appends an episodic lineage note.

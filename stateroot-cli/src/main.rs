@@ -12,8 +12,8 @@ use tracing_subscriber::EnvFilter;
 
 use cli::{
     Command, ExtAction, HandoffAction, HarnessAction, LearnAction, LearningsAction, McpAction,
-    MemoryAction, ObservationsAction, ProposalsAction, RulesAction, SkillAction, SoulAction,
-    WikiAction,
+    MemoryAction, ObservationsAction, ProposalsAction, RulesAction, SessionAction, SkillAction,
+    SoulAction, WikiAction,
 };
 use commands::Ctx;
 
@@ -61,6 +61,14 @@ async fn main() -> anyhow::Result<()> {
             )
             .await?;
         }
+        Command::Session(args) => match args.action {
+            SessionAction::Sync { harness } => commands::session::sync(&ctx, harness.as_deref())?,
+            SessionAction::List { harness } => commands::session::list(&ctx, harness.as_deref())?,
+            SessionAction::Show { id } => commands::session::show(&ctx, &id)?,
+            SessionAction::Transfer { id, to, dry_run } => {
+                commands::session::transfer(&ctx, &id, &to, dry_run)?
+            }
+        },
         Command::Resume(args) => {
             commands::resume::run(
                 &ctx,

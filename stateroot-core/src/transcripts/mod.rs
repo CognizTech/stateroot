@@ -12,9 +12,11 @@ pub mod bundle;
 pub mod claude;
 pub mod codex;
 pub mod cursor;
+pub mod dsh;
 pub mod hermes;
 pub mod kimi;
 pub mod openclaw;
+pub mod pi;
 
 use std::path::{Path, PathBuf};
 
@@ -142,6 +144,8 @@ pub fn readers() -> Vec<Box<dyn TranscriptReader>> {
         Box::new(kimi::KimiReader),
         Box::new(openclaw::OpenClawReader),
         Box::new(hermes::HermesReader),
+        Box::new(pi::PiReader),
+        Box::new(dsh::DshReader),
     ]
 }
 

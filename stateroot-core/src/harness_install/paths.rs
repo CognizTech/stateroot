@@ -63,6 +63,19 @@ pub fn pi_agent_root(home: &Path) -> PathBuf {
     pi_agent_root_in(home, std::env::var_os(ENV_PI_CODING_AGENT_DIR))
 }
 
+/// DeepSeek Harness home override (`$DSH_HOME`; default `~/.dsh`).
+pub const ENV_DSH_HOME: &str = "DSH_HOME";
+
+/// DSH home: `$DSH_HOME` or `home/.dsh`.
+pub fn dsh_root_in(home: &Path, env: Option<OsString>) -> PathBuf {
+    agent_config_home(env).unwrap_or_else(|| home.join(".dsh"))
+}
+
+/// DSH home using the process environment.
+pub fn dsh_root(home: &Path) -> PathBuf {
+    dsh_root_in(home, std::env::var_os(ENV_DSH_HOME))
+}
+
 fn resolve_prefixed(root: PathBuf, home: &Path, rel: &str, prefix: &str) -> PathBuf {
     if rel == prefix {
         return root;
