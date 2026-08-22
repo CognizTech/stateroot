@@ -27,7 +27,7 @@ PowerShell:
 irm https://github.com/CognizTech/stateroot/releases/latest/download/install.ps1 | iex
 ```
 
-`stateroot-windows-x64.exe` is the portable CLI, not an installer. Windows assets are unsigned for now. SmartScreen may warn.
+`stateroot-windows-x64.exe` is the portable CLI, not an installer.
 
 ## macOS / from source
 

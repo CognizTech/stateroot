@@ -8,7 +8,6 @@ Quote CLI output. Do not hand-write `.stateroot/`, `~/.stateroot/`, or harness s
 | --- | --- |
 | `version 'GLIBC_2.xx' not found` | Binary newer than this distro's glibc | Reinstall from the current GitHub latest (glibc 2.17+). |
 | `stateroot --version` works, harnesses have no hooks | Run `stateroot setup` (this skill still applies). `stateroot install` is harness wiring only. |
-| SmartScreen / unsigned warning | Expected on Windows for now. Use the MSI from the GitHub release. |
 | macOS / no binary | Do not guess a release URL. Build from source (see install.md). |
 | `doctor` non-zero | Broken local setup. Quote the output. Missing synthesis keys are not a failure. |
 | Checksum mismatch / installer refuse | Fail closed. Re-download from the official latest release. Do not skip verification. |

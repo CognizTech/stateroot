@@ -112,7 +112,7 @@ Installs to `~/.local/bin`. Put that directory on `PATH` if `stateroot` is still
 irm https://github.com/CognizTech/stateroot/releases/latest/download/install.ps1 | iex
 ```
 
-`stateroot-windows-x64.exe` is the portable CLI, not an installer. Assets are unsigned; SmartScreen may warn.
+`stateroot-windows-x64.exe` is the portable CLI, not an installer.
 
 **macOS:** current releases are Linux and Windows. Do not guess a macOS binary URL. Build from source per [references/install.md](references/install.md).
 

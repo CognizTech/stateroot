@@ -245,8 +245,6 @@ jobs:
 
             **Windows installation:** download and run `StateRootSetup-x64.msi`.
             `stateroot-windows-x64.exe` is the portable command-line binary, not an installer.
-
-            These preview artifacts are unsigned.
           prerelease: true
           make_latest: false
           overwrite_files: true
@@ -458,8 +456,6 @@ jobs:
             `stateroot-windows-x64.exe` is the portable command-line binary, not an installer.
 
             Linux binaries require glibc 2.17 or newer (Ubuntu 16.04, Debian 9, RHEL 7, and later).
-
-            Windows assets are unsigned for now. SmartScreen may warn.
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
