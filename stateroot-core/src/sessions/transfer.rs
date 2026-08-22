@@ -797,20 +797,11 @@ mod tests {
             std::path::Path::new(raw.header["cwd"].as_str().expect("cwd")),
             std::path::Path::new(&cwd)
         );
-        // The target lives under sessions/<--tmp-…-->/ — compare components,
-        // not a separator-bearing substring (Windows displays backslashes).
-        let parts: Vec<String> = plan
-            .target_path
-            .components()
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            .collect();
-        assert!(
-            parts
-                .windows(2)
-                .any(|w| w[0] == "sessions" && w[1].starts_with("--tmp-")),
-            "target: {}",
-            plan.target_path.display()
-        );
+        // The target lands in pi's encoded sessions dir for this cwd —
+        // assert against the encoder itself (platform-correct by
+        // construction; Windows tempdirs are not `--tmp-`-shaped).
+        let expected_dir = pi_session_dir(target_home.path(), project.path());
+        assert_eq!(plan.target_path.parent(), Some(expected_dir.as_path()));
     }
 
     /// dsh fixture → canonical → dsh writer → re-read with our dsh reader.
