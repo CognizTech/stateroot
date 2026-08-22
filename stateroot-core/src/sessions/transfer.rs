@@ -797,11 +797,20 @@ mod tests {
             std::path::Path::new(raw.header["cwd"].as_str().expect("cwd")),
             std::path::Path::new(&cwd)
         );
-        assert!(plan
+        // The target lives under sessions/<--tmp-…-->/ — compare components,
+        // not a separator-bearing substring (Windows displays backslashes).
+        let parts: Vec<String> = plan
             .target_path
-            .display()
-            .to_string()
-            .contains("sessions/--tmp-"));
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            parts
+                .windows(2)
+                .any(|w| w[0] == "sessions" && w[1].starts_with("--tmp-")),
+            "target: {}",
+            plan.target_path.display()
+        );
     }
 
     /// dsh fixture → canonical → dsh writer → re-read with our dsh reader.
