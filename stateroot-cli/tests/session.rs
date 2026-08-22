@@ -46,8 +46,11 @@ fn write_lines(path: &Path, lines: &[String]) {
 /// `PI_CODING_AGENT_DIR` at.
 fn pi_fixture(cwd: &str) -> tempfile::TempDir {
     let agent = tempfile::tempdir().expect("pi agent");
+    // JSON-escape the cwd — Windows paths contain backslashes, which are
+    // invalid raw JSON escapes and would silently void the fixture.
+    let cwd_json = serde_json::to_string(cwd).expect("cwd json");
     let lines = vec![
-        format!(r#"{{"type":"session","version":3,"id":"pi-sess-1","timestamp":"2026-08-20T10:00:00.000Z","cwd":"{cwd}"}}"#),
+        format!(r#"{{"type":"session","version":3,"id":"pi-sess-1","timestamp":"2026-08-20T10:00:00.000Z","cwd":{cwd_json}}}"#),
         r#"{"type":"message","id":"m1","parentId":null,"timestamp":"2026-08-20T10:00:01.000Z","message":{"role":"user","content":"write the migration","timestamp":1784272801000}}"#.to_string(),
         r#"{"type":"message","id":"m2","parentId":"m1","timestamp":"2026-08-20T10:00:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"migrating now"}],"timestamp":1784272802000}}"#.to_string(),
         r#"{"type":"model_change","id":"mc1","parentId":"m2","timestamp":"2026-08-20T10:00:03.000Z","provider":"deepseek","modelId":"deepseek-v4-flash"}"#.to_string(),
@@ -64,8 +67,9 @@ fn pi_fixture(cwd: &str) -> tempfile::TempDir {
 /// A dsh session fixture about `cwd`; returns the home to point `DSH_HOME` at.
 fn dsh_fixture(cwd: &str) -> tempfile::TempDir {
     let dsh_home = tempfile::tempdir().expect("dsh home");
+    let cwd_json = serde_json::to_string(cwd).expect("cwd json");
     let lines = vec![
-        format!(r#"{{"type":"session","version":0,"id":"dsh-sess-1","createdAt":1784272800000,"cwd":"{cwd}","delegationDepth":0}}"#),
+        format!(r#"{{"type":"session","version":0,"id":"dsh-sess-1","createdAt":1784272800000,"cwd":{cwd_json},"delegationDepth":0}}"#),
         r#"{"type":"turn/start","seq":0,"time":1784272801000,"data":{"turn":1}}"#.to_string(),
         r#"{"type":"user/message","seq":1,"time":1784272801001,"data":{"id":"u1","role":"user","content":[{"type":"text","text":"migrate the schema"}],"source":{"kind":"user"}},"surfaceOp":"append"}"#.to_string(),
         r#"{"type":"step/start","seq":2,"time":1784272801002,"data":{"turn":1,"step":1}}"#.to_string(),
