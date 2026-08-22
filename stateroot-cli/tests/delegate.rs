@@ -56,6 +56,7 @@ fn delegations(project: &Path) -> std::path::PathBuf {
     project.join(".stateroot/delegations")
 }
 
+#[cfg(unix)] // all call sites are unix-gated fixture tests (windows clippy: dead code)
 fn read_record(project: &Path) -> serde_json::Value {
     let dir = delegations(project);
     let entry = std::fs::read_dir(&dir)
