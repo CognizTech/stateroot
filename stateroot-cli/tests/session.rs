@@ -294,3 +294,192 @@ fn session_transfer_to_pi_and_dsh_with_fidelity() {
         .assert()
         .failure();
 }
+
+/// Claude/codex/kimi/openclaw file fixtures plus cursor/hermes sqlite stores,
+/// all about `cwd`; returns nothing — everything lives under `user_home`.
+fn seed_remaining_harnesses(user_home: &Path, cwd: &str) {
+    let cwd_json = serde_json::to_string(cwd).expect("cwd json");
+
+    // claude: ~/.claude/projects/<slug>/<session>.jsonl
+    write_lines(
+        &user_home.join(".claude/projects/-tmp-demo/cl-sess-1.jsonl"),
+        &[
+            format!(r#"{{"type":"user","uuid":"u1","parentUuid":null,"message":{{"role":"user","content":"claude task"}},"timestamp":"2026-07-10T09:00:01Z","cwd":{cwd_json},"sessionId":"cl-sess-1"}}"#),
+            r#"{"type":"assistant","uuid":"u2","parentUuid":"u1","message":{"role":"assistant","content":[{"type":"text","text":"claude answer"}]},"timestamp":"2026-07-10T09:00:02Z"}"#.to_string(),
+        ],
+    );
+
+    // codex: ~/.codex/sessions/yyyy/mm/dd/rollout-*.jsonl
+    write_lines(
+        &user_home.join(".codex/sessions/2026/08/01/rollout-codex-1.jsonl"),
+        &[
+            format!(r#"{{"type":"session_meta","payload":{{"id":"codex-1","cwd":{cwd_json},"timestamp":"2026-08-01T10:00:00Z"}}}}"#),
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"codex task"}]},"timestamp":"2026-08-01T10:00:01Z"}"#.to_string(),
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"codex answer"}]},"timestamp":"2026-08-01T10:00:02Z"}"#.to_string(),
+        ],
+    );
+
+    // kimi: wire.jsonl + session_index.jsonl for the cwd binding.
+    write_lines(
+        &user_home.join(".kimi-code/sessions/wd_demo/kimi-1/agents/main/wire.jsonl"),
+        &[
+            r#"{"type":"metadata","protocol_version":"1.0","created_at":1784310494250}"#.to_string(),
+            r#"{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"kimi task"}]},"time":1784310495000}"#.to_string(),
+            r#"{"type":"context.append_message","message":{"role":"assistant","content":[{"type":"text","text":"kimi answer"}]},"time":1784310496000}"#.to_string(),
+        ],
+    );
+    write_lines(
+        &user_home.join(".kimi-code/session_index.jsonl"),
+        &[format!(r#"{{"sessionId":"kimi-1","workDir":{cwd_json}}}"#)],
+    );
+
+    // openclaw: ~/.openclaw/agents/main/sessions/*.jsonl
+    write_lines(
+        &user_home.join(".openclaw/agents/main/sessions/oc-1.jsonl"),
+        &[
+            format!(r#"{{"type":"session","version":1,"id":"oc-1","timestamp":"2026-07-10T09:00:00Z","cwd":{cwd_json}}}"#),
+            r#"{"type":"message","id":"m1","message":{"role":"user","content":[{"type":"text","text":"openclaw task"}]}}"#.to_string(),
+            r#"{"type":"message","id":"m2","message":{"role":"assistant","content":[{"type":"text","text":"openclaw answer"}]}}"#.to_string(),
+        ],
+    );
+
+    // cursor: state.vscdb (composerHeaders + cursorDiskKV bubbles).
+    let cursor_dir = user_home.join(".config/Cursor/User/globalStorage");
+    std::fs::create_dir_all(&cursor_dir).expect("cursor dir");
+    let db = rusqlite::Connection::open(cursor_dir.join("state.vscdb")).expect("cursor db");
+    db.execute_batch(
+        "CREATE TABLE composerHeaders (composerId TEXT, value TEXT);
+         CREATE TABLE cursorDiskKV (key TEXT, value TEXT);",
+    )
+    .expect("cursor schema");
+    db.execute(
+        "INSERT INTO composerHeaders (composerId, value) VALUES ('cur-1', ?1)",
+        [serde_json::json!({"type":"head","composerId":"cur-1","createdAt":1781508855958i64,"workspaceIdentifier":{"uri":{"fsPath":cwd}}}).to_string()],
+    )
+    .expect("cursor head");
+    for (id, bubble_type, text) in [("b-1", 1, "cursor task"), ("b-2", 2, "cursor answer")] {
+        db.execute(
+            "INSERT INTO cursorDiskKV (key, value) VALUES (?1, ?2)",
+            [
+                format!("bubbleId:cur-1:{id}"),
+                serde_json::json!({"_v":3,"type":bubble_type,"text":text,"createdAt":"2026-07-01T10:00:01Z"}).to_string(),
+            ],
+        )
+        .expect("bubble");
+    }
+    drop(db);
+
+    // hermes: ~/.hermes/state.db (sessions + messages).
+    let hermes_dir = user_home.join(".hermes");
+    std::fs::create_dir_all(&hermes_dir).expect("hermes dir");
+    let db = rusqlite::Connection::open(hermes_dir.join("state.db")).expect("hermes db");
+    db.execute_batch(
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, cwd TEXT, git_repo_root TEXT, started_at REAL, ended_at REAL);
+         CREATE TABLE messages (session_id TEXT, role TEXT, content TEXT, tool_calls TEXT, tool_name TEXT, timestamp REAL);",
+    )
+    .expect("hermes schema");
+    db.execute(
+        "INSERT INTO sessions (id, cwd, git_repo_root, started_at, ended_at) VALUES ('her-1', ?1, '', 1700000000, 1700000060)",
+        [cwd],
+    )
+    .expect("hermes session");
+    for (role, content, ts) in [
+        ("user", "hermes task", 1700000001.0),
+        ("assistant", "hermes answer", 1700000002.0),
+    ] {
+        db.execute(
+            "INSERT INTO messages (session_id, role, content, tool_calls, tool_name, timestamp) VALUES ('her-1', ?1, ?2, '', '', ?3)",
+            rusqlite::params![role, content, ts],
+        )
+        .expect("hermes message");
+    }
+    drop(db);
+}
+
+#[test]
+fn session_sync_covers_every_harness() {
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    let cwd = project.path().display().to_string();
+    let pi_agent = pi_fixture(&cwd);
+    let dsh_home = dsh_fixture(&cwd);
+    seed_remaining_harnesses(user_home.path(), &cwd);
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .env("PI_CODING_AGENT_DIR", pi_agent.path())
+        .env("DSH_HOME", dsh_home.path())
+        .args(["session", "sync"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains("session sync: 8 sessions canonicalized"),
+        "stdout: {stdout}"
+    );
+    for harness in [
+        "claude", "codex", "cursor", "dsh", "hermes", "kimi", "openclaw", "pi",
+    ] {
+        assert!(
+            stdout.contains(&format!("{harness}: 1")),
+            "{harness} missing: {stdout}"
+        );
+    }
+
+    // One canonical file per harness session.
+    let store = project.path().join(".stateroot/local/sessions");
+    for file in [
+        "claude-cl-sess-1.jsonl",
+        "codex-codex-1.jsonl",
+        "cursor-cur-1.jsonl",
+        "dsh-dsh-sess-1.jsonl",
+        "hermes-her-1.jsonl",
+        "kimi-kimi-1.jsonl",
+        "openclaw-oc-1.jsonl",
+        "pi-pi-sess-1.jsonl",
+    ] {
+        assert!(store.join(file).is_file(), "missing {file}");
+    }
+
+    // list + show handle every harness.
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["session", "list"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    for id in [
+        "cl-sess-1",
+        "codex-1",
+        "cur-1",
+        "dsh-sess-1",
+        "her-1",
+        "kimi-1",
+        "oc-1",
+        "pi-sess-1",
+    ] {
+        assert!(stdout.contains(id), "{id} missing from list: {stdout}");
+    }
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["session", "show", "kimi-1"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(stdout.contains("session kimi-1 (kimi)"), "show: {stdout}");
+    assert!(stdout.contains("kimi task"), "show: {stdout}");
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["session", "show", "cur-1"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(stdout.contains("cursor task"), "show: {stdout}");
+
+    // Episodic lineage counts every harness.
+    let episodic =
+        std::fs::read_to_string(project.path().join(".stateroot/memories/episodic.jsonl"))
+            .expect("episodic");
+    assert!(
+        episodic.contains("session sync: 8 sessions canonicalized"),
+        "{episodic}"
+    );
+}

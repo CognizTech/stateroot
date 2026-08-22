@@ -285,8 +285,10 @@ fn scheduled_identity_output(
         stateroot_core::persona_injection::Decision::Full => digest_builder(identity),
         stateroot_core::persona_injection::Decision::Compressed => {
             let name = stateroot_core::persona_injection::persona_name(identity);
+            let tagline = stateroot_core::persona_injection::persona_tagline(identity);
             let pointer = stateroot_core::persona_injection::compressed_pointer(
                 &name,
+                &tagline,
                 &home
                     .join(stateroot_core::soul::SOUL_DIR)
                     .join(stateroot_core::soul::CANONICAL_FILE),

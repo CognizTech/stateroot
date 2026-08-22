@@ -134,8 +134,8 @@ pub trait TranscriptReader {
     fn scan(&self, home: &Path, project_dir: &Path) -> Vec<TranscriptSession>;
 }
 
-/// Readers with a verified format today (cursor/kimi are intentionally
-/// pending — their stores are not fabricated).
+/// Readers with a verified format — every registered harness has one
+/// (cursor/kimi were pending once; their readers are verified now).
 pub fn readers() -> Vec<Box<dyn TranscriptReader>> {
     vec![
         Box::new(codex::CodexReader),

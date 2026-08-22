@@ -10,7 +10,7 @@
 //! 1. FULL fires ONLY on (a) session start / first prompt_submit of a
 //!    session, (b) pre_compact / post_compaction events, (c) content change
 //!    (the persona+user content hash differs from the last FULL injection).
-//! 2. COMPRESSED fires every 15th prompt_submit since the last FULL.
+//! 2. COMPRESSED fires every 8th prompt_submit since the last FULL.
 //! 3. DEDUPE: no injection of any kind within 3 prompts OR 60 seconds of
 //!    the previous injection (state existing).
 //! 4. State is a small JSON in the USER-GLOBAL local dir
@@ -94,7 +94,7 @@ fn save_states(home: &Path, states: &BTreeMap<String, InjectionState>) -> std::i
 
 const DEDUPE_PROMPTS: i64 = 3;
 const DEDUPE_SECONDS: i64 = 60;
-const COMPRESSED_EVERY: i64 = 15;
+const COMPRESSED_EVERY: i64 = 8;
 
 fn parse_ts(ts: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::DateTime::parse_from_rfc3339(ts)
@@ -164,12 +164,51 @@ pub fn decide(
     Decision::Nothing
 }
 
-/// The 1–2 line compressed pointer (~20 tokens).
-pub fn compressed_pointer(persona_name: &str, persona_path: &Path) -> String {
+/// The 1–2 line compressed pointer (~30 tokens): name + a one-line voice
+/// anchor from the persona text, so sparse injections re-anchor *behavior*
+/// (how to speak), not just point at a file on disk.
+pub fn compressed_pointer(persona_name: &str, tagline: &str, persona_path: &Path) -> String {
+    let anchor = if tagline.is_empty() {
+        String::new()
+    } else {
+        format!(" — {tagline}")
+    };
     format!(
-        "{persona_name} — {} (unchanged since last full injection)",
+        "{persona_name}{anchor} (unchanged since last full injection: {})",
         persona_path.display()
     )
+}
+
+/// One-line voice anchor for the compressed pointer: the first prose line of
+/// the Persona/SOUL section when present, else the first non-heading line
+/// (list markers and emphasis stripped). Capped — the pointer stays cheap.
+pub fn persona_tagline(persona_text: &str) -> String {
+    let lines: Vec<&str> = persona_text.lines().collect();
+    let soul_at = lines
+        .iter()
+        .position(|l| l.contains("SOUL.md") && l.trim_start().starts_with('#'));
+    let search_from = soul_at.map(|i| i + 1).unwrap_or(0);
+    let mut fallback = "";
+    for line in lines.iter().skip(search_from) {
+        let cleaned = line
+            .trim()
+            .trim_start_matches('-')
+            .trim()
+            .trim_matches('*')
+            .trim_matches('_')
+            .trim();
+        if cleaned.is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        // Prefer real prose over `Field: value` frontmatter-ish lines.
+        if !cleaned.contains(':') || soul_at.is_some() {
+            return cleaned.chars().take(120).collect();
+        }
+        if fallback.is_empty() {
+            fallback = cleaned;
+        }
+    }
+    fallback.chars().take(120).collect()
 }
 
 /// Persona display name for the pointer: first markdown heading in the
@@ -213,7 +252,7 @@ pub fn apply(
                 state.content_hash = content_hash.to_string();
             }
             // The injecting prompt_submit itself counts as cycle prompt #1,
-            // so COMPRESSED fires on the 15th prompt of the cycle.
+            // so COMPRESSED fires on the 8th prompt of the cycle.
             state.prompts_since_full = if canonical == "user_prompt_submit" {
                 1
             } else {
@@ -353,18 +392,18 @@ mod tests {
     }
 
     #[test]
-    fn cadence_fires_compressed_every_fifteenth() {
-        let s = state(0, 0, "h1", 13, 4);
+    fn cadence_fires_compressed_every_eighth() {
+        let s = state(0, 0, "h1", 6, 4);
         assert_eq!(
             decide(Some(&s), "user_prompt_submit", "h1", t(100)),
             Decision::Nothing
         );
-        let s = state(0, 0, "h1", 14, 4);
+        let s = state(0, 0, "h1", 7, 4);
         assert_eq!(
             decide(Some(&s), "user_prompt_submit", "h1", t(100)),
             Decision::Compressed
         );
-        let s = state(0, 0, "h1", 29, 4);
+        let s = state(0, 0, "h1", 15, 4);
         assert_eq!(
             decide(Some(&s), "user_prompt_submit", "h1", t(100)),
             Decision::Compressed
@@ -379,14 +418,14 @@ mod tests {
             decide(Some(&s), "user_prompt_submit", "h1", t(1000)),
             Decision::Nothing
         );
-        // ≥ 3 prompts but < 60s → Nothing.
-        let s = state(0, 0, "h1", 14, 4);
+        // ≥ 3 prompts but < 60s → Nothing (even when the cadence would fire).
+        let s = state(0, 0, "h1", 7, 4);
         assert_eq!(
             decide(Some(&s), "user_prompt_submit", "h1", t(30)),
             Decision::Nothing
         );
         // ≥ 3 prompts AND ≥ 60s → cadence applies.
-        let s = state(0, 0, "h1", 14, 4);
+        let s = state(0, 0, "h1", 7, 4);
         assert_eq!(
             decide(Some(&s), "user_prompt_submit", "h1", t(100)),
             Decision::Compressed
@@ -424,12 +463,16 @@ mod tests {
 
     #[test]
     fn pointer_is_compact_and_shaped() {
-        let pointer = compressed_pointer("Yinyue", Path::new("/home/u/.stateroot/soul/SOUL.md"));
+        let pointer = compressed_pointer(
+            "Yinyue",
+            "speaks in riddles",
+            Path::new("/home/u/.stateroot/soul/SOUL.md"),
+        );
         assert!(pointer.lines().count() <= 2);
         assert!(pointer.contains("Yinyue"));
         assert!(pointer.contains("SOUL.md"));
         assert!(pointer.contains("unchanged since last full injection"));
-        assert!(pointer.len() < 120, "~20 tokens: {pointer}");
+        assert!(pointer.len() < 160, "~35 tokens: {pointer}");
     }
 
     #[test]
@@ -567,20 +610,18 @@ mod tests {
         let mut seq = String::new();
         let first = decide_and_record(home.path(), key, "user_prompt_submit", "h1", t(now), true);
         assert_eq!(first, Decision::Full);
-        for _ in 2..=14 {
+        let mut last = Decision::Nothing;
+        for _ in 2..=8 {
             now += 31 * 60;
-            let d = decide_and_record(home.path(), key, "user_prompt_submit", "h1", t(now), true);
-            seq.push(match d {
+            last = decide_and_record(home.path(), key, "user_prompt_submit", "h1", t(now), true);
+            seq.push(match last {
                 Decision::Full => 'F',
                 Decision::Compressed => 'C',
                 Decision::Nothing => '.',
             });
         }
-        now += 31 * 60;
-        let fifteenth =
-            decide_and_record(home.path(), key, "user_prompt_submit", "h1", t(now), true);
-        assert_eq!(fifteenth, Decision::Compressed, "sequence: {seq}");
-        assert_eq!(seq.matches('.').count(), 13, "sequence: {seq}");
+        assert_eq!(last, Decision::Compressed, "sequence: {seq}");
+        assert_eq!(seq.matches('.').count(), 6, "sequence: {seq}");
     }
 
     #[test]
@@ -612,17 +653,45 @@ mod tests {
     }
 
     #[test]
+    fn tagline_prefers_the_soul_prose_line() {
+        let composed = "### Identity (IDENTITY.md)\n\n- **Name:** Marid\n- **Emoji:** 🪔\n\n### Persona (SOUL.md)\n\n*I am Marid, the jinn of the lamp. Classical. Arabian Nights, not Hollywood.*\n";
+        assert_eq!(
+            persona_tagline(composed),
+            "I am Marid, the jinn of the lamp. Classical. Arabian Nights, not Hollywood."
+        );
+        // No SOUL section: first plain line wins, list markers stripped.
+        assert_eq!(
+            persona_tagline("# Soul\n\n- Tone: direct\n"),
+            "Tone: direct"
+        );
+        assert!(persona_tagline("# Only headings\n").is_empty());
+    }
+
+    #[test]
+    fn compressed_pointer_carries_the_voice_anchor() {
+        let pointer = compressed_pointer(
+            "Marid",
+            "I am Marid, the jinn of the lamp.",
+            Path::new("/home/u/.stateroot/soul/SOUL.md"),
+        );
+        assert!(pointer.contains("Marid — I am Marid, the jinn of the lamp."));
+        assert!(pointer.contains("unchanged since last full injection"));
+        assert!(pointer.contains("SOUL.md"));
+        let bare = compressed_pointer("Persona", "", Path::new("/p/SOUL.md"));
+        assert!(bare.starts_with("Persona ("));
+    }
+
+    #[test]
     fn full_flow_cadence_over_a_session() {
         let home = tempfile::tempdir().expect("home");
         let key = "p:s1";
         let mut now = 0i64;
         let mut seq = String::new();
-        // First prompt: FULL. Then 14 quiet prompts (dedupe spaced out),
-        // then a COMPRESSED at the 15th.
+        // First prompt: FULL. Prompts 2–7 quiet; prompt 8 COMPRESSED;
+        // 9–15 quiet again; prompt 16 COMPRESSED (every-8th cadence).
         let first = decide_and_record(home.path(), key, "user_prompt_submit", "h1", t(now), true);
         assert_eq!(first, Decision::Full);
-        // Prompts 2–14: silent (13 of them). Prompt 15: COMPRESSED.
-        for _ in 2..=14 {
+        for i in 2..=16 {
             now += 61;
             let d = decide_and_record(home.path(), key, "user_prompt_submit", "h1", t(now), true);
             seq.push(match d {
@@ -630,11 +699,13 @@ mod tests {
                 Decision::Compressed => 'C',
                 Decision::Nothing => '.',
             });
+            if i == 8 || i == 16 {
+                assert_eq!(d, Decision::Compressed, "prompt {i}, sequence: {seq}");
+            } else {
+                assert_eq!(d, Decision::Nothing, "prompt {i}, sequence: {seq}");
+            }
         }
-        now += 61;
-        let fifteenth =
-            decide_and_record(home.path(), key, "user_prompt_submit", "h1", t(now), true);
-        assert_eq!(fifteenth, Decision::Compressed, "sequence: {seq}");
         assert_eq!(seq.matches('.').count(), 13, "sequence: {seq}");
+        assert_eq!(seq.matches('C').count(), 2, "sequence: {seq}");
     }
 }

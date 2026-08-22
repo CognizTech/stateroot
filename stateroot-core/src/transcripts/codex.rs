@@ -25,6 +25,53 @@ use crate::harness_install::paths;
 /// Codex rollout reader.
 pub struct CodexReader;
 
+/// Rollout files with the same dedup the summary scan applies: active store
+/// first, archived second, first file for a session id wins (the canonical
+/// import must never let an archived copy overwrite the active one).
+pub(crate) fn session_files(home: &Path) -> Vec<std::path::PathBuf> {
+    let rollout = |p: &Path| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.starts_with("rollout-") && n.ends_with(".jsonl"))
+            .unwrap_or(false)
+    };
+    let (sessions, archived) = paths::codex_transcript_roots(home);
+    let mut files = walk_files(&sessions, &rollout);
+    files.extend(walk_files(&archived, &rollout));
+    let mut seen = std::collections::HashSet::new();
+    files
+        .into_iter()
+        .filter(|file| {
+            let id = parse_session_file(file)
+                .and_then(|(meta, _)| {
+                    meta.pointer("/payload/id")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| file.display().to_string());
+            seen.insert(id)
+        })
+        .collect()
+}
+
+/// Raw parse of one rollout: the `session_meta` line plus event lines as
+/// verbatim JSON (unparseable lines skipped, mirroring the summary reader).
+pub(crate) fn parse_session_file(path: &Path) -> Option<(Value, Vec<Value>)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+    let meta: Value = serde_json::from_str(lines.next()?).ok()?;
+    if meta.get("type").and_then(|v| v.as_str()) != Some("session_meta") {
+        return None;
+    }
+    let mut events = Vec::new();
+    for line in lines {
+        if let Ok(event) = serde_json::from_str::<Value>(line) {
+            events.push(event);
+        }
+    }
+    Some((meta, events))
+}
+
 impl TranscriptReader for CodexReader {
     fn id(&self) -> &'static str {
         "codex"

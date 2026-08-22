@@ -12,6 +12,8 @@
 
 pub mod transfer;
 
+mod extract;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -20,7 +22,7 @@ use serde_json::{json, Value};
 
 use crate::harness_install::paths;
 use crate::local_store::{self, now_rfc3339};
-use crate::transcripts::{self, dsh, pi};
+use crate::transcripts::{self, claude, codex, cursor, dsh, hermes, kimi, openclaw, pi};
 
 /// Schema tag on the header line.
 pub const SCHEMA_SESSION_V1: &str = "stateroot.session.v1";
@@ -158,6 +160,26 @@ fn canonical_from_pi(raw: &pi::RawSession, source_path: &Path) -> Option<Canonic
                             entries.push(e);
                         }
                         if role == "assistant" {
+                            // Thinking blocks are model content — preserved
+                            // as meta, same as dsh reasoning.
+                            if let Some(Value::Array(blocks)) = message.get("content") {
+                                for block in blocks {
+                                    if block.get("type").and_then(|v| v.as_str())
+                                        == Some("thinking")
+                                    {
+                                        let mut r = CanonicalEntry::new("meta");
+                                        r.id = base.id.clone();
+                                        r.parent_id = base.id.clone();
+                                        r.ts = base.ts.clone();
+                                        r.native_type = Some("thinking".into());
+                                        r.content = block
+                                            .get("thinking")
+                                            .and_then(|v| v.as_str())
+                                            .map(str::to_string);
+                                        entries.push(r);
+                                    }
+                                }
+                            }
                             for (call_id, name, arguments) in pi::tool_calls(&message) {
                                 let mut call = CanonicalEntry::new("tool_call");
                                 call.id = Some(call_id);
@@ -466,6 +488,95 @@ pub fn import_from_readers_filtered(
             }
         }
     }
+
+    if harness.is_none_or(|h| h == "claude") {
+        for file in claude::session_files(home) {
+            let Some(events) = claude::parse_session_file(&file) else {
+                continue;
+            };
+            if let Some(session) = extract::canonical_from_claude(&events, &file, project_dir) {
+                import_one(session, &mut report);
+            }
+        }
+    }
+
+    if harness.is_none_or(|h| h == "codex") {
+        for file in codex::session_files(home) {
+            let Some((meta, events)) = codex::parse_session_file(&file) else {
+                continue;
+            };
+            if let Some(session) = extract::canonical_from_codex(&meta, &events, &file, project_dir)
+            {
+                import_one(session, &mut report);
+            }
+        }
+    }
+
+    if harness.is_none_or(|h| h == "kimi") {
+        let index = kimi::read_session_index(home);
+        for file in kimi::session_files(home) {
+            let Some((meta, records)) = kimi::parse_wire_raw(&file) else {
+                continue;
+            };
+            let (session_id, agent) = kimi::ids_for(&file);
+            let Some(cwd) = index.get(&session_id) else {
+                continue;
+            };
+            // One canonical session per agent wire: `main` keeps the bare
+            // session id; other agents suffix it (collision-free store names).
+            let canonical_id = if agent == "main" {
+                session_id.clone()
+            } else {
+                format!("{session_id}-{agent}")
+            };
+            if let Some(session) = extract::canonical_from_kimi(
+                &meta,
+                &records,
+                &canonical_id,
+                cwd,
+                &file,
+                project_dir,
+            ) {
+                import_one(session, &mut report);
+            }
+        }
+    }
+
+    if harness.is_none_or(|h| h == "openclaw") {
+        for root in openclaw::store_roots(home) {
+            for file in openclaw::session_files_in(&root) {
+                let Some(events) = openclaw::parse_session_file(&file) else {
+                    continue;
+                };
+                if let Some(session) = extract::canonical_from_openclaw(&events, &file, project_dir)
+                {
+                    import_one(session, &mut report);
+                }
+            }
+        }
+    }
+
+    if harness.is_none_or(|h| h == "cursor") {
+        for db_path in cursor::db_candidates(home) {
+            let Ok(db) = cursor::open_immutable(&db_path) else {
+                continue;
+            };
+            for raw in cursor::raw_sessions(&db, project_dir) {
+                import_one(extract::canonical_from_cursor(&raw, &db_path), &mut report);
+            }
+        }
+    }
+
+    if harness.is_none_or(|h| h == "hermes") {
+        for db_path in hermes::db_candidates(home) {
+            let Ok(db) = cursor::open_immutable(&db_path) else {
+                continue;
+            };
+            for raw in hermes::raw_sessions(&db, project_dir) {
+                import_one(extract::canonical_from_hermes(&raw, &db_path), &mut report);
+            }
+        }
+    }
     report
 }
 
@@ -561,18 +672,43 @@ pub fn list(project_dir: &Path) -> Vec<StoredSession> {
 
 /// Load one canonical session by id (exact, or a unique prefix).
 pub fn load(project_dir: &Path, id: &str) -> Option<StoredSession> {
+    resolve(project_dir, id).ok()
+}
+
+/// [`load`] with a truthful error: unknown id vs ambiguous prefix (candidate
+/// ids listed, capped at five).
+pub fn resolve(project_dir: &Path, id: &str) -> Result<StoredSession, String> {
     let all = list(project_dir);
     if let Some(exact) = all.iter().find(|s| s.session_id == id) {
-        return Some(exact.clone());
+        return Ok(exact.clone());
     }
     let matches: Vec<&StoredSession> = all
         .iter()
         .filter(|s| s.session_id.starts_with(id))
         .collect();
-    if matches.len() == 1 {
-        Some(matches[0].clone())
-    } else {
-        None
+    match matches.len() {
+        0 => Err(format!(
+            "no canonical session matches `{id}` — run `stateroot session list`"
+        )),
+        1 => Ok(matches[0].clone()),
+        n => {
+            let mut ids: Vec<&str> = matches.iter().map(|s| s.session_id.as_str()).collect();
+            ids.sort_unstable();
+            let preview = ids
+                .iter()
+                .take(5)
+                .map(|i| format!("  {i}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let more = if n > 5 {
+                format!("\n  … and {} more", n - 5)
+            } else {
+                String::new()
+            };
+            Err(format!(
+                "`{id}` is ambiguous — {n} canonical sessions match:\n{preview}{more}"
+            ))
+        }
     }
 }
 

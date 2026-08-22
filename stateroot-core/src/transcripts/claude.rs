@@ -23,6 +23,30 @@ use super::{
 /// Claude Code session reader.
 pub struct ClaudeReader;
 
+/// Every claude session file under the projects store.
+pub(crate) fn session_files(home: &Path) -> Vec<std::path::PathBuf> {
+    walk_files(&home.join(".claude/projects"), &|p| {
+        p.extension().and_then(|e| e.to_str()) == Some("jsonl")
+    })
+}
+
+/// Raw parse of one session file: the event lines as verbatim JSON
+/// (unparseable lines skipped, mirroring the summary reader). `None` when
+/// the file holds no JSON at all.
+pub(crate) fn parse_session_file(path: &Path) -> Option<Vec<Value>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let events: Vec<Value> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    if events.is_empty() {
+        None
+    } else {
+        Some(events)
+    }
+}
+
 impl TranscriptReader for ClaudeReader {
     fn id(&self) -> &'static str {
         "claude"

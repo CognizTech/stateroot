@@ -5,15 +5,30 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- Canonical sessions now cover EVERY harness: `stateroot session sync`
+  extracts full-fidelity canonical timelines from all eight transcript
+  stores — claude (`~/.claude/projects/**`), codex (rollout + archived
+  stores, deduped active-first), kimi (wire files + session index —
+  stateroot's own harness, dogfooded), openclaw, cursor and hermes (sqlite
+  stores, opened immutable) — alongside pi and dsh. Verbatim content, no
+  caps; native ids/parents kept where the format has them (claude
+  uuid/parentUuid, tool-call correlations); injected envelopes, thinking
+  blocks, harness control records, and unknown types land as `meta` with
+  `native_type` (cursor's unverified `toolResults` are preserved raw).
+  Transfer targets are unchanged (pi/dsh only).
 - Persona injection: removed the wall-clock staleness trigger
   (`SESSION_STALE_MINUTES`) from the injection scheduler. Long agent turns
   routinely idle past any fixed threshold, so the time rule re-injected the
   FULL persona block on nearly every user message. New sessions are now
   recognized by session keys only (harnesses with session ids); the remaining
   FULL triggers are unchanged (first contact, session_start, content change,
-  compaction boundaries, first prompt of a session), as is the every-15th
-  COMPRESSED pointer cadence. The digest-delivery ledger keeps its own
-  staleness window for resume-dedupe — untouched.
+  compaction boundaries, first prompt of a session). The digest-delivery
+  ledger keeps its own staleness window for resume-dedupe — untouched.
+  Follow-up: the COMPRESSED pointer now carries a one-line voice anchor
+  extracted from the persona text (`name — tagline (unchanged since last
+  full injection: <path>)`) so sparse injections re-anchor *behavior*, not
+  just a file path, and its cadence tightened from every 15th to every 8th
+  prompt (~30 tokens a pointer).
 - Central plan artifacts + lifecycle: `stateroot plan record --file|--stdin
   [--title] [--from]` / `list` / `show` / `approve` / `activate` / `done` /
   `abandon`. Plans live at `.stateroot/plans/<id>.md` (verbatim markdown)

@@ -106,14 +106,21 @@ echo "checkpoint recorded in $STATEROOT_PROJECT_DIR"
 ## `stateroot session` — canonical sessions & cross-harness transfer
 
 Sessions belong to StateRoot: standardized, shared, portable across
-harnesses. `stateroot session sync` canonicalizes Pi (`$PI_CODING_AGENT_DIR`
-or `~/.pi/agent/sessions`) and DSH (`$DSH_HOME` or `~/.dsh/sessions`)
-sessions into `.stateroot/local/sessions/` as `stateroot.session.v1` JSONL:
-a header line, then one full-fidelity entry per line (`message`,
-`tool_call`, `tool_result`, `compaction`, `plan`, `meta`). Entries are
-never content-capped (display paths cap); unmapped native types are kept as
-`meta` with `native_type` — nothing silently vanishes. Sync is idempotent
-(each session file is rewritten whole).
+harnesses. `stateroot session sync` canonicalizes sessions from every
+harness store — claude (`~/.claude/projects/**`), codex (rollout + archived
+stores), kimi (wire files + session index — stateroot's own harness,
+dogfooded), openclaw, cursor and hermes (sqlite state stores, opened
+immutable), pi (`$PI_CODING_AGENT_DIR` or `~/.pi/agent/sessions`), and dsh
+(`$DSH_HOME` or `~/.dsh/sessions`) — into `.stateroot/local/sessions/` as
+`stateroot.session.v1` JSONL: a header line, then one full-fidelity entry
+per line (`message`, `tool_call`, `tool_result`, `compaction`, `plan`,
+`meta`). Entries are never content-capped (display paths cap); native
+ids/parents are kept where the format has them; unmapped native types are
+kept as `meta` with `native_type` — nothing silently vanishes (injected
+envelopes, thinking blocks, harness control records, and cursor's
+unverified `toolResults` are all preserved and marked). Sync is idempotent
+(each session file is rewritten whole; codex active-store copies win over
+archived duplicates).
 
 - **The `local/` boundary** — canonical sessions live under
   `.stateroot/local/`, never pinned into roots (same rule as

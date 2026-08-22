@@ -14,7 +14,7 @@
 //! envelope check. `think` content blocks are reasoning — dropped.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
@@ -26,6 +26,43 @@ use super::{
 
 /// Kimi Code wire reader.
 pub struct KimiReader;
+
+/// Every wire file under the kimi sessions store.
+pub(crate) fn session_files(home: &Path) -> Vec<PathBuf> {
+    walk_files(&home.join(".kimi-code/sessions"), &|p| {
+        p.file_name().and_then(|n| n.to_str()) == Some("wire.jsonl")
+    })
+}
+
+/// `(session id, agent)` from the wire path
+/// (`…/<session-dir>/agents/<agent>/wire.jsonl`).
+pub(crate) fn ids_for(file: &Path) -> (String, String) {
+    let agent = file
+        .parent()
+        .and_then(|main| main.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("main")
+        .to_string();
+    (session_id_for(file), agent)
+}
+
+/// Raw parse of one wire file: the `metadata` line plus records as verbatim
+/// JSON (unparseable lines skipped, mirroring the summary reader).
+pub(crate) fn parse_wire_raw(path: &Path) -> Option<(Value, Vec<Value>)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+    let meta: Value = serde_json::from_str(lines.next()?).ok()?;
+    if meta.get("type").and_then(|v| v.as_str()) != Some("metadata") {
+        return None;
+    }
+    let mut events = Vec::new();
+    for line in lines {
+        if let Ok(event) = serde_json::from_str::<Value>(line) {
+            events.push(event);
+        }
+    }
+    Some((meta, events))
+}
 
 /// session id → workDir from `~/.kimi-code/session_index.jsonl`.
 pub(crate) fn read_session_index(home: &Path) -> HashMap<String, String> {

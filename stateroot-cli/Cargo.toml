@@ -38,4 +38,5 @@ tempfile.workspace = true
 assert_cmd.workspace = true
 predicates.workspace = true
 wiremock.workspace = true
+rusqlite.workspace = true
 tokio = { workspace = true, features = ["full"] }

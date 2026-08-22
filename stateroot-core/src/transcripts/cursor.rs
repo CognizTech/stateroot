@@ -25,6 +25,80 @@ use super::{clean, cwd_matches, push_unique, Outcome, TranscriptReader, Transcri
 /// Cursor state-db reader.
 pub struct CursorReader;
 
+/// A composer's raw rows: parsed head JSON plus bubbles in chronological
+/// order — `(bubbleId, createdAt coerced to string, bubble)`.
+pub(crate) struct RawSession {
+    pub(crate) head: Value,
+    pub(crate) bubbles: Vec<(String, String, Value)>,
+}
+
+/// Every composer session belonging to `project_dir` with its raw bubble
+/// rows (same store queries and coercion as the summary reader).
+pub(crate) fn raw_sessions(db: &rusqlite::Connection, project_dir: &Path) -> Vec<RawSession> {
+    let mut out = Vec::new();
+    let mut stmt = match db.prepare("SELECT composerId, value FROM composerHeaders") {
+        Ok(stmt) => stmt,
+        Err(_) => return out,
+    };
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map(|mapped| mapped.flatten().collect::<Vec<_>>())
+        .unwrap_or_default();
+    for (composer_id, head_json) in rows {
+        let Ok(head) = serde_json::from_str::<Value>(&head_json) else {
+            continue;
+        };
+        let cwd = head
+            .pointer("/workspaceIdentifier/uri/fsPath")
+            .or_else(|| head.pointer("/workspaceIdentifier/uri/path"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if cwd.is_empty() || !cwd_matches(cwd, project_dir) {
+            continue;
+        }
+        let pattern = format!("bubbleId:{composer_id}:*");
+        let Ok(mut stmt) = db.prepare("SELECT key, value FROM cursorDiskKV WHERE key GLOB ?1")
+        else {
+            continue;
+        };
+        let bubbles = stmt
+            .query_map([pattern], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map(|mapped| mapped.flatten().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let mut parsed: Vec<(String, String, Value)> = bubbles
+            .into_iter()
+            .filter_map(|(key, value)| {
+                let bubble: Value = serde_json::from_str(&value).ok()?;
+                let bubble_id = key.rsplit(':').next().unwrap_or("").to_string();
+                let created = bubble
+                    .get("createdAt")
+                    .map(|v| match v {
+                        Value::Number(n) => n
+                            .as_i64()
+                            .map(rfc3339_millis)
+                            .unwrap_or_else(|| n.to_string()),
+                        Value::String(s) => s.clone(),
+                        _ => String::new(),
+                    })
+                    .unwrap_or_default();
+                Some((bubble_id, created, bubble))
+            })
+            .collect();
+        parsed.sort_by(|a, b| a.1.cmp(&b.1));
+        if !parsed.is_empty() {
+            out.push(RawSession {
+                head,
+                bubbles: parsed,
+            });
+        }
+    }
+    out
+}
+
 /// Candidate locations of the global state db (Linux/macOS/Windows shapes).
 pub(crate) fn db_candidates(home: &Path) -> Vec<PathBuf> {
     [

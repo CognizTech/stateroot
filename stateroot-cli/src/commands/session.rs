@@ -85,9 +85,7 @@ pub fn list(ctx: &Ctx, harness: Option<&str>) -> anyhow::Result<()> {
 /// Run `stateroot session show <id>`.
 pub fn show(ctx: &Ctx, id: &str) -> anyhow::Result<()> {
     ctx.require_project()?;
-    let Some(session) = sessions::load(&ctx.cwd, id) else {
-        anyhow::bail!("no canonical session matches `{id}` — run `stateroot session list`");
-    };
+    let session = sessions::resolve(&ctx.cwd, id).map_err(anyhow::Error::msg)?;
     let (first, last, outcome) = sessions::summarize_stored(&session);
     println!(
         "session {} ({}) — {}",
@@ -157,9 +155,7 @@ fn display_line(entry: &sessions::CanonicalEntry) -> String {
 /// Run `stateroot session transfer <id> --to pi|dsh [--dry-run]`.
 pub fn transfer(ctx: &Ctx, id: &str, to: &str, dry_run: bool) -> anyhow::Result<()> {
     ctx.require_project()?;
-    let Some(session) = sessions::load(&ctx.cwd, id) else {
-        anyhow::bail!("no canonical session matches `{id}` — run `stateroot session list`");
-    };
+    let session = sessions::resolve(&ctx.cwd, id).map_err(anyhow::Error::msg)?;
     let home = stateroot_core::harness_install::home_dir().map_err(|e| anyhow::anyhow!(e))?;
     let new_id = uuid::Uuid::new_v4().to_string();
     let plan = match to {

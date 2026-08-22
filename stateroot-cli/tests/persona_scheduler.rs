@@ -1,5 +1,5 @@
 //! Persona injection scheduler — end-to-end through the hook binary.
-//! FULL on boundaries/change, COMPRESSED on the 15th, dedupe window,
+//! FULL on boundaries/change, COMPRESSED on the 8th, dedupe window,
 //! per-harness start detection, state in the user-global local dir.
 
 use std::path::Path;
@@ -21,7 +21,7 @@ fn seed_identity(user_home: &Path) {
     std::fs::create_dir_all(&soul_dir).expect("soul dir");
     std::fs::write(
         soul_dir.join("SOUL.md"),
-        "# Soul\n\n## Communication\n\n- Tone: direct\n\n## Principles\n\n- be exact\n",
+        "# Soul\n\nI am the Test Djinn — exact and brief.\n\n## Communication\n\n- Tone: direct\n\n## Principles\n\n- be exact\n",
     )
     .expect("soul");
     let user_dir = user_home.join(".stateroot/user");
@@ -73,8 +73,8 @@ fn first_prompt_full_then_dedupe_then_compressed_cadence() {
     );
     assert!(out.contains(MARKER), "first prompt must inject FULL: {out}");
 
-    // Prompts 2–14: dedupe (within 3 prompts / 60s windows as spaced).
-    for i in 2..=14 {
+    // Prompts 2–7: dedupe (within 3 prompts / 60s windows as spaced).
+    for i in 2..=7 {
         let out = hook_prompt(
             config_home.path(),
             user_home.path(),
@@ -85,20 +85,24 @@ fn first_prompt_full_then_dedupe_then_compressed_cadence() {
         assert!(out.trim().is_empty(), "prompt {i} must be silent: {out}");
     }
 
-    // 15th: COMPRESSED — pointer only, no persona body.
+    // 8th: COMPRESSED — pointer with voice anchor, no persona body.
     let out = hook_prompt(
         config_home.path(),
         user_home.path(),
         project.path(),
         "s1",
-        1_000 + 15 * 61,
+        1_000 + 8 * 61,
     );
     assert!(
         out.contains("unchanged since last full injection"),
         "compressed pointer: {out}"
     );
     assert!(out.contains("SOUL.md"), "persona path in pointer: {out}");
-    assert!(!out.contains(MARKER), "no full body in compressed: {out}");
+    assert!(out.contains("be exact"), "voice anchor in pointer: {out}");
+    assert!(
+        !out.contains("## Principles"),
+        "no full body in compressed: {out}"
+    );
 
     // State file lives in the user-global local dir (never the project).
     assert!(user_home

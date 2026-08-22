@@ -31,6 +31,45 @@ const PROGRESS_SUMMARIES_MAX: usize = 8;
 /// OpenClaw JSONL session reader.
 pub struct OpenClawReader;
 
+/// Session store roots: `$OPENCLAW_STATE_DIR` when set, then `~/.openclaw`.
+pub(crate) fn store_roots(home: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(state) = std::env::var("OPENCLAW_STATE_DIR") {
+        if !state.trim().is_empty() {
+            roots.push(PathBuf::from(state.trim()));
+        }
+    }
+    roots.push(home.join(".openclaw"));
+    roots
+}
+
+/// Every session file under `<root>/agents/**` (deleted sessions excluded).
+pub(crate) fn session_files_in(root: &Path) -> Vec<PathBuf> {
+    walk_files(&root.join("agents"), &|p| {
+        p.extension().and_then(|e| e.to_str()) == Some("jsonl")
+            && p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| !n.contains(".deleted."))
+                .unwrap_or(false)
+    })
+}
+
+/// Raw parse of one session file: the entry lines as verbatim JSON
+/// (unparseable lines skipped, mirroring the summary reader).
+pub(crate) fn parse_session_file(path: &Path) -> Option<Vec<Value>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let events: Vec<Value> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    if events.is_empty() {
+        None
+    } else {
+        Some(events)
+    }
+}
+
 impl TranscriptReader for OpenClawReader {
     fn id(&self) -> &'static str {
         "openclaw"
@@ -210,6 +249,12 @@ fn parse_session(file: &Path, project_dir: &Path) -> Option<TranscriptSession> {
         Outcome::Interrupted
     };
     Some(session)
+}
+
+/// Text of an openclaw message content field (bare string or text blocks;
+/// shared with the canonical extractor).
+pub(crate) fn extract_text_pub(content: Option<&Value>) -> String {
+    extract_text(content)
 }
 
 fn extract_text(content: Option<&Value>) -> String {

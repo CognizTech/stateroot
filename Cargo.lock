@@ -1740,6 +1740,7 @@ dependencies = [
  "include_dir",
  "predicates",
  "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml",

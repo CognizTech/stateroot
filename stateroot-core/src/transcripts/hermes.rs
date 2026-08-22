@@ -26,6 +26,81 @@ const TAIL_ENTRIES_MAX: usize = 24;
 /// Hermes `state.db` reader.
 pub struct HermesReader;
 
+/// A session's raw rows: id/cwd/span plus message rows `(role, content,
+/// tool_calls, tool_name, timestamp)` in table order.
+pub(crate) struct RawSession {
+    pub(crate) id: String,
+    pub(crate) cwd: String,
+    pub(crate) started: f64,
+    pub(crate) ended: f64,
+    pub(crate) messages: Vec<(String, String, String, String, f64)>,
+}
+
+/// Every session belonging to `project_dir` with its raw message rows (same
+/// store queries and filters as the summary reader).
+pub(crate) fn raw_sessions(db: &rusqlite::Connection, project_dir: &Path) -> Vec<RawSession> {
+    let mut out = Vec::new();
+    let mut stmt = match db.prepare(
+        "SELECT id, COALESCE(cwd,''), COALESCE(git_repo_root,''), \
+         COALESCE(started_at,0), COALESCE(ended_at,0) FROM sessions",
+    ) {
+        Ok(stmt) => stmt,
+        Err(_) => return out,
+    };
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, f64>(3).unwrap_or(0.0),
+                row.get::<_, f64>(4).unwrap_or(0.0),
+            ))
+        })
+        .map(|mapped| mapped.flatten().collect::<Vec<_>>())
+        .unwrap_or_default();
+    for (id, cwd, git_root, started, ended) in rows {
+        let filter_path = if !git_root.trim().is_empty() {
+            git_root.as_str()
+        } else {
+            cwd.as_str()
+        };
+        if filter_path.is_empty() || !cwd_matches(filter_path, project_dir) {
+            continue;
+        }
+        let Ok(mut stmt) = db.prepare(
+            "SELECT COALESCE(role,''), COALESCE(content,''), COALESCE(tool_calls,''), \
+             COALESCE(tool_name,''), COALESCE(timestamp,0) \
+             FROM messages WHERE session_id = ?1 ORDER BY timestamp ASC, rowid ASC",
+        ) else {
+            continue;
+        };
+        let messages = stmt
+            .query_map([&id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, f64>(4).unwrap_or(0.0),
+                ))
+            })
+            .ok()
+            .map(|mapped| mapped.flatten().collect::<Vec<_>>())
+            .unwrap_or_default();
+        if !messages.is_empty() {
+            out.push(RawSession {
+                id,
+                cwd,
+                started,
+                ended,
+                messages,
+            });
+        }
+    }
+    out
+}
+
 impl TranscriptReader for HermesReader {
     fn id(&self) -> &'static str {
         "hermes"
@@ -183,6 +258,12 @@ fn load_session(
         Outcome::Interrupted
     };
     Some(session)
+}
+
+/// Text of a hermes content column (JSON blocks or bare string; shared with
+/// the canonical extractor).
+pub(crate) fn content_text_pub(raw: &str) -> String {
+    content_text(raw)
 }
 
 fn content_text(raw: &str) -> String {
