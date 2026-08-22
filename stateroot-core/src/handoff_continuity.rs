@@ -261,6 +261,13 @@ fn short_hash(hash: &str) -> String {
     hash.chars().take(12).collect()
 }
 
+/// Overlay tail bounds (the token razor): the LAST 8 entries, each ≤ 400
+/// chars with an ellipsis when cut. Extraction already trims/caps, so small
+/// tails render identically to before.
+const OVERLAY_TAIL_ENTRIES: usize = 8;
+/// Per-entry char cap for the overlay tail.
+const OVERLAY_TAIL_ENTRY_CHARS: usize = 400;
+
 /// Read-only overlay when a gap remains after the formal handoff packet.
 pub fn compose_since_handoff_overlay(
     project_dir: &Path,
@@ -328,10 +335,14 @@ pub fn compose_since_handoff_overlay(
     let tail = full_tail(session);
     if !tail.is_empty() {
         out.push_str("\nConversation tail (observed):\n");
-        for entry in &tail {
+        let start = tail.len().saturating_sub(OVERLAY_TAIL_ENTRIES);
+        for entry in &tail[start..] {
             let role = entry.get("role").and_then(Value::as_str).unwrap_or("?");
             let text = entry.get("text").and_then(Value::as_str).unwrap_or("");
-            out.push_str(&format!("- [{role}] {text}\n"));
+            out.push_str(&format!(
+                "- [{role}] {}\n",
+                crate::transcripts::clean(text, OVERLAY_TAIL_ENTRY_CHARS)
+            ));
         }
     }
     out.push_str("\nThis is NOT a formal handoff packet.\n");
@@ -379,5 +390,50 @@ mod tests {
         };
         assert!(!session_newer_than_handoff(&older, &handoff));
         assert!(session_newer_than_handoff(&newer, &handoff));
+    }
+
+    #[test]
+    fn overlay_tail_is_bounded_to_last_8_at_400_chars() {
+        let handoff =
+            json!({"seq": 2, "created_by_harness": "kimi", "written_at": "2026-08-12T10:00:00Z"});
+        let tail: Vec<crate::transcripts::TailEntry> = (0..12)
+            .map(|i| crate::transcripts::TailEntry {
+                role: "user",
+                text: format!("entry-{i} {}", "x".repeat(1000)),
+            })
+            .collect();
+        let session = TranscriptSession {
+            harness: "kimi",
+            session_id: "s1".into(),
+            conversation_tail: tail,
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().expect("dir");
+        let out = compose_since_handoff_overlay(dir.path(), &handoff, &session);
+        let lines: Vec<&str> = out.lines().filter(|l| l.starts_with("- [user]")).collect();
+        assert_eq!(lines.len(), 8, "last 8 only: {out}");
+        assert!(lines[0].contains("entry-4"), "oldest shown is #4: {out}");
+        assert!(lines[7].contains("entry-11"), "out: {out}");
+        for line in lines {
+            assert!(
+                line.chars().count() <= 410,
+                "line: {} chars",
+                line.chars().count()
+            );
+            assert!(line.ends_with('…'), "cut lines carry the ellipsis: {line}");
+        }
+
+        // A small tail renders identically to the unbounded form.
+        let small = TranscriptSession {
+            harness: "kimi",
+            session_id: "s2".into(),
+            conversation_tail: vec![crate::transcripts::TailEntry {
+                role: "assistant",
+                text: "short answer".into(),
+            }],
+            ..Default::default()
+        };
+        let out = compose_since_handoff_overlay(dir.path(), &handoff, &small);
+        assert!(out.contains("- [assistant] short answer\n"), "out: {out}");
     }
 }

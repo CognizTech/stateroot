@@ -11,6 +11,10 @@ use crate::sync_engine::ignore::IgnoreRules;
 
 /// Per-file cap (product direction §4.8 `repo_doc_char_cap`).
 pub const REPO_DOC_CHAR_CAP: usize = 8_000;
+/// Total budget across repo-doc sections, in pack order: a doc that fits the
+/// remaining budget inlines whole (per-doc cap applied); a doc past the
+/// budget is title-listed, never cut (`capped — N more docs on disk`).
+pub const REPO_DOCS_TOTAL_CAP: usize = 16_000;
 /// Canonical repo-root names, in pack order.
 pub const CANONICAL_REPO_DOCS: &[&str] = &[
     "README.md",
@@ -88,13 +92,29 @@ pub fn build(project_dir: &Path) -> ContextPack {
     let rules = IgnoreRules::load(project_dir);
     let mut sections = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
+    // Repo-doc sections share REPO_DOCS_TOTAL_CAP in pack order; a doc that
+    // does not fit whole is title-listed (never cut mid-content).
+    let mut budget_left = REPO_DOCS_TOTAL_CAP;
+    let mut not_inlined: Vec<String> = Vec::new();
+    let push_repo_doc = |section: PackSection,
+                         sections: &mut Vec<PackSection>,
+                         budget_left: &mut usize,
+                         not_inlined: &mut Vec<String>| {
+        let len = section.content.chars().count();
+        if len <= *budget_left {
+            *budget_left -= len;
+            sections.push(section);
+        } else {
+            not_inlined.push(section.title);
+        }
+    };
 
     for name in CANONICAL_REPO_DOCS {
         if !seen.insert((*name).to_string()) {
             continue;
         }
         if let Some(section) = read_repo_doc(project_dir, name) {
-            sections.push(section);
+            push_repo_doc(section, &mut sections, &mut budget_left, &mut not_inlined);
         }
     }
     for name in extra_root_doc_names(project_dir) {
@@ -102,8 +122,18 @@ pub fn build(project_dir: &Path) -> ContextPack {
             continue;
         }
         if let Some(section) = read_repo_doc(project_dir, &name) {
-            sections.push(section);
+            push_repo_doc(section, &mut sections, &mut budget_left, &mut not_inlined);
         }
+    }
+    if !not_inlined.is_empty() {
+        sections.push(PackSection {
+            title: "Repo docs not inlined (budget)".into(),
+            content: format!(
+                "{} (capped — {} more docs on disk)",
+                not_inlined.join(" · "),
+                not_inlined.len()
+            ),
+        });
     }
 
     if let Some(section) =
@@ -235,6 +265,66 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn repo_docs_share_a_total_budget_and_title_list_the_rest() {
+        let tmp = tempdir().unwrap();
+        // 3 × ~8760 chars (per-doc cap cuts each to ~8000): the first inlines
+        // whole; the rest exceed the remaining 16000 budget and are
+        // title-listed. Canonical order inlines README first.
+        let big = |name: &str| format!("# {name}\n\n{}\n", "content line for {name}. ".repeat(350));
+        write(tmp.path(), "README.md", &big("README.md"));
+        write(tmp.path(), "TODO.md", &big("TODO.md"));
+        write(tmp.path(), "ARCHITECTURE.md", &big("ARCHITECTURE.md"));
+
+        let pack = build(tmp.path());
+        let readme = pack
+            .sections
+            .iter()
+            .find(|s| s.title == "Repo: README.md (observed)")
+            .expect("readme inlined");
+        assert!(readme.content.chars().count() <= REPO_DOC_CHAR_CAP + 20);
+        for title in [
+            "Repo: TODO.md (observed)",
+            "Repo: ARCHITECTURE.md (observed)",
+        ] {
+            assert!(
+                !pack.sections.iter().any(|s| s.title == title),
+                "past-budget doc must not inline: {title}"
+            );
+        }
+        let marker = pack
+            .sections
+            .iter()
+            .find(|s| s.title == "Repo docs not inlined (budget)")
+            .expect("marker section");
+        assert!(marker.content.contains("Repo: TODO.md (observed)"));
+        assert!(marker.content.contains("Repo: ARCHITECTURE.md (observed)"));
+        assert!(
+            marker.content.contains("(capped — 2 more docs on disk)"),
+            "marker: {}",
+            marker.content
+        );
+        // The repo-doc block stays within budget + marker overhead.
+        let total: usize = pack
+            .sections
+            .iter()
+            .map(|s| s.content.chars().count())
+            .sum();
+        assert!(total <= REPO_DOCS_TOTAL_CAP + 300, "total: {total}");
+
+        // Small docs are untouched by the budget (identity).
+        let small = tempdir().unwrap();
+        write(small.path(), "README.md", "# Demo\n\nSmall doc.\n");
+        let pack = build(small.path());
+        assert!(
+            !pack
+                .sections
+                .iter()
+                .any(|s| s.title == "Repo docs not inlined (budget)"),
+            "no marker when everything fits"
+        );
     }
 
     #[test]

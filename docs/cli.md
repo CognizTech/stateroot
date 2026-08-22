@@ -187,3 +187,25 @@ in the prompt path (token razor).
 - **v1 has no tool-gating** — hooks do not deny write tools while a draft
   exists. Enforcement is a policy decision for the user (optional hook
   hardening later); StateRoot ships the strings, not a runtime cage.
+
+## `stateroot resume` — digest budgets
+
+The resume/hook digest is prompt-path real estate, so the bulky sections are
+bounded — pointer + shape, never silent loss. The work body (objective,
+active plan, next actions, handoff fields) stays fully inline.
+
+- **Shared Rules** — a rule whose body fits 1200 chars renders whole; a
+  larger rule renders as title + a deterministic outline (every markdown
+  heading, one indented line each) + `… full rule: \`stateroot rules show
+  <slug>\``. Past an 8000-char section budget, later rules collapse to
+  title + pointer. Never truncated mid-line.
+- **Federated Skills** — the same package discovered from several scopes
+  lists once (deduped by slug + route + description); the header count and
+  the 40-line cap apply to the deduped list.
+- **Work-since-handoff overlay** — the observed conversation tail is the
+  last 8 entries, each ≤ 400 chars with an ellipsis when cut (same bound in
+  resume and hooks).
+- **Context pack** — per-doc cap stays 8000 chars; repo docs additionally
+  share a 16000-char total budget in pack order, and docs past the budget
+  appear as a one-line title listing: `(capped — N more docs on disk)`. The
+  top-level tree listing is unbounded (it is short by construction).

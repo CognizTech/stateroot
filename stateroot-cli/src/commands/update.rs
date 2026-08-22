@@ -567,7 +567,7 @@ pub fn self_replace(current_exe: &Path, new_binary: &Path) -> anyhow::Result<Sel
 
     let old_version = version_of(&current_exe);
     let parked = park_target(dir, file_name);
-    std::fs::rename(&current_exe, &parked).with_context(|| {
+    rename_retrying(&current_exe, &parked).with_context(|| {
         format!(
             "could not rename {} → {} (is the install directory writable?)",
             current_exe.display(),
@@ -578,7 +578,7 @@ pub fn self_replace(current_exe: &Path, new_binary: &Path) -> anyhow::Result<Sel
     let outcome = install_and_verify(&current_exe, &new_binary, old_version);
     if let Err(err) = outcome {
         let _ = std::fs::remove_file(&current_exe);
-        if let Err(rollback_err) = std::fs::rename(&parked, &current_exe) {
+        if let Err(rollback_err) = rename_retrying(&parked, &current_exe) {
             return Err(anyhow!(
                 "self-update failed ({err:#}) AND rollback failed ({rollback_err:#}) — \
                  the previous binary is parked at {}; restore it manually",
@@ -593,6 +593,24 @@ pub fn self_replace(current_exe: &Path, new_binary: &Path) -> anyhow::Result<Sel
     outcome.installed_path = current_exe;
     let _ = std::fs::remove_file(&parked);
     Ok(outcome)
+}
+
+/// Rename with a bounded retry on ETXTBSY/EBUSY: drvfs (WSL `/mnt/*`)
+/// releases executable handles asynchronously, so renaming a just-run binary
+/// can transiently fail with os error 26/16. Real product hardening for
+/// self-update on WSL — and it deflakes the tests at the source.
+fn rename_retrying(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut attempt = 0;
+    loop {
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(err) if matches!(err.raw_os_error(), Some(16) | Some(26)) && attempt < 5 => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(50 * attempt));
+            }
+            Err(err) => return Err(err),
+        }
+    }
 }
 
 /// Where to park the old exe: `<file-name>.old`, falling back to a
@@ -658,12 +676,26 @@ fn set_executable_if_unix(_installed: &Path, _source: &Path) -> anyhow::Result<(
 }
 
 /// Run `path --version`; Ok(first stdout line) on exit 0.
+///
+/// Retries ETXTBSY/EBUSY on spawn: drvfs (WSL `/mnt/*`) releases executable
+/// handles asynchronously, so executing a just-written binary can transiently
+/// fail with os error 26 — without this, a WSL self-update spuriously fails
+/// verification and rolls back.
 fn verify_binary(path: &Path) -> Result<String, String> {
-    let output = std::process::Command::new(path)
-        .arg("--version")
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|err| format!("could not execute: {err}"))?;
+    let mut attempt = 0;
+    let output = loop {
+        match std::process::Command::new(path)
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .output()
+        {
+            Err(err) if matches!(err.raw_os_error(), Some(16) | Some(26)) && attempt < 5 => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(50 * attempt));
+            }
+            other => break other.map_err(|err| format!("could not execute: {err}"))?,
+        }
+    };
     if !output.status.success() {
         return Err(format!("`--version` exited with {}", output.status));
     }

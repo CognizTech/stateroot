@@ -277,7 +277,32 @@ pub fn show(project_dir: &Path, home: &Path, slug: &str) -> Option<(Rule, String
     None
 }
 
+/// Per-rule inline budget: bodies at or under this render whole (small rules
+/// stay complete); larger bodies render as title + outline + pointer.
+const RULE_BODY_INLINE_CAP: usize = 1200;
+/// Section-wide budget: past it, later rules collapse to title + pointer.
+const RULES_SECTION_CAP: usize = 8000;
+
+/// Every markdown heading in `body`, one indented line each — the
+/// deterministic outline for over-budget rules. Never cut mid-line.
+fn outline_of(body: &str) -> String {
+    let mut out = String::new();
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') {
+            out.push_str(&format!("  {}\n", trimmed.trim_end()));
+        }
+    }
+    out
+}
+
 /// Full digest section: product-intent body plus every imported rule body.
+///
+/// Bounded (the token razor): a rule whose body fits `RULE_BODY_INLINE_CAP`
+/// renders whole; a larger body renders as title + outline + a
+/// `rules show` pointer; once the section crosses `RULES_SECTION_CAP`, later
+/// rules collapse to title + pointer. The pointer is the loss marker —
+/// nothing is truncated mid-line or dropped silently.
 pub fn compose_section(project_dir: &Path, home: &Path) -> String {
     let rules = list_all(project_dir, home);
     let mut out = String::from("## Shared Rules\n\n");
@@ -289,17 +314,24 @@ pub fn compose_section(project_dir: &Path, home: &Path) -> String {
     }
     for rule in &rules {
         let body = show(project_dir, home, &rule.slug)
-            .map(|(_, text)| text)
+            .map(|(_, text)| text.trim().to_string())
             .unwrap_or_default();
-        out.push_str(&format!(
-            "### {} [{} / {}]\n\n",
-            rule.slug, rule.origin, rule.scope
-        ));
+        let mut head = format!("### {} [{} / {}]\n\n", rule.slug, rule.origin, rule.scope);
         if !rule.title.is_empty() && rule.title != rule.slug {
-            out.push_str(&format!("{}\n\n", rule.title));
+            head.push_str(&format!("{}\n\n", rule.title));
         }
-        out.push_str(body.trim());
-        out.push_str("\n\n");
+        let pointer = format!("… full rule: `stateroot rules show {}`\n\n", rule.slug);
+        let block = if body.chars().count() <= RULE_BODY_INLINE_CAP {
+            format!("{head}{body}\n\n")
+        } else {
+            format!("{head}{}{pointer}", outline_of(&body))
+        };
+        if out.chars().count() + block.chars().count() > RULES_SECTION_CAP {
+            // Over the section budget: title + pointer only.
+            out.push_str(&format!("{head}{pointer}"));
+        } else {
+            out.push_str(&block);
+        }
     }
     out.push_str("`stateroot rules list` / `stateroot rules sync`\n");
     out
@@ -540,16 +572,103 @@ mod tests {
 
         let section = compose_section(project.path(), home.path());
         assert!(section.contains("product-intent"));
+        // Bounded shape: the constitution (≫1200 chars) renders as outline +
+        // pointer, while small imported rules inline whole.
         assert!(
-            section.contains("Preserve product intent")
-                || section.contains("product intent")
-                || PRODUCT_INTENT_MD
-                    .lines()
-                    .find(|l| l.len() > 20)
-                    .is_some_and(|line| section.contains(line)),
-            "digest must include product-intent body, not titles only: {section}"
+            section.contains("… full rule: `stateroot rules show product-intent`"),
+            "over-budget rules render a pointer: {section}"
+        );
+        assert!(
+            section.contains("## 1. Product Intent Is a Hard Constraint"),
+            "the outline carries every heading: {section}"
         );
         assert!(section.contains("Never commit secrets") || section.contains("codex"));
+    }
+
+    #[test]
+    fn outline_is_every_heading_one_indented_line_each() {
+        let body = "# Title\n\nprose line\n## 2. Second\n\n- bullet\n### Deep\n";
+        let outline = outline_of(body);
+        assert_eq!(outline, "  # Title\n  ## 2. Second\n  ### Deep\n");
+        assert!(!outline.contains("prose"));
+    }
+
+    #[test]
+    fn section_budget_collapses_later_rules_to_title_and_pointer() {
+        let home = tempfile::tempdir().expect("home");
+        let project = tempfile::tempdir().expect("project");
+        crate::local_store::init_skeleton(project.path(), "p1", "demo", "default").unwrap();
+        assert!(ensure_product_intent(home.path()).unwrap());
+
+        // A small rule inlines whole even beside the big constitution.
+        let root = user_root(home.path());
+        let small = root.join("imported/test/test-small-rule.md");
+        std::fs::create_dir_all(small.parent().unwrap()).unwrap();
+        std::fs::write(&small, "# Small\n\nOne line of substance.\n").unwrap();
+        upsert_index(
+            &root,
+            Rule {
+                slug: "test-small-rule".into(),
+                title: "Small".into(),
+                scope: "user".into(),
+                origin: "test".into(),
+                origin_path: small.display().to_string(),
+                product: false,
+                sha256: String::new(),
+            },
+        )
+        .unwrap();
+
+        let section = compose_section(project.path(), home.path());
+        assert!(
+            section.contains("One line of substance."),
+            "small rules inline whole: {section}"
+        );
+        assert!(section.contains("… full rule: `stateroot rules show product-intent`"));
+        assert!(
+            section.chars().count() < RULES_SECTION_CAP + 1200,
+            "section stays near the cap: {} chars",
+            section.chars().count()
+        );
+
+        // Enough big rules to blow the section cap → later ones collapse to
+        // title + pointer (never mid-line cuts). Each body exceeds the 1200
+        // inline cap; 60 headings make the outline budget-visible.
+        for i in 0..12 {
+            let slug = format!("test-big-{i}");
+            let path = root.join(format!("imported/test/{slug}.md"));
+            let headings: String = (0..60).map(|j| format!("## Section {j}\n\n")).collect();
+            std::fs::write(
+                &path,
+                format!("# Big {i}\n\n{headings}{}\n", "body text. ".repeat(300)),
+            )
+            .unwrap();
+            upsert_index(
+                &root,
+                Rule {
+                    slug: slug.clone(),
+                    title: format!("Big {i}"),
+                    scope: "user".into(),
+                    origin: "test".into(),
+                    origin_path: path.display().to_string(),
+                    product: false,
+                    sha256: String::new(),
+                },
+            )
+            .unwrap();
+        }
+        let section = compose_section(project.path(), home.path());
+        assert!(
+            section.chars().count() < RULES_SECTION_CAP + 1200,
+            "section cap holds: {} chars",
+            section.chars().count()
+        );
+        assert!(section.contains("`stateroot rules list` / `stateroot rules sync`"));
+        // Collapsed rules still leave a pointer — never silent loss.
+        let pointers = section
+            .matches("… full rule: `stateroot rules show")
+            .count();
+        assert!(pointers >= 6, "pointers: {pointers}\n{section}");
     }
 
     #[test]

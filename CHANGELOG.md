@@ -3,8 +3,19 @@
 All notable changes to StateRoot. Format loosely follows Keep a Changelog;
 StateRoot is pre-1.0 and milestones land as minor versions.
 
-## Unreleased
+## v0.1.5 — 2026-08-23
 
+- The resume/hook digest is now BOUNDED (it reached ~67KB on real projects):
+  Shared Rules inlines small rules whole but renders oversized ones as
+  title + heading outline + a `rules show` pointer, with an 8000-char
+  section budget collapsing later rules to title + pointer; the Federated
+  Skills list dedupes packages discovered from multiple scopes (count and
+  40-line cap apply to the deduped list); the work-since-handoff
+  conversation tail is the last 8 entries at ≤ 400 chars each; and repo
+  docs in the observed context pack share a 16000-char total budget with
+  past-budget docs title-listed (`capped — N more docs on disk`). The work
+  body (objective, active plan, next actions, handoff fields) stays fully
+  inline, and every cut leaves a pointer or marker — never silent loss.
 - Canonical sessions now cover EVERY harness: `stateroot session sync`
   extracts full-fidelity canonical timelines from all eight transcript
   stores — claude (`~/.claude/projects/**`), codex (rollout + archived

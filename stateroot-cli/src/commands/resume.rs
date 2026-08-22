@@ -19,6 +19,36 @@ const UNATTRIBUTED_CALLER: &str = "unattributed";
 /// in both (plan P4.2).
 pub const NO_REFETCH_FOOTER: &str = "This content IS the handoff — do NOT re-fetch it via tools";
 
+/// The digest route line for one discovered skill.
+fn skill_route(skill: &stateroot_core::skill_federation::DiscoveredSkill) -> String {
+    match skill.lifecycle.as_str() {
+        "reference_only" => format!("delegate to {}", skill.native_harness),
+        "external_only" => format!("external-only via {}", skill.native_harness),
+        _ => format!("portable from {}", skill.harness),
+    }
+}
+
+/// Dedupe the federated skill list for the digest: the same package
+/// discovered from several scopes lists once (key: slug + route +
+/// description), discovery order preserved.
+fn dedup_skills(
+    skills: &[stateroot_core::skill_federation::DiscoveredSkill],
+) -> Vec<&stateroot_core::skill_federation::DiscoveredSkill> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for skill in skills {
+        let key = (
+            skill.slug.clone(),
+            skill_route(skill),
+            skill.description.clone(),
+        );
+        if seen.insert(key) {
+            out.push(skill);
+        }
+    }
+    out
+}
+
 /// Render a handoff packet (`stateroot.handoff.v1`) as digest markdown,
 /// actionables-first: Next Actions → Open Questions / Failed Approaches →
 /// summary → files touched. Rich pack fields (plan_state,
@@ -714,16 +744,15 @@ skipping duplicate. Pass --force to reprint.)\n\n{NO_REFETCH_FOOTER}"
 
     // Federated skill index: native origins + user-global and project
     // portable packages. Managed `.agents/skills` projections are skipped by
-    // discovery to avoid loops.
+    // discovery to avoid loops. The same package discovered from several
+    // scopes lists ONCE (deduped by slug + route + description); the header
+    // count and the 40-line cap apply to the deduped list.
     let skills = stateroot_core::skill_federation::discover_all(&ctx.cwd, None).unwrap_or_default();
+    let skills = dedup_skills(&skills);
     if !skills.is_empty() {
         out.push_str(&format!("\n## Federated Skills ({})\n\n", skills.len()));
         for skill in skills.iter().take(40) {
-            let route = match skill.lifecycle.as_str() {
-                "reference_only" => format!("delegate to {}", skill.native_harness),
-                "external_only" => format!("external-only via {}", skill.native_harness),
-                _ => format!("portable from {}", skill.harness),
-            };
+            let route = skill_route(skill);
             if skill.description.is_empty() {
                 out.push_str(&format!("- `{}` — {} ({route})\n", skill.slug, skill.name));
             } else {
@@ -1128,5 +1157,54 @@ mod tests {
         std::fs::write(config.path().join("persona.md"), persona_lines).expect("persona");
         let persona = crate::commands::persona::resolve(config.path()).expect("persona");
         assert!(persona.contains("Resume persona voice line 24: remain in character"));
+    }
+
+    #[test]
+    fn federated_skills_dedupe_by_slug_route_and_description() {
+        use stateroot_core::skill_federation::DiscoveredSkill;
+        fn skill(
+            slug: &str,
+            harness: &str,
+            lifecycle: &str,
+            native: &str,
+            desc: &str,
+        ) -> DiscoveredSkill {
+            DiscoveredSkill {
+                identity_key: format!("k-{slug}-{harness}"),
+                slug: slug.into(),
+                name: slug.into(),
+                description: desc.into(),
+                harness: harness.into(),
+                source_path: String::new(),
+                scope: "global".into(),
+                ownership_class: "user_installed".into(),
+                lifecycle: lifecycle.into(),
+                visibility: String::new(),
+                package_digest: String::new(),
+                files: Default::default(),
+                source_kind: "user_installed".into(),
+                license: None,
+                native_harness: native.into(),
+                native_invocation: String::new(),
+                compatibility: Value::Null,
+                hash_exclusions: Vec::new(),
+            }
+        }
+        let skills = vec![
+            skill("demo", "claude", "active", "claude", "Does demo"),
+            // Literal duplicate discovered from a second scope — deduped.
+            skill("demo", "claude", "active", "claude", "Does demo"),
+            // Same slug but a different route → a distinct entry.
+            skill("demo", "codex", "active", "codex", "Does demo"),
+            skill("other", "pi", "reference_only", "pi", "Ref"),
+        ];
+        let deduped = dedup_skills(&skills);
+        assert_eq!(deduped.len(), 3, "deduped: {:?}", deduped.len());
+        assert_eq!(deduped[0].harness, "claude");
+        assert_eq!(deduped[1].harness, "codex");
+        assert_eq!(deduped[2].slug, "other");
+        // No duplicates → identity.
+        let unique = vec![skill("a", "claude", "active", "claude", "A")];
+        assert_eq!(dedup_skills(&unique).len(), 1);
     }
 }
