@@ -248,11 +248,11 @@ fn decide(
 
     match channel {
         DeliveryChannel::Resume => {
-            // New-session staleness (same SESSION_STALE_MINUTES rule as the
-            // persona scheduler): a matching entry only suppresses a reprint
-            // while it is FRESH. An older match belongs to an earlier
-            // session — deliver again instead of staying silenced
-            // project-forever; a malformed timestamp counts as stale.
+            // New-session staleness: a matching entry only suppresses a
+            // reprint while it is FRESH (SESSION_STALE_MINUTES). An older
+            // match belongs to an earlier session — deliver again instead
+            // of staying silenced project-forever; a malformed timestamp
+            // counts as stale.
             let duplicate = session_entries.iter().any(|e| {
                 e.handoff_seq == seq && e.content_fp == content_fp && is_fresh(&e.delivered_at, now)
             });

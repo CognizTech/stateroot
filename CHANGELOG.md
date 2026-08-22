@@ -5,6 +5,31 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- Persona injection: removed the wall-clock staleness trigger
+  (`SESSION_STALE_MINUTES`) from the injection scheduler. Long agent turns
+  routinely idle past any fixed threshold, so the time rule re-injected the
+  FULL persona block on nearly every user message. New sessions are now
+  recognized by session keys only (harnesses with session ids); the remaining
+  FULL triggers are unchanged (first contact, session_start, content change,
+  compaction boundaries, first prompt of a session), as is the every-15th
+  COMPRESSED pointer cadence. The digest-delivery ledger keeps its own
+  staleness window for resume-dedupe — untouched.
+- Central plan artifacts + lifecycle: `stateroot plan record --file|--stdin
+  [--title] [--from]` / `list` / `show` / `approve` / `activate` / `done` /
+  `abandon`. Plans live at `.stateroot/plans/<id>.md` (verbatim markdown)
+  plus a `stateroot.plan.v1` sidecar with provenance (`root_ref` from
+  `refs/stateroot/latest`, author harness, source path). Lifecycle
+  `draft → approved → active → done` (`abandoned` from any open state), at
+  most one active — activating demotes the current active plan to approved
+  with a recorded note; wrong-state transitions error clearly. The resume
+  digest gains `## Active Plan` before `## Plan State` — pointer +
+  directive only (executor: "execute it as written; do not re-plan or
+  re-explore"; draft-only: "refine the plan file; do not implement yet"),
+  never the body; the transcript Plan State stays as fallback and is
+  suppressed while a central plan exists. `handoff write` auto-attaches
+  `plan_ref {id, title, status}` for active/approved plans, and every
+  lifecycle event writes an episodic lineage note. No hook tool-gating in
+  v1 — strings above the runtime.
 - Session canon & transfer: `stateroot session sync|list|show`
   canonicalizes Pi and DSH sessions into `.stateroot/local/sessions/` as
   `stateroot.session.v1` JSONL — full-fidelity entries with no content caps,

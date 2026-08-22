@@ -25,8 +25,6 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::local_store::SESSION_STALE_MINUTES;
-
 /// Decision for one hook event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
@@ -97,9 +95,6 @@ fn save_states(home: &Path, states: &BTreeMap<String, InjectionState>) -> std::i
 const DEDUPE_PROMPTS: i64 = 3;
 const DEDUPE_SECONDS: i64 = 60;
 const COMPRESSED_EVERY: i64 = 15;
-// SESSION_STALE_MINUTES lives in `local_store` — shared with the
-// digest-delivery ledger, which applies the same new-session staleness
-// rule to resume dedupe.
 
 fn parse_ts(ts: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::DateTime::parse_from_rfc3339(ts)
@@ -124,23 +119,12 @@ pub fn decide(
     if !content_hash.is_empty() && content_hash != state.content_hash {
         return Decision::Full;
     }
-    // New-session staleness: an idle gap past the threshold means the old
-    // session is over — treat the event as a fresh session's first contact
-    // (and re-FULL it). A malformed anchor falls back to FULL safely.
-    let anchor = if !state.last_any_ts.is_empty() {
-        &state.last_any_ts
-    } else {
-        &state.last_full_ts
-    };
-    if !anchor.is_empty() {
-        match parse_ts(anchor) {
-            Some(last) if (now - last).num_minutes() >= SESSION_STALE_MINUTES => {
-                return Decision::Full;
-            }
-            None => return Decision::Full,
-            _ => {}
-        }
-    }
+    // NOTE: no wall-clock staleness rule here by design. Long agent turns
+    // routinely idle past any fixed threshold, so a time-based re-injection
+    // fires on nearly every user message. New sessions are recognized by
+    // their session keys (harnesses with session ids); harnesses without
+    // them get FULL on session_start/content change/compaction and the
+    // COMPRESSED cadence otherwise.
     // session_start is one-per-session (never re-inject on a duplicate
     // SessionStart — guarded by ANY prior FULL, marked or not).
     if canonical == "session_start" {
@@ -515,21 +499,16 @@ mod tests {
     }
 
     #[test]
-    fn stale_entry_is_a_new_session_and_fulls_again() {
-        // The reported regression: project-dir-key entry older than the
-        // threshold (kimi-code has no session ids) → next prompt FULLs.
+    fn stale_entry_does_not_reinject() {
+        // Idle gaps never re-FULL: long agent turns idle past any fixed
+        // threshold, so a stale entry simply keeps its dedupe/cadence state.
         let mut s = state(0, 0, "h1", 5, 5);
         s.started = true;
         assert_eq!(
-            decide(
-                Some(&s),
-                "user_prompt_submit",
-                "h1",
-                t(SESSION_STALE_MINUTES * 60 + 1)
-            ),
-            Decision::Full
+            decide(Some(&s), "user_prompt_submit", "h1", t(30 * 60 + 1)),
+            Decision::Nothing
         );
-        // Fresh entry within the threshold → NO duplicate FULL.
+        // A fresh entry behaves the same.
         let mut fresh = state(0, 0, "h1", 5, 5);
         fresh.started = true;
         fresh.last_any_ts = t(100).to_rfc3339();
@@ -540,9 +519,8 @@ mod tests {
     }
 
     #[test]
-    fn session_keys_are_independent_of_each_others_staleness() {
+    fn session_keys_stay_quiet_after_idle_gaps() {
         let home = tempfile::tempdir().expect("home");
-        // Stale key fulls; the fresh key in the same project keeps dedupe.
         let d1 = decide_and_record(
             home.path(),
             "kimi:p",
@@ -561,77 +539,58 @@ mod tests {
             true,
         );
         assert_eq!(d2, Decision::Full); // first prompt of its own session key
-        let later = t(SESSION_STALE_MINUTES * 60 + 10);
-        let d3 = decide_and_record(
-            home.path(),
-            "kimi:p",
-            "user_prompt_submit",
-            "h1",
-            later,
-            true,
-        );
-        assert_eq!(d3, Decision::Full, "stale key re-FULLs");
-        let d4 = decide_and_record(
-            home.path(),
-            "claude:p",
-            "user_prompt_submit",
-            "h1",
-            later,
-            true,
-        );
-        assert_eq!(
-            d4,
-            Decision::Full,
-            "claude key is ALSO stale now (same wall clock)"
-        );
-        // Right after each stale FULL, the following prompt dedupes again.
+        let later = t(30 * 60 + 10);
+        // Neither key re-FULLs after a long idle gap — time is not a signal.
+        for key in ["kimi:p", "claude:p"] {
+            let d = decide_and_record(home.path(), key, "user_prompt_submit", "h1", later, true);
+            assert_eq!(d, Decision::Nothing, "{key} must not re-FULL on idle");
+        }
+        // A new session key still gets its own FULL (id-keyed detection).
         let d5 = decide_and_record(
             home.path(),
-            "kimi:p",
+            "kimi:p:s2",
             "user_prompt_submit",
             "h1",
-            t(SESSION_STALE_MINUTES * 60 + 20),
+            later,
             true,
         );
-        assert_eq!(d5, Decision::Nothing);
+        assert_eq!(d5, Decision::Full);
     }
 
     #[test]
-    fn after_stale_full_the_cycle_restarts() {
+    fn idle_gaps_do_not_restart_the_cycle() {
+        // Same cadence as `full_flow_cadence_over_a_session`, but every gap
+        // is 31 minutes: time never resets counters or forces FULL.
         let home = tempfile::tempdir().expect("home");
-        let d1 = decide_and_record(home.path(), "p", "user_prompt_submit", "h1", t(0), true);
-        assert_eq!(d1, Decision::Full);
-        let later = t(SESSION_STALE_MINUTES * 60 + 5);
-        let d2 = decide_and_record(home.path(), "p", "user_prompt_submit", "h1", later, true);
-        assert_eq!(d2, Decision::Full);
-        // Counters restarted: immediate next prompt is deduped, and the
-        // compressed cadence lands on the 15th of the NEW cycle.
-        let d3 = decide_and_record(
-            home.path(),
-            "p",
-            "user_prompt_submit",
-            "h1",
-            t(SESSION_STALE_MINUTES * 60 + 15),
-            true,
-        );
-        assert_eq!(d3, Decision::Nothing);
-        let mut now = SESSION_STALE_MINUTES * 60 + 15;
-        let mut last = Decision::Nothing;
-        for _ in 3..=15 {
-            now += 61;
-            last = decide_and_record(home.path(), "p", "user_prompt_submit", "h1", t(now), true);
+        let key = "p:s1";
+        let mut now = 0i64;
+        let mut seq = String::new();
+        let first = decide_and_record(home.path(), key, "user_prompt_submit", "h1", t(now), true);
+        assert_eq!(first, Decision::Full);
+        for _ in 2..=14 {
+            now += 31 * 60;
+            let d = decide_and_record(home.path(), key, "user_prompt_submit", "h1", t(now), true);
+            seq.push(match d {
+                Decision::Full => 'F',
+                Decision::Compressed => 'C',
+                Decision::Nothing => '.',
+            });
         }
-        assert_eq!(last, Decision::Compressed);
+        now += 31 * 60;
+        let fifteenth =
+            decide_and_record(home.path(), key, "user_prompt_submit", "h1", t(now), true);
+        assert_eq!(fifteenth, Decision::Compressed, "sequence: {seq}");
+        assert_eq!(seq.matches('.').count(), 13, "sequence: {seq}");
     }
 
     #[test]
-    fn malformed_anchor_falls_back_to_full_safely() {
+    fn malformed_anchor_is_ignored() {
         let mut s = state(0, 0, "h1", 5, 5);
         s.started = true;
         s.last_any_ts = "not-a-timestamp".into();
         assert_eq!(
             decide(Some(&s), "user_prompt_submit", "h1", t(999_999)),
-            Decision::Full
+            Decision::Nothing
         );
     }
 

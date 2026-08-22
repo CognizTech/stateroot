@@ -34,6 +34,38 @@ pub fn render_handoff_digest_with(packet: &Value, deterministic: bool) -> String
     render_handoff_digest_full(packet, deterministic, &[], None, None)
 }
 
+/// The central-plan digest section (authoritative tier): pointer + directive,
+/// never the plan body. Shared by the handoff digest and the no-handoff arm —
+/// a planner/executor split must surface even before any handoff exists.
+fn central_plan_section(project_dir: Option<&Path>) -> Option<String> {
+    let (plan, _path) = project_dir.and_then(stateroot_core::plans::current)?;
+    let mut section = String::from("## Active Plan\n\n");
+    section.push_str(&format!(
+        "**{}** ({}) — planned by {}",
+        plan.title, plan.status, plan.created_by_harness
+    ));
+    if let Some(root) = &plan.root_ref {
+        let short: String = root.chars().take(12).collect();
+        section.push_str(&format!(" · root `{short}`"));
+    }
+    section.push('\n');
+    match plan.status() {
+        stateroot_core::plans::PlanStatus::Approved | stateroot_core::plans::PlanStatus::Active => {
+            section.push_str(&format!(
+                "\nAn {} plan exists at `.stateroot/plans/{}.md`. Execute it as written; do not re-plan or re-explore.\n\n",
+                plan.status, plan.id
+            ));
+        }
+        _ => {
+            section.push_str(&format!(
+                "\nA draft plan is being authored at `.stateroot/plans/{}.md` — refine the plan file; do not implement yet.\n\n",
+                plan.id
+            ));
+        }
+    }
+    Some(section)
+}
+
 /// Full digest: deterministic switch + durable learnings + active goal (both
 /// from synced local files), rendered after Plan State.
 pub fn render_handoff_digest_full(
@@ -75,16 +107,27 @@ pub fn render_handoff_digest_full(
     if !phase.is_empty() {
         out.push_str(&format!("## Current Phase\n\n{phase}\n\n"));
     }
+    // The authoritative plan tier: the central plan store as pointer +
+    // directive (NEVER the body — the executor reads one file; the token
+    // razor stays). The packet's transcript-derived Plan State below is the
+    // fallback tier and is suppressed whenever a central plan exists (the
+    // dedup rule: the store section wins).
+    let central_plan = central_plan_section(project_dir);
+    if let Some(section) = &central_plan {
+        out.push_str(section);
+    }
     // The residual-work view: latest plan snapshot with status markers.
-    if let Some(items) = packet.get("plan_state").and_then(|v| v.as_array()) {
-        if !items.is_empty() {
-            out.push_str("## Plan State\n\n");
-            for item in items {
-                let step = item.get("step").and_then(|v| v.as_str()).unwrap_or("");
-                let status = item.get("status").and_then(|v| v.as_str()).unwrap_or("");
-                out.push_str(&format!("- [{status}] {step}\n"));
+    if central_plan.is_none() {
+        if let Some(items) = packet.get("plan_state").and_then(|v| v.as_array()) {
+            if !items.is_empty() {
+                out.push_str("## Plan State\n\n");
+                for item in items {
+                    let step = item.get("step").and_then(|v| v.as_str()).unwrap_or("");
+                    let status = item.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                    out.push_str(&format!("- [{status}] {step}\n"));
+                }
+                out.push('\n');
             }
-            out.push('\n');
         }
     }
     // Durable preferences (all active learnings) — after Plan State.
@@ -645,6 +688,12 @@ skipping duplicate. Pass --force to reprint.)\n\n{NO_REFETCH_FOOTER}"
         }
         None => {
             out.push_str("(no handoff yet — write one with `stateroot handoff write`)\n");
+            // A plan may exist before any handoff (plan/implement split):
+            // the planner/executor directive must still surface.
+            if let Some(section) = central_plan_section(Some(&ctx.cwd)) {
+                out.push('\n');
+                out.push_str(&section);
+            }
         }
     }
 
@@ -848,6 +897,74 @@ mod tests {
         packet["recommended_next_harness"] = Value::Null;
         let out = render_handoff_digest(&packet);
         assert!(!out.contains("Recommended next harness"), "out: {out}");
+    }
+
+    #[test]
+    fn active_plan_section_supersedes_transcript_plan_state() {
+        let dir = tempfile::tempdir().expect("dir");
+        let packet = json!({
+            "objective": "obj",
+            "plan_state": [{"step": "residual step", "status": "pending"}],
+        });
+        // No central plan → the transcript Plan State fallback renders.
+        let out = render_handoff_digest_full(&packet, true, &[], None, Some(dir.path()));
+        assert!(out.contains("## Plan State"), "out: {out}");
+        assert!(!out.contains("## Active Plan"), "out: {out}");
+
+        // A central plan wins: pointer + directive, Plan State suppressed,
+        // and the plan body never enters the digest.
+        let meta = stateroot_core::plans::record(
+            dir.path(),
+            "Ship It",
+            "claude",
+            None,
+            "# Ship It\n\nBODY-SECRET-NEVER-IN-DIGEST\n",
+        )
+        .expect("record");
+        stateroot_core::plans::transition(
+            dir.path(),
+            &meta.id,
+            stateroot_core::plans::PlanStatus::Approved,
+        )
+        .expect("approve");
+        let out = render_handoff_digest_full(&packet, true, &[], None, Some(dir.path()));
+        assert!(out.contains("## Active Plan"), "out: {out}");
+        assert!(
+            out.contains("**Ship It** (approved) — planned by claude"),
+            "out: {out}"
+        );
+        assert!(
+            out.contains("Execute it as written; do not re-plan or re-explore"),
+            "out: {out}"
+        );
+        assert!(
+            out.contains(&format!(".stateroot/plans/{}.md", meta.id)),
+            "out: {out}"
+        );
+        assert!(!out.contains("## Plan State"), "out: {out}");
+        assert!(!out.contains("BODY-SECRET-NEVER-IN-DIGEST"), "out: {out}");
+
+        // Draft-only → the planner directive instead.
+        let draft_dir = tempfile::tempdir().expect("dir2");
+        let draft = stateroot_core::plans::record(
+            draft_dir.path(),
+            "Rough Draft",
+            "codex",
+            None,
+            "# Rough Draft\n\nbody\n",
+        )
+        .expect("record draft");
+        let out = render_handoff_digest_full(&packet, true, &[], None, Some(draft_dir.path()));
+        assert!(
+            out.contains("refine the plan file; do not implement yet"),
+            "out: {out}"
+        );
+        assert!(
+            out.contains(&format!(".stateroot/plans/{}.md", draft.id)),
+            "out: {out}"
+        );
+        assert!(!out.contains("Execute it as written"), "out: {out}");
+        assert!(!out.contains("## Plan State"), "out: {out}");
     }
 
     #[test]

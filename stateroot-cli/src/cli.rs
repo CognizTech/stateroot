@@ -45,6 +45,8 @@ pub enum Command {
     Import(ImportArgs),
     /// Canonical session store (sync/list/show) and cross-harness transfer.
     Session(SessionArgs),
+    /// Central plan artifacts + lifecycle (record/list/show/approve/activate/done/abandon).
+    Plan(PlanArgs),
     /// Print the compact resume digest for the current project.
     Resume(ResumeArgs),
     /// Append an episodic checkpoint to the local log.
@@ -221,6 +223,58 @@ pub enum SessionAction {
         /// Print the plan + fidelity report without writing anything.
         #[arg(long)]
         dry_run: bool,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct PlanArgs {
+    #[command(subcommand)]
+    pub action: PlanAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PlanAction {
+    /// Record a plan file (or stdin) as a new draft in `.stateroot/plans/`.
+    Record {
+        /// Plan markdown file.
+        #[arg(long, value_name = "PATH", conflicts_with = "stdin")]
+        file: Option<String>,
+        /// Read the plan body from standard input.
+        #[arg(long)]
+        stdin: bool,
+        /// Plan title (defaults to the body's first heading, then the file stem).
+        #[arg(long)]
+        title: Option<String>,
+        /// Authoring harness (defaults to the active local marker or `cli`).
+        #[arg(long)]
+        from: Option<String>,
+    },
+    /// List plans (id · title · status · harness · updated).
+    List,
+    /// Print a plan's markdown to stdout (how other harnesses read plans).
+    Show {
+        /// Plan id (prefix allowed).
+        id: String,
+    },
+    /// Approve a draft plan.
+    Approve {
+        /// Plan id (prefix allowed).
+        id: String,
+    },
+    /// Activate an approved plan (the current active one demotes to approved).
+    Activate {
+        /// Plan id (prefix allowed).
+        id: String,
+    },
+    /// Mark the active plan done.
+    Done {
+        /// Plan id (prefix allowed).
+        id: String,
+    },
+    /// Abandon a plan (any non-terminal state).
+    Abandon {
+        /// Plan id (prefix allowed).
+        id: String,
     },
 }
 

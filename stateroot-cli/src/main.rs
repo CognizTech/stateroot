@@ -12,8 +12,8 @@ use tracing_subscriber::EnvFilter;
 
 use cli::{
     Command, ExtAction, HandoffAction, HarnessAction, LearnAction, LearningsAction, McpAction,
-    MemoryAction, ObservationsAction, ProposalsAction, RulesAction, SessionAction, SkillAction,
-    SoulAction, WikiAction,
+    MemoryAction, ObservationsAction, PlanAction, ProposalsAction, RulesAction, SessionAction,
+    SkillAction, SoulAction, WikiAction,
 };
 use commands::Ctx;
 
@@ -68,6 +68,26 @@ async fn main() -> anyhow::Result<()> {
             SessionAction::Transfer { id, to, dry_run } => {
                 commands::session::transfer(&ctx, &id, &to, dry_run)?
             }
+        },
+        Command::Plan(args) => match args.action {
+            PlanAction::Record {
+                file,
+                stdin,
+                title,
+                from,
+            } => commands::plan::record(
+                &ctx,
+                file.as_deref(),
+                stdin,
+                title.as_deref(),
+                from.as_deref(),
+            )?,
+            PlanAction::List => commands::plan::list(&ctx)?,
+            PlanAction::Show { id } => commands::plan::show(&ctx, &id)?,
+            PlanAction::Approve { id } => commands::plan::approve(&ctx, &id)?,
+            PlanAction::Activate { id } => commands::plan::activate(&ctx, &id)?,
+            PlanAction::Done { id } => commands::plan::done(&ctx, &id)?,
+            PlanAction::Abandon { id } => commands::plan::abandon(&ctx, &id)?,
         },
         Command::Resume(args) => {
             commands::resume::run(

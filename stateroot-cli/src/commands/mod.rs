@@ -34,6 +34,7 @@ pub mod mcp_stdio;
 pub mod memory;
 pub mod observations;
 pub mod persona;
+pub mod plan;
 pub mod proposals;
 pub mod remove;
 pub mod resume;

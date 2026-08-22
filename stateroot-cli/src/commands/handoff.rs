@@ -109,6 +109,7 @@ const HANDOFF_ENVELOPE_KEYS: &[&str] = &[
     "created_by_harness",
     "latest_root",
     "plan_state",
+    "plan_ref",
     "progress_summaries",
     "milestones",
     "conversation_tail",
@@ -682,6 +683,16 @@ fn assemble_packet(
         if !root.is_empty() {
             packet["latest_root"] = json!(root);
         }
+    }
+
+    // The central plan store is the authoritative plan tier: attach a
+    // pointer when an active/approved plan exists (additive packet field).
+    if let Some((plan, _)) = stateroot_core::plans::active_or_approved(context.project_dir) {
+        packet["plan_ref"] = json!({
+            "id": plan.id,
+            "title": plan.title,
+            "status": plan.status,
+        });
     }
 
     packet = bound_packet(packet);

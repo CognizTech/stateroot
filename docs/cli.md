@@ -146,3 +146,37 @@ transferred session <id> → pi
 
 `--dry-run` prints the same plan with `would write:` and touches nothing.
 Every transfer appends an episodic lineage note.
+
+## `stateroot plan` — central plan artifacts + lifecycle
+
+The plan/implement split, doctrine-shaped: StateRoot owns the plan
+**artifact and its lifecycle** (strings above the runtime); each harness
+keeps its own plan **mode**. A strong model in harness A authors a plan;
+it lands in the project plan store with provenance; the user (or a
+delegating agent) approves it; harness B's digest points at the file with
+an execute directive. Full-fidelity markdown on disk, pointer + directive
+in the prompt path (token razor).
+
+- **Store** — `.stateroot/plans/<id>.md` (the plan, verbatim markdown) plus
+  a `stateroot.plan.v1` sidecar (`<id>.json`: title, status, author
+  harness, timestamps, `root_ref` from `refs/stateroot/latest`, source
+  path, notes). `stateroot plan record --file <path>` / `--stdin` creates a
+  **draft**; `list` / `show <id>` inspect (show prints the raw markdown —
+  that is how other harnesses read a plan).
+- **Lifecycle** — `draft → approved → active → done`; `abandoned` from any
+  non-terminal state. Wrong-state transitions are clear errors (same-state
+  included). At most one plan is **active**: `plan activate` demotes the
+  currently active plan to `approved`, recorded in its notes — never
+  silent.
+- **Digest** — resume renders `## Active Plan` before `## Plan State`:
+  title, status, provenance, the `.md` path, and a directive. Approved or
+  active → the executor directive ("Execute it as written; do not re-plan
+  or re-explore"); only a draft → the planner directive ("refine the plan
+  file; do not implement yet"). The transcript `## Plan State` remains as
+  the fallback tier and is suppressed while a central plan exists. The plan
+  body never enters the digest — the executor reads one file.
+- **Handoff** — `handoff write` auto-attaches `plan_ref: {id, title,
+  status}` when an active/approved plan exists.
+- **v1 has no tool-gating** — hooks do not deny write tools while a draft
+  exists. Enforcement is a policy decision for the user (optional hook
+  hardening later); StateRoot ships the strings, not a runtime cage.
