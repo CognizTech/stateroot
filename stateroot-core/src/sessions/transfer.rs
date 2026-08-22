@@ -790,8 +790,13 @@ mod tests {
             reread.progress_summaries
         );
         // The header is a v3 pi header at the pi-encoded dir for the cwd.
+        // Compare as paths: the writer emits the platform separator form
+        // (backslashes on Windows), the fixture used the JSON-safe form.
         assert_eq!(raw.header["version"], 3);
-        assert_eq!(raw.header["cwd"].as_str().expect("cwd"), cwd);
+        assert_eq!(
+            std::path::Path::new(raw.header["cwd"].as_str().expect("cwd")),
+            std::path::Path::new(&cwd)
+        );
         assert!(plan
             .target_path
             .display()
