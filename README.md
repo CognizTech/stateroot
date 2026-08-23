@@ -1,8 +1,8 @@
 # StateRoot
 
-**One persistent working intelligence across all your coding agents.**
+**Switch coding agents without losing the work.**
 
-Memory, personality, coding rules, skills, MCPs, learnings and project state — shared across Codex, Cursor, Kimi, Claude Code and other compatible harnesses.
+StateRoot keeps your project's goal, plans, memory, skills, rules, and sessions in one local place — so Claude Code, Codex, Cursor, Kimi Code, Pi, DeepSeek Harness and friends each pick up exactly where the last one left off. One CLI, everything on your machine.
 
 <p align="center">
   <a href="https://github.com/CognizTech/stateroot/releases"><img src="https://img.shields.io/github/v/release/CognizTech/stateroot?color=7ee0c8&labelColor=0c1016&logo=github&style=for-the-badge" alt="Release"></a>
@@ -16,9 +16,23 @@ Memory, personality, coding rules, skills, MCPs, learnings and project state —
   <a href="https://discord.gg/SfbKEPRD7"><img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord"></a>
 </p>
 
-StateRoot is a local CLI that sits beside Git and beside the coding agents you already use. It shares personality, skills, tools, memories, and project notes across those agents — and snapshots the work so you can continue, branch, or restore.
+## Why StateRoot
 
-Each agent keeps its own transcripts, rules, skills, and MCP configs. Switching tools usually means rebuilding context by hand. StateRoot gives a project one place for that context. Everything runs on your machine.
+Every model wants its own harness — Claude works best in Claude Code, GPT in Codex, DeepSeek in its own. And every harness keeps its own context: its own transcripts, rules, skills, and plans. So the everyday moments of modern AI work — a usage limit hit mid-task, a better model launching in a rival tool, an expensive model you'd rather only plan with — all carry the same hidden tax: re-explaining the project, re-reading the codebase, re-teaching how you work.
+
+StateRoot is the shared layer above the agent runtime:
+
+- **Continue anywhere** — hooks inject a bounded digest (goal, plan, decisions, memories, next actions) at session start. No pasting transcripts.
+- **Plan in one harness, implement in another** — a strong model authors the plan in its plan mode; a cheaper model executes it. `stateroot plan` carries the artifact and its approval state, and the executor's digest says *"execute this plan; do not re-plan."*
+- **Spawn subagents across harnesses** — `stateroot delegate --to codex --task "…"` runs a bounded task inside another harness with full project context. The parent gets the conclusion, not the transcript.
+- **Move the session itself** — sessions canonicalize from every supported harness into one store, and transfer into Pi / DeepSeek Harness as real, resumable native sessions.
+- **Branch and restore the work** — snapshots live in Git plumbing under `refs/stateroot`; your branches are never rewritten.
+
+And when a harness is retired or replaced, the work doesn't care. **The harness is disposable; the work is not.**
+
+### Why not just AGENTS.md?
+
+Honestly — for a solo dev, one harness, and a small project, AGENTS.md plus rereading files is enough, and we won't sell you harder. StateRoot pays its rent when you *switch*: long projects with curated memory, several harnesses per day, plan-here-implement-there workflows, team handoffs. The cost of re-contexting is zero until it isn't.
 
 ```text
 Claude Code ──→ State A ──→ State B
@@ -33,10 +47,14 @@ Claude Code ──→ State A ──→ State B
 | | |
 | --- | --- |
 | **Personality** | Soul + USER.md, injected in full — not truncated to fit a token budget. |
+| **Project state** | Objective, phase, handoffs, next actions — one place every harness reads. |
+| **Plans** | A plan store with a lifecycle (draft → approved → active → done) and provenance. |
 | **Memory** | Curated facts, a compiled wiki, local search. The next session can look things up. |
 | **Preferences** | Record “prefer X over Y” once. Every agent on the machine sees it. |
 | **Skills and tools** | SKILL.md packages and MCP servers sync across agent configs. Conflicts are left alone. |
-| **Session handoffs** | Objective, current task, what to do next. Hooks inject the brief so you are not pasting transcripts. |
+| **Sessions** | Full-fidelity canonical session store across harnesses; transfer into Pi / DeepSeek Harness. |
+| **Subagents** | Delegate bounded tasks into other harness CLIs — depth-capped, bounded result, lineage recorded. |
+| **Extensions** | Any `stateroot-<name>` executable on PATH becomes a subcommand — agents can extend the CLI itself. |
 
 ## What it snapshots
 
@@ -100,9 +118,9 @@ Walkthrough: [Quickstart](https://stateroot.dev/docs/getting-started/quickstart)
 
 ## Supported harnesses
 
-**Hooks + transcripts:** Claude Code · Codex · Cursor · Kimi Code · OpenClaw · Hermes
+**Hooks + transcripts:** Claude Code · Codex · Cursor · Kimi Code · OpenClaw · Hermes · Pi
 
-**Instruction files / federation:** OpenCode · GitHub Copilot · Crush · others detected at install
+**Transcripts / delegation:** DeepSeek Harness · OpenCode · others detected at install
 
 Per-harness notes: [Harnesses](https://stateroot.dev/docs/harnesses/overview).
 
