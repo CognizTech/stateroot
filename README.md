@@ -2,7 +2,7 @@
 
 **Switch coding agents without losing the work.**
 
-StateRoot keeps your project's goal, plans, memory, skills, rules, and sessions in one local place — so Claude Code, Codex, Cursor, Kimi Code, Pi, DeepSeek Harness and friends each pick up exactly where the last one left off. And every lesson one agent learns becomes a rule for all of them. One CLI, everything on your machine.
+StateRoot keeps your project's goal, personality, plans, memory, skills, rules, and sessions in one local place — so Claude Code, Codex, Cursor, Kimi Code, Pi, DeepSeek Harness and friends each pick up exactly where the last one left off. And every lesson one agent learns becomes a rule for all of them. One CLI, everything on your machine.
 
 <!-- GIF SLOT: drop the continuity demo here (close one agent, open another — it just knows).
      Suggested: <p align="center"><img alt="Close one agent, open another — it just knows" src="docs/assets/continuity-demo.gif"></p>
@@ -60,15 +60,28 @@ Claude Code ──→ State A ──→ State B
 
 | | |
 | --- | --- |
-| **Personality** | Soul + USER.md, injected in full — not truncated to fit a token budget. |
 | **Project state** | Objective, phase, handoffs, next actions — one place every harness reads. |
 | **Plans** | A plan store with a lifecycle (draft → approved → active → done) and provenance. |
-| **Memory** | Curated facts, a compiled wiki, local search. The next session can look things up. |
-| **Self-improvement** | A correction recorded once becomes a rule for every agent. Learnings, memory, and new skills compound across all your harnesses — the team of agents gets smarter together. |
 | **Skills and tools** | SKILL.md packages and MCP servers sync across agent configs. Conflicts are left alone. |
 | **Sessions** | Full-fidelity canonical session store across harnesses; transfer into Pi / DeepSeek Harness. |
 | **Subagents** | Delegate bounded tasks into other harness CLIs — depth-capped, bounded result, lineage recorded. |
 | **Extensions** | Any `stateroot-<name>` executable on PATH becomes a subcommand — agents can extend the CLI itself. |
+
+### One personality across every agent
+
+Soul + USER.md — your agent's name, character, voice, and boundaries, plus who you are and how you work — are injected in full at every session start, never truncated to fit a token budget. The agent you brief in Codex is the same person when you open Claude Code: same manners, same tone, same knowledge of you and how you like things done. You never re-introduce yourself, and the working relationship does not reset when the harness changes.
+
+### Memory, in three layers
+
+- **Hot apex (`MEMORY.md`)** — the curated few hundred lines every session sees: the project's current facts, decisions, and hard-won context, scoped to project or user.
+- **Compiled wiki** — long-form knowledge distilled from evidence over time: pages, an index, and a log, compiled deterministically with optional LLM synthesis behind your own keys.
+- **Episodic log + full-text recall** — every checkpoint and observation, append-only and locally searchable (`stateroot memory recall`), so anything the project ever learned is one query away.
+
+Every fact carries provenance — **verified** (Git), **observed** (transcripts), or **synthesized** (LLM) — and empty stays empty.
+
+### Learnings: taste that compounds
+
+Learnings are judgment, not facts: `prefer X over Y`, `never Z`, each with *when it applies*. Record one — yourself, or any agent on your behalf — and it activates immediately for every harness: no approval queue, no classifier. Scoped to project, user, workspace, or domain; superseded over time, never silently lost. A correction made in one harness becomes a rule for all of them — this is how the team of agents gets smarter together instead of repeating the same mistake in six different tools.
 
 ## What it snapshots
 
