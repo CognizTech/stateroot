@@ -4,6 +4,10 @@
 
 StateRoot keeps your project's goal, plans, memory, skills, rules, and sessions in one local place — so Claude Code, Codex, Cursor, Kimi Code, Pi, DeepSeek Harness and friends each pick up exactly where the last one left off. One CLI, everything on your machine.
 
+<!-- GIF SLOT: drop the continuity demo here (close one agent, open another — it just knows).
+     Suggested: <p align="center"><img alt="Close one agent, open another — it just knows" src="docs/assets/continuity-demo.gif"></p>
+     Record ~10s: work in one harness, open a second in the same project, first answer already has the context. -->
+
 <p align="center">
   <a href="https://github.com/CognizTech/stateroot/releases"><img src="https://img.shields.io/github/v/release/CognizTech/stateroot?color=7ee0c8&labelColor=0c1016&logo=github&style=for-the-badge" alt="Release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-7ee0c8?labelColor=0c1016&style=for-the-badge" alt="License"></a>
@@ -33,6 +37,19 @@ And when a harness is retired or replaced, the work doesn't care. **The harness 
 ### Why not just AGENTS.md?
 
 Honestly — for a solo dev, one harness, and a small project, AGENTS.md plus rereading files is enough, and we won't sell you harder. StateRoot pays its rent when you *switch*: long projects with curated memory, several harnesses per day, plan-here-implement-there workflows, team handoffs. The cost of re-contexting is zero until it isn't.
+
+### What actually crosses the boundary
+
+| | AGENTS.md | Memory tools (distilled summaries) | StateRoot |
+| --- | --- | --- | --- |
+| Instructions & rules | ✅ one harness at a time | ✅ | ✅ shared pool |
+| Memory & facts | — | ✅ LLM summaries | ✅ curated, provenance-labeled |
+| Project state & next actions | — | partial | ✅ one state of record |
+| Plans with an approval lifecycle | — | — | ✅ `stateroot plan` |
+| Real, resumable sessions | — | — | ✅ canon + transfer |
+| Subagents in *other* harnesses | — | — | ✅ `stateroot delegate` |
+| State lineage (branch / restore) | — | — | ✅ Git plumbing |
+| No new runtime, no required cloud, no lock-in | ✅ | — | ✅ one CLI on your machine |
 
 ```text
 Claude Code ──→ State A ──→ State B
@@ -93,6 +110,8 @@ stateroot doctor     # passes with zero config and zero keys
 
 ## Quickstart
 
+Zero config, zero keys, one binary. `stateroot doctor` passes out of the box.
+
 ```bash
 cd my-project
 stateroot init
@@ -100,6 +119,8 @@ stateroot setup      # once per machine: identity, harnesses, skills
 ```
 
 Work in your usual agent. Session hooks inject a digest. You do not need to paste anything.
+
+**Then the aha:** close that agent and open any other supported harness in the same project. It starts the session already knowing the goal, the plan, the decisions, and the next actions — no re-explaining, no re-reading the codebase.
 
 ```bash
 stateroot status
