@@ -2,7 +2,7 @@
 
 **Switch coding agents without losing the work.**
 
-StateRoot keeps your project's goal, plans, memory, skills, rules, and sessions in one local place — so Claude Code, Codex, Cursor, Kimi Code, Pi, DeepSeek Harness and friends each pick up exactly where the last one left off. One CLI, everything on your machine.
+StateRoot keeps your project's goal, plans, memory, skills, rules, and sessions in one local place — so Claude Code, Codex, Cursor, Kimi Code, Pi, DeepSeek Harness and friends each pick up exactly where the last one left off. And every lesson one agent learns becomes a rule for all of them. One CLI, everything on your machine.
 
 <!-- GIF SLOT: drop the continuity demo here (close one agent, open another — it just knows).
      Suggested: <p align="center"><img alt="Close one agent, open another — it just knows" src="docs/assets/continuity-demo.gif"></p>
@@ -64,7 +64,7 @@ Claude Code ──→ State A ──→ State B
 | **Project state** | Objective, phase, handoffs, next actions — one place every harness reads. |
 | **Plans** | A plan store with a lifecycle (draft → approved → active → done) and provenance. |
 | **Memory** | Curated facts, a compiled wiki, local search. The next session can look things up. |
-| **Preferences** | Record “prefer X over Y” once. Every agent on the machine sees it. |
+| **Self-improvement** | A correction recorded once becomes a rule for every agent. Learnings, memory, and new skills compound across all your harnesses — the team of agents gets smarter together. |
 | **Skills and tools** | SKILL.md packages and MCP servers sync across agent configs. Conflicts are left alone. |
 | **Sessions** | Full-fidelity canonical session store across harnesses; transfer into Pi / DeepSeek Harness. |
 | **Subagents** | Delegate bounded tasks into other harness CLIs — depth-capped, bounded result, lineage recorded. |
