@@ -2,10 +2,13 @@
 //! shape: hooks.json points at a bare `stateroot` that resolves to a stale
 //! binary on PATH; doctor must name the version (fail-open hooks never do).
 
+#[cfg(unix)]
 use std::path::Path;
 
+#[cfg(unix)]
 use assert_cmd::Command;
 
+#[cfg(unix)] // only the unix-gated exec-stub tests invoke the binary
 fn stateroot(config_home: &Path, user_home: &Path, cwd: &Path) -> Command {
     let mut cmd = Command::cargo_bin("stateroot").expect("binary");
     cmd.env("STATEROOT_HOME", config_home)
