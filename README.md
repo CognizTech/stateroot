@@ -34,22 +34,20 @@ StateRoot is the shared layer above the agent runtime:
 
 And when a harness is retired or replaced, the work doesn't care. **The harness is disposable; the work is not.**
 
-### Why not just AGENTS.md?
+### What crosses the boundary
 
-Honestly — for a solo dev, one harness, and a small project, AGENTS.md plus rereading files is enough, and we won't sell you harder. StateRoot pays its rent when you *switch*: long projects with curated memory, several harnesses per day, plan-here-implement-there workflows, team handoffs. The cost of re-contexting is zero until it isn't.
+One project, every harness — no new runtime, no required cloud, no lock-in:
 
-### What actually crosses the boundary
-
-| | AGENTS.md | Memory tools (distilled summaries) | StateRoot |
-| --- | --- | --- | --- |
-| Instructions & rules | ✅ one harness at a time | ✅ | ✅ shared pool |
-| Memory & facts | — | ✅ LLM summaries | ✅ curated, provenance-labeled |
-| Project state & next actions | — | partial | ✅ one state of record |
-| Plans with an approval lifecycle | — | — | ✅ `stateroot plan` |
-| Real, resumable sessions | — | — | ✅ canon + transfer |
-| Subagents in *other* harnesses | — | — | ✅ `stateroot delegate` |
-| State lineage (branch / restore) | — | — | ✅ Git plumbing |
-| No new runtime, no required cloud, no lock-in | ✅ | — | ✅ one CLI on your machine |
+| Travels with the work | How |
+| --- | --- |
+| Goal, state & next actions | one state of record every harness reads |
+| Plans with an approval lifecycle | `stateroot plan` |
+| Memory & facts | curated, provenance-labeled, searchable |
+| Rules & preferences | shared pool, recorded once, seen everywhere |
+| Real, resumable sessions | canon across harnesses + transfer |
+| Subagents in *other* harnesses | `stateroot delegate` |
+| State lineage (branch / restore) | Git plumbing, your branches untouched |
+| Personality | full persona + USER.md, never trimmed |
 
 ```text
 Claude Code ──→ State A ──→ State B
