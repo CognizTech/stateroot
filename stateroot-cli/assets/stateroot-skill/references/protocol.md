@@ -16,6 +16,8 @@ stateroot resume | less
 
 Do not invent `--budget`. The CLI already sized the digest. A 2–3 sentence user summary after you have ingested every section is fine; clipping the digest itself is not. If a tool UI offers "limit output" or auto-pipes through `head`, disable it for `resume`, `status`, `doctor`, `log`, and `handoff show`.
 
+**A truncated tool *display* is not a truncated digest.** Harness UIs may elide long tool results visually while the model still receives the full text. If the digest looks cut off in the UI, treat it as complete anyway: it is the state of record, and its sections already answer "where are we". Do NOT re-fetch the same state via `handoff show`, `handoff list`, `memory recall`, or session tools to compensate — one `resume` (or one injected hook digest) is the whole answer. Reach for other tools only for things the digest does not carry.
+
 ## Checkpoint Cadence
 
 1. Checkpoint after every step that changes project state:

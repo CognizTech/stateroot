@@ -3,6 +3,39 @@
 All notable changes to StateRoot. Format loosely follows Keep a Changelog;
 StateRoot is pre-1.0 and milestones land as minor versions.
 
+## Unreleased
+
+- Hook latency hardening (cursor session-start timeouts on slow
+  filesystems): the session-start hook now prints the digest FIRST and runs
+  the session-boundary federation syncs (skills/MCP/rules) and the compiler
+  AFTER output, so a killed hook can't take the injection with it; the
+  installer now writes `timeout: 30` into cursor hook entries (cursor kills
+  hooks at a short default — our session-start took ~11s on drvfs).
+- `self-update` now re-arms harness wiring after a successful update (spawns
+  `stateroot install` from the new binary; background auto-update does it
+  quietly). Binaries and wiring no longer drift apart across versions.
+- `stateroot doctor` now checks the binary every installed hook config
+  points at (all harness hook formats): each distinct stateroot hook binary
+  gets a `--version` probe — `[ok]` when it matches the running CLI, a soft
+  `[!!]` warning naming the version when it differs (`<harness> hook binary
+  is stateroot X.Y.Z — run \`stateroot self-update\` on this machine`) or
+  when the command cannot be executed at all. Bare `stateroot` commands
+  resolve through the same PATH-probing seam as the rest of the codebase.
+  This catches fail-open staleness — hooks wired to an old binary silently
+  doing nothing (the Cursor-on-Windows 0.1.1-vs-0.1.5 incident).
+- Cursor delivery routing fixed to Cursor's real hook contract:
+  `beforeSubmitPrompt` is continue-only and cannot carry
+  `additional_context`, so digest + persona now ride `sessionStart`
+  exclusively (`prompt_submit_injects: false`, `session_start_marks: true`).
+  Previously stateroot emitted the digest on prompt submits where Cursor
+  silently discarded it — and recorded false deliveries in the ledger.
+- Skill protocol: a truncated tool *display* is not a truncated digest —
+  agents must not re-fetch state the digest already carries (the cursor
+  scavenger-hunt lesson).
+- Doctor: new per-harness hook-binary version check — resolves the stateroot
+  binary each installed hook config points at and warns when it is stale or
+  unrunnable (the Windows-Cursor-on-0.1.1 incident).
+
 ## v0.1.5 — 2026-08-23
 
 - The resume/hook digest is now BOUNDED (it reached ~67KB on real projects):

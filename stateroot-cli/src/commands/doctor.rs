@@ -2,10 +2,16 @@
 //! registry, hooks, federation). No server health checks exist in this
 //! variant.
 
+use std::path::Path;
+
+use serde_json::Value;
+use stateroot_core::harness_install::paths;
+use stateroot_core::harness_install::registry::{self, HookFormat};
 use stateroot_core::local_store;
 
 use super::Ctx;
 
+#[derive(Debug)]
 struct Check {
     label: String,
     ok: bool,
@@ -128,6 +134,12 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
                 hard: false,
             });
         }
+        // Hook-binary health: the binary each installed hook config points
+        // at must exist and match THIS cli's version (fail-open hooks never
+        // complain otherwise — the Cursor-on-Windows incident: hooks.json
+        // resolved to stateroot 0.1.1 while the box ran 0.1.5 and no digest
+        // was ever injected).
+        checks.extend(hook_binary_checks(&home));
     }
 
     // Federation doctors (local engines).
@@ -210,5 +222,410 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
     } else {
         println!("doctor: all local checks pass");
         Ok(0)
+    }
+}
+
+/// Hidden test seam (mirrors `STATEROOT_TEST_HOME`): when
+/// `STATEROOT_TEST_CMD_PROBES` is set, bare-binary detection answers from
+/// this comma-separated allowlist instead of probing the host PATH.
+fn test_cmd_probes() -> Option<Vec<String>> {
+    std::env::var("STATEROOT_TEST_CMD_PROBES").ok().map(|raw| {
+        raw.split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    })
+}
+
+/// Every stateroot hook command found in `path` (the installer's
+/// `hook_target_candidates` output for one harness).
+fn extract_hook_commands(path: &Path, format: HookFormat) -> Vec<String> {
+    match format {
+        HookFormat::TomlHooks => {
+            let Ok(text) = std::fs::read_to_string(path) else {
+                return Vec::new();
+            };
+            text.lines()
+                .filter_map(|line| {
+                    let line = line.trim();
+                    let rest = line.strip_prefix("command")?;
+                    let command = rest.trim().trim_start_matches('=').trim().trim_matches('"');
+                    command
+                        .contains("stateroot hook")
+                        .then(|| command.to_string())
+                })
+                .collect()
+        }
+        HookFormat::ZeroExecJson => {
+            let Ok(text) = std::fs::read_to_string(path) else {
+                return Vec::new();
+            };
+            let Ok(doc) = serde_json::from_str::<Value>(&text) else {
+                return Vec::new();
+            };
+            doc.get("hooks")
+                .and_then(Value::as_array)
+                .map(|hooks| {
+                    hooks
+                        .iter()
+                        .filter(|entry| {
+                            entry.get("command").and_then(Value::as_str) == Some("stateroot")
+                                && entry
+                                    .get("args")
+                                    .and_then(Value::as_array)
+                                    .and_then(|args| args.first())
+                                    .and_then(Value::as_str)
+                                    == Some("hook")
+                        })
+                        .map(|_| "stateroot".to_string())
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+        HookFormat::NativePlugin => {
+            // The generated extension invokes bare `stateroot` via execFile.
+            let Ok(text) = std::fs::read_to_string(path.join("index.ts")) else {
+                return Vec::new();
+            };
+            if text.contains("\"stateroot\"") {
+                vec!["stateroot".to_string()]
+            } else {
+                Vec::new()
+            }
+        }
+        _ => {
+            // NestedJson / FlatJson / NamedGroupsJson (and devin's
+            // whole-object file): collect every string containing a
+            // stateroot hook invocation.
+            let Ok(text) = std::fs::read_to_string(path) else {
+                return Vec::new();
+            };
+            let Ok(doc) = serde_json::from_str::<Value>(&text) else {
+                return Vec::new();
+            };
+            let mut out = Vec::new();
+            collect_hook_commands(&doc, &mut out);
+            out
+        }
+    }
+}
+
+fn collect_hook_commands(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::String(s) if s.contains("stateroot hook") || s.contains("stateroot.exe hook") => {
+            out.push(s.clone())
+        }
+        Value::Array(items) => items
+            .iter()
+            .for_each(|item| collect_hook_commands(item, out)),
+        Value::Object(map) => map
+            .values()
+            .for_each(|item| collect_hook_commands(item, out)),
+        _ => {}
+    }
+}
+
+/// The binary a stateroot hook command invokes: bare `stateroot`, or the
+/// (possibly quoted) path before the ` hook <event> --harness <id>` suffix
+/// the installer writes.
+fn binary_of_command(command: &str) -> Option<String> {
+    let command = command.trim().trim_matches('"');
+    if command == "stateroot" {
+        return Some("stateroot".to_string());
+    }
+    let (binary, _) = command.split_once(" hook ")?;
+    let binary = binary.trim().trim_matches('"');
+    if binary == "stateroot" || binary.ends_with("/stateroot") || binary.ends_with("stateroot.exe")
+    {
+        Some(binary.to_string())
+    } else {
+        None
+    }
+}
+
+/// Run one hook binary's `--version` and grade it against this cli.
+fn check_one_binary(harness_id: &str, binary: &str, probe: &dyn Fn(&str) -> bool) -> Check {
+    let label = format!("hook binary ({harness_id})");
+    if binary == "stateroot" && !probe("stateroot") {
+        return Check {
+            label,
+            ok: false,
+            detail: "hook command `stateroot` not found on PATH".into(),
+            hard: false,
+        };
+    }
+    if binary != "stateroot" && !Path::new(binary).is_file() {
+        return Check {
+            label,
+            ok: false,
+            detail: format!("hook command not runnable: {binary}"),
+            hard: false,
+        };
+    }
+    match std::process::Command::new(binary).arg("--version").output() {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let version = stdout
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().last())
+                .unwrap_or("")
+                .to_string();
+            if version == crate::cli::BUILD_VERSION {
+                Check {
+                    label,
+                    ok: true,
+                    detail: format!("{binary} · {version}"),
+                    hard: false,
+                }
+            } else {
+                Check {
+                    label,
+                    ok: false,
+                    detail: format!(
+                        "{harness_id} hook binary is stateroot {version} — run `stateroot self-update` on this machine"
+                    ),
+                    hard: false,
+                }
+            }
+        }
+        _ => Check {
+            label,
+            ok: false,
+            detail: format!("hook command not runnable: {binary}"),
+            hard: false,
+        },
+    }
+}
+
+/// One check per DISTINCT hook binary found in installed hook configs (a
+/// full install wires ~7 events at the same binary — one line, not seven).
+fn hook_binary_checks(home: &Path) -> Vec<Check> {
+    let probes = test_cmd_probes();
+    let probe = stateroot_core::skill_federation::binary_probe(probes.as_deref());
+    let mut checks = Vec::new();
+    for quirk in registry::ADAPTERS {
+        let Some(target) = quirk.hooks else {
+            continue;
+        };
+        let mut binaries = std::collections::BTreeSet::new();
+        for path in paths::hook_target_candidates(home, quirk) {
+            let exists = if target.format == HookFormat::NativePlugin {
+                path.is_dir()
+            } else {
+                path.is_file()
+            };
+            if !exists {
+                continue;
+            }
+            for command in extract_hook_commands(&path, target.format) {
+                if let Some(binary) = binary_of_command(&command) {
+                    binaries.insert(binary);
+                }
+            }
+        }
+        for binary in binaries {
+            checks.push(check_one_binary(quirk.id, &binary, &probe));
+        }
+    }
+    checks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn write(path: &Path, body: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir");
+        }
+        std::fs::write(path, body).expect("write");
+    }
+
+    #[test]
+    fn extracts_hook_commands_from_every_config_shape() {
+        let dir = tempfile::tempdir().expect("dir");
+
+        // cursor FlatJson.
+        let flat = dir.path().join(".cursor/hooks.json");
+        write(
+            &flat,
+            &serde_json::to_string_pretty(&json!({
+                "version": 1,
+                "hooks": {
+                    "sessionStart": [{"type": "command", "command": "/opt/tools/stateroot hook session_start --harness cursor", "matcher": ""}],
+                    "stop": [{"type": "command", "command": "stateroot hook stop --harness cursor", "matcher": ""}]
+                }
+            }))
+            .unwrap(),
+        );
+        let commands = extract_hook_commands(&flat, HookFormat::FlatJson);
+        assert_eq!(commands.len(), 2);
+        assert_eq!(
+            binary_of_command(&commands[0]).as_deref(),
+            Some("/opt/tools/stateroot")
+        );
+        assert_eq!(
+            binary_of_command(&commands[1]).as_deref(),
+            Some("stateroot")
+        );
+
+        // claude NestedJson (wrapped in `hooks`).
+        let nested = dir.path().join(".claude/settings.json");
+        write(
+            &nested,
+            &serde_json::to_string_pretty(&json!({
+                "hooks": {
+                    "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "stateroot hook session_start --harness claude-code"}]}]
+                }
+            }))
+            .unwrap(),
+        );
+        let commands = extract_hook_commands(&nested, HookFormat::NestedJson);
+        assert_eq!(commands.len(), 1);
+        assert_eq!(
+            binary_of_command(&commands[0]).as_deref(),
+            Some("stateroot")
+        );
+
+        // kimi TomlHooks.
+        let toml = dir.path().join(".kimi-code/config.toml");
+        write(
+            &toml,
+            "[hooks]\ncommand = \"stateroot hook session_start --harness kimi-code\"\nevent = \"SessionStart\"\n",
+        );
+        let commands = extract_hook_commands(&toml, HookFormat::TomlHooks);
+        assert_eq!(commands.len(), 1);
+        assert_eq!(
+            binary_of_command(&commands[0]).as_deref(),
+            Some("stateroot")
+        );
+
+        // zero ZeroExecJson (command + args form).
+        let zero = dir.path().join(".zero/hooks.json");
+        write(
+            &zero,
+            &serde_json::to_string_pretty(&json!({
+                "enabled": true,
+                "hooks": [{"id": "stateroot-session_start", "command": "stateroot", "args": ["hook", "session_start", "--harness", "zero"], "enabled": true}]
+            }))
+            .unwrap(),
+        );
+        let commands = extract_hook_commands(&zero, HookFormat::ZeroExecJson);
+        assert_eq!(commands, vec!["stateroot".to_string()]);
+
+        // Windows-style absolute path (backslashes, .exe suffix).
+        assert_eq!(
+            binary_of_command(
+                "C:\\Users\\u\\bin\\stateroot.exe hook session_start --harness cursor"
+            )
+            .as_deref(),
+            Some("C:\\Users\\u\\bin\\stateroot.exe")
+        );
+        // Foreign commands never extract.
+        assert_eq!(binary_of_command("eslint --fix ."), None);
+    }
+
+    #[cfg(unix)]
+    fn stub_binary(dir: &Path, version: &str) -> std::path::PathBuf {
+        let path = dir.join("stateroot");
+        write(&path, &format!("#!/bin/sh\necho 'stateroot {version}'\n"));
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("chmod");
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hook_binary_grades_ok_stale_and_missing() {
+        let dir = tempfile::tempdir().expect("dir");
+        let probe = |_cmd: &str| true;
+
+        // (a) current-version stub → ok.
+        let current = stub_binary(dir.path(), crate::cli::BUILD_VERSION);
+        let check = check_one_binary("cursor", &current.display().to_string(), &probe);
+        assert!(check.ok, "{}", check.detail);
+        assert!(
+            check.detail.contains(crate::cli::BUILD_VERSION),
+            "{}",
+            check.detail
+        );
+
+        // (b) older-version stub → warning naming the version.
+        let stale = stub_binary(dir.path(), "0.1.1");
+        let check = check_one_binary("cursor", &stale.display().to_string(), &probe);
+        assert!(!check.ok);
+        assert!(
+            check
+                .detail
+                .contains("cursor hook binary is stateroot 0.1.1"),
+            "{}",
+            check.detail
+        );
+        assert!(check.detail.contains("self-update"), "{}", check.detail);
+        assert!(!check.hard, "stale hooks warn, they never hard-fail");
+
+        // (c) missing binary → warning.
+        let missing = dir.path().join("gone").display().to_string();
+        let check = check_one_binary("cursor", &missing, &probe);
+        assert!(!check.ok);
+        assert!(
+            check.detail.contains("hook command not runnable"),
+            "{}",
+            check.detail
+        );
+
+        // Bare `stateroot` with a negative probe → not-found warning.
+        let check = check_one_binary("cursor", "stateroot", &|_cmd: &str| false);
+        assert!(!check.ok);
+        assert!(
+            check.detail.contains("not found on PATH"),
+            "{}",
+            check.detail
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hook_binary_checks_walk_installed_configs() {
+        let home = tempfile::tempdir().expect("home");
+        let stale = stub_binary(home.path(), "0.1.1");
+        let config = home.path().join(".cursor/hooks.json");
+        write(
+            &config,
+            &serde_json::to_string_pretty(&json!({
+                "version": 1,
+                "hooks": {
+                    "sessionStart": [{
+                        "type": "command",
+                        "command": format!("{} hook session_start --harness cursor", stale.display()),
+                        "matcher": ""
+                    }],
+                    // Windows incident shape: absolute stateroot.exe path.
+                    "stop": [{
+                        "type": "command",
+                        "command": "C:\\Tools\\stateroot.exe hook stop --harness cursor",
+                        "matcher": ""
+                    }]
+                }
+            }))
+            .unwrap(),
+        );
+        let checks = hook_binary_checks(home.path());
+        assert_eq!(checks.len(), 2, "checks: {checks:?}");
+        assert!(!checks[0].ok);
+        assert!(
+            checks[0].detail.contains("stateroot 0.1.1"),
+            "{}",
+            checks[0].detail
+        );
+        // The .exe path extracted and graded as not runnable here.
+        assert!(!checks[1].ok);
+        assert!(
+            checks[1].detail.contains("hook command not runnable"),
+            "{}",
+            checks[1].detail
+        );
     }
 }

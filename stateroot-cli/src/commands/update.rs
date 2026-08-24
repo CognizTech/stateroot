@@ -426,6 +426,16 @@ pub async fn download_verified(
 /// On ANY failure the old binary stays in place (the self-replace rolls
 /// back internally; download failures never touch the install).
 pub async fn download_and_install(ctx: &Ctx, info: &ReleaseInfo) -> anyhow::Result<PathBuf> {
+    download_and_install_quiet(ctx, info, false).await
+}
+
+/// [`download_and_install`] with a quiet switch for the background path
+/// (no install output, failures only traced).
+pub async fn download_and_install_quiet(
+    ctx: &Ctx,
+    info: &ReleaseInfo,
+    quiet: bool,
+) -> anyhow::Result<PathBuf> {
     let tmp = download_verified(ctx, &info.asset_url, &info.checksums_url).await?;
     let current_exe = std::env::current_exe().context("resolving current exe")?;
     let outcome = self_replace(&current_exe, &tmp)?;
@@ -439,7 +449,37 @@ pub async fn download_and_install(ctx: &Ctx, info: &ReleaseInfo) -> anyhow::Resu
         info.tag,
         outcome.installed_path.display()
     ));
+    rearm_install(&outcome.installed_path, quiet);
     Ok(outcome.installed_path)
+}
+
+/// A successful update re-arms harness wiring with the NEW binary: hook
+/// formats, plugins, and MCP registrations go stale across versions (the
+/// 0.1.1 hooks.json incident — the binary moved on, the wiring never
+/// migrated). Best-effort: a failed re-arm never fails the update.
+fn rearm_install(installed: &Path, quiet: bool) {
+    let mut cmd = std::process::Command::new(installed);
+    cmd.arg("install").env("STATEROOT_NO_AUTO_UPDATE", "1");
+    let result = if quiet {
+        cmd.output().map(|o| o.status.success())
+    } else {
+        cmd.status().map(|s| s.success())
+    };
+    match result {
+        Ok(true) => {
+            if !quiet {
+                note_update("harness wiring re-armed (`stateroot install`)");
+            }
+        }
+        _ => {
+            let message = "warning: could not re-run `stateroot install` — run it manually to refresh harness wiring";
+            if quiet {
+                tracing::warn!("{message}");
+            } else {
+                note_update(message);
+            }
+        }
+    }
 }
 
 fn note_update(message: &str) {
@@ -457,7 +497,7 @@ pub async fn maybe_auto_update(ctx: &Ctx) {
         if !is_newer(&info.tag) {
             return None;
         }
-        download_and_install(ctx, &info).await.ok()
+        download_and_install_quiet(ctx, &info, true).await.ok()
     }
     .await;
     // Deliberately discarded: silent background update — every failure is

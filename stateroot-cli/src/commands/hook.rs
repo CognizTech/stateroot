@@ -576,46 +576,6 @@ async fn resume_output(
                 note!("warning: could not queue heartbeat op: {err}");
             }
         }
-        // Session-boundary skill federation sync (best-effort, never fails the hook).
-        let options = stateroot_core::skill_federation::SyncOptions {
-            dry_run: false,
-            push: false,
-            pull: true,
-            cmd_probe: None,
-        };
-        if let Err(err) =
-            stateroot_core::skill_federation::sync_project(project_dir, &options, None)
-        {
-            note!("warning: skill federation sync skipped: {err}");
-        }
-        // Session-boundary MCP federation (pull + project; never fails the hook).
-        let mcp_options = stateroot_core::mcp_federation::SyncOptions {
-            dry_run: false,
-            pull: true,
-            push: true,
-            cmd_probe: None,
-        };
-        if let Err(err) =
-            stateroot_core::mcp_federation::sync(None, Some(project_dir), &mcp_options)
-        {
-            note!("warning: MCP federation sync skipped: {err}");
-        }
-        // Session-boundary rules federation (product-intent + harness imports).
-        if let Ok(home) = stateroot_core::harness_install::home_dir() {
-            if let Err(err) = stateroot_core::rules::sync(project_dir, &home) {
-                note!("warning: rules sync skipped: {err}");
-            }
-        }
-        // Dual-mode compiler: agentic when keyed/logged-in; never fails the hook.
-        let hook_ctx = Ctx {
-            cwd: project_dir.to_path_buf(),
-            config_dir: ctx.config_dir.clone(),
-            config: ctx.config.clone(),
-        };
-        match super::compiler::try_agentic(&hook_ctx, false).await {
-            Ok(_) => {}
-            Err(err) => note!("warning: compiler skipped: {err}"),
-        }
     }
     // Empty check only — the scheduler decides the printable content below.
     if hook_digest(&ctx.config_dir, project_dir, quirk.id).is_none() {
@@ -657,6 +617,52 @@ async fn resume_output(
             payload,
             &content_fp,
         );
+    }
+    // Heavy session-boundary work runs AFTER the digest is printed: harnesses
+    // kill slow hooks (cursor's default timeout), and a killed process must
+    // not take the injection with it. All of it is best-effort and fresh
+    // enough one step behind (discovery reads sources live anyway).
+    if canonical == "session_start" {
+        // Skill federation sync (best-effort, never fails the hook).
+        let options = stateroot_core::skill_federation::SyncOptions {
+            dry_run: false,
+            push: false,
+            pull: true,
+            cmd_probe: None,
+        };
+        if let Err(err) =
+            stateroot_core::skill_federation::sync_project(project_dir, &options, None)
+        {
+            note!("warning: skill federation sync skipped: {err}");
+        }
+        // MCP federation (pull + project; never fails the hook).
+        let mcp_options = stateroot_core::mcp_federation::SyncOptions {
+            dry_run: false,
+            pull: true,
+            push: true,
+            cmd_probe: None,
+        };
+        if let Err(err) =
+            stateroot_core::mcp_federation::sync(None, Some(project_dir), &mcp_options)
+        {
+            note!("warning: MCP federation sync skipped: {err}");
+        }
+        // Rules federation (product-intent + harness imports).
+        if let Ok(home) = stateroot_core::harness_install::home_dir() {
+            if let Err(err) = stateroot_core::rules::sync(project_dir, &home) {
+                note!("warning: rules sync skipped: {err}");
+            }
+        }
+        // Dual-mode compiler: agentic when keyed/logged-in; never fails the hook.
+        let hook_ctx = Ctx {
+            cwd: project_dir.to_path_buf(),
+            config_dir: ctx.config_dir.clone(),
+            config: ctx.config.clone(),
+        };
+        match super::compiler::try_agentic(&hook_ctx, false).await {
+            Ok(_) => {}
+            Err(err) => note!("warning: compiler skipped: {err}"),
+        }
     }
     Ok(0)
 }

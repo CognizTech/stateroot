@@ -209,3 +209,15 @@ active plan, next actions, handoff fields) stays fully inline.
   share a 16000-char total budget in pack order, and docs past the budget
   appear as a one-line title listing: `(capped — N more docs on disk)`. The
   top-level tree listing is unbounded (it is short by construction).
+
+## `stateroot doctor` — hook-binary health
+
+Doctor inspects the binary every installed hook config actually points at
+(all harness hook formats: nested/flat JSON, TOML, exec-form, named groups,
+and the generated OpenClaw plugin). For each distinct stateroot hook binary
+it runs `--version`: a match with the running CLI reports `[ok]`; a
+mismatched or unrunnable binary is a soft `[!!]` warning (never a hard
+failure) — e.g. `cursor hook binary is stateroot 0.1.1 — run \`stateroot
+self-update\` on this machine`. This is the check for fail-open staleness:
+hooks that resolve to an old `stateroot` silently do nothing, and nothing
+else reports it.

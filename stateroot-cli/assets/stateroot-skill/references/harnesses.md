@@ -11,7 +11,7 @@ Automatic harnesses inject persona + USER.md + work context onto the first usabl
 | Harness | Delivery | Notes |
 | --- | --- | --- |
 | Claude Code, Codex, Kimi, Devin | Automatic | Session-start inject; first prompt retries if that missed |
-| Cursor | Automatic | Session-start stdout may be ignored; first prompt always injects |
+| Cursor | Automatic | Cursor injects only on `sessionStart` (`beforeSubmitPrompt` is continue-only); prompt submits are capture-only |
 | Kimi Code | Automatic | Identity rides UserPromptSubmit |
 | OpenClaw | Automatic | `before_prompt_build` pulls digest stdout |
 | OpenCode, OMP, pi | Automatic | Generated plugin consumes hook stdout on the first prompt |

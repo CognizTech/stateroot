@@ -85,23 +85,39 @@ fn no_handoff_identity_is_injected_and_recorded() {
 }
 
 #[test]
-fn cursor_missed_session_start_recovers_on_first_prompt() {
+fn cursor_session_start_injects_and_prompt_submit_is_capture_only() {
     let config_home = tempfile::tempdir().expect("config");
     let user_home = tempfile::tempdir().expect("home");
     let project = tempfile::tempdir().expect("project");
     seed_marid(config_home.path(), user_home.path());
     init_project(config_home.path(), user_home.path(), project.path());
 
-    let prompt = stateroot(config_home.path(), user_home.path(), project.path())
-        .args(["hook", "beforeSubmitPrompt", "--harness", "cursor"])
-        .write_stdin(r#"{"conversation_id":"skills-chat","prompt":"Can you list all of the skills that you have?"}"#)
+    // Cursor's real contract: additional_context only lands on sessionStart.
+    let start = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["hook", "SessionStart", "--harness", "cursor"])
+        .write_stdin(r#"{"conversation_id":"skills-chat"}"#)
         .assert()
         .success();
-    let out = stdout_of(&prompt);
-    assert!(out.contains("additional_context"), "cursor envelope: {out}");
+    let start_out = stdout_of(&start);
     assert!(
-        contains_marid(&out),
-        "missed session-start must recover: {out}"
+        start_out.contains("additional_context"),
+        "cursor envelope: {start_out}"
+    );
+    assert!(
+        contains_marid(&start_out),
+        "session-start must inject: {start_out}"
+    );
+
+    // beforeSubmitPrompt is continue-only upstream — capture, never inject.
+    let prompt = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["hook", "beforeSubmitPrompt", "--harness", "cursor"])
+        .write_stdin(r#"{"conversation_id":"skills-chat","prompt":"hi"}"#)
+        .assert()
+        .success();
+    let prompt_out = stdout_of(&prompt);
+    assert!(
+        !prompt_out.contains("additional_context"),
+        "beforeSubmitPrompt must not inject: {prompt_out}"
     );
 }
 
@@ -142,7 +158,7 @@ fn two_session_ids_are_independent() {
 
     for id in ["chat-a", "chat-b"] {
         let out = stateroot(config_home.path(), user_home.path(), project.path())
-            .args(["hook", "beforeSubmitPrompt", "--harness", "cursor"])
+            .args(["hook", "SessionStart", "--harness", "cursor"])
             .write_stdin(format!(r#"{{"conversation_id":"{id}"}}"#))
             .assert()
             .success();
@@ -198,7 +214,7 @@ fn cross_harness_deliveries_are_independent() {
         .success();
 
     let cursor = stateroot(config_home.path(), user_home.path(), project.path())
-        .args(["hook", "beforeSubmitPrompt", "--harness", "cursor"])
+        .args(["hook", "SessionStart", "--harness", "cursor"])
         .write_stdin(r#"{"conversation_id":"shared"}"#)
         .assert()
         .success();
@@ -334,15 +350,13 @@ fn sideragents_demo_both_chats_receive_marid_identity() {
     init_project(config_home.path(), user_home.path(), project.path());
 
     let skills = stateroot(config_home.path(), user_home.path(), project.path())
-        .args(["hook", "beforeSubmitPrompt", "--harness", "cursor"])
-        .write_stdin(
-            r#"{"conversation_id":"5d08e155-3828-403b-8a87-bf05871d083d","prompt":"Can you list all of the skills that you have?"}"#,
-        )
+        .args(["hook", "SessionStart", "--harness", "cursor"])
+        .write_stdin(r#"{"conversation_id":"5d08e155-3828-403b-8a87-bf05871d083d"}"#)
         .assert()
         .success();
     let hi = stateroot(config_home.path(), user_home.path(), project.path())
-        .args(["hook", "beforeSubmitPrompt", "--harness", "cursor"])
-        .write_stdin(r#"{"conversation_id":"5be521b7-ac2c-41f1-b2a7-676646ad3cb1","prompt":"Hi"}"#)
+        .args(["hook", "SessionStart", "--harness", "cursor"])
+        .write_stdin(r#"{"conversation_id":"5be521b7-ac2c-41f1-b2a7-676646ad3cb1"}"#)
         .assert()
         .success();
 

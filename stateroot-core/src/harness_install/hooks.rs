@@ -63,6 +63,10 @@ fn flat_entries(quirk: &HarnessQuirk) -> Map<String, Value> {
                 "type": "command",
                 "command": command_for(quirk, canonical),
                 "matcher": "",
+                // Cursor kills hooks at a short default timeout; session_start
+                // also runs federation syncs, which can take ~10s on slow
+                // filesystems. The digest prints first, then the syncs.
+                "timeout": 30,
             }]),
         );
     }

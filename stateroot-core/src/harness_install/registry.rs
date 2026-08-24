@@ -103,10 +103,13 @@ impl DigestDeliveryPolicy {
             "cursor" => Self {
                 primary_event: "session_start",
                 session_start_prints: true,
-                session_start_marks: false,
-                prompt_submit_injects: true,
+                session_start_marks: true,
+                // Cursor's beforeSubmitPrompt is continue-only (no
+                // additional_context) — prompt submits are capture-only;
+                // digest and identity ride sessionStart exclusively.
+                prompt_submit_injects: false,
                 tier: DeliveryTier::Automatic,
-                note: "session-start may be ignored; first prompt always injects",
+                note: "cursor injects only on sessionStart; prompt submits are capture-only",
             },
             "gemini-cli" | "antigravity" => Self {
                 primary_event: "session_start",
@@ -972,9 +975,11 @@ mod tests {
                     assert_eq!(policy.tier, DeliveryTier::Automatic);
                 }
                 "cursor" => {
+                    // Cursor injects additional_context ONLY on sessionStart;
+                    // beforeSubmitPrompt is continue-only (capture-only).
                     assert!(policy.session_start_prints);
-                    assert!(!policy.session_start_marks);
-                    assert!(policy.prompt_submit_injects);
+                    assert!(policy.session_start_marks);
+                    assert!(!policy.prompt_submit_injects);
                     assert_eq!(policy.tier, DeliveryTier::Automatic);
                 }
                 "openclaw" | "opencode" | "omp" => {
