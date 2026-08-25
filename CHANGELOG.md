@@ -5,6 +5,12 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- Hook project resolution now prefers the event payload's `cwd` /
+  `workspace_roots` over the hook process's own cwd — gateway daemons and
+  IDE hosts run hooks with *their* working directory, so the digest
+  previously described the wrong project (the OpenClaw gateway served the
+  repo it was launched from). New env-gated forensics: `STATEROOT_HOOK_DEBUG=1`
+  appends every hook payload to `/tmp/stateroot-hook-payloads.jsonl`.
 - The digest (resume AND in-band hook injection) now carries the freshest
   actionable state: a `## Recent Checkpoints` section (last five episodic
   notes) and the `## Active Plan` section in the hook digest too — previously

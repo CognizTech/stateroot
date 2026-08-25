@@ -57,6 +57,27 @@ fn find_project_root(start: &Path) -> Option<PathBuf> {
     None
 }
 
+/// The agent's working directory from a hook payload, when the harness sends
+/// one: `cwd` / `project_dir` / `workspace_dir` string fields, or the first
+/// `workspace_roots` entry (cursor's shape). Returns None on anything odd.
+fn payload_project_dir(payload: &Value) -> Option<PathBuf> {
+    for key in ["cwd", "project_dir", "projectDir", "workspace_dir"] {
+        if let Some(dir) = payload.get(key).and_then(|v| v.as_str()) {
+            let path = PathBuf::from(dir);
+            if path.is_absolute() && path.is_dir() {
+                return Some(path);
+            }
+        }
+    }
+    payload
+        .get("workspace_roots")
+        .and_then(|v| v.as_array())
+        .and_then(|roots| roots.first())
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute() && path.is_dir())
+}
+
 /// Lenient stdin payload parse (tolerates empty or non-JSON input).
 fn read_payload() -> Value {
     use std::io::Read;
@@ -71,19 +92,49 @@ fn read_payload() -> Value {
     serde_json::from_str(text).unwrap_or_else(|_| json!({"_raw": text}))
 }
 
+/// Debug capture: STATEROOT_HOOK_DEBUG=1 appends every hook payload to
+/// /tmp/stateroot-hook-payloads.jsonl (payload-shape forensics).
+fn debug_dump_payload(event: &str, harness: &str, payload: &Value) {
+    if std::env::var_os("STATEROOT_HOOK_DEBUG").is_none() {
+        return;
+    }
+    let line = serde_json::json!({
+        "event": event,
+        "harness": harness,
+        "payload": payload,
+    });
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/stateroot-hook-payloads.jsonl")
+    {
+        use std::io::Write as _;
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 /// Run the hook. Always exits 0 on harness-facing paths.
 pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
     let Some(quirk) = quirk_any(harness) else {
         return Ok(0);
     };
 
-    // Project resolution: walk-up first, then the registry.
-    let project_dir = find_project_root(&ctx.cwd).or_else(|| {
-        ctx.current_project()
-            .ok()
-            .flatten()
-            .and_then(|_| ctx.cwd.canonicalize().ok())
-            .filter(|cwd| local_store::is_stateroot_dir(cwd))
+    let payload = read_payload();
+    debug_dump_payload(event, harness, &payload);
+
+    // Project resolution: the event payload's cwd/workspace first (gateway
+    // daemons and IDEs run hooks with THEIR cwd, not the agent's project —
+    // the openclaw gateway bug), then walk-up from our process cwd, then the
+    // registry.
+    let payload_root = payload_project_dir(&payload).and_then(|d| find_project_root(&d));
+    let project_dir = payload_root.or_else(|| {
+        find_project_root(&ctx.cwd).or_else(|| {
+            ctx.current_project()
+                .ok()
+                .flatten()
+                .and_then(|_| ctx.cwd.canonicalize().ok())
+                .filter(|cwd| local_store::is_stateroot_dir(cwd))
+        })
     });
     let Some(canonical) = normalize_event(quirk, event) else {
         return Ok(0);
@@ -91,7 +142,6 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
     let Some(kind) = event_kind(canonical) else {
         return Ok(0);
     };
-    let payload = read_payload();
 
     match kind {
         EventKind::Resume => match project_dir.as_ref() {
@@ -954,6 +1004,27 @@ mod tests {
     use std::sync::Mutex;
 
     static TEST_HOME_ENV: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn payload_project_dir_prefers_agent_cwd_over_process() {
+        let project = tempfile::tempdir().expect("project");
+        local_store::init_skeleton(project.path(), "p-test", "proj", "local").expect("skeleton");
+        // cwd string field (openclaw/kimi shape).
+        let payload = json!({"cwd": project.path().display().to_string()});
+        let dir = payload_project_dir(&payload).expect("cwd dir");
+        assert_eq!(
+            find_project_root(&dir).expect("root"),
+            project.path().canonicalize().unwrap()
+        );
+        // workspace_roots array (cursor shape).
+        let payload = json!({"workspace_roots": [project.path().display().to_string()]});
+        assert!(payload_project_dir(&payload).is_some());
+        // Garbage stays None: relative paths, missing dirs, wrong types.
+        assert!(payload_project_dir(&json!({"cwd": "relative/path"})).is_none());
+        assert!(payload_project_dir(&json!({"cwd": "/definitely/not/here"})).is_none());
+        assert!(payload_project_dir(&json!({"cwd": 42})).is_none());
+        assert!(payload_project_dir(&json!({})).is_none());
+    }
 
     #[test]
     fn digest_is_actionables_first_with_footer() {
