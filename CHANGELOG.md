@@ -3,7 +3,7 @@
 All notable changes to StateRoot. Format loosely follows Keep a Changelog;
 StateRoot is pre-1.0 and milestones land as minor versions.
 
-## Unreleased
+## v0.1.7 — 2026-08-25
 
 - `stateroot projects` [--json] [--prune]: the global registry window —
   every initialized project on the machine with live hints (phase, objective,
