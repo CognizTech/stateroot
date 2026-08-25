@@ -327,7 +327,45 @@ pub fn search(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     hits.truncate(limit);
+    // Indexed docs can be whole transcripts (~100KB) — return an excerpt
+    // around the match, or MCP/tool budgets blow up (a real claude-code
+    // incident: one recall hit exceeded the maximum tool result).
+    for hit in &mut hits {
+        hit.text = excerpt_around(&hit.text, q);
+    }
     Ok(hits)
+}
+
+/// The excerpt budget for one recall hit (chars, not tokens).
+const RECALL_EXCERPT_CHARS: usize = 1600;
+
+/// Cap `text` to a window around the first query-token match, with ellipsis
+/// marks where cut. Char-boundary safe; short texts pass through untouched.
+fn excerpt_around(text: &str, query: &str) -> String {
+    let total = text.chars().count();
+    if total <= RECALL_EXCERPT_CHARS {
+        return text.to_string();
+    }
+    let lower = text.to_lowercase();
+    let pos = query
+        .split_whitespace()
+        .filter(|t| t.len() > 1)
+        .filter_map(|t| lower.find(&t.to_lowercase()))
+        .min()
+        .unwrap_or(0);
+    let char_pos = lower[..pos].chars().count();
+    let start = char_pos.saturating_sub(400);
+    let chars: Vec<char> = text.chars().collect();
+    let end = (start + RECALL_EXCERPT_CHARS).min(total);
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.extend(chars[start..end].iter());
+    if end < total {
+        out.push('…');
+    }
+    out
 }
 
 fn build_fts_query(q: &str) -> String {
@@ -408,6 +446,20 @@ fn like_fallback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn excerpt_around_caps_giant_docs_at_the_match() {
+        let giant = format!("{}needle{}", "x".repeat(9000), "y".repeat(9000));
+        let out = excerpt_around(&giant, "needle");
+        assert!(out.chars().count() <= RECALL_EXCERPT_CHARS + 2, "bounded");
+        assert!(out.contains("needle"), "match kept");
+        assert!(out.starts_with('…') && out.ends_with('…'), "cut marked");
+        // Short docs pass through untouched.
+        assert_eq!(excerpt_around("small doc", "needle"), "small doc");
+        // No match → capped from the front, marked at the cut.
+        let out = excerpt_around(&"z".repeat(9000), "needle");
+        assert!(out.ends_with('…') && out.chars().count() <= RECALL_EXCERPT_CHARS + 1);
+    }
 
     #[test]
     fn recall_hits_page_and_episodic() {

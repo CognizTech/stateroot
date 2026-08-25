@@ -5,6 +5,9 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- `memory recall` / MCP `memory_recall` hits are now excerpted to a ~1600-char
+  window around the match (indexed transcript docs can run ~100KB and blew
+  past Claude Code's MCP tool-result cap mid-continuity-test).
 - Hook project resolution now prefers the event payload's `cwd` /
   `workspace_roots` over the hook process's own cwd — gateway daemons and
   IDE hosts run hooks with *their* working directory, so the digest

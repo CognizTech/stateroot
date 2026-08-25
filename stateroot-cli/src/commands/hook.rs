@@ -1012,10 +1012,13 @@ mod tests {
         // cwd string field (openclaw/kimi shape).
         let payload = json!({"cwd": project.path().display().to_string()});
         let dir = payload_project_dir(&payload).expect("cwd dir");
-        assert_eq!(
-            find_project_root(&dir).expect("root"),
-            project.path().canonicalize().unwrap()
-        );
+        // Canonicalize BOTH sides: Windows canonicalize adds the \\?\ prefix
+        // and expands 8.3 short names — comparing raw forms flakes there.
+        let found = find_project_root(&dir)
+            .expect("root")
+            .canonicalize()
+            .expect("canonical root");
+        assert_eq!(found, project.path().canonicalize().unwrap());
         // workspace_roots array (cursor shape).
         let payload = json!({"workspace_roots": [project.path().display().to_string()]});
         assert!(payload_project_dir(&payload).is_some());
