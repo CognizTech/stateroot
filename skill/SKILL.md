@@ -186,3 +186,27 @@ Do not continue from this file. Do not summarize a homemade session protocol. Ru
 - Running `setup --blank-slate` unprompted
 - Teaching resume / checkpoint / handoff / memory here after setup succeeded
 - Staying on this marketplace skill once harnesses are interfaced
+
+---
+
+## About StateRoot (marketplace listing copy)
+
+*This section is for humans browsing skill registries (ClawHub and similar). It plays no role in agent routing or bootstrap behavior.*
+
+StateRoot is an open-source, local-first CLI for **continuity across AI coding agents**. It keeps one shared project state — goal, plans, memory, learnings, skills, rules, personality, and sessions — so Claude Code, Codex, Cursor, Kimi Code, Pi, DeepSeek Harness, OpenClaw, and Hermes each pick up exactly where the last agent left off. No re-explaining the project, no re-reading the codebase, no rebuilding context when you hit a usage limit or a better model lands in a rival tool.
+
+What it does:
+
+- **Session continuity and handoffs** — hooks inject a bounded project digest at session start; the next agent starts knowing the goal, the plan, decisions, and next actions.
+- **Cross-agent shared memory** — a three-layer memory (curated hot-apex facts, an evidence-compiled wiki, searchable episodic history) with every fact labeled verified, observed, or synthesized.
+- **Shared learnings and self-improvement** — record a correction once and every agent on the machine lives by it immediately; the team of agents gets smarter together.
+- **Plans across agents** — a plan store with an approval lifecycle; plan with a strong model in one agent, implement with a cheaper one in another.
+- **Cross-agent subagents** — delegate a bounded task into another agent's CLI and get back the conclusion.
+- **State versioning** — working-tree snapshots in Git plumbing: restore, fork, compare, with receipts. Your branches are never touched.
+- **Skills and MCP sync** — SKILL.md packages and MCP server configs pooled and projected across agent configs without clobbering user content.
+- **Personality sharing** — one persona and user profile, injected in full at every session start.
+- **Local-first and private** — one static binary, zero config to start, everything on your machine, Apache-2.0.
+
+Keywords for search: AI coding agents, cross-agent memory, shared agent context, project state, session handoff, context engineering, multi-agent workflow, agent skills, MCP, Claude Code, Codex, Cursor, developer tools, local-first, open source.
+
+Homepage: https://stateroot.dev · Source: https://github.com/CognizTech/stateroot
