@@ -3,7 +3,7 @@
 All notable changes to StateRoot. Format loosely follows Keep a Changelog;
 StateRoot is pre-1.0 and milestones land as minor versions.
 
-## Unreleased
+## v0.1.6 — 2026-08-25
 
 - Hook latency hardening (cursor session-start timeouts on slow
   filesystems): the session-start hook now prints the digest FIRST and runs
