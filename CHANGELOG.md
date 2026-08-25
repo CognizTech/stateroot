@@ -3,7 +3,7 @@
 All notable changes to StateRoot. Format loosely follows Keep a Changelog;
 StateRoot is pre-1.0 and milestones land as minor versions.
 
-## Unreleased
+## v0.1.8 — 2026-08-26
 
 - `stateroot install` (and thus `self-update`'s re-arm) now refreshes the
   project convenience layers — the AGENTS.md block and harness command/rule
