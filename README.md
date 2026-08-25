@@ -4,6 +4,8 @@
 
 StateRoot keeps your project's goal, personality, plans, memory, skills, rules, and sessions in one local place — so Claude Code, Codex, Cursor, Kimi Code, Pi, DeepSeek Harness and friends each pick up exactly where the last one left off. And every lesson one agent learns becomes a rule for all of them. One CLI, everything on your machine.
 
+**And it versions the work itself.** Snapshot, restore, fork, and compare the complete state of the project at any point — immutable, content-addressed, with receipts for how it changed.
+
 <!-- GIF SLOT: drop the continuity demo here (close one agent, open another — it just knows).
      Suggested: <p align="center"><img alt="Close one agent, open another — it just knows" src="docs/assets/continuity-demo.gif"></p>
      Record ~10s: work in one harness, open a second in the same project, first answer already has the context. -->
@@ -32,6 +34,8 @@ StateRoot is the shared layer above the agent runtime:
 - **Branch and restore the work** — snapshots live in Git plumbing under `refs/stateroot`; your branches are never rewritten.
 
 And when a harness is retired or replaced, the work doesn't care. **The harness is disposable; the work is not.**
+
+Memory tools preserve what your agents *know*. StateRoot also preserves what the work *is* — every meaningful state of the project, immutable and restorable, with a provable lineage of how it changed.
 
 ### What crosses the boundary
 
@@ -86,6 +90,8 @@ Learnings are judgment, not facts: `prefer X over Y`, `never Z`, each with *when
 ## What it snapshots
 
 Git versions the commits you make. StateRoot snapshots the working tree during agent work, stored with Git *plumbing* under `refs/stateroot`. Your branches are never rewritten.
+
+Every snapshot is a complete, immutable, content-addressed state: restore it exactly, fork it safely, compare any two states honestly, and read the receipt of what changed between them.
 
 Restores and digests say where information came from: **verified** (Git), **observed** (transcripts), or **synthesized** (LLM). Empty stays empty.
 
