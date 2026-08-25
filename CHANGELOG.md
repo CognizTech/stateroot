@@ -3,6 +3,23 @@
 All notable changes to StateRoot. Format loosely follows Keep a Changelog;
 StateRoot is pre-1.0 and milestones land as minor versions.
 
+## Unreleased
+
+- **Latest Activity in every digest** (resume and hook): the newest observed
+  activity anywhere — last checkpoint or latest root — with harness and
+  timestamp, plus an explicit stale-handoff note when activity postdates the
+  formal handoff (`activity continues after formal handoff #2 by codex…`). A
+  long-running session that never writes a formal handoff is now visible to
+  every harness that arrives after it (the claude-code/codex misattribution
+  incident). `checkpoint` and `snap` also stamp `last_activity
+  {harness, kind, at}` into the current handoff in place (additive; history
+  files stay immutable).
+- **Periodic self-update for agents**: the digest now carries a cache-only
+  `**Update available: <tag> — run \`stateroot self-update\`**` notice when
+  the release cache knows a newer tag (never network at hook time), and the
+  post-install skill instructs agents to act on it (or to run
+  `self-update --check` occasionally) — the tool keeps its own freshness.
+
 ## v0.1.7 — 2026-08-25
 
 - `stateroot projects` [--json] [--prune]: the global registry window —

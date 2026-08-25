@@ -29,6 +29,8 @@ pub fn snap(ctx: &Ctx, reason: Option<&str>, harness: Option<&str>) -> anyhow::R
         Some(&snap_ctx),
     )?;
     println!("root {}", manifest.id);
+    // Same contract as checkpoint: the next harness sees who worked last.
+    stateroot_core::local_store::stamp_handoff_activity(&ctx.cwd, &resolved_harness, "root");
     println!(
         "coverage: {}",
         if manifest.coverage == "state_only" {

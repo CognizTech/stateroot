@@ -264,6 +264,29 @@ pub fn recent_episodic(project_dir: &Path, limit: usize) -> Vec<Value> {
     records.into_iter().rev().take(limit).rev().collect()
 }
 
+/// Stamp `last_activity: {harness, kind, at}` into the current handoff — an
+/// additive in-place update under the same convention as `accepted_by`
+/// (history files stay immutable; no new handoff is written). Called by
+/// checkpoint and snap so the next harness sees who worked last even when no
+/// formal handoff exists. Best-effort: never fails on IO.
+pub fn stamp_handoff_activity(project_dir: &Path, harness: &str, kind: &str) {
+    let path = root(project_dir).join(HANDOFF_CURRENT_PATH);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(mut packet) = serde_json::from_str::<Value>(&text) else {
+        return;
+    };
+    packet["last_activity"] = serde_json::json!({
+        "harness": harness,
+        "kind": kind,
+        "at": now_rfc3339(),
+    });
+    if let Ok(text) = serde_json::to_string_pretty(&packet) {
+        let _ = std::fs::write(&path, format!("{text}\n"));
+    }
+}
+
 /// Persist a handoff packet locally: `handoffs/current.json` plus an immutable
 /// copy in `handoffs/history/<ts>-<harness>.json`.
 pub fn write_handoff_local(project_dir: &Path, packet: &Value) -> Result<(), LocalStoreError> {
@@ -514,6 +537,34 @@ pub fn now_rfc3339() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stamp_handoff_activity_updates_in_place_without_touching_the_packet() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        init_skeleton(tmp.path(), "p", "proj", "local").expect("skeleton");
+        let packet = serde_json::json!({
+            "schema_version": SCHEMA_HANDOFF_V1,
+            "project_id": "p", "seq": 1, "created_by_harness": "cli",
+            "objective": "keep me", "task": "t", "context_summary": "",
+            "next_actions": []
+        });
+        write_handoff_local(tmp.path(), &packet).expect("write");
+        stamp_handoff_activity(tmp.path(), "kimi", "checkpoint");
+        let text =
+            std::fs::read_to_string(root(tmp.path()).join(HANDOFF_CURRENT_PATH)).expect("read");
+        let after: Value = serde_json::from_str(&text).expect("json");
+        let activity = &after["last_activity"];
+        assert_eq!(activity["harness"], "kimi");
+        assert_eq!(activity["kind"], "checkpoint");
+        assert!(activity["at"].as_str().is_some_and(|t| !t.is_empty()));
+        assert_eq!(after["objective"], "keep me", "body untouched");
+        // Idempotent: a later stamp replaces, never accumulates.
+        stamp_handoff_activity(tmp.path(), "codex", "root");
+        let text =
+            std::fs::read_to_string(root(tmp.path()).join(HANDOFF_CURRENT_PATH)).expect("read");
+        let after: Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(after["last_activity"]["harness"], "codex");
+    }
 
     #[test]
     fn recent_episodic_reads_the_tail_and_tolerates_gaps() {

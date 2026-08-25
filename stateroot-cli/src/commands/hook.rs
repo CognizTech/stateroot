@@ -493,6 +493,16 @@ pub fn hook_digest_with_identity(
     // The central plan store and recent checkpoint notes ride the hook digest
     // too — they are the freshest actionable state, and a harness whose digest
     // never shows them will go hunting for them (the openclaw probe lesson).
+    // The freshest truth first: latest observed activity (a live session that
+    // never wrote a handoff stays visible), then the central plan, the
+    // handoff work, and recent checkpoints. The update nudge leads (agents
+    // act on what they see).
+    if let Some(notice) = super::update::update_notice(config_dir) {
+        work.push_str(&notice);
+    }
+    if let Some(section) = super::resume::latest_activity_section(project_dir) {
+        work.push_str(&section);
+    }
     if let Some(section) = super::resume::central_plan_section(Some(project_dir)) {
         work.push_str(&section);
     }

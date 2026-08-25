@@ -210,6 +210,24 @@ active plan, next actions, handoff fields) stays fully inline.
   appear as a one-line title listing: `(capped — N more docs on disk)`. The
   top-level tree listing is unbounded (it is short by construction).
 
+## The digest's freshness lines — Latest Activity & update notice
+
+Two one-line sections keep every arriving harness oriented:
+
+- **Latest Activity** — the newest observed activity anywhere (last checkpoint
+  or latest root) with harness and timestamp. A long-running session that
+  never writes a formal handoff is no longer invisible: when activity
+  postdates the handoff boundary, the digest says so plainly (`activity
+  continues after formal handoff #2 by codex — the formal handoff is stale`).
+  `checkpoint` and `snap` also stamp `last_activity {harness, kind, at}` into
+  `handoffs/current.json` in place (additive; history stays immutable).
+- **Update notice** — when the release cache (`update-check.json`, refreshed
+  by the background auto-update on its own cadence) knows a newer tag than
+  the running binary, the digest carries `**Update available: <tag> — run
+  \`stateroot self-update\`**`. Cache-only: the digest never touches the
+  network. The post-install skill tells agents to act on this line (or to run
+  `stateroot self-update --check` occasionally).
+
 ## `stateroot doctor` — hook-binary health
 
 Doctor inspects the binary every installed hook config actually points at

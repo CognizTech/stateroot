@@ -32,6 +32,22 @@ fn cache_path(ctx: &Ctx) -> PathBuf {
     ctx.config_dir.join("update-check.json")
 }
 
+/// Digest update notice (cache-only, NEVER network): a one-liner when the
+/// cached release check knows a newer tag than this binary. The background
+/// auto-update refreshes the cache on its own cadence; hooks stay fast and
+/// offline. Agents act on what they see — this is the periodic-update nudge.
+pub(crate) fn update_notice(config_dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(config_dir.join("update-check.json")).ok()?;
+    let cached: Value = serde_json::from_str(&text).ok()?;
+    let tag = cached.get("latest_tag").and_then(|v| v.as_str())?;
+    if !is_newer(tag) {
+        return None;
+    }
+    Some(format!(
+        "**Update available: {tag} — run `stateroot self-update` (it re-arms wiring automatically).**\n\n"
+    ))
+}
+
 fn api_base() -> String {
     std::env::var("STATEROOT_GITHUB_API_BASE")
         .ok()
@@ -752,6 +768,33 @@ fn version_of(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_notice_reads_the_cache_and_stays_honest() {
+        let dir = tempfile::tempdir().expect("dir");
+        assert!(update_notice(dir.path()).is_none(), "no cache file");
+        std::fs::write(
+            dir.path().join("update-check.json"),
+            r#"{"latest_tag": "v999.0.0", "checked_at": "2026-08-25T00:00:00Z"}"#,
+        )
+        .expect("cache");
+        let notice = update_notice(dir.path()).expect("notice");
+        assert!(notice.contains("v999.0.0"), "{notice}");
+        assert!(notice.contains("self-update"), "{notice}");
+        // Same version as this binary → no nudge.
+        std::fs::write(
+            dir.path().join("update-check.json"),
+            format!(
+                r#"{{"latest_tag": "v{}", "checked_at": "2026-08-25T00:00:00Z"}}"#,
+                crate::cli::BUILD_VERSION
+            ),
+        )
+        .expect("cache");
+        assert!(
+            update_notice(dir.path()).is_none(),
+            "same version, no nudge"
+        );
+    }
 
     fn stub_binary(dir: &Path, name: &str) -> Option<PathBuf> {
         let source = Path::new("/bin/true");

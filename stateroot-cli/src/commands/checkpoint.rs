@@ -18,6 +18,9 @@ pub fn run(ctx: &Ctx, note_text: &str, files: &[String]) -> anyhow::Result<()> {
         "files": files,
     });
     local_store::append_episodic(&ctx.cwd, &record)?;
+    // The next harness should see who worked last even when no formal
+    // handoff exists — stamp the current packet (additive, in place).
+    local_store::stamp_handoff_activity(&ctx.cwd, LOCAL_HARNESS, "checkpoint");
     println!("checkpoint recorded");
     // Compact digest footer (composed locally).
     if let Some(footer) = super::resume::digest_footer(&ctx.cwd) {
@@ -42,5 +45,6 @@ pub(crate) async fn record_checkpoint(
         "files": files,
     });
     local_store::append_episodic(&ctx.cwd, &record)?;
+    local_store::stamp_handoff_activity(&ctx.cwd, LOCAL_HARNESS, "checkpoint");
     Ok(true)
 }

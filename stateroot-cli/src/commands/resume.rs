@@ -96,6 +96,99 @@ pub(crate) fn central_plan_section(project_dir: Option<&Path>) -> Option<String>
     Some(section)
 }
 
+/// "## Latest Activity" — the newest observed activity anywhere (checkpoint
+/// or root), with harness + timestamp. A long-running session never writes a
+/// formal handoff; without this line the next harness anchors on the older
+/// formal writer and the live session is invisible (the claude-code incident:
+/// codex named as last actor while kimi was still working). When activity
+/// postdates the handoff boundary, the section says so explicitly.
+pub(crate) fn latest_activity_section(project_dir: &Path) -> Option<String> {
+    let activity = latest_activity(project_dir)?;
+    let mut section = format!(
+        "## Latest Activity\n\n- {} · {} · {}\n",
+        activity.harness, activity.kind, activity.at
+    );
+    let handoff = stateroot_core::local_store::read_handoff_local(project_dir)
+        .ok()
+        .flatten();
+    if let Some(packet) = handoff {
+        let boundary = packet
+            .get("written_at")
+            .and_then(|v| v.as_str())
+            .filter(|t| !t.is_empty())
+            .or_else(|| packet.get("created_at").and_then(|v| v.as_str()))
+            .unwrap_or("");
+        if !boundary.is_empty() && ts_newer(&activity.at, boundary) {
+            let seq = packet.get("seq").and_then(|v| v.as_i64()).unwrap_or(0);
+            let author = packet
+                .get("created_by_harness")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            section.push_str(&format!(
+                "- activity continues after formal handoff #{seq} by {author} — the formal handoff is stale; Recent Checkpoints and observed evidence carry the work since.\n"
+            ));
+        }
+    }
+    section.push('\n');
+    Some(section)
+}
+
+struct Activity {
+    harness: String,
+    kind: &'static str,
+    at: String,
+}
+
+/// The newest observed activity: last checkpoint vs latest root, newest wins.
+fn latest_activity(project_dir: &Path) -> Option<Activity> {
+    let mut best: Option<Activity> = stateroot_core::local_store::recent_episodic(project_dir, 1)
+        .into_iter()
+        .next()
+        .map(|rec| Activity {
+            harness: rec
+                .get("harness")
+                .and_then(|v| v.as_str())
+                .unwrap_or("cli")
+                .to_string(),
+            kind: "checkpoint",
+            at: rec
+                .get("ts")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+        })
+        .filter(|a| !a.at.is_empty());
+    if let Ok(Some(hash)) = stateroot_core::roots::latest_root(project_dir) {
+        if let Ok(manifest) = stateroot_core::roots::get_root(project_dir, &hash) {
+            let candidate = Activity {
+                harness: manifest.created_by_harness.clone(),
+                kind: "root",
+                at: manifest.created_at.clone(),
+            };
+            let replace = match (&best, candidate.at.is_empty()) {
+                (None, false) => true,
+                (Some(current), false) => ts_newer(&candidate.at, &current.at),
+                _ => false,
+            };
+            if replace {
+                best = Some(candidate);
+            }
+        }
+    }
+    best
+}
+
+/// Strict RFC3339 comparison; unparseable sides stay honest (no claim).
+fn ts_newer(a: &str, b: &str) -> bool {
+    match (
+        chrono::DateTime::parse_from_rfc3339(a),
+        chrono::DateTime::parse_from_rfc3339(b),
+    ) {
+        (Ok(a), Ok(b)) => a > b,
+        _ => false,
+    }
+}
+
 /// "## Recent Checkpoints" — the freshest structured lineage: the last five
 /// episodic checkpoint notes, oldest-of-kept first. Cheap strings, never
 /// invented; absent when the log is empty.
@@ -161,6 +254,9 @@ pub fn render_handoff_digest_full(
     let phase = get_str("current_phase");
     if !phase.is_empty() {
         out.push_str(&format!("## Current Phase\n\n{phase}\n\n"));
+    }
+    if let Some(section) = project_dir.and_then(latest_activity_section) {
+        out.push_str(&section);
     }
     // The authoritative plan tier: the central plan store as pointer +
     // directive (NEVER the body — the executor reads one file; the token
@@ -659,6 +755,12 @@ skipping duplicate. Pass --force to reprint.)\n\n{NO_REFETCH_FOOTER}"
     };
     out.push_str(&format!("# StateRoot Resume — {name}\n\n"));
 
+    // Update nudge (cache-only, never network here): agents act on what they
+    // see, and the skill tells them what to do with this line.
+    if let Some(notice) = super::update::update_notice(&ctx.config_dir) {
+        out.push_str(&notice);
+    }
+
     // Persona (global; project overlay overrides when present).
     if let Some(persona) = super::persona::resolve_in_project(&ctx.config_dir, Some(&ctx.cwd), None)
     {
@@ -750,6 +852,10 @@ skipping duplicate. Pass --force to reprint.)\n\n{NO_REFETCH_FOOTER}"
             // A plan may exist before any handoff (plan/implement split):
             // the planner/executor directive must still surface.
             if let Some(section) = central_plan_section(Some(&ctx.cwd)) {
+                out.push('\n');
+                out.push_str(&section);
+            }
+            if let Some(section) = latest_activity_section(&ctx.cwd) {
                 out.push('\n');
                 out.push_str(&section);
             }
@@ -959,6 +1065,58 @@ mod tests {
         packet["recommended_next_harness"] = Value::Null;
         let out = render_handoff_digest(&packet);
         assert!(!out.contains("Recommended next harness"), "out: {out}");
+    }
+
+    #[test]
+    fn latest_activity_names_the_freshest_actor_and_flags_stale_handoffs() {
+        let dir = tempfile::tempdir().expect("dir");
+        stateroot_core::local_store::init_skeleton(dir.path(), "p", "proj", "local")
+            .expect("skeleton");
+        assert!(
+            latest_activity_section(dir.path()).is_none(),
+            "empty project"
+        );
+
+        stateroot_core::local_store::append_episodic(
+            dir.path(),
+            &json!({"ts": "2026-08-25T09:10:32Z", "harness": "kimi", "note": "work", "files": []}),
+        )
+        .expect("episodic");
+        let section = latest_activity_section(dir.path()).expect("section");
+        assert!(
+            section.contains("kimi · checkpoint · 2026-08-25T09:10:32Z"),
+            "{section}"
+        );
+        assert!(
+            !section.contains("stale"),
+            "no handoff yet, no stale claim: {section}"
+        );
+
+        // Older formal handoff from another harness → the stale note fires.
+        stateroot_core::local_store::write_handoff_local(
+            dir.path(),
+            &json!({
+                "schema_version": stateroot_core::local_store::SCHEMA_HANDOFF_V1,
+                "project_id": "p", "seq": 2, "created_by_harness": "codex",
+                "created_at": "2026-08-24T10:00:00Z", "objective": "o", "task": "t",
+                "context_summary": "", "next_actions": []
+            }),
+        )
+        .expect("handoff");
+        let section = latest_activity_section(dir.path()).expect("section");
+        assert!(
+            section.contains("after formal handoff #2 by codex"),
+            "stale note: {section}"
+        );
+        // And it lands in the full digest.
+        let out = render_handoff_digest_full(
+            &json!({"objective": "o"}),
+            true,
+            &[],
+            None,
+            Some(dir.path()),
+        );
+        assert!(out.contains("## Latest Activity"), "out: {out}");
     }
 
     #[test]

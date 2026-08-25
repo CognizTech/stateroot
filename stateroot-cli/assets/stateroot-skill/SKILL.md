@@ -26,6 +26,10 @@ StateRoot keeps a **shared rules pool** — same idea as skills and learnings. P
 
 Before any architectural or behavioral change, read `stateroot rules show product-intent`. Preserve product intent. Do not replace agent judgment with classifiers, approval gates, or generic architecture. Do not add friction "because it seems safer." Follow imported harness rules in the pool as well (`stateroot rules list`).
 
+### Keep the tool fresh (updates)
+
+When the digest notes **Update available: \<tag\>**, run `stateroot self-update` — it re-arms harness wiring automatically. Otherwise run `stateroot self-update --check` occasionally; the CLI and this skill improve often. Never update mid-task: finish the step, checkpoint, then update.
+
 ### 1) Session start -> consume identity, resume only as fallback
 
 At the start of every session in a stateroot project, before doing any work:
