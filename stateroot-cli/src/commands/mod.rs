@@ -35,6 +35,7 @@ pub mod memory;
 pub mod observations;
 pub mod persona;
 pub mod plan;
+pub mod projects;
 pub mod proposals;
 pub mod remove;
 pub mod resume;

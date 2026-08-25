@@ -92,6 +92,7 @@ The CLI is offline-safe: when the server is unreachable it queues operations in 
 | `stateroot handoff list` / `stateroot handoff show` | inspect prior handoffs | read-only |
 | `stateroot delegate --to H --task "…"` | bounded subagent in another harness | cli-mode harnesses only; caller gets a capped tail, full log + record under `.stateroot/delegations/`; depth-capped — a subagent cannot delegate further |
 | `stateroot ext list` | extensions discovered on PATH | any `stateroot-<name>` executable on PATH runs as `stateroot <name>` — you can add commands yourself by writing one |
+| `stateroot projects` / `--json` / `--prune` | every initialized project on this machine | the discovery half of cross-project work: list projects here (name, path, phase, active plan), then work the one requested; same listing via the `projects_list` MCP tool |
 | `stateroot session sync` / `list` / `show` | canonical session store | pi/DSH sessions → `.stateroot/local/sessions/` (local-only, idempotent) |
 | `stateroot session transfer <id> --to pi\|dsh` | resume a session in another harness | writes a real native session file; fidelity report (native/adapted/dropped); `--dry-run` previews |
 | `stateroot plan record` / `list` / `show` / `approve` / `activate` / `done` / `abandon` | central plan artifact + lifecycle | plan/implement split: the planner records a draft, the user approves, the executor's digest points at `.stateroot/plans/<id>.md` with an execute directive — do not re-plan; the digest never carries the body |

@@ -5,6 +5,13 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- `stateroot projects` [--json] [--prune]: the global registry window —
+  every initialized project on the machine with live hints (phase, objective,
+  handoff seq, active plan, last root, on-disk). Missing directories are
+  marked MISSING, never silently dropped; `--prune` unregisters them. MCP
+  gains `projects_list` over the same listing. This is what lets a
+  fixed-workspace personal agent (openclaw) discover a project by name and
+  then work it — and enables cross-project operations for every harness.
 - `memory recall` / MCP `memory_recall` hits are now excerpted to a ~1600-char
   window around the match (indexed transcript docs can run ~100KB and blew
   past Claude Code's MCP tool-result cap mid-continuity-test).

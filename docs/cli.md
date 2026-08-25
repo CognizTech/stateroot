@@ -221,3 +221,18 @@ failure) — e.g. `cursor hook binary is stateroot 0.1.1 — run \`stateroot
 self-update\` on this machine`. This is the check for fail-open staleness:
 hooks that resolve to an old `stateroot` silently do nothing, and nothing
 else reports it.
+
+## `stateroot projects` — the global registry window
+
+`stateroot init` registers every initialized project in the machine-global
+`projects.toml`. `stateroot projects` prints the window: name, phase, handoff
+seq, active plan, last root, and path — with live hints read cheaply from
+each project store (no scans). `--json` for machine consumers; the same
+listing is exposed to agents as the `projects_list` MCP tool.
+
+This is the discovery half of cross-project work: a personal agent with a
+fixed workspace (openclaw) or any harness juggling repos lists the projects
+here, then moves into the one requested and resumes it there. A registered
+project whose directory was deleted is marked `MISSING`, never silently
+dropped; `stateroot projects --prune` unregisters those entries (prints each
+one; project state on disk is never touched — the dirs are already gone).

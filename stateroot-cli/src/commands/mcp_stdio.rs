@@ -54,6 +54,11 @@ pub const TOOL_DEFS: &[(&str, &str, &str)] = &[
         "Read-only audit of raw hook-captured observations from .stateroot/spool/observations.jsonl. Provenance/debug only — not primary memory.",
         r#"{"type":"object","properties":{"kind":{"type":"string"},"harness":{"type":"string"},"query":{"type":"string"},"limit":{"type":"integer"}}}"#,
     ),
+    (
+        "projects_list",
+        "List every initialized StateRoot project on this machine (name, path, phase, objective, active plan, last root, on-disk). For fixed-workspace agents: discover projects here, then work the one requested.",
+        r#"{"type":"object","properties":{}}"#,
+    ),
 ];
 
 /// Run the stdio server until stdin closes.
@@ -189,6 +194,9 @@ fn call_tool(
         "soul_read" => soul_read(home, caller),
         "learnings_list" => learnings_list(ctx, home, external, args),
         "observations_list" => observations_list(ctx, args),
+        "projects_list" => super::projects::collect(ctx)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|e| json!({"error": format!("{e:#}")}).to_string()),
         _ => return error_fallback(id, -32602, &format!("unknown tool: {name}")),
     };
     ok(id, json!({"content": [{"type": "text", "text": text}]}))

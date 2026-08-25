@@ -77,6 +77,18 @@ pub enum Command {
     },
     /// Project status (manifest, handoff, counts) — local only.
     Status,
+    /// List every initialized project on this machine (the global registry
+    /// window) with live state hints. For fixed-workspace agents and
+    /// cross-project work: discover here, then move into the project.
+    Projects {
+        /// Machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+        /// Unregister entries whose directories no longer exist (temp dirs,
+        /// deleted repos). Prints what was dropped; never touches real state.
+        #[arg(long)]
+        prune: bool,
+    },
     /// Diagnose the local setup (config, store, registry, hooks, federation).
     Doctor,
     /// Harness session hook (SessionStart/UserPromptSubmit/PreCompact/Stop).

@@ -138,6 +138,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Fork(args) => commands::roots::fork(&ctx, &args.root, args.branch.as_deref())?,
         Command::Receipt { id } => commands::roots::receipt(&ctx, &id)?,
         Command::Status => commands::status::run(&ctx)?,
+        Command::Projects { json, prune } => commands::projects::run(&ctx, json, prune)?,
         Command::Doctor => {
             let code = commands::doctor::run(&ctx).await?;
             if code != 0 {
