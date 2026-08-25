@@ -3,6 +3,15 @@
 All notable changes to StateRoot. Format loosely follows Keep a Changelog;
 StateRoot is pre-1.0 and milestones land as minor versions.
 
+## Unreleased
+
+- The digest (resume AND in-band hook injection) now carries the freshest
+  actionable state: a `## Recent Checkpoints` section (last five episodic
+  notes) and the `## Active Plan` section in the hook digest too — previously
+  resume-only, so hook-injected agents never saw the plan store. A live
+  OpenClaw probe caught both gaps: the agent received persona and rules but
+  no plan and no checkpoint notes.
+
 ## v0.1.6 — 2026-08-25
 
 - Hook latency hardening (cursor session-start timeouts on slow

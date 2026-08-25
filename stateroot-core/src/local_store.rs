@@ -250,6 +250,20 @@ pub fn append_episodic(project_dir: &Path, record: &Value) -> Result<(), LocalSt
     Ok(())
 }
 
+/// Read the last `limit` episodic records, oldest-of-kept first. Tolerant:
+/// unparseable lines are skipped; a missing or empty file yields nothing.
+pub fn recent_episodic(project_dir: &Path, limit: usize) -> Vec<Value> {
+    let path = root(project_dir).join(EPISODIC_PATH);
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let records: Vec<Value> = text
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    records.into_iter().rev().take(limit).rev().collect()
+}
+
 /// Persist a handoff packet locally: `handoffs/current.json` plus an immutable
 /// copy in `handoffs/history/<ts>-<harness>.json`.
 pub fn write_handoff_local(project_dir: &Path, packet: &Value) -> Result<(), LocalStoreError> {
@@ -500,6 +514,29 @@ pub fn now_rfc3339() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recent_episodic_reads_the_tail_and_tolerates_gaps() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        assert!(recent_episodic(tmp.path(), 5).is_empty(), "missing file");
+        for i in 0..7 {
+            append_episodic(
+                tmp.path(),
+                &serde_json::json!({"ts": format!("t{i}"), "note": format!("note {i}")}),
+            )
+            .expect("append");
+        }
+        let records = recent_episodic(tmp.path(), 3);
+        let notes: Vec<&str> = records
+            .iter()
+            .filter_map(|r| r.get("note").and_then(|v| v.as_str()))
+            .collect();
+        assert_eq!(
+            notes,
+            ["note 4", "note 5", "note 6"],
+            "last 3, oldest first"
+        );
+    }
 
     #[test]
     fn local_skills_scan_and_read() {

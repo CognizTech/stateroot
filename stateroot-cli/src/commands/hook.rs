@@ -440,8 +440,17 @@ pub fn hook_digest_with_identity(
     let identity = identity.to_string();
     let handoff = local_store::read_handoff_local(project_dir).ok().flatten();
     let mut work = String::new();
+    // The central plan store and recent checkpoint notes ride the hook digest
+    // too — they are the freshest actionable state, and a harness whose digest
+    // never shows them will go hunting for them (the openclaw probe lesson).
+    if let Some(section) = super::resume::central_plan_section(Some(project_dir)) {
+        work.push_str(&section);
+    }
     if let Some(ref handoff) = handoff {
         append_handoff_work(&mut work, handoff, project_dir);
+    }
+    if let Some(section) = super::resume::recent_checkpoints_section(project_dir) {
+        work.push_str(&section);
     }
 
     if !work.trim().is_empty() {

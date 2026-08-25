@@ -67,7 +67,7 @@ pub fn render_handoff_digest_with(packet: &Value, deterministic: bool) -> String
 /// The central-plan digest section (authoritative tier): pointer + directive,
 /// never the plan body. Shared by the handoff digest and the no-handoff arm —
 /// a planner/executor split must surface even before any handoff exists.
-fn central_plan_section(project_dir: Option<&Path>) -> Option<String> {
+pub(crate) fn central_plan_section(project_dir: Option<&Path>) -> Option<String> {
     let (plan, _path) = project_dir.and_then(stateroot_core::plans::current)?;
     let mut section = String::from("## Active Plan\n\n");
     section.push_str(&format!(
@@ -94,6 +94,31 @@ fn central_plan_section(project_dir: Option<&Path>) -> Option<String> {
         }
     }
     Some(section)
+}
+
+/// "## Recent Checkpoints" — the freshest structured lineage: the last five
+/// episodic checkpoint notes, oldest-of-kept first. Cheap strings, never
+/// invented; absent when the log is empty.
+pub(crate) fn recent_checkpoints_section(project_dir: &Path) -> Option<String> {
+    let records = stateroot_core::local_store::recent_episodic(project_dir, 5);
+    if records.is_empty() {
+        return None;
+    }
+    let mut out = String::from("## Recent Checkpoints\n\n");
+    for record in &records {
+        let ts = record.get("ts").and_then(|v| v.as_str()).unwrap_or("");
+        let short_ts: String = ts.chars().take(16).collect();
+        let note = record.get("note").and_then(|v| v.as_str()).unwrap_or("");
+        let capped: String = note.chars().take(200).collect();
+        let ellipsis = if note.chars().count() > 200 {
+            "…"
+        } else {
+            ""
+        };
+        out.push_str(&format!("- [{short_ts}] {capped}{ellipsis}\n"));
+    }
+    out.push('\n');
+    Some(out)
 }
 
 /// Full digest: deterministic switch + durable learnings + active goal (both
@@ -172,6 +197,10 @@ pub fn render_handoff_digest_full(
         out.push_str("## Durable Preferences\n\n");
         out.push_str(&section);
         out.push('\n');
+    }
+    // The freshest structured lineage: recent episodic checkpoint notes.
+    if let Some(section) = project_dir.and_then(recent_checkpoints_section) {
+        out.push_str(&section);
     }
     // Active goal (synced goal docs) — after Durable Preferences, before
     // the synthesized tier.
@@ -724,6 +753,10 @@ skipping duplicate. Pass --force to reprint.)\n\n{NO_REFETCH_FOOTER}"
                 out.push('\n');
                 out.push_str(&section);
             }
+            if let Some(section) = recent_checkpoints_section(&ctx.cwd) {
+                out.push('\n');
+                out.push_str(&section);
+            }
         }
     }
 
@@ -926,6 +959,28 @@ mod tests {
         packet["recommended_next_harness"] = Value::Null;
         let out = render_handoff_digest(&packet);
         assert!(!out.contains("Recommended next harness"), "out: {out}");
+    }
+
+    #[test]
+    fn recent_checkpoints_section_renders_and_stays_absent_when_empty() {
+        let dir = tempfile::tempdir().expect("dir");
+        assert!(
+            recent_checkpoints_section(dir.path()).is_none(),
+            "empty log"
+        );
+        stateroot_core::local_store::append_episodic(
+            dir.path(),
+            &json!({"ts": "2026-08-25T07:31:01Z", "note": "wired the bridge"}),
+        )
+        .expect("append");
+        let section = recent_checkpoints_section(dir.path()).expect("section");
+        assert!(section.contains("## Recent Checkpoints"), "{section}");
+        assert!(section.contains("wired the bridge"), "{section}");
+        assert!(section.contains("2026-08-25T07:31"), "{section}");
+        // And it lands in the full digest.
+        let packet = json!({"objective": "obj"});
+        let out = render_handoff_digest_full(&packet, true, &[], None, Some(dir.path()));
+        assert!(out.contains("## Recent Checkpoints"), "out: {out}");
     }
 
     #[test]
