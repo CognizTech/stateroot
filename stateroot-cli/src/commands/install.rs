@@ -181,6 +181,24 @@ pub async fn install(ctx: &Ctx) -> Result<()> {
         Err(err) => note!("warning: rules sync failed ({err})"),
     }
 
+    // Re-arm project convenience layers (AGENTS.md block, harness command/rule
+    // stubs) for every registered project still on disk. Init writes them once
+    // and the protocol text evolves — self-update re-arms install, and install
+    // keeps the project stubs current with it.
+    if let Ok(registry) = stateroot_core::config::load_registry(&ctx.config_dir) {
+        let block = render_project_agents_block();
+        for path in registry.projects.keys() {
+            let dir = Path::new(path);
+            if !dir.is_dir() {
+                continue;
+            }
+            let actions = super::skill::ensure_convenience_layer(dir, &block);
+            for action in actions {
+                println!("  {}: {action}", path);
+            }
+        }
+    }
+
     // Record for `init`'s one-time global install + `uninstall`.
     let mut config = ctx.config.clone();
     config.installed_harnesses = installed.clone();

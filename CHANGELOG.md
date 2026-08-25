@@ -5,6 +5,12 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- `stateroot install` (and thus `self-update`'s re-arm) now refreshes the
+  project convenience layers — the AGENTS.md block and harness command/rule
+  stubs — for every registered project still on disk. Init writes those stubs
+  once and the protocol text evolves with the binary; without this, projects
+  keep stale stubs indefinitely (the Aug-20 `.claude/commands/stateroot.md`
+  found stale during the claude-code continuity test).
 - **Latest Activity in every digest** (resume and hook): the newest observed
   activity anywhere — last checkpoint or latest root — with harness and
   timestamp, plus an explicit stale-handoff note when activity postdates the
