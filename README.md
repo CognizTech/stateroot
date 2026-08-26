@@ -1,8 +1,10 @@
 # StateRoot
 
-**Switch coding agents without losing the work.**
+**Switch harnesses. Keep the agent.**
 
-StateRoot keeps your project's goal, personality, plans, memory, skills, rules, and sessions in one local place — so Claude Code, Codex, Cursor, Kimi Code, Pi, DeepSeek Harness and friends each pick up exactly where the last one left off. And every lesson one agent learns becomes a rule for all of them. One CLI, everything on your machine.
+StateRoot is the cross-harness continuity layer for AI coding agents: one continuous agent across Claude Code, Codex, Cursor, Kimi Code, Pi, DeepSeek Harness and friends — same persona, memory, plans, skills, sessions, and project history — while each model keeps its own native runtime. One local CLI, everything on your machine.
+
+Close Claude Code. Open Codex. Keep working. The next agent starts already knowing the goal, the plan, the decisions, and how you work — and every lesson one agent learns becomes a rule for all of them.
 
 **And it versions the work itself.** Snapshot, restore, fork, and compare the complete state of the project at any point — immutable, content-addressed, with receipts for how it changed.
 

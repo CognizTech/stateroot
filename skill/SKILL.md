@@ -1,6 +1,9 @@
 ---
 name: stateroot
 description: >-
+  StateRoot is the cross-harness continuity layer for AI coding agents
+  (Claude Code, Codex, Cursor, Kimi Code, Pi, DeepSeek Harness): shared
+  persona, memory, plans, skills, sessions, and project history.
   Bootstrap-only: install the StateRoot CLI from official GitHub release
   assets and run once-per-machine `stateroot setup` so harnesses get hooks
   and the built-in session skill. Use when the user asks to install or set
@@ -34,6 +37,8 @@ metadata:
 ---
 
 # StateRoot (bootstrap)
+
+StateRoot is the cross-harness continuity layer for AI coding agents: one continuous agent — persona, memory, plans, skills, sessions, and project history — across Claude Code, Codex, Cursor, Kimi Code, Pi, DeepSeek Harness and friends, while each model keeps its own native runtime.
 
 This skill installs the CLI and runs **global** `stateroot setup`. That wires harnesses. After that, **this skill expires**. The CLI-embedded session skill becomes the default — do not keep using these bootstrap instructions, and do not copy the session protocol into this file.
 
