@@ -57,6 +57,7 @@ fn delegations(project: &Path) -> std::path::PathBuf {
     project.join(".stateroot/delegations")
 }
 
+#[cfg(unix)] // all call sites are unix-gated fixture tests (windows clippy: dead code)
 fn read_records(project: &Path) -> Vec<serde_json::Value> {
     let dir = delegations(project);
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -71,6 +72,7 @@ fn read_records(project: &Path) -> Vec<serde_json::Value> {
 
 /// Poll the store until one record carries a final outcome (the worker is
 /// detached — completion is observed, never blocked on in the CLI itself).
+#[cfg(unix)] // all call sites are unix-gated fixture tests (windows clippy: dead code)
 fn wait_for_outcome(project: &Path, secs: u64) -> serde_json::Value {
     for _ in 0..(secs * 10) {
         if let Some(record) = read_records(project)
