@@ -345,27 +345,40 @@ pub enum HarnessAction {
 
 #[derive(Debug, Args)]
 pub struct DelegateArgs {
+    #[command(subcommand)]
+    pub action: Option<DelegateAction>,
     /// Harness to delegate to (a registry cli-mode harness: claude, codex, …).
     #[arg(long)]
-    pub to: String,
-    /// Bounded task for the subagent; the caller receives only its final output.
+    pub to: Option<String>,
+    /// Bounded task for the subagent; the caller observes via list/status/digest.
     #[arg(long)]
-    pub task: String,
-    /// Subagent timeout in seconds; the child is killed past it.
-    #[arg(long, default_value_t = 600)]
-    pub timeout_secs: u64,
-    /// Cap on the stdout tail returned to the caller (chars).
-    #[arg(long, default_value_t = 8000)]
-    pub max_output_chars: usize,
+    pub task: Option<String>,
     /// StateRoot skill slug to make available to the subagent (repeatable).
     #[arg(long = "skill")]
     pub skills: Vec<String>,
     /// Let the subagent harness use its own ambient skill discovery.
     #[arg(long)]
     pub ambient_skills: bool,
-    /// Machine-readable envelope (delegation record + bounded tails).
+    /// Machine-readable spawn envelope (the running delegation record).
     #[arg(long)]
     pub json: bool,
+    /// Hidden: run the delegation to completion (internal worker mode).
+    #[arg(long = "_worker", hide = true)]
+    pub _worker: bool,
+    /// Hidden: the record id this worker finalizes (internal worker mode).
+    #[arg(long, hide = true)]
+    pub record_id: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DelegateAction {
+    /// List delegations with live status (running|completed|failed|lost).
+    List,
+    /// Show one delegation: record + bounded log tail.
+    Status {
+        /// Delegation id (prefix allowed).
+        id: String,
+    },
 }
 
 #[derive(Debug, Args)]

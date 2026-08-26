@@ -94,7 +94,7 @@ The CLI is offline-safe: when the server is unreachable it queues operations in 
 | `stateroot handoff write --from CURRENT_HARNESS [--to H] [--task …] [--context-summary …] [--next …]` | session end / harness switch | prefer flags near limits; `--to` optional (routing only); `--input` for large payloads |
 | `stateroot handoff finalize [--from H]` | hook missed / quota exit | observed continuity from verified transcript; no routing |
 | `stateroot handoff list` / `stateroot handoff show` | inspect prior handoffs | read-only |
-| `stateroot delegate --to H --task "…"` | bounded subagent in another harness | cli-mode harnesses only; caller gets a capped tail, full log + record under `.stateroot/delegations/`; depth-capped — a subagent cannot delegate further |
+| `stateroot delegate --to H --task "…"` | detached subagent in another harness (async-only) | cli-mode harnesses only; spawn returns a `running` record immediately — observe via `stateroot delegate list` / `status <id>` and the `## Recent Delegations` digest section; nothing is ever killed or blocked; depth-capped — a subagent cannot delegate further |
 | `stateroot ext list` | extensions discovered on PATH | any `stateroot-<name>` executable on PATH runs as `stateroot <name>` — you can add commands yourself by writing one |
 | `stateroot projects` / `--json` / `--prune` | every initialized project on this machine | the discovery half of cross-project work: list projects here (name, path, phase, active plan), then work the one requested; same listing via the `projects_list` MCP tool |
 | `stateroot session sync` / `list` / `show` | canonical session store | pi/DSH sessions → `.stateroot/local/sessions/` (local-only, idempotent) |

@@ -28,40 +28,52 @@ into placeholder/empty slots (user content is never overwritten; re-running
   `synthesized — unverified (<backend>)`. Synthesis problems never fail
   `init`: a note is printed, the deterministic seed stands, exit stays 0.
 
-## `stateroot delegate` — cross-harness subagents
+## `stateroot delegate` — cross-harness subagents, async-only
 
 `stateroot delegate --to <harness> --task "<bounded task>"` spawns another
-harness's CLI as a subagent inside the current project: the task goes out as
-a prompt (prefixed with a short subagent contract), the child runs with piped
-stdout under a timeout, and the caller receives only a bounded tail of its
-final output — never a transcript dump.
+harness's CLI as a **detached** subagent inside the current project, writes a
+`stateroot.delegation.v1` record with `status: "running"` and a pid, prints
+the delegation id and exits 0 immediately. Async was always the right
+architecture: launch detached, observe until done, completions surface in the
+record and the digest. **There is no sync mode, and no timeout anywhere —
+nothing is ever killed or blocked on.** The harness runs to its natural end;
+its own internal limits belong to the harness.
 
+```bash
+stateroot delegate --to codex --task "add the failing parser test"
+stateroot delegate list                    # every delegation with live status
+stateroot delegate status <id>             # the record + a bounded log tail
+```
+
+- **The worker** — the spawn launches a detached copy of the same binary
+  (hidden `--_worker`) with stdout/stderr redirected into
+  `.stateroot/delegations/<ts>-<h>-d<depth>.log`. The worker runs the full
+  path (resolve → depth guard → prompt wrap → capture, no kill condition)
+  and finalizes the record (`outcome: completed|failed`, `exit_code`,
+  `duration_ms`, `ended_at`) plus an episodic lineage note.
+- **Live status** — `list` reports `running | completed | failed | lost`.
+  `lost` means the worker died before writing an outcome (dead pid, no final
+  record): `list`/`status` probe pid liveness and reap the record to
+  `lost` — never a silent running-forever.
+- **Completions surface asynchronously** — the digest gains a
+  `## Recent Delegations` section (last few with status + task), so a parent
+  harness learns on its next session or prompt that labor finished.
 - **Resolution** — the target must be a registry cli-mode harness whose
   binary probes on PATH. Unknown harnesses, handoff-only harnesses (e.g.
   `cursor`), and missing binaries are loud errors listing the available
-  cli-mode harnesses (unlike `init --synthesize`, which notes and stands
-  down).
+  cli-mode harnesses.
 - **Depth cap** — `STATEROOT_DELEGATION_DEPTH` guards recursion: at depth ≥
-  2 the command refuses ("a subagent may not spawn further subagents") and
-  nothing is spawned; children always run with the depth incremented.
-- **Bounds** — `--timeout-secs` (default 600) kills the child past the
-  deadline; `--max-output-chars` (default 8000) caps the stdout tail returned
-  to the caller. `--skill <slug>` (repeatable) projects StateRoot skill
-  packages into the run per the registry policy; `--ambient-skills` opts into
-  the harness's own skill discovery. `--json` emits the delegation record
-  plus tails as one machine-readable envelope.
-- **Records** — every run writes the full stdout/stderr log and a
-  `stateroot.delegation.v1` record (harness, task, command, exit code,
-  duration, outcome `completed|failed|timed_out`) under
-  `.stateroot/delegations/`, and appends an episodic lineage note so the
-  delegation shows up in digests like any other activity.
-- **Exit codes** — 0 on success; the child's own exit code when it fails
-  (its stderr tail is included in the output); 1 on timeout, refusal, or an
-  empty-stdout run (pty-marked harnesses may misbehave when piped — the full
-  log path is printed either way).
+  2 the spawn refuses ("a subagent may not spawn further subagents") and
+  nothing is spawned or recorded. The worker runs at parent depth + 1; its
+  own depth guard then enforces the cap inside the delegation as well.
+- **Flags** — `--skill <slug>` (repeatable) projects StateRoot skill
+  packages into the run; `--ambient-skills` opts into the harness's own
+  skill discovery; `--json` prints the running record as the spawn envelope.
+  `--timeout-secs` and `--max-output-chars` no longer exist (the sync
+  contract they belonged to is gone).
 
 For an interactive harness session use `stateroot harness run` instead;
-`delegate` is the bounded, recorded, non-interactive route.
+`delegate` is the detached, recorded, non-interactive route.
 
 ## Extension subcommands — git-style `stateroot-<name>` on PATH
 

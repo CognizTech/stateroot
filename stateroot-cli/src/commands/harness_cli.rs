@@ -33,22 +33,23 @@ pub struct HarnessOutput {
     pub stderr: String,
     /// Final exit status (`code()` is `None` when killed by a signal).
     pub status: ExitStatus,
-    /// Wall-clock duration of the run.
-    pub duration: Duration,
     /// The run hit the timeout; the child was killed.
     pub timed_out: bool,
 }
 
 /// Launch harness `id` from its registry delegation `spec`, capturing piped
-/// stdout/stderr. A timeout kills the child and returns `timed_out` rather
-/// than erroring, so callers can record the outcome honestly.
+/// stdout/stderr. `Some(timeout)` kills the child past the deadline and
+/// returns `timed_out`; `None` means no cap at all — the child runs to its
+/// natural end (the async delegate's contract; the harness's own limits
+/// belong to the harness). The timeout fact is returned, never an error, so
+/// callers can record the outcome honestly.
 pub fn run_capture(
     dir: &Path,
     id: &str,
     spec: &DelegationSpec,
     prompt: &str,
     policy: &LaunchPolicy,
-    timeout: Duration,
+    timeout: Option<Duration>,
 ) -> Result<HarnessOutput> {
     let argv = build_launch_argv_from_spec(
         spec,
@@ -69,14 +70,16 @@ pub fn run_capture(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    let deadline = started + timeout;
+    let deadline = timeout.map(|cap| started + cap);
     let timed_out = loop {
         if child.try_wait()?.is_some() {
             break false;
         }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            break true;
+        if let Some(deadline) = deadline {
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                break true;
+            }
         }
         std::thread::sleep(Duration::from_millis(100));
     };
@@ -85,7 +88,6 @@ pub fn run_capture(
         stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
         status: output.status,
-        duration: started.elapsed(),
         timed_out,
     })
 }

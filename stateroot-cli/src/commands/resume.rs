@@ -214,6 +214,23 @@ pub(crate) fn recent_checkpoints_section(project_dir: &Path) -> Option<String> {
     Some(out)
 }
 
+/// "## Recent Delegations" — the last few delegations with live status
+/// (running|completed|failed|lost), so a parent harness learns
+/// asynchronously that its labor finished — the same shape as kimi's
+/// background subagent notifications. Absent when the store is empty.
+pub(crate) fn recent_delegations_section(project_dir: &Path) -> Option<String> {
+    let records = super::delegate::recent_delegations(project_dir, 5);
+    if records.is_empty() {
+        return None;
+    }
+    let mut out = String::from("## Recent Delegations\n\n");
+    for (short_ts, status, task) in &records {
+        out.push_str(&format!("- [{short_ts}] {status} · {task}\n"));
+    }
+    out.push('\n');
+    Some(out)
+}
+
 /// Full digest: deterministic switch + durable learnings + active goal (both
 /// from synced local files), rendered after Plan State.
 pub fn render_handoff_digest_full(
@@ -296,6 +313,10 @@ pub fn render_handoff_digest_full(
     }
     // The freshest structured lineage: recent episodic checkpoint notes.
     if let Some(section) = project_dir.and_then(recent_checkpoints_section) {
+        out.push_str(&section);
+    }
+    // Delegation outcomes surface asynchronously here (async-only delegate).
+    if let Some(section) = project_dir.and_then(recent_delegations_section) {
         out.push_str(&section);
     }
     // Active goal (synced goal docs) — after Durable Preferences, before
@@ -860,6 +881,10 @@ skipping duplicate. Pass --force to reprint.)\n\n{NO_REFETCH_FOOTER}"
                 out.push_str(&section);
             }
             if let Some(section) = recent_checkpoints_section(&ctx.cwd) {
+                out.push('\n');
+                out.push_str(&section);
+            }
+            if let Some(section) = recent_delegations_section(&ctx.cwd) {
                 out.push('\n');
                 out.push_str(&section);
             }

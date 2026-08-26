@@ -1,6 +1,7 @@
-//! `stateroot delegate` tests — temp home/project fixtures plus a fake
-//! harness CLI on PATH (mirrors the init_seed auto-backend fixture; zero real
-//! harnesses, zero network).
+//! `stateroot delegate` tests — async-only contract: spawn records `running`
+//! and exits; the detached worker finalizes; list/status/digest observe.
+//! Hermetic homes plus a fake harness CLI on PATH (mirrors the init_seed
+//! auto-backend fixture; zero real harnesses, zero network).
 
 use std::path::Path;
 
@@ -56,141 +57,233 @@ fn delegations(project: &Path) -> std::path::PathBuf {
     project.join(".stateroot/delegations")
 }
 
-#[cfg(unix)] // all call sites are unix-gated fixture tests (windows clippy: dead code)
-fn read_record(project: &Path) -> serde_json::Value {
+fn read_records(project: &Path) -> Vec<serde_json::Value> {
     let dir = delegations(project);
-    let entry = std::fs::read_dir(&dir)
-        .expect("delegations dir")
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    entries
         .flatten()
-        .find(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-        .expect("delegation record");
-    serde_json::from_str(&std::fs::read_to_string(entry.path()).expect("record")).expect("json")
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
+        .filter_map(|e| serde_json::from_str(&std::fs::read_to_string(e.path()).ok()?).ok())
+        .collect()
+}
+
+/// Poll the store until one record carries a final outcome (the worker is
+/// detached — completion is observed, never blocked on in the CLI itself).
+fn wait_for_outcome(project: &Path, secs: u64) -> serde_json::Value {
+    for _ in 0..(secs * 10) {
+        if let Some(record) = read_records(project)
+            .into_iter()
+            .find(|r| r.get("outcome").is_some())
+        {
+            return record;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!("delegation did not complete within {secs}s");
 }
 
 #[cfg(unix)]
 #[test]
-fn delegate_happy_path_returns_conclusion_and_persists_lineage() {
+fn spawn_returns_immediately_and_worker_completes() {
     let (config_home, user_home) = homes();
     let project = tempfile::tempdir().expect("project");
     init_project(config_home.path(), user_home.path(), project.path());
-    let (_bin, path) = fake_claude(
-        "#!/bin/sh\necho \"depth=$STATEROOT_DELEGATION_DEPTH\"\necho 'conclusion: parser wired'\n",
-    );
+    let (_bin, path) = fake_claude("#!/bin/sh\nsleep 2\necho 'conclusion: parser wired'\n");
 
+    // The spawn path exits 0 immediately with a running record.
     let out = stateroot(config_home.path(), user_home.path(), project.path())
         .env("PATH", &path)
-        .args(["delegate", "--to", "claude", "--task", "wire the parser"])
+        .args(["delegate", "--to", "claude", "--task", "slow build"])
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
     assert!(
-        stdout.contains("delegated to claude · exit 0"),
+        stdout.contains("running in background (pid "),
         "stdout: {stdout}"
     );
     assert!(
-        stdout.contains("conclusion: parser wired"),
-        "stdout: {stdout}"
-    );
-    assert!(
-        stdout.contains("full log: .stateroot/delegations/"),
+        stdout.contains("observe: `stateroot delegate status"),
         "stdout: {stdout}"
     );
 
-    // Full log exists and shows the child ran at depth + 1.
-    let log_name = stdout
-        .split("full log: .stateroot/delegations/")
-        .nth(1)
-        .and_then(|rest| rest.split_whitespace().next())
-        .expect("log name in header");
-    let log = std::fs::read_to_string(delegations(project.path()).join(log_name)).expect("log");
-    assert!(log.contains("depth=1"), "log: {log}");
-    assert!(log.contains("--- stderr ---"), "log: {log}");
+    // The record the parent wrote before exiting: running, with a pid.
+    let records = read_records(project.path());
+    assert_eq!(records.len(), 1, "records: {records:?}");
+    let record = &records[0];
+    assert_eq!(record["status"], "running");
+    assert!(record["pid"].as_u64().expect("pid") > 0);
+    let id = record["id"].as_str().expect("id").to_string();
+    let log_rel = record["log"].as_str().expect("log").to_string();
 
-    // stateroot.delegation.v1 record.
-    let record = read_record(project.path());
-    assert_eq!(record["schema_version"], "stateroot.delegation.v1");
-    assert_eq!(record["harness"], "claude");
-    assert_eq!(record["task"], "wire the parser");
-    assert_eq!(record["command"], "claude");
-    assert_eq!(record["depth"], 0);
-    assert_eq!(record["exit_code"], 0);
+    // The worker finalizes: outcome, exit code, log body, episodic lineage.
+    let record = wait_for_outcome(project.path(), 20);
     assert_eq!(record["outcome"], "completed");
-    assert!(record["log"]
-        .as_str()
-        .expect("log path")
-        .ends_with("-d0.log"));
-
-    // Episodic lineage.
+    assert_eq!(record["exit_code"], 0);
+    assert!(record.get("status").is_none(), "status replaced by outcome");
+    let log = std::fs::read_to_string(project.path().join(&log_rel)).expect("log");
+    assert!(log.contains("conclusion: parser wired"), "log: {log}");
+    assert!(log.contains("--- stdout ---"), "log: {log}");
     let episodic =
         std::fs::read_to_string(project.path().join(".stateroot/memories/episodic.jsonl"))
             .expect("episodic");
     assert!(
-        episodic.contains("delegated to claude: wire the parser → completed"),
+        episodic.contains("delegated to claude: slow build → completed"),
         "episodic: {episodic}"
     );
 
-    // --json emits the record plus the bounded tail.
+    // status <id> shows the record + the tail; list shows the outcome.
     let out = stateroot(config_home.path(), user_home.path(), project.path())
-        .env("PATH", &path)
-        .args([
-            "delegate",
-            "--to",
-            "claude",
-            "--task",
-            "wire the parser",
-            "--json",
-        ])
+        .args(["delegate", "status", &id])
         .assert()
         .success();
-    let envelope: serde_json::Value =
-        serde_json::from_slice(&out.get_output().stdout).expect("json envelope");
-    assert_eq!(envelope["schema_version"], "stateroot.delegation.v1");
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(stdout.contains("· completed"), "stdout: {stdout}");
     assert!(
-        envelope["stdout_tail"]
-            .as_str()
-            .expect("stdout_tail")
-            .contains("conclusion: parser wired"),
-        "envelope: {envelope}"
+        stdout.contains("conclusion: parser wired"),
+        "stdout: {stdout}"
+    );
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["delegate", "list"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains("claude · completed · slow build"),
+        "stdout: {stdout}"
+    );
+
+    // Completions surface in the digest.
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["resume", "--force"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(stdout.contains("## Recent Delegations"), "digest: {stdout}");
+    assert!(
+        stdout.contains("claude · completed · slow build"),
+        "digest: {stdout}"
     );
 }
 
 #[cfg(unix)]
 #[test]
-fn delegate_output_is_bounded_to_the_tail() {
+fn status_shows_a_bounded_log_tail() {
     let (config_home, user_home) = homes();
     let project = tempfile::tempdir().expect("project");
     init_project(config_home.path(), user_home.path(), project.path());
     let (_bin, path) = fake_claude("#!/bin/sh\nhead -c 20480 /dev/zero | tr '\\0' 'x'\n");
 
-    let out = stateroot(config_home.path(), user_home.path(), project.path())
+    stateroot(config_home.path(), user_home.path(), project.path())
         .env("PATH", &path)
-        .args([
-            "delegate",
-            "--to",
-            "claude",
-            "--task",
-            "flood",
-            "--max-output-chars",
-            "100",
-        ])
+        .args(["delegate", "--to", "claude", "--task", "flood"])
+        .assert()
+        .success();
+    let record = wait_for_outcome(project.path(), 20);
+    assert_eq!(record["outcome"], "completed");
+    let id = record["id"].as_str().expect("id");
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["delegate", "status", id])
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-    assert!(stdout.contains("full log:"), "stdout: {stdout}");
-    let expected: String = "x".repeat(100);
-    assert_eq!(
-        stdout.lines().last(),
-        Some(expected.as_str()),
-        "caller gets only the 100-char tail: {stdout}"
+    let full_run = "x".repeat(20_000);
+    assert!(
+        !stdout.contains(&full_run),
+        "the status tail is bounded, never the full flood"
     );
-    // The log keeps the full flood.
-    let log_name = stdout
-        .split("full log: .stateroot/delegations/")
-        .nth(1)
-        .and_then(|rest| rest.split_whitespace().next())
-        .expect("log name");
-    let log = std::fs::read_to_string(delegations(project.path()).join(log_name)).expect("log");
-    assert!(log.contains(&"x".repeat(20_000)), "log keeps everything");
+    assert!(
+        stdout.contains(&"x".repeat(500)),
+        "the tail still shows the end of the flood"
+    );
+    let log_rel = record["log"].as_str().expect("log");
+    let log_len = std::fs::read_to_string(project.path().join(log_rel))
+        .expect("log")
+        .len();
+    assert!(
+        stdout.len() < log_len,
+        "status output ({}) is smaller than the full log ({log_len})",
+        stdout.len()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_children_record_failed_and_the_spawn_still_exits_zero() {
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    let (_bin, path) =
+        fake_claude("#!/bin/sh\necho 'partial answer'\necho 'boom went wrong' >&2\nexit 3\n");
+
+    // Async contract: the SPAWN exits 0 even when the child will fail.
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .env("PATH", &path)
+        .args(["delegate", "--to", "claude", "--task", "fail on purpose"])
+        .assert()
+        .success();
+    let record = wait_for_outcome(project.path(), 20);
+    assert_eq!(record["outcome"], "failed");
+    assert_eq!(record["exit_code"], 3);
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["delegate", "list"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(stdout.contains("· failed ·"), "stdout: {stdout}");
+    let id = record["id"].as_str().expect("id");
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["delegate", "status", id])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains("boom went wrong"),
+        "stderr in tail: {stdout}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn list_marks_a_dead_worker_lost() {
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+
+    // A running record whose pid cannot be alive (worker died pre-outcome).
+    let dir = delegations(project.path());
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let record = serde_json::json!({
+        "schema_version": "stateroot.delegation.v1",
+        "id": "2026-08-26T00-00-00Z-claude",
+        "ts": "2026-08-26T00:00:00Z",
+        "depth": 0,
+        "harness": "claude",
+        "task": "never finishes",
+        "command": "claude",
+        "status": "running",
+        "pid": 4_000_000u32,
+        "log": ".stateroot/delegations/2026-08-26T00-00-00Z-claude-d0.log",
+    });
+    std::fs::write(
+        dir.join("2026-08-26T00-00-00Z-claude.json"),
+        serde_json::to_string_pretty(&record).expect("json"),
+    )
+    .expect("record");
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["delegate", "list"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(stdout.contains("· lost ·"), "stdout: {stdout}");
+    // Reaped on disk — never a silent running-forever.
+    let records = read_records(project.path());
+    assert_eq!(records[0]["outcome"], "lost");
+    assert!(records[0].get("status").is_none());
 }
 
 #[cfg(unix)]
@@ -219,91 +312,6 @@ fn delegate_refuses_past_the_depth_cap_without_spawning() {
         !delegations(project.path()).exists(),
         "a refused delegation writes no records"
     );
-}
-
-#[cfg(unix)]
-#[test]
-fn delegate_child_failure_exits_nonzero_with_stderr_tail() {
-    let (config_home, user_home) = homes();
-    let project = tempfile::tempdir().expect("project");
-    init_project(config_home.path(), user_home.path(), project.path());
-    let (_bin, path) =
-        fake_claude("#!/bin/sh\necho 'partial answer'\necho 'boom went wrong' >&2\nexit 3\n");
-
-    let out = stateroot(config_home.path(), user_home.path(), project.path())
-        .env("PATH", &path)
-        .args(["delegate", "--to", "claude", "--task", "fail on purpose"])
-        .assert()
-        .code(3);
-    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-    assert!(
-        stdout.contains("delegated to claude · exit 3"),
-        "stdout: {stdout}"
-    );
-    assert!(stdout.contains("partial answer"), "stdout: {stdout}");
-    assert!(stdout.contains("boom went wrong"), "stdout: {stdout}");
-
-    let record = read_record(project.path());
-    assert_eq!(record["outcome"], "failed");
-    assert_eq!(record["exit_code"], 3);
-}
-
-#[cfg(unix)]
-#[test]
-fn delegate_failure_with_empty_stdout_still_surfaces_stderr() {
-    let (config_home, user_home) = homes();
-    let project = tempfile::tempdir().expect("project");
-    init_project(config_home.path(), user_home.path(), project.path());
-    let (_bin, path) = fake_claude("#!/bin/sh\necho 'silent boom' >&2\nexit 4\n");
-
-    let out = stateroot(config_home.path(), user_home.path(), project.path())
-        .env("PATH", &path)
-        .args(["delegate", "--to", "claude", "--task", "fail quietly"])
-        .assert()
-        .code(4);
-    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-    assert!(
-        stdout.contains("delegated to claude · exit 4"),
-        "stdout: {stdout}"
-    );
-    assert!(stdout.contains("silent boom"), "stdout: {stdout}");
-    let stderr = String::from_utf8(out.get_output().stderr.clone()).expect("utf8");
-    assert!(
-        !stderr.contains("returned empty stdout"),
-        "failed runs take the stderr-tail path, not the empty-stdout error: {stderr}"
-    );
-
-    let record = read_record(project.path());
-    assert_eq!(record["outcome"], "failed");
-    assert_eq!(record["exit_code"], 4);
-}
-
-#[cfg(unix)]
-#[test]
-fn delegate_timeout_kills_the_child_and_records_timed_out() {
-    let (config_home, user_home) = homes();
-    let project = tempfile::tempdir().expect("project");
-    init_project(config_home.path(), user_home.path(), project.path());
-    let (_bin, path) = fake_claude("#!/bin/sh\nsleep 5\necho late\n");
-
-    let out = stateroot(config_home.path(), user_home.path(), project.path())
-        .env("PATH", &path)
-        .args([
-            "delegate",
-            "--to",
-            "claude",
-            "--task",
-            "hang forever",
-            "--timeout-secs",
-            "1",
-        ])
-        .assert()
-        .failure();
-    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-    assert!(stdout.contains("timed out after 1s"), "stdout: {stdout}");
-
-    let record = read_record(project.path());
-    assert_eq!(record["outcome"], "timed_out");
 }
 
 #[test]
@@ -337,5 +345,32 @@ fn delegate_rejects_non_cli_and_unknown_harnesses() {
     assert!(
         !delegations(project.path()).exists(),
         "refusals write no records"
+    );
+}
+
+#[test]
+fn digest_section_stays_absent_without_delegations() {
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["resume", "--force"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        !stdout.contains("## Recent Delegations"),
+        "no section when the store is empty: {stdout}"
+    );
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["delegate", "list"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains("no delegations recorded"),
+        "stdout: {stdout}"
     );
 }

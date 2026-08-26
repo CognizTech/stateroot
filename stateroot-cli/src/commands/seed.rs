@@ -456,7 +456,7 @@ fn run_harness_cli(dir: &Path, id: &str, spec: &DelegationSpec, prompt: &str) ->
         spec,
         prompt,
         &harness_cli::LaunchPolicy::default(),
-        HARNESS_TIMEOUT,
+        Some(HARNESS_TIMEOUT),
     )?;
     if output.timed_out {
         anyhow::bail!("timed out after {}s", HARNESS_TIMEOUT.as_secs());

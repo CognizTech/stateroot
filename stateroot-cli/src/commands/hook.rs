@@ -512,6 +512,9 @@ pub fn hook_digest_with_identity(
     if let Some(section) = super::resume::recent_checkpoints_section(project_dir) {
         work.push_str(&section);
     }
+    if let Some(section) = super::resume::recent_delegations_section(project_dir) {
+        work.push_str(&section);
+    }
 
     if !work.trim().is_empty() {
         work.push_str(&format!("\n{}", super::resume::NO_REFETCH_FOOTER));

@@ -5,6 +5,21 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- **BREAKING: `stateroot delegate` is async-only.** The sync contract
+  (blocking run, `--timeout-secs`, `--max-output-chars`, caller-receives-a-
+  tail) is gone. `delegate --to H --task "…"` now writes a
+  `stateroot.delegation.v1` record with `status: "running"` and a pid,
+  launches a detached worker (the same binary in hidden `--_worker` mode,
+  output redirected into `.stateroot/delegations/<file>.log`), and exits 0
+  immediately. **No timeout anywhere and no blocking**: the harness runs to
+  its natural end; the worker finalizes the record (`outcome:
+  completed|failed`, `exit_code`, `duration_ms`) plus an episodic lineage
+  note. Observation is pull-based — `stateroot delegate list` (live status
+  `running|completed|failed|lost`; a dead pid with no final outcome is
+  reaped to `lost`) and `stateroot delegate status <id>` (record + bounded
+  log tail) — and completions surface in the digest's new `## Recent
+  Delegations` section. The depth cap still refuses at
+  `STATEROOT_DELEGATION_DEPTH >= 2` before anything is spawned.
 - **Automatic scheduled self-update**: session-boundary hooks now fire a
   detached `stateroot self-update` whenever the release cache is stale
   (gated by `[update] check_interval_hours`, one worker at a time via a
