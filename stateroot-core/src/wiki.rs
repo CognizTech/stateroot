@@ -310,22 +310,35 @@ fn normalize(s: &str) -> String {
 }
 
 /// List page paths under memories/pages (relative to `.stateroot/`).
+/// Recursive — imported harness pages live in `harness/<harness>/` subdirs.
 pub fn list_pages(project_dir: &Path) -> Vec<String> {
     let dir = pages_dir(project_dir);
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return Vec::new();
-    };
     let mut out = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("md") {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                out.push(format!("{PAGES_DIR}/{name}"));
+    walk_pages(&dir, &dir, &mut out);
+    out.sort();
+    out
+}
+
+fn walk_pages(base: &Path, dir: &Path, out: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut items: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    items.sort();
+    for path in items {
+        if path.is_dir() {
+            walk_pages(base, &path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
+            if let Ok(rel) = path.strip_prefix(base) {
+                let rel: String = rel
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                out.push(format!("{PAGES_DIR}/{rel}"));
             }
         }
     }
-    out.sort();
-    out
 }
 
 /// Lint: pages missing from index, index orphans, duplicate titles.

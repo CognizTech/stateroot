@@ -1,7 +1,7 @@
 //! `stateroot memory …` — curated hot-apex + FTS recall.
 
 use anyhow::Result;
-use stateroot_core::{hot_apex, memory_index};
+use stateroot_core::{hot_apex, memory_federation, memory_index};
 
 use super::Ctx;
 
@@ -112,6 +112,66 @@ pub fn recall(ctx: &Ctx, query: &str, limit: usize) -> Result<()> {
             hit.text.clone()
         };
         println!("  {snippet}\n");
+    }
+    Ok(())
+}
+
+/// `stateroot memory sync [--harness claude|codex|openclaw] [--dry-run] [--push]`
+pub fn sync(ctx: &Ctx, harness: Option<&str>, dry_run: bool, push: bool) -> Result<()> {
+    ctx.require_project()?;
+    let home = home()?;
+    if push {
+        return sync_push(ctx, &home, dry_run);
+    }
+    if let Some(h) = harness {
+        if !["claude", "codex", "openclaw"].contains(&h) {
+            anyhow::bail!("unknown harness {h:?} — expected claude | codex | openclaw");
+        }
+    }
+    let report = memory_federation::sync_pull(&ctx.cwd, &home, harness, dry_run)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    if !dry_run {
+        let _ = memory_index::rebuild_if_needed(&ctx.cwd, &home);
+    }
+    if report.sources.is_empty() {
+        println!("no harness memory found to import");
+        return Ok(());
+    }
+    for src in &report.sources {
+        println!(
+            "{}: {} found · {} imported · {} duplicates · {} conflicts{}",
+            src.harness,
+            src.found,
+            src.imported,
+            src.duplicates,
+            src.conflicts,
+            if dry_run { " (dry-run)" } else { "" }
+        );
+    }
+    Ok(())
+}
+
+fn sync_push(ctx: &Ctx, home: &std::path::Path, dry_run: bool) -> Result<()> {
+    let results =
+        memory_federation::sync_push(&ctx.cwd, home, dry_run).map_err(|e| anyhow::anyhow!(e))?;
+    if results.is_empty() {
+        println!("no harness memory homes found to push into");
+        return Ok(());
+    }
+    for r in &results {
+        let status = match r.status.as_str() {
+            "written" => "written",
+            "updated" => "updated (managed)",
+            "conflict" => "conflict — unmanaged file left untouched",
+            _ => "would write (dry-run)",
+        };
+        println!(
+            "{}: {} ({} bytes) — {}",
+            r.harness,
+            r.target.display(),
+            r.bytes,
+            status
+        );
     }
     Ok(())
 }

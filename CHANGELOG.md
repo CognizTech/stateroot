@@ -3,6 +3,20 @@
 All notable changes to StateRoot. Format loosely follows Keep a Changelog;
 StateRoot is pre-1.0 and milestones land as minor versions.
 
+## Unreleased
+
+- **Memory federation** (`stateroot memory sync`): pull harness-native memories
+  into the StateRoot pool as `observed` tier — claude
+  (`~/.claude/projects/<slug>/memory/*.md`), codex (`~/.codex/memories/*.md`),
+  and openclaw daily logs (`~/.openclaw/workspace/memory/*.md`). Claude and
+  codex notes become wiki pages under `memories/pages/harness/<harness>/`
+  (provenance header, content-hash dedup, conflicts preserved alongside as
+  `title__hash8.md`); openclaw logs land in the episodic tier. `--dry-run`
+  reports without writing. `--push` writes a compact managed brief
+  (`<!-- stateroot:managed v1 -->`) into each harness's native memory home —
+  only when the file is absent or already managed; an unmarked pre-existing
+  file is reported as a conflict and left untouched.
+
 ## v0.1.8 — 2026-08-26
 
 - `stateroot install` (and thus `self-update`'s re-arm) now refreshes the

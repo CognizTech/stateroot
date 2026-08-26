@@ -281,6 +281,11 @@ async fn main() -> anyhow::Result<()> {
             MemoryAction::Remove { old, target } => commands::memory::remove(&ctx, &target, &old)?,
             MemoryAction::Show { target } => commands::memory::show(&ctx, &target)?,
             MemoryAction::Recall { query, limit } => commands::memory::recall(&ctx, &query, limit)?,
+            MemoryAction::Sync {
+                harness,
+                dry_run,
+                push,
+            } => commands::memory::sync(&ctx, harness.as_deref(), dry_run, push)?,
         },
         Command::Observations(args) => match args.action {
             ObservationsAction::List {

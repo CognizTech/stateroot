@@ -21,6 +21,7 @@ pub mod hot_apex;
 pub mod learnings;
 pub mod local_store;
 pub mod mcp_federation;
+pub mod memory_federation;
 pub mod memory_index;
 pub mod observations;
 pub mod openclaw_identity;

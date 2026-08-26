@@ -101,6 +101,7 @@ The CLI is offline-safe: when the server is unreachable it queues operations in 
 | `stateroot session transfer <id> --to pi\|dsh` | resume a session in another harness | writes a real native session file; fidelity report (native/adapted/dropped); `--dry-run` previews |
 | `stateroot plan record` / `list` / `show` / `approve` / `activate` / `done` / `abandon` | central plan artifact + lifecycle | plan/implement split: the planner records a draft, the user approves, the executor's digest points at `.stateroot/plans/<id>.md` with an execute directive — do not re-plan; the digest never carries the body |
 | `stateroot memory recall <query> [--limit N]` | find decisions, failures, memories | FTS over memory, wiki, episodic, transcripts |
+| `stateroot memory sync [--harness H] [--dry-run]` | federate harness memory into the pool | pulls claude/codex/openclaw memories in as `observed` wiki pages / episodic; dedups by content hash, preserves conflicts; `--push` writes a curated brief into managed harness memory files |
 | `stateroot snap [--reason R]` | after meaningful real-tree changes | records verified root under `refs/stateroot` |
 | `stateroot log` / `stateroot show <root>` | inspect lineage | current root, transitions, coverage |
 | `stateroot diff` / `stateroot compare A B` | inspect tree deltas | verified git diff between roots |

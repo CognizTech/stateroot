@@ -254,3 +254,45 @@ here, then moves into the one requested and resumes it there. A registered
 project whose directory was deleted is marked `MISSING`, never silently
 dropped; `stateroot projects --prune` unregisters those entries (prints each
 one; project state on disk is never touched — the dirs are already gone).
+
+## `stateroot memory sync` — memory federation
+
+Harness-native memory systems (claude memory, codex memories, openclaw session
+logs) are both a conflict and an opportunity. `stateroot memory sync` makes
+StateRoot the memory **pool**: pull harness memories in as `observed` tier, and
+push a curated brief back into harness-native formats so even hook-limited
+harnesses know the project.
+
+### Sources → tiers
+
+| Harness | Reads | Lands as |
+| --- | --- | --- |
+| `claude` | `~/.claude/projects/<slug>/memory/*.md` (slug decodes to the cwd, matched with walk-up/walk-down tolerance) | wiki pages `memories/pages/harness/claude/*.md` |
+| `codex` | `~/.codex/memories/*.md` (flat; the sqlite is pipeline state, never read) | wiki pages `memories/pages/harness/codex/*.md` |
+| `openclaw` | `~/.openclaw/workspace/memory/*.md` (daily logs) | episodic records (`harness-memory:openclaw:<hash>` source id) |
+
+`stateroot memory sync [--harness claude|codex|openclaw] [--dry-run]` — no
+harness filter means all three.
+
+### Dedup, conflicts, provenance
+
+- Every imported artifact carries a provenance header
+  `<!-- stateroot:imported harness=… source=… hash=… -->` and is `observed`.
+- Dedup is by **content hash** (sha256 over normalized text), recorded in the
+  import ledger `.stateroot/memories/federation.json` — never by title.
+- Same title + different content is **preserved, never overwritten**: the new
+  note lands as `<title>__<hash8>.md` and the conflict is recorded.
+
+### Push (`--push`)
+
+`stateroot memory sync --push` writes a compact managed brief
+(`<!-- stateroot:managed v1 -->` + objective, phase, active plan, latest
+checkpoints, hot-apex memory — capped ~4000 chars) into:
+
+- `~/.claude/projects/<slug>/memory/stateroot.md`
+- `~/.codex/memories/stateroot.md`
+- `~/.openclaw/workspace/memory/stateroot.md`
+
+Managed files are written only when absent or already carrying the marker; an
+unmarked pre-existing file is a conflict, reported and left untouched.
+`--dry-run` prints each target and the would-be size without writing.

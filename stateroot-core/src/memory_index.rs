@@ -75,32 +75,17 @@ fn content_fingerprint(project_dir: &Path, home: &Path) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     let root = local_store::root(project_dir);
-    for rel in [
-        local_store::MEMORY_CORE_PATH,
-        local_store::EPISODIC_PATH,
-        wiki::PAGES_DIR,
-    ] {
+    for rel in [local_store::MEMORY_CORE_PATH, local_store::EPISODIC_PATH] {
         let p = root.join(rel);
         hasher.update(rel.as_bytes());
         if p.is_file() {
             hasher.update(fs::read(&p).unwrap_or_default());
-        } else if p.is_dir() {
-            if let Ok(entries) = fs::read_dir(&p) {
-                let mut paths: Vec<_> = entries.flatten().map(|e| e.path()).collect();
-                paths.sort();
-                for path in paths {
-                    if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                        hasher.update(
-                            path.file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("")
-                                .as_bytes(),
-                        );
-                        hasher.update(fs::read(&path).unwrap_or_default());
-                    }
-                }
-            }
         }
+    }
+    // Wiki pages (recursive — imported harness pages live in subdirs).
+    for rel in wiki::list_pages(project_dir) {
+        hasher.update(rel.as_bytes());
+        hasher.update(fs::read(root.join(&rel)).unwrap_or_default());
     }
     if let Some(user) = crate::user_profile::read(home) {
         hasher.update(b"user");

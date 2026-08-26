@@ -826,6 +826,19 @@ pub enum MemoryAction {
         #[arg(long, default_value_t = 5)]
         limit: usize,
     },
+    /// Federate harness-native memory: pull in as observed tier (default) or
+    /// push the curated brief back (`--push`).
+    Sync {
+        /// Restrict the pull to one harness: claude | codex | openclaw.
+        #[arg(long)]
+        harness: Option<String>,
+        /// Report what would happen without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Push the curated brief into managed harness memory files.
+        #[arg(long)]
+        push: bool,
+    },
 }
 
 #[derive(Debug, Args)]
