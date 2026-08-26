@@ -722,6 +722,14 @@ async fn resume_output(
                 note!("warning: rules sync skipped: {err}");
             }
         }
+        // Automatic update path: fire a detached self-update when the release
+        // cache is stale — scheduled by activity, never blocking, never
+        // asking an agent to act. (The digest notice stays as the visible
+        // layer; this is the layer that actually keeps machines current.)
+        super::update::maybe_spawn_scheduled_update(
+            &ctx.config_dir,
+            ctx.config.update.check_interval_hours,
+        );
         // Dual-mode compiler: agentic when keyed/logged-in; never fails the hook.
         let hook_ctx = Ctx {
             cwd: project_dir.to_path_buf(),

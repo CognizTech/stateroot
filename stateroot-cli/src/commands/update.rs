@@ -32,6 +32,73 @@ fn cache_path(ctx: &Ctx) -> PathBuf {
     ctx.config_dir.join("update-check.json")
 }
 
+/// Fire a DETACHED `self-update` when the release cache is stale — the
+/// automatic, agent-independent update path. Session-boundary hooks (already
+/// the slow-work zone) call this: when the check interval has passed, we
+/// spawn the updater in the background and return instantly. The hook never
+/// blocks, no agent is asked to act, and a lock prevents concurrent workers.
+pub fn maybe_spawn_scheduled_update(config_dir: &Path, interval_hours: i64) {
+    if let Ok(worker) = std::env::current_exe() {
+        spawn_scheduled_update(config_dir, interval_hours, &worker);
+    }
+}
+
+fn spawn_scheduled_update(config_dir: &Path, interval_hours: i64, worker: &Path) {
+    // Gate 1: a fresh cache means a check already happened recently.
+    let cache_fresh = std::fs::read_to_string(config_dir.join("update-check.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|cached| {
+            cached
+                .get("checked_at")
+                .and_then(|v| v.as_str())
+                .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                .map(|at| {
+                    (chrono::Utc::now() - at.with_timezone(&chrono::Utc)).num_hours()
+                        < interval_hours.max(1)
+                })
+        })
+        .unwrap_or(false);
+    if cache_fresh {
+        return;
+    }
+    // Gate 2: one worker at a time (lock younger than an hour counts as live).
+    let lock = config_dir.join("update-in-progress");
+    let lock_live = std::fs::read_to_string(&lock)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|entry| {
+            entry
+                .get("started_at")
+                .and_then(|v| v.as_str())
+                .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                .map(|at| (chrono::Utc::now() - at.with_timezone(&chrono::Utc)).num_hours() < 1)
+        })
+        .unwrap_or(false);
+    if lock_live {
+        return;
+    }
+    let Ok(log) = std::fs::File::create(config_dir.join("update-scheduled.log")) else {
+        return;
+    };
+    let Ok(log_err) = log.try_clone() else {
+        return;
+    };
+    let spawned = std::process::Command::new(worker)
+        .arg("self-update")
+        .stdin(std::process::Stdio::null())
+        .stdout(log)
+        .stderr(log_err)
+        .spawn();
+    if let Ok(child) = spawned {
+        let entry = serde_json::json!({
+            "pid": child.id(),
+            "started_at": chrono::Utc::now().to_rfc3339(),
+        });
+        let _ = std::fs::write(&lock, format!("{entry}\n"));
+    }
+}
+
 /// Digest update notice (cache-only, NEVER network): a one-liner when the
 /// cached release check knows a newer tag than this binary. The background
 /// auto-update refreshes the cache on its own cadence; hooks stay fast and
@@ -768,6 +835,44 @@ fn version_of(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scheduled_update_gates_on_cache_freshness_and_the_lock() {
+        let dir = tempfile::tempdir().expect("dir");
+        let worker = Path::new("/bin/true");
+        if !worker.is_file() {
+            eprintln!("skipping: /bin/true unavailable");
+            return;
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        // Fresh cache → never fires.
+        std::fs::write(
+            dir.path().join("update-check.json"),
+            format!(r#"{{"latest_tag": "v9.9.9", "checked_at": "{now}"}}"#),
+        )
+        .expect("cache");
+        spawn_scheduled_update(dir.path(), 6, worker);
+        assert!(
+            !dir.path().join("update-in-progress").exists(),
+            "fresh cache"
+        );
+        // Stale cache → fires once, writes the lock.
+        std::fs::write(
+            dir.path().join("update-check.json"),
+            r#"{"latest_tag": "v9.9.9", "checked_at": "2020-01-01T00:00:00Z"}"#,
+        )
+        .expect("cache");
+        spawn_scheduled_update(dir.path(), 6, worker);
+        assert!(
+            dir.path().join("update-in-progress").exists(),
+            "stale fires"
+        );
+        // Live lock → no second fire (lock content unchanged).
+        let before = std::fs::read_to_string(dir.path().join("update-in-progress")).expect("lock");
+        spawn_scheduled_update(dir.path(), 6, worker);
+        let after = std::fs::read_to_string(dir.path().join("update-in-progress")).expect("lock");
+        assert_eq!(before, after, "live lock blocks respawn");
+    }
 
     #[test]
     fn update_notice_reads_the_cache_and_stays_honest() {

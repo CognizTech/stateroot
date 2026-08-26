@@ -5,6 +5,13 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- **Automatic scheduled self-update**: session-boundary hooks now fire a
+  detached `stateroot self-update` whenever the release cache is stale
+  (gated by `[update] check_interval_hours`, one worker at a time via a
+  lock file). Updates keep machines current through agent activity alone —
+  no command invocation and no agent action required. The digest's update
+  notice stays as the visible layer; this is the layer that acts on it.
+  Failures land in `<config>/update-scheduled.log`.
 - **Memory federation** (`stateroot memory sync`): pull harness-native memories
   into the StateRoot pool as `observed` tier — claude
   (`~/.claude/projects/<slug>/memory/*.md`), codex (`~/.codex/memories/*.md`),

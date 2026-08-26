@@ -228,6 +228,17 @@ Two one-line sections keep every arriving harness oriented:
   network. The post-install skill tells agents to act on this line (or to run
   `stateroot self-update --check` occasionally).
 
+## Scheduled self-update (automatic, agent-independent)
+
+Machines stay current without anyone asking. On every session-boundary hook
+(already the slow-work zone), stateroot checks the release cache's age; when
+`[update] check_interval_hours` has passed, it spawns a **detached**
+`stateroot self-update` and returns instantly — the hook never blocks and no
+agent is asked to act. One worker at a time (`update-in-progress` lock, one
+hour liveness); the child updates the binary and re-arms harness wiring as
+usual, logging to `update-scheduled.log`. The digest's update notice is the
+visible layer; this is the layer that acts.
+
 ## `stateroot doctor` — hook-binary health
 
 Doctor inspects the binary every installed hook config actually points at
