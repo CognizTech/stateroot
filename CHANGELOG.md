@@ -5,6 +5,13 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+## v0.1.9 — 2026-08-26
+
+- **Reframed public copy**: "Switch harnesses. Keep the agent." — the README,
+  GitHub About, stateroot.dev (landing, tagline, intro, `llms.txt`), and all
+  skill descriptions (marketplace, CLI-embedded, plugin) now open by anchoring
+  the AI-coding-agent domain in the first screen: cross-harness continuity
+  across Claude Code, Codex, Cursor, Kimi Code, Pi, and DeepSeek Harness.
 - **BREAKING: `stateroot delegate` is async-only.** The sync contract
   (blocking run, `--timeout-secs`, `--max-output-chars`, caller-receives-a-
   tail) is gone. `delegate --to H --task "…"` now writes a
