@@ -5,6 +5,19 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- **Team-ready state: the shared/local boundary is now code.** Teams that
+  commit `.stateroot/` asked the right questions — what travels, what
+  fights. `stateroot init` (and `install` for existing projects) now writes
+  `.stateroot/.gitignore` classifying the store: shareable state of record
+  (goal, plans, learnings, rules, wiki, memory pages, handoff history,
+  skill pool, soul overlay, transitions) vs machine-local/per-person
+  (search, spool, delegations, cursors, hot-apex `MEMORY.md` and
+  `episodic.jsonl` — per-person lens and private journal — the current
+  handoff, and `roots/`, whose lineage travels via `refs/stateroot`, not
+  files). `.stateroot/.gitattributes` merges any committed journal by
+  union. `stateroot doctor` warns when a local-set path is tracked in git
+  (`collab boundary` check). README gains a "Sharing a project" section
+  with the teammate flow: clone, install once, open any harness.
 - **CI flake exorcised: the scheduled-update worker vs the request-counting
   mock.** `updater_never_runs_on_hook_but_runs_on_status` asserted a v0.1.9
   premise that v0.1.9 itself had retired: hooks *do* fire updates now —

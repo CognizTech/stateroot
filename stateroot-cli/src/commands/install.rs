@@ -196,6 +196,17 @@ pub async fn install(ctx: &Ctx) -> Result<()> {
             for action in actions {
                 println!("  {}: {action}", path);
             }
+            // Collaboration defaults reach existing projects too
+            // (write-if-absent; user edits win).
+            let root = stateroot_core::local_store::root(dir);
+            let mut created = Vec::new();
+            if let Err(err) = stateroot_core::local_store::ensure_collab_files(&root, &mut created)
+            {
+                note!("warning: collab files failed for {}: {err}", root.display());
+            }
+            for item in created {
+                println!("  {}: {item}", path);
+            }
         }
     }
 

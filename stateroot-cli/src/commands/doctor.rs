@@ -461,6 +461,42 @@ fn continuity_chain_checks(home: &Path, project_dir: &Path) -> Vec<Check> {
         }
     }
 
+    // Collaboration boundary: machine-local / per-person paths must not be
+    // git-tracked — they churn on every session and fight on every pull.
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["ls-files", "--", ".stateroot"])
+        .current_dir(project_dir)
+        .output()
+    {
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let tracked: Vec<&str> = text
+                .lines()
+                .map(|line| line.trim_start_matches(".stateroot/"))
+                .filter(|rel| {
+                    stateroot_core::local_store::COLLAB_LOCAL_PATHS
+                        .iter()
+                        .any(|p| {
+                            let p = *p;
+                            (p.ends_with('/') && rel.starts_with(p)) || *rel == p
+                        })
+                })
+                .collect();
+            if !tracked.is_empty() {
+                checks.push(Check {
+                    label: "collab boundary".into(),
+                    ok: false,
+                    detail: format!(
+                        "{} machine-local/per-person path(s) tracked in git ({}…) — `git rm --cached` them; `.stateroot/.gitignore` covers the rest",
+                        tracked.len(),
+                        tracked.first().copied().unwrap_or("")
+                    ),
+                    hard: false,
+                });
+            }
+        }
+    }
+
     // Last captured checkpoint per harness (episodic carries a harness
     // field; older records said only "cli", so fall back to the note's
     // "<event> via <harness> hook" attribution).

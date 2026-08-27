@@ -216,6 +216,10 @@ pub fn init_skeleton(
     });
     write_json_if_absent(&root.join(FIRST_RUN_PATH), &first_run, &mut created)?;
 
+    // Collaboration defaults: teams that commit `.stateroot/` get a sane
+    // shared/local boundary out of the box (write-if-absent; user edits win).
+    ensure_collab_files(&root, &mut created)?;
+
     let learnings_dir = root.join("learnings");
     if !learnings_dir.exists() {
         std::fs::create_dir_all(&learnings_dir).map_err(io_err(&learnings_dir))?;
@@ -230,6 +234,74 @@ pub fn init_skeleton(
     }
 
     Ok(created)
+}
+
+/// Machine-local and per-person paths inside `.stateroot/` — the do-not-
+/// commit set written to `.stateroot/.gitignore` at init and checked by
+/// `doctor`. Everything else in the store (goal, plans, learnings, rules,
+/// wiki, memory pages, handoff history, tools/mcp.json, transitions) is
+/// the shareable state of record for a team.
+pub const COLLAB_LOCAL_PATHS: &[&str] = &[
+    // Machine-local: search index, transient buffers, delegation pids,
+    // sync/compiler cursors, per-machine markers.
+    "local/",
+    "spool/",
+    "delegations/",
+    "outbox.jsonl",
+    "first-run.json",
+    "ingest-gov.json",
+    "memories/federation.json",
+    "tools/mcp.projections.json",
+    // Lineage lives in Git plumbing under refs/stateroot — it travels by
+    // explicit ref push, not by committing its index.
+    "roots/",
+    // Per-person continuity: rewritten or appended constantly, and private.
+    // The hot-apex lens compiles per person from the shared wiki; the
+    // episodic journal captures raw session input.
+    "handoffs/current.json",
+    "memories/MEMORY.md",
+    "memories/episodic.jsonl",
+];
+
+const COLLAB_GITIGNORE: &str = "\
+# StateRoot — machine-local and per-person state. Do not commit these.
+# Everything else in .stateroot/ (goal, plans, learnings, rules, wiki,
+# memory pages, handoff history, project soul, tools/mcp.json) is the
+# shareable state of record for a team.
+
+# Machine-local: search index, transient buffers, delegation pids, cursors.
+local/
+spool/
+delegations/
+outbox.jsonl
+first-run.json
+ingest-gov.json
+memories/federation.json
+tools/mcp.projections.json
+
+# Lineage travels via git refs (refs/stateroot/*), not committed files.
+roots/
+
+# Per-person continuity: the hot-apex lens compiles per person from the
+# shared wiki; the episodic journal captures raw session input; the current
+# handoff is per-session continuity (history/ stays shared).
+handoffs/current.json
+memories/MEMORY.md
+memories/episodic.jsonl
+";
+
+const COLLAB_GITATTRIBUTES: &str = "\
+# Append-only journals merge by union (keep both sides' lines) when a team
+# commits StateRoot state.
+*.jsonl merge=union
+";
+
+/// Write `.stateroot/.gitignore` + `.stateroot/.gitattributes` when absent
+/// (init and install's project refresh; user edits are never overwritten).
+pub fn ensure_collab_files(root: &Path, created: &mut Vec<String>) -> Result<(), LocalStoreError> {
+    write_text_if_absent(&root.join(".gitignore"), COLLAB_GITIGNORE, created)?;
+    write_text_if_absent(&root.join(".gitattributes"), COLLAB_GITATTRIBUTES, created)?;
+    Ok(())
 }
 
 /// Append one JSON record to `memories/episodic.jsonl`.
@@ -652,6 +724,27 @@ mod tests {
         // Idempotent: second run creates nothing and keeps content.
         let created_again = init_skeleton(tmp.path(), "proj-1", "demo", "default").expect("init2");
         assert!(created_again.is_empty());
+    }
+
+    #[test]
+    fn collab_files_written_once_and_user_edits_win() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        init_skeleton(tmp.path(), "p", "n", "default").expect("init");
+        let r = root(tmp.path());
+        let ignore = std::fs::read_to_string(r.join(".gitignore")).expect("gitignore");
+        assert!(ignore.contains("memories/episodic.jsonl"));
+        assert!(ignore.contains("handoffs/current.json"));
+        assert!(ignore.contains("roots/"));
+        assert!(ignore.contains("Do not commit"), "guidance present");
+        let attrs = std::fs::read_to_string(r.join(".gitattributes")).expect("gitattributes");
+        assert!(attrs.contains("merge=union"));
+        // User edits are never overwritten by a refresh.
+        std::fs::write(r.join(".gitignore"), "# custom\n").expect("edit");
+        let mut created = Vec::new();
+        ensure_collab_files(&r, &mut created).expect("refresh");
+        assert!(created.is_empty(), "nothing rewritten: {created:?}");
+        let after = std::fs::read_to_string(r.join(".gitignore")).expect("read");
+        assert_eq!(after, "# custom\n");
     }
 
     #[test]

@@ -187,6 +187,16 @@ Snapshots honor root `.gitignore` and `.staterootignore`, plus `.git/` and `loca
 
 Details: [Privacy](https://stateroot.dev/docs/guides/privacy).
 
+## Sharing a project
+
+Committing `.stateroot/` makes the project's state of record a team asset — and the boundary is deliberate so it merges cleanly:
+
+- **Travels with the repo:** goal and project state, plans, learnings, rules, the skill pool, wiki and memory pages, handoff history, the project soul overlay, transitions. Your persona and USER.md never travel — they live in `~/.stateroot/` by design, so every teammate keeps their own agent's personality.
+- **Stays local** (written to `.stateroot/.gitignore` at init): the search index, spool, delegations, sync cursors, the hot-apex `memories/MEMORY.md` and `memories/episodic.jsonl` (per-person lens and private journal — shared truth lives in the wiki and learnings), the current handoff (per-session continuity; history is shared), and `roots/` — lineage travels through Git itself: `git push origin 'refs/stateroot/*'`.
+- Append-only journals merge by union via `.stateroot/.gitattributes`. `stateroot doctor` warns when a local-set path is tracked in git.
+
+A teammate's flow: clone, `stateroot install` once, open any harness — the digest already knows the goal, the plans, and every lesson the project has learned.
+
 ## Contributing
 
 ```bash
