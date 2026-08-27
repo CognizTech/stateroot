@@ -328,6 +328,11 @@ pub fn render_handoff_digest_full(
     if let Some(section) = &central_plan {
         out.push_str(section);
     }
+    if let Some(dir) = project_dir {
+        if let Some(section) = shared_capabilities_section(dir) {
+            out.push_str(&section);
+        }
+    }
     // The residual-work view: latest plan snapshot with status markers.
     if central_plan.is_none() {
         if let Some(items) = packet.get("plan_state").and_then(|v| v.as_array()) {
