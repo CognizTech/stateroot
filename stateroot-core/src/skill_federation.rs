@@ -1292,6 +1292,18 @@ fn projection_digest(path: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Wrapper-template format version. Bump when the generated delegation
+/// wrapper text changes in a way existing projections must pick up
+/// (v2: "offer it, never refuse" — v1 taught explicit-ask-only, which
+/// read as refusal on capability questions).
+const WRAPPER_VERSION: u64 = 2;
+
+fn projection_wrapper_version(path: &Path) -> Option<u64> {
+    read_json_file(&path.join(PROJECTION_META))?
+        .get("wrapper_version")?
+        .as_u64()
+}
+
 fn materialize_managed_projection(
     src: &Path,
     dst: &Path,
@@ -1422,6 +1434,7 @@ fn write_reference_wrapper(dst: &Path, skill: &DiscoveredSkill) -> std::io::Resu
             "schema_version": "stateroot.skill_projection.v1",
             "managed_by": "stateroot",
             "projection_kind": "delegation_wrapper",
+            "wrapper_version": WRAPPER_VERSION,
             "identity_key": skill.identity_key,
             "slug": skill.slug,
             "package_digest": skill.package_digest,
@@ -1546,8 +1559,14 @@ fn materialize_reference_projection(
     dry_run: bool,
 ) -> Result<&'static str, String> {
     if dst.exists() {
+        // The package digest covers the *source*; the wrapper's own text is
+        // generated from a template, so template changes must also
+        // regenerate — gated by a wrapper-format version.
+        let version = projection_wrapper_version(dst).unwrap_or(1);
         match projection_digest(dst) {
-            Some(existing_digest) if existing_digest == skill.package_digest => {
+            Some(existing_digest)
+                if existing_digest == skill.package_digest && version >= WRAPPER_VERSION =>
+            {
                 return Ok("unchanged");
             }
             Some(_) => {}

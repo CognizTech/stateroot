@@ -25,7 +25,10 @@ StateRoot is pre-1.0 and milestones land as minor versions.
   to delegate instead of answering "I can't", never claim another
   harness's capability as your own — and the generated reference skills
   now fire on the capability ask itself, not only on explicit delegation
-  requests.
+  requests. (A `wrapper_version` in the projection metadata makes template
+  changes regenerate existing wrappers — the old dedup compared only the
+  source package digest, so v1's refusal-shaped wording would have lived
+  on disk forever.)
 - **Capture-chain honesty.** reqwest now trusts the OS certificate store
   (`rustls-tls-native-roots`, webpki fallback kept) — enterprise GitHub via
   `STATEROOT_GITHUB_API_BASE`, corporate MITM proxies, and private PKI no
