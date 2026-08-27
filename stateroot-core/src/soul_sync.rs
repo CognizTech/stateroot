@@ -151,9 +151,13 @@ struct Source {
 }
 
 /// Discover present sources: openclaw (first identity pack with a persona)
-/// and hermes (`SOUL.md`).
-fn discover_sources(home: &Path) -> Vec<Source> {
+/// and hermes (`SOUL.md`). Returns the sources plus the ids of skipped
+/// stateroot-managed projections (a `<!-- stateroot:begin -->` block is our
+/// own install projection — its persona already flows via the projection
+/// refresh, so it is never a sync source and never a conflict).
+fn discover_sources(home: &Path) -> (Vec<Source>, Vec<&'static str>) {
     let mut out = Vec::new();
+    let mut managed = Vec::new();
     if let Some(pack) = crate::openclaw_identity::discover_openclaw_identities(home)
         .into_iter()
         .find(|p| !p.persona_markdown.trim().is_empty())
@@ -166,13 +170,23 @@ fn discover_sources(home: &Path) -> Vec<Source> {
     let hermes = crate::soul::hermes_home(home).join("SOUL.md");
     if let Ok(text) = std::fs::read_to_string(&hermes) {
         if !text.trim().is_empty() {
-            out.push(Source {
-                id: "hermes",
-                text: text.trim().to_string(),
-            });
+            if is_stateroot_projection(&text) {
+                managed.push("hermes");
+            } else {
+                out.push(Source {
+                    id: "hermes",
+                    text: text.trim().to_string(),
+                });
+            }
         }
     }
-    out
+    (out, managed)
+}
+
+/// True when a native persona file is stateroot's own install projection
+/// (the one-agent instruction block), not harness-authored content.
+fn is_stateroot_projection(text: &str) -> bool {
+    text.contains("<!-- stateroot:begin")
 }
 
 // ---------------------------------------------------------------------
@@ -298,6 +312,16 @@ fn push_source(
         }
         "hermes" => {
             let path = crate::soul::hermes_home(home).join("SOUL.md");
+            // Never overwrite our own install projection — its persona
+            // already flows through the projection refresh.
+            if let Ok(current) = std::fs::read_to_string(&path) {
+                if is_stateroot_projection(&current) {
+                    actions.push(
+                        "hermes: stateroot projection — skipped (refreshed by install)".to_string(),
+                    );
+                    return;
+                }
+            }
             write_native_file(&path, &normalize(canonical), dry_run, actions);
         }
         _ => {}
@@ -318,14 +342,24 @@ pub fn sync(home: &Path, dry_run: bool) -> SyncReport {
             .push("no canonical soul — nothing to sync".to_string());
         return report;
     };
-    let sources = discover_sources(home);
-    if sources.is_empty() {
+    let (sources, managed) = discover_sources(home);
+    if sources.is_empty() && managed.is_empty() {
         report
             .actions
             .push("no harness-native persona sources found".to_string());
         return report;
     }
     let mut state = load_state(home);
+    // Managed projections are never sources: prune any stale conflict
+    // recorded before the projection was recognized.
+    for id in &managed {
+        if state.conflicts.iter().any(|c| c.source == *id) {
+            state.conflicts.retain(|c| c.source != *id);
+            report.actions.push(format!(
+                "{id}: stateroot projection — persona flows via install refresh; conflict cleared"
+            ));
+        }
+    }
     let canonical_hash = hash(&canonical);
     // Conflict sources are skipped by the automatic pass until resolved.
     let conflicted: std::collections::BTreeSet<String> =
@@ -488,7 +522,7 @@ pub fn accept(home: &Path, source_id: &str, theirs: bool) -> SyncReport {
     let mut state = load_state(home);
     state.conflicts.retain(|c| c.source != source_id);
     if theirs {
-        let sources = discover_sources(home);
+        let (sources, _) = discover_sources(home);
         if let Some(source) = sources.iter().find(|s| s.id == source_id) {
             match crate::soul::write_canonical(
                 home,
@@ -525,7 +559,7 @@ pub fn accept(home: &Path, source_id: &str, theirs: bool) -> SyncReport {
         );
         // An accept-theirs also carries the new canonical to every other source.
         if theirs {
-            for other in discover_sources(home) {
+            for other in discover_sources(home).0 {
                 if other.id == source_id {
                     continue;
                 }
@@ -784,6 +818,48 @@ mod tests {
         assert!(report.canonical_changed, "{report:?}");
         let canonical = crate::soul::read_canonical(home.path()).expect("canonical");
         assert!(canonical.contains("hermes again"));
+    }
+
+    #[test]
+    fn stateroot_projection_is_never_a_source_and_clears_conflicts() {
+        let home = tempfile::tempdir().expect("home");
+        let hermes = home.path().join(".hermes");
+        fs::create_dir_all(&hermes).expect("hermes");
+        // Hermes' SOUL.md as install projects it: our block, not a persona.
+        fs::write(
+            hermes.join("SOUL.md"),
+            "<!-- stateroot:begin -->\n\n## StateRoot — one agent in every harness\n\n### Identity\n\n- Name: Marid\n",
+        )
+        .expect("projection");
+        crate::soul::write_canonical(home.path(), "# Soul\n\nI am Marid.\n", Some("test"))
+            .expect("write");
+        let report = sync(home.path(), false);
+        assert!(
+            report.conflicts.is_empty(),
+            "projection is no source: {report:?}"
+        );
+        assert!(
+            report.actions.is_empty(),
+            "no sources, nothing to prune — a silent pass: {report:?}"
+        );
+        // A stale conflict recorded before the projection was recognized
+        // gets pruned, never surfaced forever.
+        let mut state = load_state(home.path());
+        state.conflicts.push(ConflictRecord {
+            source: "hermes".to_string(),
+            detail: "stale".to_string(),
+            at: now(),
+        });
+        save_state(home.path(), &state);
+        let report = sync(home.path(), false);
+        assert!(report.conflicts.is_empty());
+        assert!(pending_conflicts(home.path()).is_empty(), "pruned");
+        // And a push never overwrites the projection.
+        crate::soul::write_canonical(home.path(), "# Soul\n\nchanged voice\n", Some("propose"))
+            .expect("edit");
+        let _ = sync(home.path(), false);
+        let native = fs::read_to_string(hermes.join("SOUL.md")).expect("projection");
+        assert!(native.contains("stateroot:begin"), "projection intact");
     }
 
     #[test]
