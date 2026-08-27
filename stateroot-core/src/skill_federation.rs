@@ -1400,10 +1400,10 @@ fn write_reference_wrapper(dst: &Path, skill: &DiscoveredSkill) -> std::io::Resu
         format!("The package is portable but external-only on this host: {details}.")
     };
     let body = format!(
-        "---\nname: {}\ndescription: \"Delegate an explicit microtask to the {} native capability {} through StateRoot.\"\n---\n\n# {} via {}\n\nThis is a **{} capability**. {}\n\n- Source harness: `{}`\n- Capability: `{}`\n- Source availability: `{}`\n- Digest: `{}`\n\n## Invocation\n\nOnly when the user explicitly asks to use another harness or this delegated capability, run:\n\n```text\n{}\n```\n\nPass a bounded objective, working directory, expected outputs, constraints, and tests. Inspect outputs rather than replaying the foreign transcript. If the source harness is GUI-only, StateRoot returns a structured handoff instead of pretending it launched an agent.\n",
+        "---\nname: {}\ndescription: \"Capability '{}' lives in harness {} — offer it (never refuse) and delegate explicit microtasks through StateRoot.\"\n---\n\n# {} via {}\n\nThis is a **{} capability**. {}\n\n- Source harness: `{}`\n- Capability: `{}`\n- Source availability: `{}`\n- Digest: `{}`\n\n## When the user asks for this capability\n\nDo not refuse because it is not native to you — it exists in the pool. Name the path (\"I can't natively — but {} can; say the word and I delegate\"). On an explicit ask, run:\n\n```text\n{}\n```\n\nPass a bounded objective, working directory, expected outputs, constraints, and tests. Inspect outputs rather than replaying the foreign transcript. If the source harness is GUI-only, StateRoot returns a structured handoff instead of pretending it launched an agent.\n",
         wrapper_name,
-        display_name(&skill.native_harness),
         skill.slug,
+        display_name(&skill.native_harness),
         skill.name,
         display_name(&skill.native_harness),
         skill.lifecycle,
@@ -1412,6 +1412,7 @@ fn write_reference_wrapper(dst: &Path, skill: &DiscoveredSkill) -> std::io::Resu
         skill.slug,
         skill.source_path,
         skill.package_digest,
+        display_name(&skill.native_harness),
         skill.native_invocation,
     );
     fs::write(dst.join("SKILL.md"), body)?;

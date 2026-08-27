@@ -96,6 +96,50 @@ pub(crate) fn central_plan_section(project_dir: Option<&Path>) -> Option<String>
     Some(section)
 }
 
+/// "## Shared Capabilities" — the pooled reference-only capabilities another
+/// harness owns (imagegen → codex, automate → cursor, …). The pool already
+/// exists on disk; without this section an agent asked "can you do X"
+/// answers from its own tool list and refuses (the claude imagegen trial:
+/// the pool held imagegen, the agent never looked). Bounded: 8 entries plus
+/// a "+N more" tail; empty pool → no section (empty stays empty).
+pub(crate) fn shared_capabilities_section(project_dir: &Path) -> Option<String> {
+    let pooled = stateroot_core::skill_federation::discover_all(project_dir, None).ok()?;
+    let mut refs: Vec<(String, String)> = pooled
+        .iter()
+        .filter(|s| s.lifecycle == "reference_only")
+        .map(|s| (s.slug.clone(), s.native_harness.clone()))
+        .collect();
+    refs.sort();
+    refs.dedup();
+    render_shared_capabilities(&refs)
+}
+
+/// Pure renderer (unit-tested): reference-only (slug, harness) pairs → the
+/// bounded section, or None when the pool is empty.
+fn render_shared_capabilities(refs: &[(String, String)]) -> Option<String> {
+    if refs.is_empty() {
+        return None;
+    }
+    const MAX: usize = 8;
+    let mut section = String::from(
+        "## Shared Capabilities (pooled — delegate, never refuse)\n\n\
+         Asked for a capability you lack natively? Another harness owns it — name the path and offer to delegate instead of answering \"I can't\".\n",
+    );
+    for (slug, harness) in refs.iter().take(MAX) {
+        section.push_str(&format!(
+            "- {slug} → {harness}: `stateroot delegate --to {harness} --skill {slug} --task \"…\"`\n"
+        ));
+    }
+    if refs.len() > MAX {
+        section.push_str(&format!(
+            "- … +{} more (`stateroot skill list`)\n",
+            refs.len() - MAX
+        ));
+    }
+    section.push('\n');
+    Some(section)
+}
+
 /// "## Latest Activity" — the newest observed activity anywhere (checkpoint
 /// or root), with harness + timestamp. A long-running session never writes a
 /// formal handoff; without this line the next harness anchors on the older
@@ -881,6 +925,10 @@ skipping duplicate. Pass --force to reprint.)\n\n{NO_REFETCH_FOOTER}"
                 out.push('\n');
                 out.push_str(&section);
             }
+            if let Some(section) = shared_capabilities_section(&ctx.cwd) {
+                out.push('\n');
+                out.push_str(&section);
+            }
             if let Some(section) = latest_activity_section(&ctx.cwd) {
                 out.push('\n');
                 out.push_str(&section);
@@ -1007,6 +1055,26 @@ mod tests {
             "created_at": "2026-07-26T00:00:00Z",
             "created_by_harness": "codex"
         })
+    }
+
+    #[test]
+    fn shared_capabilities_render_bounded_and_honest() {
+        assert!(
+            render_shared_capabilities(&[]).is_none(),
+            "empty pool → no section (empty stays empty)"
+        );
+        let refs: Vec<(String, String)> = (0..10)
+            .map(|i| (format!("cap-{i:02}"), "codex".to_string()))
+            .collect();
+        let section = render_shared_capabilities(&refs).expect("section");
+        assert!(section.contains("delegate, never refuse"));
+        assert!(section.contains("cap-00 → codex"));
+        assert!(section.contains("stateroot delegate --to codex --skill cap-00"));
+        assert!(!section.contains("cap-08 → codex"), "bounded at 8");
+        assert!(section.contains("+2 more"), "tail names the remainder");
+        let one = render_shared_capabilities(&[("imagegen".into(), "codex".into())]).expect("one");
+        assert!(one.contains("imagegen → codex"));
+        assert!(!one.contains("more (`stateroot skill list`)"));
     }
 
     #[test]

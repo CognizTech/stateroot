@@ -523,6 +523,9 @@ pub fn hook_digest_with_identity(
     if let Some(section) = super::resume::central_plan_section(Some(project_dir)) {
         work.push_str(&section);
     }
+    if let Some(section) = super::resume::shared_capabilities_section(project_dir) {
+        work.push_str(&section);
+    }
     if let Some(ref handoff) = handoff {
         append_handoff_work(&mut work, handoff, project_dir);
     }

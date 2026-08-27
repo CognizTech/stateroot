@@ -38,6 +38,12 @@ fn cache_path(ctx: &Ctx) -> PathBuf {
 /// spawn the updater in the background and return instantly. The hook never
 /// blocks, no agent is asked to act, and a lock prevents concurrent workers.
 pub fn maybe_spawn_scheduled_update(config_dir: &Path, interval_hours: i64) {
+    // Test/CI seam: integration tests drive the real binary against a mock
+    // release server and assert exact request counts — the detached worker
+    // makes that nondeterministic by design.
+    if std::env::var_os("STATEROOT_DISABLE_SCHEDULED_UPDATE").is_some() {
+        return;
+    }
     if let Ok(worker) = std::env::current_exe() {
         spawn_scheduled_update(config_dir, interval_hours, &worker);
     }

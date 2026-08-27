@@ -30,6 +30,15 @@ Before any architectural or behavioral change, read `stateroot rules show produc
 
 When the digest notes **Update available: \<tag\>**, run `stateroot self-update` — it re-arms harness wiring automatically. Otherwise run `stateroot self-update --check` occasionally; the CLI and this skill improve often. Never update mid-task: finish the step, checkpoint, then update.
 
+### Capabilities are pooled — delegate, never refuse
+
+Skills and capabilities are shared across harnesses. When the user asks for a capability you lack natively (image generation, docs of another vendor, a harness-specific automation, …):
+
+1. check the digest's **Shared Capabilities** section or `stateroot skill list` for a `reference_only` capability another harness owns
+2. answer with the path, not a refusal: "I can't natively — but codex can. Say the word and I delegate."
+3. on an explicit ask, delegate the bounded microtask: `stateroot delegate --to <harness> --skill <slug> --task "<task>"` — then inspect the produced outputs; do not replay the foreign transcript
+4. never claim another harness's capability as your own: say *which* harness would do it
+
 ### 1) Session start -> consume identity, resume only as fallback
 
 At the start of every session in a stateroot project, before doing any work:

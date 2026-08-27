@@ -5,6 +5,27 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- **CI flake exorcised: the scheduled-update worker vs the request-counting
+  mock.** `updater_never_runs_on_hook_but_runs_on_status` asserted a v0.1.9
+  premise that v0.1.9 itself had retired: hooks *do* fire updates now —
+  detached and scheduled. When the worker's GET landed before the mock's
+  verification (a race that favored slow CI runners), the count failed.
+  The worker now honors `STATEROOT_DISABLE_SCHEDULED_UPDATE` (test/CI
+  seam); the test documents that the hook's inline fast-path is the
+  property under test. Flaked twice on GitHub, never locally.
+- **Shared Capabilities in every digest — delegate, never refuse.** The
+  reference-only pool (imagegen → codex, automate → cursor, …) existed on
+  disk, but its triggers required the user to *already know* to ask for
+  delegation — so an agent asked "can you do X" answered from its own tool
+  list and refused (the four-harness imagegen trial: codex native yes,
+  kimi offered delegation, cursor discovered-then-claimed, claude flat
+  no). Every resume/hook digest now carries a bounded **Shared
+  Capabilities** section (8 entries + a "+N more" tail; empty pool → no
+  section), the session skill gains a hard rule — name the path and offer
+  to delegate instead of answering "I can't", never claim another
+  harness's capability as your own — and the generated reference skills
+  now fire on the capability ask itself, not only on explicit delegation
+  requests.
 - **Capture-chain honesty.** reqwest now trusts the OS certificate store
   (`rustls-tls-native-roots`, webpki fallback kept) — enterprise GitHub via
   `STATEROOT_GITHUB_API_BASE`, corporate MITM proxies, and private PKI no

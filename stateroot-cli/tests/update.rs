@@ -121,9 +121,13 @@ async fn updater_never_runs_on_hook_but_runs_on_status() {
     let project = tempfile::tempdir().expect("project");
     init_project(config_home.path(), user_home.path(), project.path());
 
-    // hook path: NO update check (harness event flows stay fast).
+    // hook path: NO update check inline (harness event flows stay fast).
+    // The scheduled detached worker is disabled here — by design the hook
+    // DOES fire it (v0.1.9), and its timing is nondeterministic against a
+    // request-counting mock.
     stateroot(config_home.path(), user_home.path(), project.path())
         .env("STATEROOT_GITHUB_API_BASE", server.uri())
+        .env("STATEROOT_DISABLE_SCHEDULED_UPDATE", "1")
         .args(["hook", "SessionStart", "--harness", "claude-code"])
         .assert()
         .success();
