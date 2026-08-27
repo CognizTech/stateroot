@@ -212,3 +212,81 @@ pub fn propose(ctx: &Ctx, file: Option<&str>, stdin: bool, rationale: Option<&st
     }
     Ok(())
 }
+
+/// `stateroot soul sync [--dry-run] [--accept-theirs S | --accept-mine S]` —
+/// two-way bridge between the canonical soul and harness-native persona
+/// files. Personality authored anywhere lands everywhere.
+pub fn sync(
+    ctx: &Ctx,
+    dry_run: bool,
+    accept_theirs: Option<&str>,
+    accept_mine: Option<&str>,
+) -> Result<()> {
+    let home = home(ctx)?;
+    if accept_theirs.is_some() && accept_mine.is_some() {
+        anyhow::bail!("pass only one of --accept-theirs / --accept-mine");
+    }
+    let report = if let Some(source) = accept_theirs {
+        stateroot_core::soul_sync::accept(&home, source, true)
+    } else if let Some(source) = accept_mine {
+        stateroot_core::soul_sync::accept(&home, source, false)
+    } else {
+        stateroot_core::soul_sync::sync(&home, dry_run)
+    };
+    for action in &report.actions {
+        println!("{action}");
+    }
+    for conflict in &report.conflicts {
+        println!(
+            "CONFLICT ({}): {} — resolve with `stateroot soul sync --accept-theirs {0}` or `--accept-mine {0}`",
+            conflict.source, conflict.detail
+        );
+    }
+    if report.canonical_changed {
+        refresh_persona_cache(ctx);
+    }
+    Ok(())
+}
+
+/// Digest surface: one bounded line per pending soul-sync conflict.
+/// Local file read only; hooks stay fast and offline.
+pub(crate) fn soul_sync_notice(home: &std::path::Path) -> Option<String> {
+    let conflicts = stateroot_core::soul_sync::pending_conflicts(home);
+    if conflicts.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    for conflict in conflicts.iter().take(3) {
+        out.push_str(&format!(
+            "**Soul sync conflict ({}): {} — resolve: `stateroot soul sync --accept-theirs {0}` or `--accept-mine {0}`.**\n",
+            conflict.source, conflict.detail
+        ));
+    }
+    out.push('\n');
+    Some(out)
+}
+
+/// Hook path: run one sync pass per interval of agent activity (inline —
+/// local files only, never fails the hook). Refreshes the persona cache
+/// when an adoption changed the canonical soul.
+pub(crate) fn maybe_auto_sync(ctx: &Ctx, interval_hours: i64) {
+    let Ok(home) = home(ctx) else {
+        return;
+    };
+    let Some(report) = stateroot_core::soul_sync::maybe_auto(&home, interval_hours) else {
+        return;
+    };
+    if report.canonical_changed {
+        refresh_persona_cache(ctx);
+    }
+    for action in &report.actions {
+        note!("soul sync: {action}");
+    }
+    for conflict in &report.conflicts {
+        note!(
+            "soul sync CONFLICT ({}): {} — see digest for resolution",
+            conflict.source,
+            conflict.detail
+        );
+    }
+}

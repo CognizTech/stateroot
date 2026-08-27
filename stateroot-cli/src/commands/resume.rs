@@ -781,6 +781,11 @@ skipping duplicate. Pass --force to reprint.)\n\n{NO_REFETCH_FOOTER}"
     if let Some(notice) = super::update::update_notice(&ctx.config_dir) {
         out.push_str(&notice);
     }
+    if let Ok(home) = stateroot_core::harness_install::home_dir() {
+        if let Some(notice) = super::soul::soul_sync_notice(&home) {
+            out.push_str(&notice);
+        }
+    }
 
     // Persona (global; project overlay overrides when present).
     if let Some(persona) = super::persona::resolve_in_project(&ctx.config_dir, Some(&ctx.cwd), None)

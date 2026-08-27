@@ -207,6 +207,16 @@ async fn main() -> anyhow::Result<()> {
                 stdin,
                 rationale.as_deref(),
             )?,
+            SoulAction::Sync {
+                dry_run,
+                accept_theirs,
+                accept_mine,
+            } => commands::soul::sync(
+                &ctx,
+                dry_run,
+                accept_theirs.as_deref(),
+                accept_mine.as_deref(),
+            )?,
         },
         Command::Proposals(args) => match args.action {
             ProposalsAction::List { status } => commands::proposals::list(&ctx, status.as_deref())?,

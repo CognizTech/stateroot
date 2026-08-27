@@ -680,6 +680,21 @@ pub enum SoulAction {
         #[arg(long)]
         rationale: Option<String>,
     },
+    /// Two-way sync between the canonical soul and harness-native persona
+    /// files (openclaw IDENTITY+SOUL, hermes SOUL). Adopt native edits,
+    /// push canonical edits, surface conflicts. Also fires automatically
+    /// from session hooks on an interval.
+    Sync {
+        /// Report what would change without writing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Resolve a pending conflict by adopting the harness-native copy.
+        #[arg(long, value_name = "SOURCE")]
+        accept_theirs: Option<String>,
+        /// Resolve a pending conflict by pushing the canonical copy.
+        #[arg(long, value_name = "SOURCE")]
+        accept_mine: Option<String>,
+    },
 }
 
 #[derive(Debug, Args)]

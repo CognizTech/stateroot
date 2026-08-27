@@ -36,6 +36,7 @@ pub mod sessions;
 pub mod skill_federation;
 pub mod snap_context;
 pub mod soul;
+pub mod soul_sync;
 pub mod sync_engine;
 pub mod transcripts;
 pub mod user_profile;

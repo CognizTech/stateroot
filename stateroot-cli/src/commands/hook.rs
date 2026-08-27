@@ -512,6 +512,11 @@ pub fn hook_digest_with_identity(
     if let Some(notice) = super::update::update_notice(config_dir) {
         work.push_str(&notice);
     }
+    if let Ok(home) = stateroot_core::harness_install::home_dir() {
+        if let Some(notice) = super::soul::soul_sync_notice(&home) {
+            work.push_str(&notice);
+        }
+    }
     if let Some(section) = super::resume::latest_activity_section(project_dir) {
         work.push_str(&section);
     }
@@ -737,6 +742,10 @@ async fn resume_output(
                 note!("warning: rules sync skipped: {err}");
             }
         }
+        // Soul federation: one sync pass per hour of agent activity —
+        // harness-native persona edits are adopted into the canonical soul
+        // and pushed outward; conflicts surface in the digest.
+        super::soul::maybe_auto_sync(ctx, 1);
         // Automatic update path: fire a detached self-update when the release
         // cache is stale — scheduled by activity, never blocking, never
         // asking an agent to act. (The digest notice stays as the visible

@@ -5,6 +5,20 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- **Soul federation — personality authored anywhere lands everywhere.**
+  `stateroot soul sync` is a two-way bridge between the canonical soul and
+  harness-native persona files (openclaw `IDENTITY.md` + `SOUL.md`, hermes
+  `SOUL.md`): a persona edit made inside OpenClaw or Hermes is adopted into
+  the canonical soul (history-snapshotted) and pushed outward to the other
+  harnesses; a canonical edit (`soul propose` from any harness) is pushed
+  back into the native files (backup first, `stateroot:synced` marker).
+  Three-way baseline hashing keeps round trips stable; both-sides-changed
+  is a surfaced conflict in the digest, resolved explicitly with
+  `--accept-theirs|--accept-mine <source>` — never silently. Session hooks
+  run one pass per hour of activity automatically, so the bridge needs no
+  command. A persona change from any harness now re-anchors every other
+  harness on its next session (the adoption changes the identity hash,
+  which itself forces a FULL injection).
 - **Persona re-injection after compaction — delivered where it can land.**
   On harnesses whose compact-boundary stdout is discarded (kimi ignores
   PreCompact return values outright), the scheduler printed a FULL identity
