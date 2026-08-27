@@ -461,14 +461,30 @@ fn continuity_chain_checks(home: &Path, project_dir: &Path) -> Vec<Check> {
         }
     }
 
-    // Last captured checkpoint per harness (episodic carries a harness field).
+    // Last captured checkpoint per harness (episodic carries a harness
+    // field; older records said only "cli", so fall back to the note's
+    // "<event> via <harness> hook" attribution).
     let mut last_by_harness: std::collections::BTreeMap<String, String> = Default::default();
     for rec in stateroot_core::local_store::recent_episodic(project_dir, 100) {
-        let harness = rec
+        let mut harness = rec
             .get("harness")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        if harness.is_empty() || harness == "cli" {
+            if let Some(note) = rec.get("note").and_then(|v| v.as_str()) {
+                if let Some(id) = note
+                    .split(" via ")
+                    .nth(1)
+                    .and_then(|s| s.split_whitespace().next())
+                    .map(|s| s.to_string())
+                {
+                    if registry::quirk_any(&id).is_some() {
+                        harness = id;
+                    }
+                }
+            }
+        }
         let ts = rec
             .get("ts")
             .and_then(|v| v.as_str())

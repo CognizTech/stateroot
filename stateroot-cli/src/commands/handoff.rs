@@ -952,7 +952,9 @@ pub async fn finalize(ctx: &Ctx, from: Option<&str>) -> anyhow::Result<()> {
 /// `handoffs/current.json` or finalize a separate handoff boundary.
 async fn automatic_checkpoint_only(ctx: &Ctx, note_text: Option<&str>) -> anyhow::Result<()> {
     let note = note_text.unwrap_or("automatic session checkpoint");
-    let projected = super::checkpoint::record_checkpoint(ctx, note, &[]).await?;
+    let projected =
+        super::checkpoint::record_checkpoint(ctx, super::checkpoint::LOCAL_HARNESS, note, &[])
+            .await?;
     if projected {
         println!("checkpoint recorded; existing structured handoff preserved");
     } else {

@@ -14,8 +14,10 @@ StateRoot is pre-1.0 and milestones land as minor versions.
   this local-first variant does not have — with no drain anywhere, the queue
   grew forever, silently. And `stateroot doctor` gains a **continuity
   chain**: per hooked harness, a duplicate-block lint on the managed hook
-  config plus the last captured checkpoint attributed to it, and a
-  legacy-outbox warning when a pre-fix queue still exists (safe to delete).
+  config plus the last captured checkpoint attributed to it (hook
+  checkpoints now record the firing harness id; older `cli`-attributed
+  records fall back to note parsing), and a legacy-outbox warning when a
+  pre-fix queue still exists (safe to delete).
 - **Soul federation — personality authored anywhere lands everywhere.**
   `stateroot soul sync` is a two-way bridge between the canonical soul and
   harness-native persona files (openclaw `IDENTITY.md` + `SOUL.md`, hermes

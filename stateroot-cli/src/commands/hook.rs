@@ -890,7 +890,8 @@ async fn checkpoint_from_spool(
         config_dir: ctx.config_dir.clone(),
         config: ctx.config.clone(),
     };
-    let projected = super::checkpoint::record_checkpoint(&hook_ctx, &note_text, &[]).await?;
+    let projected =
+        super::checkpoint::record_checkpoint(&hook_ctx, quirk.id, &note_text, &[]).await?;
     if !projected {
         note!("hook checkpoint queued to outbox (offline)");
     }
