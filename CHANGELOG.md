@@ -5,6 +5,8 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+## v0.1.10 — 2026-08-27
+
 - **Team-ready state: the shared/local boundary is now code.** Teams that
   commit `.stateroot/` asked the right questions — what travels, what
   fights. `stateroot init` (and `install` for existing projects) now writes
