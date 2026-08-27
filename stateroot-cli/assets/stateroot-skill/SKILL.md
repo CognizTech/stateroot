@@ -1,6 +1,6 @@
 ---
 name: stateroot
-description: Cross-harness continuity for AI coding agents: persistent project state, shared memory, and handoffs via the `stateroot` CLI. Use when working in a project that has a `.stateroot/` directory — consume the auto-injected identity/resume digest on the first usable prompt, run `stateroot resume --harness <id>` only if that digest is missing (unpiped; never `| head` / `| tail` / line limits — the full digest is the state of record), `stateroot checkpoint` after every state-changing step, check the failed-approaches log before attempting an approach, and run `stateroot handoff write` before ending a session or switching agent harnesses.
+description: "Cross-harness continuity for AI coding agents: persistent project state, shared memory, and handoffs via the `stateroot` CLI. Use when working in a project that has a `.stateroot/` directory — consume the auto-injected identity/resume digest on the first usable prompt, run `stateroot resume --harness <id>` only if that digest is missing (unpiped; never `| head` / `| tail` / line limits — the full digest is the state of record), `stateroot checkpoint` after every state-changing step, check the failed-approaches log before attempting an approach, and run `stateroot handoff write` before ending a session or switching agent harnesses."
 ---
 
 # StateRoot

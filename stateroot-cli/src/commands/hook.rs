@@ -173,10 +173,16 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
             Some(project_dir) => {
                 let code =
                     checkpoint_from_spool(ctx, quirk, canonical, project_dir, &payload).await?;
-                // Scheduler rule 1(b): compact boundaries earn a FULL identity
-                // injection (dedupe window still applies).
+                // Compact boundaries ARM a FULL identity injection for the
+                // next deliverable event — but only where the harness has
+                // no working compact channel of its own. kimi discards
+                // compact-boundary stdout outright (arm + deliver later);
+                // `compact_injection` harnesses (claude) already re-inject
+                // identity with the bounded digest below, so arming would
+                // only buy a redundant FULL on the next prompt.
                 if matches!(canonical, "pre_compact" | "post_compaction")
                     && quirk.injection != Injection::None
+                    && !quirk.compact_injection
                 {
                     let home = stateroot_core::harness_install::home_dir()
                         .unwrap_or_else(|_| ctx.config_dir.clone());
@@ -323,6 +329,11 @@ fn scheduled_identity_output(
         "session_start" => identity_event_marks(quirk, canonical),
         _ => true,
     };
+    // Deliverable = the event's output can carry identity to the model on
+    // this harness: session_start where it marks (cursor/gemini ride it
+    // exclusively), prompt_submit where the policy injects. An armed
+    // compaction FULL waits for a deliverable event.
+    let deliverable = identity_event_marks(quirk, canonical);
     let decision = stateroot_core::persona_injection::decide_and_record(
         &home,
         &key,
@@ -330,6 +341,7 @@ fn scheduled_identity_output(
         &hash,
         hook_now(),
         mark,
+        deliverable,
     );
     match decision {
         stateroot_core::persona_injection::Decision::Full => digest_builder(identity),

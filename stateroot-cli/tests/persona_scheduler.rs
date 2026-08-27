@@ -37,6 +37,24 @@ fn init_project(config_home: &Path, user_home: &Path, project: &Path) {
         .success();
 }
 
+fn hook_event(
+    config_home: &Path,
+    user_home: &Path,
+    cwd: &Path,
+    harness: &str,
+    event: &str,
+    session: &str,
+    now: i64,
+) -> String {
+    let out = stateroot(config_home, user_home, cwd)
+        .env("STATEROOT_HOOK_NOW", now.to_string())
+        .args(["hook", event, "--harness", harness])
+        .write_stdin(format!(r#"{{"session_id": "{session}"}}"#))
+        .assert()
+        .success();
+    String::from_utf8(out.get_output().stdout.clone()).expect("utf8")
+}
+
 fn hook_prompt(
     config_home: &Path,
     user_home: &Path,
@@ -44,13 +62,15 @@ fn hook_prompt(
     session: &str,
     now: i64,
 ) -> String {
-    let out = stateroot(config_home, user_home, cwd)
-        .env("STATEROOT_HOOK_NOW", now.to_string())
-        .args(["hook", "UserPromptSubmit", "--harness", "kimi-code"])
-        .write_stdin(format!(r#"{{"session_id": "{session}"}}"#))
-        .assert()
-        .success();
-    String::from_utf8(out.get_output().stdout.clone()).expect("utf8")
+    hook_event(
+        config_home,
+        user_home,
+        cwd,
+        "kimi-code",
+        "UserPromptSubmit",
+        session,
+        now,
+    )
 }
 
 const MARKER: &str = "be exact";
@@ -104,14 +124,22 @@ fn first_prompt_full_then_dedupe_then_compressed_cadence() {
         "no full body in compressed: {out}"
     );
 
-    // State file lives in the user-global local dir (never the project).
-    assert!(user_home
-        .path()
-        .join(".stateroot/local/persona-injection.json")
-        .is_file());
+    // Per-key state files live in the user-global local dir (never the
+    // project).
+    let state_dir = user_home.path().join(".stateroot/local/persona-injection");
+    let json_files: Vec<_> = std::fs::read_dir(&state_dir)
+        .expect("state dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .collect();
+    assert_eq!(
+        json_files.len(),
+        1,
+        "one per-key state file in {state_dir:?}"
+    );
     assert!(!project
         .path()
-        .join(".stateroot/local/persona-injection.json")
+        .join(".stateroot/local/persona-injection")
         .exists());
 }
 
@@ -162,7 +190,7 @@ fn content_change_forces_full_and_new_session_restarts() {
 }
 
 #[test]
-fn claude_session_start_full_and_compact_boundary_full() {
+fn claude_compact_reinjects_via_digest_without_extra_full() {
     let config_home = tempfile::tempdir().expect("config home");
     let user_home = tempfile::tempdir().expect("user home");
     let project = tempfile::tempdir().expect("project");
@@ -170,28 +198,98 @@ fn claude_session_start_full_and_compact_boundary_full() {
     init_project(config_home.path(), user_home.path(), project.path());
 
     // session_start → FULL (claude's JSON envelope).
-    let out = stateroot(config_home.path(), user_home.path(), project.path())
-        .env("STATEROOT_HOOK_NOW", "9000")
-        .args(["hook", "SessionStart", "--harness", "claude-code"])
-        .write_stdin(r#"{"session_id": "c1"}"#)
-        .assert()
-        .success();
-    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    let stdout = hook_event(
+        config_home.path(),
+        user_home.path(),
+        project.path(),
+        "claude-code",
+        "SessionStart",
+        "c1",
+        9_000,
+    );
     assert!(
         stdout.contains("additionalContext"),
         "claude envelope: {stdout}"
     );
     assert!(stdout.contains(MARKER), "session_start FULL: {stdout}");
 
-    // pre_compact boundary → FULL again (dedupe window spaced).
-    let out = stateroot(config_home.path(), user_home.path(), project.path())
-        .env("STATEROOT_HOOK_NOW", "9061")
-        .args(["hook", "PreCompact", "--harness", "claude-code"])
-        .write_stdin(r#"{"session_id": "c1"}"#)
-        .assert()
-        .success();
-    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-    assert!(stdout.contains(MARKER), "pre_compact FULL: {stdout}");
+    // claude's compact channel works: the bounded digest (identity
+    // included) prints at the boundary and lands post-compaction.
+    let stdout = hook_event(
+        config_home.path(),
+        user_home.path(),
+        project.path(),
+        "claude-code",
+        "PreCompact",
+        "c1",
+        9_061,
+    );
+    assert!(
+        stdout.contains(MARKER),
+        "compact digest re-injects identity: {stdout}"
+    );
+
+    // No redundant arm: the next prompt stays silent (dedupe), since the
+    // digest already re-anchored the persona.
+    let stdout = hook_event(
+        config_home.path(),
+        user_home.path(),
+        project.path(),
+        "claude-code",
+        "UserPromptSubmit",
+        "c1",
+        9_122,
+    );
+    assert!(
+        !stdout.contains(MARKER),
+        "no redundant FULL after a working compact channel: {stdout}"
+    );
+}
+
+#[test]
+fn kimi_compact_arms_full_on_next_prompt() {
+    let config_home = tempfile::tempdir().expect("config home");
+    let user_home = tempfile::tempdir().expect("user home");
+    let project = tempfile::tempdir().expect("project");
+    seed_identity(user_home.path());
+    init_project(config_home.path(), user_home.path(), project.path());
+
+    let out = hook_prompt(
+        config_home.path(),
+        user_home.path(),
+        project.path(),
+        "s1",
+        1_000,
+    );
+    assert!(out.contains(MARKER), "first prompt FULL: {out}");
+
+    // kimi discards pre-compact hook stdout entirely — we print nothing.
+    let out = hook_event(
+        config_home.path(),
+        user_home.path(),
+        project.path(),
+        "kimi-code",
+        "PreCompact",
+        "s1",
+        1_061,
+    );
+    assert!(
+        out.trim().is_empty(),
+        "kimi pre_compact prints nothing: {out}"
+    );
+
+    // The very next prompt re-anchors the FULL persona (dedupe bypassed).
+    let out = hook_prompt(
+        config_home.path(),
+        user_home.path(),
+        project.path(),
+        "s1",
+        1_122,
+    );
+    assert!(
+        out.contains(MARKER),
+        "post-compaction prompt re-injects FULL: {out}"
+    );
 }
 
 #[test]

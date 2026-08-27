@@ -228,6 +228,9 @@ pub fn install_hooks(home: &Path, quirk: &HarnessQuirk) -> Result<Vec<String>, H
 /// `[[hooks]]` TOML entries: remove prior stateroot-marked blocks, append ours.
 fn install_toml_hooks(path: &Path, quirk: &HarnessQuirk) -> Result<Vec<String>, HarnessError> {
     let existing = std::fs::read_to_string(path).unwrap_or_default();
+    // Normalize what the strip leaves behind (stray blank lines where our
+    // blocks and markers were) so reinstalls converge instead of accruing
+    // one newline per run.
     let cleaned = strip_stateroot_toml_hooks(&existing);
     let mut block = String::from(
         "\n# stateroot hooks (managed by `stateroot install` — do not edit by hand)\n",
@@ -240,8 +243,8 @@ fn install_toml_hooks(path: &Path, quirk: &HarnessQuirk) -> Result<Vec<String>, 
             command_for(quirk, canonical)
         ));
     }
-    let mut updated = cleaned;
-    if !updated.is_empty() && !updated.ends_with('\n') {
+    let mut updated = cleaned.trim_end().to_string();
+    if !updated.is_empty() {
         updated.push('\n');
     }
     updated.push_str(&block);
@@ -270,13 +273,19 @@ fn strip_stateroot_toml_hooks(text: &str) -> String {
     let flush = |block: &[&str], out: &mut String, in_hooks: bool| {
         if in_hooks {
             let body = block.join("\n");
-            let is_ours = body.contains("command = \"stateroot hook")
-                || body.contains("command=\"stateroot hook");
-            let is_marker = block
-                .first()
-                .map(|l| l.trim().starts_with("# stateroot hooks"))
-                .unwrap_or(false);
-            if is_ours || is_marker {
+            // Our commands are always quoted, bare or absolute, any platform:
+            //   "stateroot hook …"  "/abs/path/stateroot hook …"
+            //   "C:\…\stateroot.exe hook …"
+            // (The old matcher looked for a bare `command = "stateroot hook`
+            // prefix and never matched the absolute-path forms, so every
+            // reinstall appended another full set of blocks.)
+            let is_ours = body.contains("\"stateroot hook ")
+                || body.contains("/stateroot hook ")
+                || body.contains("\\stateroot hook ")
+                || body.contains("\"stateroot.exe hook ")
+                || body.contains("/stateroot.exe hook ")
+                || body.contains("\\stateroot.exe hook ");
+            if is_ours {
                 return; // drop the stateroot-owned block
             }
         }
@@ -287,6 +296,10 @@ fn strip_stateroot_toml_hooks(text: &str) -> String {
     };
 
     for line in text.lines() {
+        // Drop our orphaned managed-block marker comments wherever they sit.
+        if line.trim_start().starts_with("# stateroot hooks") {
+            continue;
+        }
         let is_array_header = line.trim_start().starts_with("[[");
         if is_array_header {
             flush(&block, &mut out, in_hooks_block);
@@ -721,5 +734,73 @@ mod tests {
         assert!(src.contains("prependContext"));
         assert!(src.contains("before_prompt_build"));
         assert!(src.contains("fire(\"session_start\")"));
+    }
+
+    #[test]
+    fn toml_strip_removes_absolute_path_blocks_markers_and_keeps_foreign() {
+        // The live bug: installs wrote absolute-path commands the strip
+        // matcher never recognized, so every re-arm appended a full set
+        // (152 `[[hooks]]` blocks on the dogfood box).
+        let mut text = String::from("[model]\nname = \"k2\"\n\n[[hooks]]\nevent = \"PreToolUse\"\ncommand = \"node /home/u/foreign.mjs\"\n");
+        for _ in 0..3 {
+            text.push_str(
+                "\n# stateroot hooks (managed by `stateroot install` — do not edit by hand)\n",
+            );
+            for event in ["SessionStart", "UserPromptSubmit"] {
+                text.push_str(&format!(
+                    "[[hooks]]\nevent = \"{event}\"\ncommand = \"/home/ubuntu/.local/bin/stateroot hook {} --harness kimi-code\"\n",
+                    event.to_lowercase()
+                ));
+            }
+        }
+        // Also a bare-form block and a windows-form block.
+        text.push_str(
+            "[[hooks]]\nevent = \"Stop\"\ncommand = \"stateroot hook stop --harness kimi-code\"\n",
+        );
+        text.push_str("[[hooks]]\nevent = \"Stop\"\ncommand = \"C:\\\\bin\\\\stateroot.exe hook stop --harness kimi-code\"\n");
+
+        let cleaned = strip_stateroot_toml_hooks(&text);
+        assert!(
+            cleaned.contains("node /home/u/foreign.mjs"),
+            "foreign hook survives: {cleaned}"
+        );
+        assert!(cleaned.contains("[model]"), "config survives: {cleaned}");
+        assert!(
+            !cleaned.contains("stateroot hook"),
+            "all absolute/bare stateroot blocks dropped: {cleaned}"
+        );
+        assert!(
+            !cleaned.contains("stateroot.exe hook"),
+            "windows-form block dropped: {cleaned}"
+        );
+        assert!(
+            !cleaned.contains("# stateroot hooks"),
+            "orphan markers dropped: {cleaned}"
+        );
+        assert_eq!(
+            cleaned.matches("[[hooks]]").count(),
+            1,
+            "only the foreign block remains: {cleaned}"
+        );
+    }
+
+    #[test]
+    fn toml_install_is_idempotent() {
+        let home = tempfile::tempdir().expect("home");
+        let q = quirk("kimi-code").expect("kimi-code");
+        let first = install_hooks(home.path(), q).expect("first install");
+        assert!(first.iter().any(|m| m.contains("hooks installed")));
+        let second = install_hooks(home.path(), q).expect("second install");
+        assert!(
+            second.iter().any(|m| m.contains("already up to date")),
+            "reinstall must be a no-op: {second:?}"
+        );
+        let text =
+            std::fs::read_to_string(home.path().join(".kimi-code/config.toml")).expect("cfg");
+        assert_eq!(
+            text.matches("[[hooks]]").count(),
+            q.event_map.len(),
+            "exactly one set of hook blocks: {text}"
+        );
     }
 }

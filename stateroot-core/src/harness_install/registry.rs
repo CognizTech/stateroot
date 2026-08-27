@@ -341,6 +341,7 @@ const KIMI_CODE_EVENTS: &[(&str, &str)] = &[
     ("PostToolUse", "post_tool_use"),
     ("PostToolUseFailure", "tool_failure"),
     ("PreCompact", "pre_compact"),
+    ("PostCompact", "post_compaction"),
     ("Stop", "stop"),
     ("SessionEnd", "session_end"),
 ];

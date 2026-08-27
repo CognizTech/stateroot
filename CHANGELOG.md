@@ -5,6 +5,36 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- **Persona re-injection after compaction — delivered where it can land.**
+  On harnesses whose compact-boundary stdout is discarded (kimi ignores
+  PreCompact return values outright), the scheduler printed a FULL identity
+  into the void and marked it delivered — the state believed the persona had
+  been refreshed while the model got nothing, and post-compaction sessions
+  decayed to the 30-token pointer. Compact boundaries on those harnesses now
+  only arm a `pending_compaction` flag, and the first event that can
+  actually carry identity (prompt_submit on kimi/claude, session_start on
+  cursor/gemini) injects FULL, bypassing dedupe. `compact_injection`
+  harnesses (claude-code) keep their working channel — the bounded digest
+  already re-injects identity at compaction — so no redundant FULL arms
+  there.
+- **kimi `PostCompact` wired** into the event map and installed hooks.
+- **Scheduler state is per-key** (`~/.stateroot/local/persona-injection/
+  <sha256(key)>.json`): concurrent hooks from multiple harnesses no longer
+  clobber each other's counters through the whole-map load/save race (a live
+  kimi session's record was observed fossilized four days old while its
+  hooks fired daily). State resets once on upgrade; each live session
+  re-anchors with a single FULL.
+- **`stateroot install` TOML hook idempotency fixed**: the strip matcher
+  looked for a bare `command = "stateroot hook` prefix and never matched the
+  absolute-path commands install actually writes, so every re-arm —
+  including scheduled self-update's — appended another full set of
+  `[[hooks]]` blocks (152 on the dogfood machine) and kept churning
+  `config.toml` underneath running kimi sessions. Reinstall is a true no-op
+  now and dedupes existing piles, bare/absolute/Windows command forms.
+- **Embedded session skill frontmatter repaired**: the v0.1.9 description
+  was an unquoted YAML scalar containing `agents: …`, which made harnesses
+  skip the installed skill on parse.
+
 ## v0.1.9 — 2026-08-26
 
 - **Reframed public copy**: "Switch harnesses. Keep the agent." — the README,
