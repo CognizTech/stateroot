@@ -17,10 +17,10 @@
 //!   append one observation verbatim to `.stateroot/spool/observations.jsonl`
 //!   (256KB rotation), fire-and-forget.
 //! - checkpoint (`tool_failure`, `pre_compact`, `post_compaction`, `stop`,
-//!   `session_end`): checkpoint from the spool tail via the existing
-//!   machinery (offline → outbox); `stop`/`session_end` preserve any
-//!   explicit structured handoff (automatic paths never rewrite
-//!   `handoffs/current.json`), then rotate the spool.
+//!   `session_end`): checkpoint from the spool tail into the local episodic
+//!   log; `stop`/`session_end` preserve any explicit structured handoff
+//!   (automatic paths never rewrite `handoffs/current.json`), then rotate
+//!   the spool.
 
 use std::path::{Path, PathBuf};
 
@@ -648,22 +648,9 @@ async fn resume_output(
     project_dir: &Path,
     payload: &Value,
 ) -> anyhow::Result<u8> {
-    // W5: session_start queues a draft heartbeat for the server root model.
-    // Fire-and-forget — replayed (best-effort) by the next online command.
     if canonical == "session_start" {
         if let Err(err) = stateroot_core::learnings::record_first_session(project_dir, quirk.id) {
             note!("warning: could not record first-run harness: {err}");
-        }
-        if let Some(project_id) = manifest_project_id(project_dir) {
-            let op = json!({
-                "ts": now_rfc3339(),
-                "kind": "heartbeat",
-                "project_id": project_id,
-                "harness": quirk.id,
-            });
-            if let Err(err) = local_store::outbox_append(project_dir, &op) {
-                note!("warning: could not queue heartbeat op: {err}");
-            }
         }
     }
     // Empty check only — the scheduler decides the printable content below.
@@ -782,14 +769,6 @@ fn capture_observation(
     let kind_hint = infer_kind_hint(canonical, &text);
     let tool = payload_tool(payload);
     let excerpt = payload_excerpt(payload, &text);
-    let obs_payload = observation_payload(
-        quirk.id,
-        canonical,
-        &text,
-        kind_hint,
-        tool.clone(),
-        excerpt.clone(),
-    );
     let record = json!({
         "ts": now_rfc3339(),
         "event": canonical,
@@ -823,45 +802,7 @@ fn capture_observation(
         .append(true)
         .open(&path)?;
     file.write_all(line.as_bytes())?;
-
-    // W5: also queue the observation for the server root model. The hook
-    // itself never calls the server (<50ms local rule); the next online
-    // command replays the outbox in one batch. Stable source_id makes the
-    // at-least-once replay effectively-once server-side.
-    if let Some(project_id) = manifest_project_id(project_dir) {
-        let kind = kind_hint.unwrap_or(canonical);
-        let op = json!({
-            "ts": now_rfc3339(),
-            "kind": "observation",
-            "project_id": project_id,
-            "observation": {
-                "source": "hook",
-                "source_id": format!("hook:{project_id}:{}", uuid::Uuid::now_v7()),
-                "kind": kind,
-                "payload": obs_payload,
-                "harness": quirk.id,
-            },
-        });
-        if let Err(err) = local_store::outbox_append(project_dir, &op) {
-            note!("warning: could not queue observation op: {err}");
-        }
-    }
     Ok(0)
-}
-
-/// Project id from `.stateroot/manifest.json` (None when unreadable).
-fn manifest_project_id(project_dir: &Path) -> Option<String> {
-    let manifest = local_store::read_manifest(project_dir).ok().flatten()?;
-    let project_id = manifest
-        .get("project_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    if project_id.is_empty() {
-        None
-    } else {
-        Some(project_id)
-    }
 }
 
 fn payload_text(payload: &Value) -> String {
@@ -921,31 +862,6 @@ fn infer_kind_hint(canonical: &str, text: &str) -> Option<&'static str> {
         }
         _ => None,
     }
-}
-
-fn observation_payload(
-    harness: &str,
-    event: &str,
-    text: &str,
-    kind_hint: Option<&str>,
-    tool: Option<String>,
-    excerpt: Option<String>,
-) -> Value {
-    let mut payload = json!({
-        "text": text,
-        "harness": harness,
-        "event": event,
-    });
-    if let Some(hint) = kind_hint {
-        payload["kind_hint"] = json!(hint);
-    }
-    if let Some(tool) = tool {
-        payload["tool"] = json!(tool);
-    }
-    if let Some(excerpt) = excerpt {
-        payload["excerpt"] = json!(excerpt);
-    }
-    payload
 }
 
 // ---------------------------------------------------------------------

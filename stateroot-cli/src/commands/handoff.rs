@@ -969,50 +969,11 @@ pub async fn accept(ctx: &Ctx, by: &str) -> anyhow::Result<()> {
         println!("no current handoff to accept");
     } else {
         println!("handoff accepted by {by} ({count} acceptance(s) total)");
-        queue_selection_observation(&ctx.cwd, by);
     }
     if let Some(footer) = super::resume::digest_footer(&ctx.cwd) {
         println!("{footer}");
     }
     Ok(())
-}
-
-fn queue_selection_observation(project_dir: &std::path::Path, by: &str) {
-    let Ok(Some(manifest)) = local_store::read_manifest(project_dir) else {
-        return;
-    };
-    let Some(project_id) = manifest.get("project_id").and_then(|v| v.as_str()) else {
-        return;
-    };
-    if project_id.is_empty() {
-        return;
-    }
-    // A CLI acceptance is not evidence that any harness performed it. Only
-    // queue a harness observation when the caller supplied a registered id.
-    let Ok(harness) = super::active_harness::canonical_id(by) else {
-        return;
-    };
-    let op = json!({
-        "ts": now_rfc3339(),
-        "kind": "observation",
-        "project_id": project_id,
-        "observation": {
-            "source": "cli",
-            "source_id": format!("handoff-accept:{project_id}:{}", uuid::Uuid::now_v7()),
-            "kind": "selection",
-            "payload": {
-                "text": format!("Handoff accepted by {by}"),
-                "harness": &harness,
-                "event": "handoff_accept",
-                "kind_hint": "selection",
-                "explicit": true,
-            },
-            "harness": &harness,
-        },
-    });
-    if let Err(err) = local_store::outbox_append(project_dir, &op) {
-        note!("warning: could not queue selection observation: {err}");
-    }
 }
 
 /// `stateroot handoff list`.

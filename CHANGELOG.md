@@ -5,6 +5,17 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- **Capture-chain honesty.** reqwest now trusts the OS certificate store
+  (`rustls-tls-native-roots`, webpki fallback kept) — enterprise GitHub via
+  `STATEROOT_GITHUB_API_BASE`, corporate MITM proxies, and private PKI no
+  longer fail TLS the way Mozilla-bundle-only clients do. The vestigial
+  server-sync writers are gone: hook heartbeats, hook observation ops, and
+  handoff-accept ops were appended to `.stateroot/outbox.jsonl` for a server
+  this local-first variant does not have — with no drain anywhere, the queue
+  grew forever, silently. And `stateroot doctor` gains a **continuity
+  chain**: per hooked harness, a duplicate-block lint on the managed hook
+  config plus the last captured checkpoint attributed to it, and a
+  legacy-outbox warning when a pre-fix queue still exists (safe to delete).
 - **Soul federation — personality authored anywhere lands everywhere.**
   `stateroot soul sync` is a two-way bridge between the canonical soul and
   harness-native persona files (openclaw `IDENTITY.md` + `SOUL.md`, hermes

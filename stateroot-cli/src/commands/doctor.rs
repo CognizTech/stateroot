@@ -206,6 +206,10 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
                 hard: false,
             }),
         }
+        // Continuity chain: not "is it installed" but "is anything flowing"
+        // — duplicate managed blocks, last captured checkpoint per harness,
+        // and the legacy outbox pile.
+        checks.extend(continuity_chain_checks(&home, &ctx.cwd));
     }
 
     let mut hard_failures = 0;
@@ -427,6 +431,91 @@ fn hook_binary_checks(home: &Path) -> Vec<Check> {
         for binary in binaries {
             checks.push(check_one_binary(quirk.id, &binary, &probe));
         }
+    }
+    checks
+}
+
+/// Continuity chain: not "is it installed" but "is anything flowing".
+/// Per hooked harness — a duplicate-block lint on the managed hook config
+/// (the 152-block kimi pile that silenced a session) and the last captured
+/// checkpoint attributed to it. Plus the legacy outbox pile (queued for the
+/// removed server sync, never delivered, previously invisible).
+fn continuity_chain_checks(home: &Path, project_dir: &Path) -> Vec<Check> {
+    let mut checks = Vec::new();
+
+    // Legacy outbox: ops queued for the removed server sync, never drained.
+    let outbox = stateroot_core::local_store::root(project_dir)
+        .join(stateroot_core::local_store::OUTBOX_PATH);
+    if let Ok(text) = std::fs::read_to_string(&outbox) {
+        let pending = text.lines().filter(|l| !l.trim().is_empty()).count();
+        if pending > 0 {
+            checks.push(Check {
+                label: "legacy outbox".into(),
+                ok: false,
+                detail: format!(
+                    "{pending} op(s) queued for the removed server-sync — never delivered; safe to delete {}",
+                    outbox.display()
+                ),
+                hard: false,
+            });
+        }
+    }
+
+    // Last captured checkpoint per harness (episodic carries a harness field).
+    let mut last_by_harness: std::collections::BTreeMap<String, String> = Default::default();
+    for rec in stateroot_core::local_store::recent_episodic(project_dir, 100) {
+        let harness = rec
+            .get("harness")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let ts = rec
+            .get("ts")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if !harness.is_empty() && !ts.is_empty() {
+            last_by_harness.entry(harness).or_insert(ts);
+        }
+    }
+
+    for quirk in registry::ADAPTERS {
+        let Some(target) = quirk.hooks else {
+            continue;
+        };
+        if !registry::quirk_detected(home, quirk) {
+            continue;
+        }
+        let config = home.join(target.path);
+        if !config.exists() {
+            continue;
+        }
+        let mut ok = true;
+        let mut detail: Vec<String> = Vec::new();
+        if let Ok(text) = std::fs::read_to_string(&config) {
+            let blocks = text.matches("stateroot hook ").count()
+                + text.matches("stateroot.exe hook ").count();
+            if blocks > quirk.event_map.len() {
+                ok = false;
+                detail.push(format!(
+                    "{blocks} stateroot hook entries (> {} events — duplicates; run `stateroot install`)",
+                    quirk.event_map.len()
+                ));
+            } else if blocks == 0 && target.format == HookFormat::TomlHooks {
+                ok = false;
+                detail.push("no stateroot hook blocks found".to_string());
+            }
+        }
+        match last_by_harness.get(quirk.id) {
+            Some(ts) => detail.push(format!("last captured {ts}")),
+            None => detail.push("no checkpoints captured yet".into()),
+        }
+        checks.push(Check {
+            label: format!("chain ({})", quirk.id),
+            ok,
+            detail: detail.join(" · "),
+            hard: false,
+        });
     }
     checks
 }

@@ -234,8 +234,8 @@ fn observation_for(session: &TranscriptSession) -> Value {
     })
 }
 
-/// Ship one observation per session: batched POST when online, outbox ops
-/// otherwise (replayed by the next online command via `flush_outbox`).
+/// Ship one observation per session: appended to the local observations
+/// spool — the same journal the session hooks write.
 async fn import_observations(
     ctx: &Ctx,
     _project_id: &str,
