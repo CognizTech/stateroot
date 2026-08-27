@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions & ideas (Discussions)
+    url: https://github.com/CognizTech/stateroot/discussions
+    about: Ask questions, show your setup, and discuss ideas before filing an issue.
+  - name: Documentation
+    url: https://stateroot.dev
+    about: Install, quickstart, concepts, per-harness setup, and the CLI reference.
+  - name: Security vulnerability
+    url: https://github.com/CognizTech/stateroot/security/advisories/new
+    about: Report vulnerabilities privately — never in a public issue.
