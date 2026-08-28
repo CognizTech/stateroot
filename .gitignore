@@ -5,3 +5,5 @@ temp/
 .agents/
 .cursor/
 AGENTS.md
+# Local-only: extension prototypes under design review (not shipped)
+editors/
