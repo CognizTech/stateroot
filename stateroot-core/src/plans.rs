@@ -264,6 +264,36 @@ pub fn current(project_dir: &Path) -> Option<(PlanMeta, PathBuf)> {
     Some((draft.clone(), body_path(project_dir, &draft.id)))
 }
 
+/// Update a plan's body while it is still a draft (plan federation refresh:
+/// the native file changed under us). Refuses past draft — once a human or
+/// harness approves, the plan is owned, not synced. Returns the meta.
+pub fn update_draft_body(
+    project_dir: &Path,
+    id: &str,
+    body: &str,
+    note: &str,
+) -> Result<PlanMeta, String> {
+    let Some((mut meta, path)) = load(project_dir, id) else {
+        return Err(format!("unknown plan `{id}`"));
+    };
+    if meta.status() != PlanStatus::Draft {
+        return Err(format!(
+            "plan {} is {} — not syncing native edits past draft",
+            meta.id, meta.status
+        ));
+    }
+    if body.trim().is_empty() {
+        return Err("plan body is empty — refusing to blank a draft".into());
+    }
+    std::fs::write(&path, body).map_err(|e| format!("write plan body: {e}"))?;
+    meta.updated_at = now_rfc3339();
+    if !note.is_empty() {
+        meta.notes = note.to_string();
+    }
+    write_meta(project_dir, &meta)?;
+    Ok(meta)
+}
+
 /// Move one plan to a new status. Returns the updated meta plus the id of a
 /// plan that was demoted by this transition (activate demoting the previous
 /// active). Wrong-state transitions are clear errors.

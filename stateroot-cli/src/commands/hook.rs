@@ -167,6 +167,26 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
             Some(project_dir) => {
                 let code =
                     checkpoint_from_spool(ctx, quirk, canonical, project_dir, &payload).await?;
+                // Plan federation: session boundaries pull the firing
+                // harness's native plans into the store (interval-gated).
+                if let Ok(home) = stateroot_core::harness_install::home_dir() {
+                    if let Some(report) = stateroot_core::plan_federation::maybe_auto(
+                        &home,
+                        project_dir,
+                        quirk.id,
+                        15,
+                    ) {
+                        for line in &report.ingested {
+                            note!("plan sync: ingested {line}");
+                        }
+                        for line in &report.updated {
+                            note!("plan sync: updated {line}");
+                        }
+                        for line in &report.notes {
+                            note!("plan sync: {line}");
+                        }
+                    }
+                }
                 // Compact boundaries ARM a FULL identity injection for the
                 // next deliverable event — but only where the harness has
                 // no working compact channel of its own. kimi discards

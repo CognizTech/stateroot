@@ -5,6 +5,19 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- **Harness-native plans federate into the store.** A plan authored in a
+  harness's own plan mode used to strand in the harness home, invisible to
+  every other harness (the cursor-plan continuity gap). Each harness now
+  pulls its own native plan dir (cursor `~/.cursor/plans/*.plan.md`, claude
+  `~/.claude/plans/`) into the project at its session boundaries — as a
+  draft with provenance, deduped by content hash, refreshed in place while
+  draft, never overwritten once approved or active. `stateroot plan sync`
+  runs the explicit pass.
+- **One project across the Windows↔WSL seam.** Registry keys, hook payload
+  paths, and project-root resolution now fold `D:\foo` and `/mnt/d/foo`
+  (plus verbatim prefixes and `\\wsl$` UNC forms) into one identity, and
+  the CLI attaches from subdirectories by walking up — Windows Cursor and
+  WSL Claude hit the same store instead of splitting one project into two.
 - **Self-update follows your channel.** Plain `stateroot self-update` — and
   therefore the scheduled background update — now tracks the running
   binary's channel: a dev/nightly build updates to the latest rolling

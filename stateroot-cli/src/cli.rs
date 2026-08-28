@@ -288,6 +288,10 @@ pub enum PlanAction {
         /// Plan id (prefix allowed).
         id: String,
     },
+    /// Pull harness-native plans (cursor plan mode, claude plans) into the
+    /// store as drafts. Runs automatically at session boundaries; this is
+    /// the explicit pass.
+    Sync,
 }
 
 #[derive(Debug, Args)]

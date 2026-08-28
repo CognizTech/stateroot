@@ -88,6 +88,7 @@ async fn main() -> anyhow::Result<()> {
             PlanAction::Activate { id } => commands::plan::activate(&ctx, &id)?,
             PlanAction::Done { id } => commands::plan::done(&ctx, &id)?,
             PlanAction::Abandon { id } => commands::plan::abandon(&ctx, &id)?,
+            PlanAction::Sync => commands::plan::sync(&ctx)?,
         },
         Command::Resume(args) => {
             commands::resume::run(
