@@ -5,6 +5,14 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- **VSCode extension (`editors/vscode/`).** The editor surface for the state
+  of record: a Project Continuity sidebar (lamp in the activity bar) showing
+  project + phase, the active plan, the current handoff with latest activity
+  and next actions, and recent checkpoints — refreshing live as any harness
+  writes — plus a status-bar entry and palette commands (Initialize,
+  Checkpoint, Snapshot, Resume Digest, Write Handoff, Doctor, Refresh). Thin
+  client by contract: reads `.stateroot/` files directly, writes only
+  through the CLI, never reimplements engine logic.
 - **Self-update follows your channel.** Plain `stateroot self-update` — and
   therefore the scheduled background update — now tracks the running
   binary's channel: a dev/nightly build updates to the latest rolling
