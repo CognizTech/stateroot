@@ -47,24 +47,18 @@ fn spool_path(project_dir: &Path) -> PathBuf {
 
 /// Walk up from `start` looking for `.stateroot/manifest.json`.
 fn find_project_root(start: &Path) -> Option<PathBuf> {
-    let mut dir = Some(start);
-    while let Some(d) = dir {
-        if local_store::is_stateroot_dir(d) {
-            return Some(d.to_path_buf());
-        }
-        dir = d.parent();
-    }
-    None
+    local_store::find_project_root(start)
 }
 
 /// The agent's working directory from a hook payload, when the harness sends
 /// one: `cwd` / `project_dir` / `workspace_dir` string fields, or the first
-/// `workspace_roots` entry (cursor's shape). Returns None on anything odd.
+/// `workspace_roots` entry (cursor's shape). Translates Windows ↔ WSL forms
+/// so a payload from the other OS still attaches. Returns None on anything odd.
 fn payload_project_dir(payload: &Value) -> Option<PathBuf> {
     for key in ["cwd", "project_dir", "projectDir", "workspace_dir"] {
         if let Some(dir) = payload.get(key).and_then(|v| v.as_str()) {
-            let path = PathBuf::from(dir);
-            if path.is_absolute() && path.is_dir() {
+            if let Some(path) = stateroot_core::path_identity::resolve_existing_dir(Path::new(dir))
+            {
                 return Some(path);
             }
         }
@@ -74,8 +68,8 @@ fn payload_project_dir(payload: &Value) -> Option<PathBuf> {
         .and_then(|v| v.as_array())
         .and_then(|roots| roots.first())
         .and_then(|v| v.as_str())
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute() && path.is_dir())
+        .map(Path::new)
+        .and_then(stateroot_core::path_identity::resolve_existing_dir)
 }
 
 /// Lenient stdin payload parse (tolerates empty or non-JSON input).

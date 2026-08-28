@@ -131,18 +131,9 @@ fn content_hash(text: &str) -> String {
     full.chars().take(16).collect()
 }
 
-/// Normalize a path string for comparison (backslashes → `/`, trailing slash
-/// trimmed). Lowercase drive letters so Windows verbatim/8.3 forms compare.
+/// Normalize a path string for comparison (Windows ↔ WSL, slash form).
 fn normalize_for_match(raw: &str) -> String {
-    let mut s = raw.trim().replace('\\', "/");
-    let is_drive = s.len() >= 2 && s.as_bytes()[1] == b':' && s.as_bytes()[0].is_ascii_alphabetic();
-    if is_drive {
-        s = s.to_lowercase();
-    }
-    while s.len() > 1 && s.ends_with('/') {
-        s.pop();
-    }
-    s
+    crate::path_identity::normalize_host_path(raw)
 }
 
 /// True when two normalized paths are equal or one is a strict ancestor of the
@@ -761,6 +752,17 @@ mod tests {
         // Wrong cwd is excluded.
         let other = read_claude(home.path(), Path::new("/unrelated"));
         assert!(other.is_empty());
+        // Windows and WSL forms of the same tree overlap.
+        write(
+            home.path(),
+            ".claude/projects/-mnt-d-work-demo/memory/win.md",
+            "wsl slug body",
+        );
+        let from_windows = read_claude(home.path(), Path::new(r"D:\work\demo"));
+        assert!(
+            from_windows.iter().any(|n| n.title == "win"),
+            "{from_windows:?}"
+        );
     }
 
     #[test]

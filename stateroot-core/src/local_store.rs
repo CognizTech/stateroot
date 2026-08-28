@@ -112,6 +112,23 @@ pub fn is_stateroot_dir(project_dir: &Path) -> bool {
     root(project_dir).join(MANIFEST_PATH).is_file()
 }
 
+/// Walk up from `start` looking for `.stateroot/manifest.json`.
+///
+/// Translates Windows ↔ WSL path forms first so a payload from the other
+/// OS still attaches to the shared project store on DrvFs.
+pub fn find_project_root(start: &Path) -> Option<PathBuf> {
+    let owned =
+        crate::path_identity::resolve_existing_dir(start).unwrap_or_else(|| start.to_path_buf());
+    let mut dir = Some(owned.as_path());
+    while let Some(d) = dir {
+        if is_stateroot_dir(d) {
+            return Some(d.to_path_buf());
+        }
+        dir = d.parent();
+    }
+    None
+}
+
 /// Read and parse the manifest, or `None` when absent.
 pub fn read_manifest(project_dir: &Path) -> Result<Option<Value>, LocalStoreError> {
     let path = root(project_dir).join(MANIFEST_PATH);
@@ -806,5 +823,16 @@ mod tests {
         assert!(outbox_pending(tmp.path())
             .expect("pending after")
             .is_empty());
+    }
+
+    #[test]
+    fn find_project_root_walks_up_from_nested_cwd() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        init_skeleton(tmp.path(), "p", "n", "default").expect("init");
+        let nested = tmp.path().join("src").join("nested");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+        let found = find_project_root(&nested).expect("walk-up");
+        assert_eq!(found, tmp.path());
+        assert!(find_project_root(tmp.path().parent().expect("parent")).is_none());
     }
 }

@@ -406,10 +406,29 @@ pub fn save_registry(dir: &Path, registry: &ProjectsRegistry) -> Result<(), Conf
 }
 
 /// Canonical key for a project directory in the registry.
+///
+/// Windows `D:\foo` and WSL `/mnt/d/foo` fold to the same key so a shared
+/// `STATEROOT_HOME` does not split one project into two registry entries.
 fn registry_key(project_dir: &Path) -> String {
-    let canonical =
-        std::fs::canonicalize(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
-    canonical.to_string_lossy().to_string()
+    crate::path_identity::equivalent_project_key(project_dir)
+}
+
+fn stored_key(registry: &ProjectsRegistry, project_dir: &Path) -> Option<String> {
+    let key = registry_key(project_dir);
+    if registry.projects.contains_key(&key) {
+        return Some(key);
+    }
+    let want = crate::path_identity::normalize_host_path(&key);
+    registry.projects.keys().find_map(|existing| {
+        crate::path_identity::host_paths_equivalent(existing, &want).then(|| existing.clone())
+    })
+}
+
+fn lookup_entry<'a>(
+    registry: &'a ProjectsRegistry,
+    project_dir: &Path,
+) -> Option<&'a ProjectEntry> {
+    stored_key(registry, project_dir).and_then(|key| registry.projects.get(&key))
 }
 
 /// Insert or update the entry for `project_dir`.
@@ -419,24 +438,32 @@ pub fn register_project(
     entry: ProjectEntry,
 ) -> Result<(), ConfigError> {
     let mut registry = load_registry(dir)?;
-    registry.projects.insert(registry_key(project_dir), entry);
+    let key = registry_key(project_dir);
+    let want = crate::path_identity::normalize_host_path(&key);
+    registry
+        .projects
+        .retain(|existing, _| !crate::path_identity::host_paths_equivalent(existing, &want));
+    registry.projects.insert(key, entry);
     save_registry(dir, &registry)
 }
 
 /// Look up the entry for `project_dir`, if any.
 pub fn lookup_project(dir: &Path, project_dir: &Path) -> Result<Option<ProjectEntry>, ConfigError> {
     let registry = load_registry(dir)?;
-    Ok(registry.projects.get(&registry_key(project_dir)).cloned())
+    Ok(lookup_entry(&registry, project_dir).cloned())
 }
 
 /// Remove the entry for `project_dir` (no-op when absent). Returns true when
 /// an entry was actually removed.
 pub fn unregister_project(dir: &Path, project_dir: &Path) -> Result<bool, ConfigError> {
     let mut registry = load_registry(dir)?;
-    let removed = registry
+    let key = registry_key(project_dir);
+    let want = crate::path_identity::normalize_host_path(&key);
+    let before = registry.projects.len();
+    registry
         .projects
-        .remove(&registry_key(project_dir))
-        .is_some();
+        .retain(|existing, _| !crate::path_identity::host_paths_equivalent(existing, &want));
+    let removed = registry.projects.len() != before;
     if removed {
         save_registry(dir, &registry)?;
     }
@@ -457,9 +484,11 @@ pub fn save_conversation(
     conversation: &ConversationState,
 ) -> Result<(), ConfigError> {
     let mut registry = load_registry(dir)?;
-    if let Some(entry) = registry.projects.get_mut(&registry_key(project_dir)) {
-        entry.conversation = conversation.clone();
-        save_registry(dir, &registry)?;
+    if let Some(key) = stored_key(&registry, project_dir) {
+        if let Some(entry) = registry.projects.get_mut(&key) {
+            entry.conversation = conversation.clone();
+            save_registry(dir, &registry)?;
+        }
     }
     Ok(())
 }
@@ -472,16 +501,18 @@ pub fn add_acknowledged_transition(
     transition_id: &str,
 ) -> Result<(), ConfigError> {
     let mut registry = load_registry(dir)?;
-    if let Some(entry) = registry.projects.get_mut(&registry_key(project_dir)) {
-        if !entry
-            .acknowledged_transitions
-            .iter()
-            .any(|t| t == transition_id)
-        {
-            entry
+    if let Some(key) = stored_key(&registry, project_dir) {
+        if let Some(entry) = registry.projects.get_mut(&key) {
+            if !entry
                 .acknowledged_transitions
-                .push(transition_id.to_string());
-            save_registry(dir, &registry)?;
+                .iter()
+                .any(|t| t == transition_id)
+            {
+                entry
+                    .acknowledged_transitions
+                    .push(transition_id.to_string());
+                save_registry(dir, &registry)?;
+            }
         }
     }
     Ok(())
@@ -530,6 +561,28 @@ mod tests {
         assert_eq!(found, Some(entry));
         let missing = lookup_project(tmp.path(), tmp.path()).expect("lookup missing");
         assert!(missing.is_none());
+    }
+
+    #[test]
+    fn lookup_folds_windows_and_wsl_registry_keys() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut registry = ProjectsRegistry::default();
+        let entry = ProjectEntry {
+            project_id: "p-wsl".to_string(),
+            workspace_id: "p-wsl".to_string(),
+            name: "demo".to_string(),
+            created_at: "2026-08-28T00:00:00Z".to_string(),
+            ..Default::default()
+        };
+        registry
+            .projects
+            .insert(r"\\?\D:\work\stateroot".to_string(), entry.clone());
+        save_registry(tmp.path(), &registry).expect("save");
+        let found = lookup_project(tmp.path(), Path::new("/mnt/d/work/stateroot")).expect("lookup");
+        assert_eq!(found.as_ref().map(|e| e.project_id.as_str()), Some("p-wsl"));
+        register_project(tmp.path(), Path::new("/mnt/d/work/stateroot"), entry).expect("register");
+        let reloaded = load_registry(tmp.path()).expect("reload");
+        assert_eq!(reloaded.projects.len(), 1, "aliases collapsed");
     }
 
     #[test]

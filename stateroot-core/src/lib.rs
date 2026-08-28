@@ -25,6 +25,7 @@ pub mod memory_federation;
 pub mod memory_index;
 pub mod observations;
 pub mod openclaw_identity;
+pub mod path_identity;
 pub mod persona_injection;
 pub mod plans;
 pub mod presentation;

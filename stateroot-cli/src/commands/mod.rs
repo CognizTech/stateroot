@@ -67,7 +67,10 @@ pub struct Ctx {
 impl Ctx {
     /// Build the context from the process environment.
     pub fn load() -> anyhow::Result<Self> {
-        let cwd = std::env::current_dir()?;
+        let process_cwd = std::env::current_dir()?;
+        // Walk up to the nearest `.stateroot/` so a WSL cwd in a subfolder
+        // (or a Windows/WSL translated payload path) still hits the shared store.
+        let cwd = local_store::find_project_root(&process_cwd).unwrap_or(process_cwd);
         let config_dir = core_config::config_dir().map_err(|e| anyhow!(e))?;
         let config = core_config::load_config(&config_dir).map_err(|e| anyhow!(e))?;
         Ok(Self {
