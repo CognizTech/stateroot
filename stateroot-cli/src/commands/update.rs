@@ -15,8 +15,6 @@ use serde_json::{json, Value};
 
 use super::Ctx;
 
-/// Current binary version (crate version at build time).
-pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Release asset name per platform.
 pub const fn asset_name() -> &'static str {
     if cfg!(target_os = "windows") {
@@ -295,6 +293,11 @@ fn assets_from_body(body: &Value) -> Option<ReleaseInfo> {
     }
     Some(ReleaseInfo {
         tag,
+        name: body
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         asset_url: asset_url?,
         checksums_url: checksums_url?,
     })
@@ -305,6 +308,9 @@ fn assets_from_body(body: &Value) -> Option<ReleaseInfo> {
 pub struct ReleaseInfo {
     /// Release tag (e.g. `v0.2.0`).
     pub tag: String,
+    /// Release display name (the nightly carries the dev version here:
+    /// `StateRoot 0.1.10-dev.125 (rolling preview)`).
+    pub name: String,
     /// Download URL of the platform asset.
     pub asset_url: String,
     /// Download URL of `checksums.txt`.
@@ -338,6 +344,7 @@ pub async fn check_latest(ctx: &Ctx, force: bool) -> Option<ReleaseInfo> {
                     let checksums_url = cached.get("checksums_url").and_then(|v| v.as_str())?;
                     return Some(ReleaseInfo {
                         tag: tag.into(),
+                        name: String::new(),
                         asset_url: asset_url.into(),
                         checksums_url: checksums_url.into(),
                     });
@@ -439,12 +446,65 @@ pub async fn fetch_tagged_release(ctx: &Ctx, tag: &str) -> anyhow::Result<Releas
     })
 }
 
-/// True when `latest` is a newer version than the running binary.
-pub fn is_newer(latest: &str) -> bool {
-    match (parse_semver(latest), parse_semver(CURRENT_VERSION)) {
-        (Some(latest), Some(current)) => latest > current,
+/// True when the running binary is a dev/nightly build (`0.1.9-dev.122`).
+/// Detected from BUILD_VERSION — the binary's true identity (git-describe
+/// suffix); CURRENT_VERSION (CARGO_PKG_VERSION) is always plain `0.1.x` and
+/// would hide the channel.
+pub fn current_is_dev() -> bool {
+    crate::cli::BUILD_VERSION.contains("-dev.")
+}
+
+/// Parse a dev-build version (`0.1.9-dev.122`) into (base, counter).
+/// Tolerant of prefixes (`stateroot 0.1.9-dev.122`) and suffixes (release
+/// names like `StateRoot 0.1.10-dev.125 (rolling preview)`): scans tokens
+/// for one carrying `-dev.`.
+pub fn parse_dev_version(text: &str) -> Option<((u64, u64, u64), u64)> {
+    for token in text.split_whitespace() {
+        let Some(pos) = token.find("-dev.") else {
+            continue;
+        };
+        let base_text: String = token[..pos]
+            .chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .collect();
+        let counter_text: String = token[pos + 5..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if let (Some(base), Ok(counter)) = (parse_semver(&base_text), counter_text.parse::<u64>()) {
+            return Some((base, counter));
+        }
+    }
+    None
+}
+
+/// True when `latest` is a newer version than `current`, compared by base
+/// version only. A dev build is *ahead* of its base release, so
+/// `0.1.9-dev.122` vs `v0.1.9` is NOT an upgrade path (and must never
+/// downgrade) — while `v0.1.10` genuinely is one.
+pub fn is_newer_than(current: &str, latest: &str) -> bool {
+    let current_base = parse_dev_version(current)
+        .map(|(base, _)| base)
+        .or_else(|| parse_semver(current));
+    let latest_base = parse_semver(latest.trim_start_matches('v'));
+    match (current_base, latest_base) {
+        (Some(current), Some(latest)) => latest > current,
         _ => false,
     }
+}
+
+/// True when `latest` is a newer version than the running binary.
+pub fn is_newer(latest: &str) -> bool {
+    is_newer_than(crate::cli::BUILD_VERSION, latest)
+}
+
+/// Order a dev build against the nightly release's dev version (carried in
+/// its display name). None when either side is unparseable — callers stay
+/// honest and do nothing rather than guess.
+pub fn dev_update_order(current: &str, release_name: &str) -> Option<std::cmp::Ordering> {
+    let current = parse_dev_version(current)?;
+    let nightly = parse_dev_version(release_name)?;
+    Some(current.cmp(&nightly))
 }
 
 /// Download the asset + checksums.txt and verify the sha256. Returns the
@@ -596,18 +656,23 @@ pub async fn maybe_auto_update(ctx: &Ctx) {
 
 /// `stateroot self-update [--check] [--tag nightly|v0.1.2]`.
 ///
-/// Omit `--tag` to follow the latest production release (`/releases/latest`).
-/// Pass `--tag nightly` for the rolling preview, or a production tag to
-/// install/downgrade that exact release. Background auto-update never uses
-/// `--tag` and never follows `nightly`.
+/// Channel stickiness: plain `self-update` follows the running binary's
+/// channel — a dev build tracks the rolling preview (`nightly`), a release
+/// build tracks the latest production release. `--tag` always wins and
+/// switches channels explicitly. A dev build is also *offered* a genuinely
+/// newer production release (base-version compare), never downgraded to
+/// its own base.
 pub async fn self_update(ctx: &Ctx, check_only: bool, tag: Option<&str>) -> anyhow::Result<()> {
     if disabled(ctx) {
         println!("auto-update is disabled ([update] enabled = false or STATEROOT_NO_AUTO_UPDATE)");
         return Ok(());
     }
     let explicit = tag.is_some();
+    let follow_nightly = !explicit && current_is_dev();
     let info = if let Some(tag) = tag {
         fetch_tagged_release(ctx, tag).await?
+    } else if follow_nightly {
+        fetch_tagged_release(ctx, "nightly").await?
     } else {
         // A user explicitly asked to check or update. Never report stale
         // cached release metadata as the current production release.
@@ -626,13 +691,31 @@ pub async fn self_update(ctx: &Ctx, check_only: bool, tag: Option<&str>) -> anyh
         "production"
     };
     println!("current:  {current}");
-    println!("release:  {} ({channel})", info.tag);
+    println!(
+        "release:  {} ({channel}){}",
+        info.tag,
+        if follow_nightly {
+            " — followed because this build is a dev variant"
+        } else {
+            ""
+        }
+    );
     if check_only {
         if explicit {
             println!(
                 "run `stateroot self-update --tag {}` to install it",
                 info.tag
             );
+        } else if follow_nightly {
+            match dev_update_order(current, &info.name) {
+                Some(std::cmp::Ordering::Less) => println!(
+                    "a newer rolling preview is available — run `stateroot self-update` to install it"
+                ),
+                Some(_) => println!("already ahead of the rolling preview"),
+                None => println!(
+                    "could not compare nightly versions — `stateroot self-update --tag nightly` forces a reinstall"
+                ),
+            }
         } else if is_newer(&info.tag) {
             println!("an update is available — run `stateroot self-update` to install it");
         } else {
@@ -640,9 +723,25 @@ pub async fn self_update(ctx: &Ctx, check_only: bool, tag: Option<&str>) -> anyh
         }
         return Ok(());
     }
-    if !explicit && !is_newer(&info.tag) {
-        println!("already on the latest production release");
-        return Ok(());
+    if !explicit {
+        if follow_nightly {
+            match dev_update_order(current, &info.name) {
+                Some(std::cmp::Ordering::Less) => {}
+                Some(_) => {
+                    println!("already ahead of the rolling preview");
+                    return Ok(());
+                }
+                None => {
+                    println!(
+                        "could not compare nightly versions — `stateroot self-update --tag nightly` forces a reinstall"
+                    );
+                    return Ok(());
+                }
+            }
+        } else if !is_newer(&info.tag) {
+            println!("already on the latest production release");
+            return Ok(());
+        }
     }
     download_and_install(ctx, &info).await.map(|_| ())
 }
@@ -1456,5 +1555,72 @@ mod tests {
         assert_eq!(normalize_release_tag("  v1.0.0  "), "v1.0.0");
         assert!(is_rolling_preview_tag("nightly"));
         assert!(!is_rolling_preview_tag("v0.1.2"));
+    }
+
+    #[test]
+    fn parse_dev_version_reads_binary_and_release_name_forms() {
+        assert_eq!(parse_dev_version("0.1.9-dev.122"), Some(((0, 1, 9), 122)));
+        assert_eq!(
+            parse_dev_version("stateroot 0.1.9-dev.122"),
+            Some(((0, 1, 9), 122))
+        );
+        assert_eq!(
+            parse_dev_version("StateRoot 0.1.10-dev.125 (rolling preview)"),
+            Some(((0, 1, 10), 125))
+        );
+        assert_eq!(parse_dev_version("v0.1.10"), None);
+        assert_eq!(parse_dev_version("nightly"), None);
+    }
+
+    #[test]
+    fn is_newer_than_never_downgrades_dev_but_offers_newer_production() {
+        // A dev build is ahead of its base release: no downgrade path.
+        assert!(!is_newer_than("0.1.9-dev.122", "v0.1.9"));
+        // …but a genuinely newer production release is offered.
+        assert!(is_newer_than("0.1.9-dev.122", "v0.1.10"));
+        assert!(is_newer_than("stateroot 0.1.9-dev.122", "v0.1.10"));
+        // Production current behaves exactly as before.
+        assert!(is_newer_than("0.1.9", "v0.1.10"));
+        assert!(!is_newer_than("0.1.10", "v0.1.10"));
+        assert!(!is_newer_than("0.1.10", "v0.1.9"));
+    }
+
+    #[test]
+    fn dev_update_order_compares_base_then_counter() {
+        use std::cmp::Ordering;
+        // Newer base wins regardless of counter.
+        assert_eq!(
+            dev_update_order(
+                "0.1.9-dev.122",
+                "StateRoot 0.1.10-dev.125 (rolling preview)"
+            ),
+            Some(Ordering::Less)
+        );
+        // Same base: higher counter is newer.
+        assert_eq!(
+            dev_update_order(
+                "0.1.10-dev.125",
+                "StateRoot 0.1.10-dev.130 (rolling preview)"
+            ),
+            Some(Ordering::Less)
+        );
+        // Local source builds with a higher counter are never clobbered.
+        assert_eq!(
+            dev_update_order(
+                "0.1.10-dev.999",
+                "StateRoot 0.1.10-dev.125 (rolling preview)"
+            ),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(
+            dev_update_order(
+                "0.1.10-dev.125",
+                "StateRoot 0.1.10-dev.125 (rolling preview)"
+            ),
+            Some(Ordering::Equal)
+        );
+        // Unparseable sides stay honest: None, not a guess.
+        assert_eq!(dev_update_order("0.1.10", "StateRoot nightly"), None);
+        assert_eq!(dev_update_order("0.1.10-dev.1", "nightly"), None);
     }
 }

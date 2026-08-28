@@ -5,6 +5,20 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- **Self-update follows your channel.** Plain `stateroot self-update` — and
+  therefore the scheduled background update — now tracks the running
+  binary's channel: a dev/nightly build updates to the latest rolling
+  preview, a release build to the latest production release, and `--tag`
+  always wins (explicit channel switch in either direction). Channel
+  detection reads the binary's true identity (the git-describe `-dev.N`
+  suffix), not the crate version. Dev builds compare against the nightly
+  release's display name by (base, counter) — a local source build with a
+  higher counter is never clobbered — and the production compare is by base
+  version, so a dev build is offered a genuinely newer production release
+  but never "upgraded" down to its own base. Previously a nightly user got
+  no updates at all and a dev binary was never told about new production
+  releases.
+
 ## v0.1.10 — 2026-08-27
 
 - **Team-ready state: the shared/local boundary is now code.** Teams that
