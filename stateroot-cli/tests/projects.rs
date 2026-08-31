@@ -33,9 +33,12 @@ fn projects_lists_registered_projects_with_hints() {
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
     for dir in [&proj_a, &proj_b] {
-        // The registry keys are canonicalized; on Windows that means the
-        // \\?\ verbatim form with long names. Compare canonical to canonical.
-        let path = dir.path().canonicalize().unwrap().display().to_string();
+        // The registry keys fold to the Windows↔WSL identity form
+        // (lowercase drive, forward slashes) — compare through the same
+        // normalization, not the raw verbatim spelling.
+        let path = stateroot_core::path_identity::normalize_host_path(
+            &dir.path().canonicalize().unwrap().display().to_string(),
+        );
         assert!(stdout.contains(&path), "missing {path}: {stdout}");
     }
     assert!(stdout.contains("init"), "phase shown: {stdout}");
@@ -66,7 +69,9 @@ fn projects_marks_missing_dirs_and_prune_drops_them() {
             .assert()
             .success();
     }
-    let gone_path = gone.path().canonicalize().unwrap().display().to_string();
+    let gone_path = stateroot_core::path_identity::normalize_host_path(
+        &gone.path().canonicalize().unwrap().display().to_string(),
+    );
     drop(gone); // delete the project dir from disk
 
     let out = stateroot(config_home.path(), proj_a.path())
