@@ -74,7 +74,7 @@ fn kimi_plan_paths(home: &Path, project_dir: &Path) -> Vec<PathBuf> {
             let Some(cwd) = state.get("cwd").and_then(|value| value.as_str()) else {
                 continue;
             };
-            if crate::path_identity::normalize_host_path(cwd) != project_key {
+            if crate::path_identity::equivalent_project_key(Path::new(cwd)) != project_key {
                 continue;
             }
             let plans = session.path().join("agents/main/plans");
