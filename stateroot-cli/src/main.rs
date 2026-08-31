@@ -13,7 +13,7 @@ use tracing_subscriber::EnvFilter;
 use cli::{
     Command, ExtAction, HandoffAction, HarnessAction, LearnAction, LearningsAction, McpAction,
     MemoryAction, ObservationsAction, PlanAction, ProposalsAction, RulesAction, SessionAction,
-    SkillAction, SoulAction, WikiAction,
+    SkillAction, SoulAction, TodoAction, WikiAction,
 };
 use commands::Ctx;
 
@@ -89,6 +89,9 @@ async fn main() -> anyhow::Result<()> {
             PlanAction::Done { id } => commands::plan::done(&ctx, &id)?,
             PlanAction::Abandon { id } => commands::plan::abandon(&ctx, &id)?,
             PlanAction::Sync => commands::plan::sync(&ctx)?,
+        },
+        Command::Todo(args) => match args.action {
+            TodoAction::List { harness } => commands::todo::list(&ctx, harness.as_deref())?,
         },
         Command::Resume(args) => {
             commands::resume::run(

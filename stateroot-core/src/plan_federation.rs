@@ -192,11 +192,16 @@ pub struct PlanSyncReport {
     pub ingested: Vec<String>,
     pub updated: Vec<String>,
     pub notes: Vec<String>,
+    /// Plan ids auto-completed because plan-bound todos are all done.
+    pub completed: Vec<String>,
 }
 
 impl PlanSyncReport {
     pub fn is_quiet(&self) -> bool {
-        self.ingested.is_empty() && self.updated.is_empty() && self.notes.is_empty()
+        self.ingested.is_empty()
+            && self.updated.is_empty()
+            && self.notes.is_empty()
+            && self.completed.is_empty()
     }
 }
 
@@ -326,7 +331,7 @@ pub fn sync_from(home: &Path, project_dir: &Path, harness: &str) -> PlanSyncRepo
                                 .ingested
                                 .push(format!("{} → {} (draft)", name, meta.id));
                             state.files.insert(
-                                key,
+                                key.clone(),
                                 SeenFile {
                                     hash: file_hash,
                                     plan_id: meta.id,
@@ -348,7 +353,7 @@ pub fn sync_from(home: &Path, project_dir: &Path, harness: &str) -> PlanSyncRepo
                         Ok(_) => {
                             report.updated.push(format!("{} → {}", name, seen.plan_id));
                             state.files.insert(
-                                key,
+                                key.clone(),
                                 SeenFile {
                                     hash: file_hash,
                                     plan_id: seen.plan_id.clone(),
@@ -359,6 +364,11 @@ pub fn sync_from(home: &Path, project_dir: &Path, harness: &str) -> PlanSyncRepo
                             .notes
                             .push(format!("{name}: {err} (left alone — it is owned now)")),
                     }
+                }
+            }
+            if source.harness == "cursor" {
+                if let Some(seen) = state.files.get(&key) {
+                    apply_cursor_plan_todos(project_dir, &path, &text, &seen.plan_id, &mut report);
                 }
             }
         }
@@ -423,7 +433,46 @@ pub fn sync_from(home: &Path, project_dir: &Path, harness: &str) -> PlanSyncRepo
     }
     state.last_run = chrono::Utc::now().to_rfc3339();
     save_state(project_dir, &state);
+    let todos = crate::todo_federation::sync_from(home, project_dir, harness);
+    for line in todos.written {
+        report.notes.push(format!("todos {line}"));
+    }
+    for line in todos.notes {
+        report.notes.push(format!("todos {line}"));
+    }
     report
+}
+
+fn apply_cursor_plan_todos(
+    project_dir: &Path,
+    path: &Path,
+    text: &str,
+    plan_id: &str,
+    report: &mut PlanSyncReport,
+) {
+    let items = crate::todo_federation::parse_frontmatter_todos(text);
+    if items.is_empty() {
+        return;
+    }
+    let session_key = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or(plan_id);
+    let complete = crate::todo_federation::all_completed(&items);
+    if let Err(err) =
+        crate::todo_federation::upsert_plan_bound(project_dir, session_key, plan_id, items, path)
+    {
+        report.notes.push(err);
+        return;
+    }
+    if !complete {
+        return;
+    }
+    match crate::todo_federation::complete_plan(project_dir, plan_id) {
+        Ok(true) => report.completed.push(plan_id.to_string()),
+        Ok(false) => {}
+        Err(err) => report.notes.push(err),
+    }
 }
 
 /// Hook path: at session boundaries, each harness pulls its own native plans
@@ -436,7 +485,10 @@ pub fn maybe_auto(
     harness: &str,
     interval_mins: i64,
 ) -> Option<PlanSyncReport> {
-    if plan_dirs(home, harness).is_empty() && !matches!(harness, "kimi" | "kimi-code") {
+    if plan_dirs(home, harness).is_empty()
+        && !matches!(harness, "kimi" | "kimi-code")
+        && !crate::todo_federation::harness_has_sources(harness)
+    {
         return None;
     }
     let state = load_state(project_dir);
@@ -557,7 +609,7 @@ mod tests {
     fn harnesses_without_plan_dirs_stay_silent() {
         let home = tempfile::tempdir().expect("home");
         let project = project();
-        assert!(maybe_auto(home.path(), project.path(), "codex", 15).is_none());
+        assert!(maybe_auto(home.path(), project.path(), "openclaw", 15).is_none());
         // A harness with a known dir ingests; another project is untouched.
         seed_cursor_transcript(home.path(), project.path());
         write_plan(home.path(), "conductor_a1b2c3d4.plan.md", PLAN_A);

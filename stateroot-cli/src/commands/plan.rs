@@ -98,8 +98,11 @@ pub fn list(ctx: &Ctx) -> anyhow::Result<()> {
         return Ok(());
     }
     for meta in &all {
+        let todos = stateroot_core::todo_federation::plan_todo_progress(&ctx.cwd, &meta.id)
+            .map(|(done, total)| format!(" · todos {done}/{total}"))
+            .unwrap_or_default();
         println!(
-            "{} · {} · {} · {} · {}",
+            "{} · {} · {} · {} · {}{todos}",
             meta.id,
             meta.title,
             meta.status,
@@ -123,10 +126,13 @@ pub fn show(ctx: &Ctx, id: &str) -> anyhow::Result<()> {
         println!();
     }
     note!(
-        "({} · {} · by {})",
+        "({} · {} · by {}{})",
         meta.id,
         meta.status,
-        meta.created_by_harness
+        meta.created_by_harness,
+        stateroot_core::todo_federation::plan_todo_progress(&ctx.cwd, &meta.id)
+            .map(|(done, total)| format!(" · todos {done}/{total}"))
+            .unwrap_or_default()
     );
     Ok(())
 }
@@ -185,6 +191,10 @@ pub fn sync(ctx: &Ctx) -> anyhow::Result<()> {
         for line in &report.updated {
             any = true;
             println!("updated {line}");
+        }
+        for line in &report.completed {
+            any = true;
+            println!("completed {line}");
         }
         for line in &report.notes {
             super::note!("plan sync: {line}");

@@ -3,9 +3,15 @@
 All notable changes to StateRoot. Format loosely follows Keep a Changelog;
 StateRoot is pre-1.0 and milestones land as minor versions.
 
-## Unreleased
+- **Todos federate as first-class state.** Harness todo lists land in
+  `.stateroot/todos/` with a structural split: Cursor plan frontmatter
+  `todos:` are plan-bound and can auto-complete `draft|approved|active`
+  plans when every item is done; Claude/Kimi/Codex/Cursor session lists
+  stay standalone (last-list-wins, never plan status). `stateroot todo
+  list` shows the current list per harness; `plan list`/`show` and the
+  digest Active Plan line print `todos n/m` when a plan-bound record
+  exists.
 
-- **Hook-config writes are atomic and self-protecting.** Every harness
   config write (TOML hooks, JSON hooks, plugin files, uninstall strips) now
   goes through one atomic write (tempfile + fsync + rename; a crash
   mid-write leaves the old file intact), and the TOML installer warns when

@@ -47,6 +47,8 @@ pub enum Command {
     Session(SessionArgs),
     /// Central plan artifacts + lifecycle (record/list/show/approve/activate/done/abandon).
     Plan(PlanArgs),
+    /// Federated harness todo lists (plan-bound and standalone).
+    Todo(TodoArgs),
     /// Print the compact resume digest for the current project.
     Resume(ResumeArgs),
     /// Append an episodic checkpoint to the local log.
@@ -292,6 +294,22 @@ pub enum PlanAction {
     /// drafts. Runs automatically at session boundaries; this is the
     /// explicit pass.
     Sync,
+}
+
+#[derive(Debug, Args)]
+pub struct TodoArgs {
+    #[command(subcommand)]
+    pub action: TodoAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TodoAction {
+    /// List the current federated todo list per harness.
+    List {
+        /// Restrict to one harness.
+        #[arg(long)]
+        harness: Option<String>,
+    },
 }
 
 #[derive(Debug, Args)]

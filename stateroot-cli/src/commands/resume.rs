@@ -78,6 +78,13 @@ pub(crate) fn central_plan_section(project_dir: Option<&Path>) -> Option<String>
         let short: String = root.chars().take(12).collect();
         section.push_str(&format!(" · root `{short}`"));
     }
+    if let Some(dir) = project_dir {
+        if let Some((done, total)) =
+            stateroot_core::todo_federation::plan_todo_progress(dir, &plan.id)
+        {
+            section.push_str(&format!(" · todos {done}/{total} complete"));
+        }
+    }
     section.push('\n');
     match plan.status() {
         stateroot_core::plans::PlanStatus::Approved | stateroot_core::plans::PlanStatus::Active => {
@@ -1288,6 +1295,28 @@ mod tests {
         );
         assert!(!out.contains("## Plan State"), "out: {out}");
         assert!(!out.contains("BODY-SECRET-NEVER-IN-DIGEST"), "out: {out}");
+
+        stateroot_core::todo_federation::upsert_plan_bound(
+            dir.path(),
+            "native-plan",
+            &meta.id,
+            vec![
+                stateroot_core::todo_federation::TodoItem {
+                    key: "a".into(),
+                    content: "A".into(),
+                    status: "completed".into(),
+                },
+                stateroot_core::todo_federation::TodoItem {
+                    key: "b".into(),
+                    content: "B".into(),
+                    status: "pending".into(),
+                },
+            ],
+            std::path::Path::new("native.plan.md"),
+        )
+        .expect("todos");
+        let out = render_handoff_digest_full(&packet, true, &[], None, Some(dir.path()));
+        assert!(out.contains("todos 1/2 complete"), "out: {out}");
 
         // Draft-only → the planner directive instead.
         let draft_dir = tempfile::tempdir().expect("dir2");

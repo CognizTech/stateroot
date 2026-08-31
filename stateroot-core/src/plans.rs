@@ -347,6 +347,21 @@ pub fn transition(
     Ok((meta, demoted))
 }
 
+/// Append a lineage note without changing status.
+pub fn append_notes(project_dir: &Path, id: &str, note: &str) -> Result<PlanMeta, String> {
+    let Some((mut meta, _)) = load(project_dir, id) else {
+        return Err(format!("unknown plan `{id}` — run `stateroot plan list`"));
+    };
+    if !note.is_empty() {
+        meta.notes = format!("{}\n{note}", meta.notes.trim_end())
+            .trim()
+            .to_string();
+        meta.updated_at = now_rfc3339();
+        write_meta(project_dir, &meta)?;
+    }
+    Ok(meta)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

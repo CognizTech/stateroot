@@ -48,6 +48,7 @@ pub mod skill;
 pub mod soul;
 pub mod status;
 pub mod synthesize;
+pub mod todo;
 pub mod transplant;
 pub mod uninstall;
 pub mod update;

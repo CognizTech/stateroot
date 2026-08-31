@@ -182,6 +182,9 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
                         for line in &report.updated {
                             note!("plan sync: updated {line}");
                         }
+                        for line in &report.completed {
+                            note!("plan sync: completed {line}");
+                        }
                         for line in &report.notes {
                             note!("plan sync: {line}");
                         }
