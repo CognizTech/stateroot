@@ -75,7 +75,11 @@ impl PlanStatus {
         }
         matches!(
             (self, to),
-            (Draft, Approved) | (Approved, Active) | (Active, Done) | (_, Abandoned)
+            (Draft, Approved)
+                | (Approved, Active)
+                | (Active, Done)
+                | (Approved, Done)
+                | (_, Abandoned)
         )
     }
 }
@@ -308,7 +312,7 @@ pub fn transition(
     let from = meta.status();
     if !from.can_transition_to(to) {
         return Err(format!(
-            "plan {} is {} — cannot move to {} (lifecycle: draft → approved → active → done; abandoned from any open state)",
+            "plan {} is {} — cannot move to {} (lifecycle: draft → approved → active → done; approved → done for plans finished while approved; abandoned from any open state)",
             meta.id,
             from.as_str(),
             to.as_str()
@@ -380,11 +384,12 @@ mod tests {
         assert!(demoted.is_none());
         let (plan, _) = transition(dir.path(), &plan.id, PlanStatus::Active).expect("activate");
         assert_eq!(plan.status(), PlanStatus::Active);
-        // approved → done is illegal (only the active plan completes).
+        // approved → done is legal: a plan finished while approved completes
+        // without a pointless activate-then-done dance.
         let second = record_plan(dir.path(), "Second plan");
         transition(dir.path(), &second.id, PlanStatus::Approved).expect("approve 2");
-        let err = transition(dir.path(), &second.id, PlanStatus::Done).unwrap_err();
-        assert!(err.contains("cannot move to done"), "{err}");
+        let (second, _) = transition(dir.path(), &second.id, PlanStatus::Done).expect("done 2");
+        assert_eq!(second.status(), PlanStatus::Done);
         let (plan, _) = transition(dir.path(), &plan.id, PlanStatus::Done).expect("done");
         assert_eq!(plan.status(), PlanStatus::Done);
         // Terminal states reject everything, including abandon.

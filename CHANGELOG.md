@@ -16,11 +16,13 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 - **Harness-native plans federate into the store.** A plan authored in a
   harness's own plan mode used to strand in the harness home, invisible to
   every other harness (the cursor-plan continuity gap). Each harness now
-  pulls its own native plan dir (cursor `~/.cursor/plans/*.plan.md`, claude
-  `~/.claude/plans/`) into the project at its session boundaries — as a
-  draft with provenance, deduped by content hash, refreshed in place while
-  draft, never overwritten once approved or active. `stateroot plan sync`
-  runs the explicit pass.
+  pulls its own native plan source (cursor `~/.cursor/plans/*.plan.md`,
+  claude `~/.claude/plans/`, Kimi's project-matching session plans) into the
+  project at its session boundaries — as a draft with provenance, deduped by
+  content hash, refreshed in place while draft, never overwritten once
+  approved or active. `stateroot plan sync` runs the explicit pass.
+- **Approved plans may complete directly.** `stateroot plan done` now allows
+  `approved → done` for work finished before activation.
 - **One project across the Windows↔WSL seam.** Registry keys, hook payload
   paths, and project-root resolution now fold `D:\foo` and `/mnt/d/foo`
   (plus verbatim prefixes and `\\wsl$` UNC forms) into one identity, and

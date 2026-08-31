@@ -169,14 +169,14 @@ pub fn abandon(ctx: &Ctx, id: &str) -> anyhow::Result<()> {
     transition(ctx, id, PlanStatus::Abandoned)
 }
 
-/// Run `stateroot plan sync` — pull harness-native plans (cursor plan mode,
-/// claude plans) into the store as drafts. The explicit pass; session
-/// boundaries also run it per harness on an interval.
+/// Run `stateroot plan sync` — pull harness-native plans (Cursor, Claude,
+/// Kimi) into the store as drafts. The explicit pass; session boundaries
+/// also run it per harness on an interval.
 pub fn sync(ctx: &Ctx) -> anyhow::Result<()> {
     ctx.require_project()?;
     let home = stateroot_core::harness_install::home_dir().map_err(|e| anyhow::anyhow!(e))?;
     let mut any = false;
-    for harness in ["cursor", "claude-code"] {
+    for harness in ["cursor", "claude-code", "kimi-code"] {
         let report = stateroot_core::plan_federation::sync_from(&home, &ctx.cwd, harness);
         for line in &report.ingested {
             any = true;

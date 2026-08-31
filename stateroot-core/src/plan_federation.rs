@@ -1,5 +1,6 @@
 //! Plan federation — harness-native plans (Cursor plan mode's
-//! `~/.cursor/plans/*.plan.md`, Claude's `~/.claude/plans/`, …) land in the
+//! `~/.cursor/plans/*.plan.md`, Claude's `~/.claude/plans/`, Kimi's session
+//! plans, …) land in the
 //! central plan store as drafts. Without this, a plan authored in a harness's
 //! native plan mode never reaches the shared store, and the next harness
 //! cannot see it (the cursor-plan continuity gap).
@@ -41,6 +42,58 @@ fn plan_dirs(home: &Path, harness: &str) -> Vec<PlanSource> {
         }],
         _ => Vec::new(),
     }
+}
+
+/// Kimi stores its plan history below each session rather than in a shared
+/// plan directory. A session's `state.json` identifies its workspace; the
+/// newest native plan for that project is the only eligible artifact.
+///
+/// Unlike Cursor and Claude's dedicated plan directories, scanning every
+/// Kimi session plan would resurrect historical drafts whenever federation
+/// first runs. The newest file is the plan Kimi just authored at the session
+/// boundary; subsequent edits refresh that same artifact through `SyncState`.
+fn kimi_plan_paths(home: &Path, project_dir: &Path) -> Vec<PathBuf> {
+    let sessions = home.join(".kimi-code/sessions");
+    let Ok(workspace_dirs) = std::fs::read_dir(sessions) else {
+        return Vec::new();
+    };
+    let project_key = crate::path_identity::equivalent_project_key(project_dir);
+    let mut paths = Vec::new();
+    for workspace in workspace_dirs.flatten() {
+        let Ok(session_dirs) = std::fs::read_dir(workspace.path()) else {
+            continue;
+        };
+        for session in session_dirs.flatten() {
+            let state_path = session.path().join("state.json");
+            let Ok(state) = std::fs::read_to_string(state_path) else {
+                continue;
+            };
+            let Ok(state) = serde_json::from_str::<serde_json::Value>(&state) else {
+                continue;
+            };
+            let Some(cwd) = state.get("cwd").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            if crate::path_identity::normalize_host_path(cwd) != project_key {
+                continue;
+            }
+            let plans = session.path().join("agents/main/plans");
+            let Ok(entries) = std::fs::read_dir(plans) else {
+                continue;
+            };
+            paths.extend(entries.flatten().map(|entry| entry.path()).filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".md"))
+            }));
+        }
+    }
+    paths.sort_by_key(|path| {
+        std::fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok()
+    });
+    paths.into_iter().rev().take(1).collect()
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -212,6 +265,64 @@ pub fn sync_from(home: &Path, project_dir: &Path, harness: &str) -> PlanSyncRepo
             }
         }
     }
+    if matches!(harness, "kimi" | "kimi-code") {
+        for path in kimi_plan_paths(home, project_dir) {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("plan");
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            if text.trim().is_empty() {
+                continue;
+            }
+            let file_hash = hash(&text);
+            let key = path.to_string_lossy().to_string();
+            match state.files.get(&key) {
+                None => {
+                    let title = plan_title(&path, &text);
+                    match crate::plans::record(project_dir, &title, "kimi-code", Some(&key), &text)
+                    {
+                        Ok(meta) => {
+                            report
+                                .ingested
+                                .push(format!("{} → {} (draft)", name, meta.id));
+                            state.files.insert(
+                                key,
+                                SeenFile {
+                                    hash: file_hash,
+                                    plan_id: meta.id,
+                                },
+                            );
+                        }
+                        Err(err) => report.notes.push(format!("{name}: record failed: {err}")),
+                    }
+                }
+                Some(seen) if seen.hash == file_hash => {}
+                Some(seen) => match crate::plans::update_draft_body(
+                    project_dir,
+                    &seen.plan_id,
+                    &text,
+                    "native plan edited — body refreshed",
+                ) {
+                    Ok(_) => {
+                        report.updated.push(format!("{} → {}", name, seen.plan_id));
+                        state.files.insert(
+                            key,
+                            SeenFile {
+                                hash: file_hash,
+                                plan_id: seen.plan_id.clone(),
+                            },
+                        );
+                    }
+                    Err(err) => report
+                        .notes
+                        .push(format!("{name}: {err} (left alone — it is owned now)")),
+                },
+            }
+        }
+    }
     state.last_run = chrono::Utc::now().to_rfc3339();
     save_state(project_dir, &state);
     report
@@ -227,7 +338,7 @@ pub fn maybe_auto(
     harness: &str,
     interval_mins: i64,
 ) -> Option<PlanSyncReport> {
-    if plan_dirs(home, harness).is_empty() {
+    if plan_dirs(home, harness).is_empty() && !matches!(harness, "kimi" | "kimi-code") {
         return None;
     }
     let state = load_state(project_dir);
@@ -316,12 +427,46 @@ mod tests {
     fn harnesses_without_plan_dirs_stay_silent() {
         let home = tempfile::tempdir().expect("home");
         let project = project();
-        assert!(maybe_auto(home.path(), project.path(), "kimi-code", 15).is_none());
+        assert!(maybe_auto(home.path(), project.path(), "codex", 15).is_none());
         // A harness with a known dir ingests; another project is untouched.
         write_plan(home.path(), "conductor_a1b2c3d4.plan.md", PLAN_A);
         let report = maybe_auto(home.path(), project.path(), "cursor", 15).expect("pass");
         assert_eq!(report.ingested.len(), 1);
         // Interval gate: an immediate second pass is silent.
         assert!(maybe_auto(home.path(), project.path(), "cursor", 15).is_none());
+    }
+
+    #[test]
+    fn kimi_session_plan_lands_as_draft_for_matching_project() {
+        let home = tempfile::tempdir().expect("home");
+        let project = project();
+        let session = home.path().join(".kimi-code/sessions/wd_project/session-1");
+        std::fs::create_dir_all(session.join("agents/main/plans")).expect("mkdir");
+        std::fs::write(
+            session.join("state.json"),
+            format!(
+                r#"{{"cwd":{}}}"#,
+                serde_json::to_string(&crate::transcripts::path_for_json(project.path())).unwrap()
+            ),
+        )
+        .expect("state");
+        std::fs::write(
+            session.join("agents/main/plans/historical.md"),
+            "# Historical plan\n\nBody.\n",
+        )
+        .expect("historical plan");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(
+            session.join("agents/main/plans/honest-smoke.md"),
+            "# Honest smoke fix\n\nBody.\n",
+        )
+        .expect("current plan");
+
+        let report = sync_from(home.path(), project.path(), "kimi-code");
+        assert_eq!(report.ingested.len(), 1, "{report:?}");
+        let (meta, _) = crate::plans::current(project.path()).expect("plan");
+        assert_eq!(meta.title, "Honest smoke fix");
+        assert_eq!(meta.created_by_harness, "kimi-code");
+        assert!(meta.source_path.unwrap().contains(".kimi-code/sessions"));
     }
 }
