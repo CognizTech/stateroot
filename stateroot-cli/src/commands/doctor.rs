@@ -435,6 +435,41 @@ fn hook_binary_checks(home: &Path) -> Vec<Check> {
     checks
 }
 
+/// Recursive directory size in bytes (best-effort; unreadable entries
+/// contribute zero).
+fn dir_size(path: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| {
+            let p = entry.path();
+            if p.is_dir() {
+                dir_size(&p)
+            } else {
+                entry.metadata().map(|m| m.len()).unwrap_or(0)
+            }
+        })
+        .sum()
+}
+
+/// Human-readable byte size (`512 B`, `12.4 KB`, `2.3 MB`, `1.1 GB`).
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
 /// Continuity chain: not "is it installed" but "is anything flowing".
 /// Per hooked harness — a duplicate-block lint on the managed hook config
 /// (the 152-block kimi pile that silenced a session) and the last captured
@@ -442,6 +477,31 @@ fn hook_binary_checks(home: &Path) -> Vec<Check> {
 /// removed server sync, never delivered, previously invisible).
 fn continuity_chain_checks(home: &Path, project_dir: &Path) -> Vec<Check> {
     let mut checks = Vec::new();
+
+    // Store footprint: growth you can see never becomes a surprise (sizes
+    // only, never content). The episodic journal is append-only by design;
+    // this line is how an operator watches it.
+    let root = stateroot_core::local_store::root(project_dir);
+    if root.is_dir() {
+        let total = dir_size(&root);
+        let episodic = std::fs::metadata(root.join("memories/episodic.jsonl"))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let local = dir_size(&root.join("local"));
+        let spool = dir_size(&root.join("spool"));
+        checks.push(Check {
+            label: "store footprint".into(),
+            ok: true,
+            detail: format!(
+                "{} total · episodic {} · search {} · spool {}",
+                human_size(total),
+                human_size(episodic),
+                human_size(local),
+                human_size(spool)
+            ),
+            hard: false,
+        });
+    }
 
     // Legacy outbox: ops queued for the removed server sync, never drained.
     let outbox = stateroot_core::local_store::root(project_dir)
@@ -576,6 +636,24 @@ fn continuity_chain_checks(home: &Path, project_dir: &Path) -> Vec<Check> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn human_size_formats_units() {
+        assert_eq!(human_size(512), "512 B");
+        assert_eq!(human_size(1024), "1.0 KB");
+        assert_eq!(human_size(12_800), "12.5 KB");
+        assert_eq!(human_size(2_300_000), "2.2 MB");
+        assert_eq!(human_size(1_610_612_736), "1.5 GB");
+    }
+
+    #[test]
+    fn dir_size_counts_recursively() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        write(&tmp.path().join("a/b/c.txt"), "1234");
+        write(&tmp.path().join("d.txt"), "12");
+        assert_eq!(dir_size(tmp.path()), 6);
+        assert_eq!(dir_size(&tmp.path().join("missing")), 0);
+    }
 
     fn write(path: &Path, body: &str) {
         if let Some(parent) = path.parent() {

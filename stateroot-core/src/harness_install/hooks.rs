@@ -134,17 +134,34 @@ fn backup_once(path: &Path) -> Result<(), HarnessError> {
     Ok(())
 }
 
+/// Write `text` to `path` atomically: tempfile in the same directory, fsync,
+/// rename. A crash mid-write leaves the old file intact — a harness config
+/// is the user's file, not ours. (Windows rename never replaces: remove the
+/// destination first; `backup_once` already holds the previous content.)
+fn atomic_write(path: &Path, text: &str) -> Result<(), HarnessError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(io_err(parent))?;
+    }
+    let tmp = path.with_extension(format!("stateroot-tmp-{}", std::process::id()));
+    {
+        use std::io::Write as _;
+        let mut file = std::fs::File::create(&tmp).map_err(io_err(&tmp))?;
+        file.write_all(text.as_bytes()).map_err(io_err(&tmp))?;
+        file.sync_all().map_err(io_err(&tmp))?;
+    }
+    if path.exists() {
+        let _ = std::fs::remove_file(path);
+    }
+    std::fs::rename(&tmp, path).map_err(io_err(path))
+}
+
 fn write_json_if_changed(path: &Path, doc: &Value) -> Result<bool, HarnessError> {
     let text = format!("{}\n", serde_json::to_string_pretty(doc)?);
     let current = std::fs::read_to_string(path).unwrap_or_default();
     if current == text {
         return Ok(false);
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(io_err(parent))?;
-    }
-    std::fs::write(path, text).map_err(io_err(path))?;
-    Ok(true)
+    atomic_write(path, &text).map(|_| true)
 }
 
 /// Install one Tier A harness's native hook config. Returns action lines.
@@ -249,18 +266,24 @@ fn install_toml_hooks(path: &Path, quirk: &HarnessQuirk) -> Result<Vec<String>, 
     }
     updated.push_str(&block);
 
-    if updated == existing {
-        return Ok(vec![format!(
-            "hooks already up to date ({})",
+    let mut actions = Vec::new();
+    // A broken config breaks the harness's whole session on some harnesses
+    // (kimi fails to load config.toml). Our write is textual — appending is
+    // safe even into a broken file — but the user must know it's broken.
+    if !existing.trim().is_empty() && toml::from_str::<toml::Value>(&existing).is_err() {
+        actions.push(format!(
+            "warning: {} is not valid TOML — hooks appended textually; fix the syntax error for the harness to load it",
             path.display()
-        )]);
+        ));
+    }
+    if updated == existing {
+        actions.push(format!("hooks already up to date ({})", path.display()));
+        return Ok(actions);
     }
     backup_once(path)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(io_err(parent))?;
-    }
-    std::fs::write(path, &updated).map_err(io_err(path))?;
-    Ok(vec![format!("hooks installed → {}", path.display())])
+    atomic_write(path, &updated)?;
+    actions.push(format!("hooks installed → {}", path.display()));
+    Ok(actions)
 }
 
 /// Remove `[[hooks]]` blocks whose body mentions `stateroot hook` (idempotent
@@ -422,7 +445,7 @@ pub fn remove_hooks(home: &Path, quirk: &HarnessQuirk) -> Result<Vec<String>, Ha
                 let stripped = strip_stateroot_toml_hooks(&existing);
                 if stripped != existing {
                     backup_once(&path)?;
-                    std::fs::write(&path, stripped).map_err(io_err(&path))?;
+                    atomic_write(&path, &stripped)?;
                     true
                 } else {
                     false
@@ -629,7 +652,7 @@ export default plugin;
             continue;
         }
         std::fs::create_dir_all(dir).map_err(io_err(dir))?;
-        std::fs::write(&path, content).map_err(io_err(&path))?;
+        atomic_write(&path, content)?;
         actions.push(format!("plugin file → {}", path.display()));
     }
     if actions.is_empty() {
@@ -710,7 +733,7 @@ fn enable_openclaw_plugin_entry(openclaw_home: &Path) -> Result<Option<String>, 
         std::fs::copy(&path, &bak).map_err(io_err(&bak))?;
     }
     let pretty = format!("{}\n", serde_json::to_string_pretty(&root)?);
-    std::fs::write(&path, pretty).map_err(io_err(&path))?;
+    atomic_write(&path, &pretty)?;
     Ok(Some(format!(
         "enabled plugins.entries.stateroot in {}",
         path.display()

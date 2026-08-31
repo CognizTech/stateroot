@@ -5,6 +5,14 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- **Hook-config writes are atomic and self-protecting.** Every harness
+  config write (TOML hooks, JSON hooks, plugin files, uninstall strips) now
+  goes through one atomic write (tempfile + fsync + rename; a crash
+  mid-write leaves the old file intact), and the TOML installer warns when
+  the existing config doesn't parse — appending still works textually, but
+  a broken config breaks the harness's whole session and the user must
+  know. `stateroot doctor` reports the store footprint (total, episodic
+  journal, search index, spool) so growth is never invisible.
 - **Harness-native plans federate into the store.** A plan authored in a
   harness's own plan mode used to strand in the harness home, invisible to
   every other harness (the cursor-plan continuity gap). Each harness now
