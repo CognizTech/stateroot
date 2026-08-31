@@ -90,7 +90,9 @@ fn is_stateroot_entry(entry: &Value) -> bool {
                 .into_iter()
                 .collect()
         });
-    commands.iter().any(|c| c.contains("stateroot hook"))
+    commands
+        .iter()
+        .any(|command| command.contains("stateroot hook") || command.contains("stateroot.exe hook"))
 }
 
 /// Overlay our entries into an event-keyed hooks object: drop prior
@@ -744,6 +746,40 @@ fn enable_openclaw_plugin_entry(openclaw_home: &Path) -> Result<Option<String>, 
 mod tests {
     use super::*;
     use crate::harness_install::registry::quirk;
+
+    #[test]
+    fn flat_overlay_replaces_windows_exe_entries_without_duplicates() {
+        let command = r"\\?\C:\Users\alice\AppData\Local\Programs\StateRoot\stateroot.exe hook session_end --harness cursor";
+        let mut hooks = Map::from_iter([(
+            "sessionEnd".to_string(),
+            json!([
+                {"type": "command", "command": command, "matcher": "", "timeout": 30},
+                {"type": "command", "command": command, "matcher": "", "timeout": 30},
+                {"type": "command", "command": "foreign-hook", "matcher": ""}
+            ]),
+        )]);
+        let ours = Map::from_iter([(
+            "sessionEnd".to_string(),
+            json!([{
+                "type": "command",
+                "command": command,
+                "matcher": "",
+                "timeout": 30
+            }]),
+        )]);
+
+        overlay(&mut hooks, &ours);
+
+        let entries = hooks["sessionEnd"].as_array().expect("entries");
+        assert_eq!(entries.len(), 2, "one foreign and one StateRoot entry");
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| is_stateroot_entry(entry))
+                .count(),
+            1
+        );
+    }
 
     #[test]
     fn openclaw_plugin_injects_on_prompt_build_not_session_start() {
