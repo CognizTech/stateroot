@@ -96,6 +96,82 @@ fn kimi_plan_paths(home: &Path, project_dir: &Path) -> Vec<PathBuf> {
     paths.into_iter().rev().take(1).collect()
 }
 
+/// How far back a cursor session may have touched a plan for it to count as
+/// that session's work (plans older than this with no session are skipped).
+const CURSOR_ATTRIBUTION_WINDOW: std::time::Duration =
+    std::time::Duration::from_secs(7 * 24 * 3600);
+
+/// Cursor's `~/.cursor/plans/` is a *global* pile with no project binding —
+/// ingesting by file presence alone pours every project's plans into one
+/// store (the historical-junk incident). A plan file is attributable to this
+/// project only when one of this project's transcripts shows activity within
+/// the attribution window of the plan's mtime. Returns this project's
+/// transcript mtimes, attributed by the absolute paths in the transcripts'
+/// own tool inputs.
+fn cursor_project_transcript_times(home: &Path, project_dir: &Path) -> Vec<std::time::SystemTime> {
+    let projects = home.join(".cursor/projects");
+    let Ok(workspaces) = std::fs::read_dir(&projects) else {
+        return Vec::new();
+    };
+    let project_key = crate::path_identity::equivalent_project_key(project_dir);
+    let mut times = Vec::new();
+    for workspace in workspaces.flatten() {
+        let Ok(sessions) = std::fs::read_dir(workspace.path().join("agent-transcripts")) else {
+            continue;
+        };
+        for session in sessions.flatten() {
+            let Ok(files) = std::fs::read_dir(session.path()) else {
+                continue;
+            };
+            for file in files.flatten() {
+                let path = file.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                let Ok(head) = read_head(&path, 8192) else {
+                    continue;
+                };
+                let belongs = transcript_project(&head)
+                    .map(|root| crate::path_identity::equivalent_project_key(&root) == project_key)
+                    .unwrap_or(false);
+                if belongs {
+                    if let Ok(mtime) = std::fs::metadata(&path).and_then(|m| m.modified()) {
+                        times.push(mtime);
+                    }
+                }
+            }
+        }
+    }
+    times
+}
+
+/// The first absolute path in the transcript head that resolves (walking up)
+/// to a stateroot project root. Tool inputs carry the workspace explicitly.
+fn transcript_project(head: &str) -> Option<PathBuf> {
+    for token in head.split(|c: char| c == '"' || c == '\'' || c.is_whitespace()) {
+        let t = token.trim_matches(|c| ",{}[]()".contains(c));
+        let looks_absolute = t.starts_with('/')
+            || (t.len() > 2
+                && t.as_bytes()[1] == b':'
+                && (t.as_bytes()[2] == b'\\' || t.as_bytes()[2] == b'/'));
+        if !looks_absolute {
+            continue;
+        }
+        if let Some(root) = crate::local_store::find_project_root(Path::new(t)) {
+            return Some(root);
+        }
+    }
+    None
+}
+
+fn read_head(path: &Path, bytes: usize) -> std::io::Result<String> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path)?;
+    let mut buf = vec![0u8; bytes];
+    let n = file.read(&mut buf)?;
+    Ok(String::from_utf8_lossy(&buf[..n]).to_string())
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct SyncState {
     #[serde(default)]
@@ -199,11 +275,33 @@ pub fn sync_from(home: &Path, project_dir: &Path, harness: &str) -> PlanSyncRepo
         let Ok(entries) = std::fs::read_dir(&source.dir) else {
             continue;
         };
+        let session_times = if source.harness == "cursor" {
+            cursor_project_transcript_times(home, project_dir)
+        } else {
+            Vec::new()
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
             if !name.ends_with(source.suffix) {
                 continue;
+            }
+            if source.harness == "cursor" {
+                // Attribute by session activity: a plan is this project's
+                // only if one of this project's transcripts was active
+                // within the window of the plan's mtime.
+                let attributable = std::fs::metadata(&path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|plan_mtime| plan_mtime.checked_sub(CURSOR_ATTRIBUTION_WINDOW))
+                    .map(|window_start| session_times.iter().any(|t| *t >= window_start))
+                    .unwrap_or(false);
+                if !attributable {
+                    report.notes.push(format!(
+                        "{name}: skipped — no cursor session activity for this project near it"
+                    ));
+                    continue;
+                }
             }
             let Ok(text) = std::fs::read_to_string(&path) else {
                 continue;
@@ -371,6 +469,21 @@ mod tests {
         path
     }
 
+    /// Seed a cursor transcript whose tool inputs name `project_dir` — the
+    /// session-activity evidence the attribution check requires.
+    fn seed_cursor_transcript(home: &Path, project_dir: &Path) {
+        let session = home.join(".cursor/projects/ws/agent-transcripts/s1");
+        std::fs::create_dir_all(&session).expect("mkdir");
+        let cwd = project_dir.display().to_string().replace('\\', "/");
+        std::fs::write(
+            session.join("s1.jsonl"),
+            format!(
+                "{{\"role\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"name\":\"Read\",\"input\":{{\"path\":\"{cwd}/src/lib.rs\"}}}}]}}}}"
+            ),
+        )
+        .expect("transcript");
+    }
+
     const PLAN_A: &str =
         "---\nname: Conductor UI\noverview: test\n---\n\n# Conductor UI\n\nBody A.\n";
 
@@ -378,6 +491,7 @@ mod tests {
     fn native_plan_lands_as_draft_with_provenance() {
         let home = tempfile::tempdir().expect("home");
         let project = project();
+        seed_cursor_transcript(home.path(), project.path());
         write_plan(home.path(), "conductor_a1b2c3d4.plan.md", PLAN_A);
         let report = sync_from(home.path(), project.path(), "cursor");
         assert_eq!(report.ingested.len(), 1, "{report:?}");
@@ -392,9 +506,25 @@ mod tests {
     }
 
     #[test]
+    fn cursor_plan_without_session_activity_is_skipped() {
+        let home = tempfile::tempdir().expect("home");
+        let project = project();
+        // No transcript naming this project — the global pile must not leak.
+        write_plan(home.path(), "foreign_a1b2c3d4.plan.md", PLAN_A);
+        let report = sync_from(home.path(), project.path(), "cursor");
+        assert!(report.ingested.is_empty(), "{report:?}");
+        assert!(
+            report.notes.iter().any(|n| n.contains("skipped")),
+            "{report:?}"
+        );
+        assert!(crate::plans::current(project.path()).is_none());
+    }
+
+    #[test]
     fn native_edit_updates_draft_but_never_past_draft() {
         let home = tempfile::tempdir().expect("home");
         let project = project();
+        seed_cursor_transcript(home.path(), project.path());
         let path = write_plan(home.path(), "conductor_a1b2c3d4.plan.md", PLAN_A);
         let _ = sync_from(home.path(), project.path(), "cursor");
         // The only plan in the store.
@@ -429,6 +559,7 @@ mod tests {
         let project = project();
         assert!(maybe_auto(home.path(), project.path(), "codex", 15).is_none());
         // A harness with a known dir ingests; another project is untouched.
+        seed_cursor_transcript(home.path(), project.path());
         write_plan(home.path(), "conductor_a1b2c3d4.plan.md", PLAN_A);
         let report = maybe_auto(home.path(), project.path(), "cursor", 15).expect("pass");
         assert_eq!(report.ingested.len(), 1);
