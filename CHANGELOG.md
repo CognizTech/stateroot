@@ -5,6 +5,8 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+## v0.1.12 — 2026-09-01
+
 - **Cursor restores working identity after context compaction.** Cursor cannot
   inject context from `preCompact` or `beforeSubmitPrompt`, so StateRoot now
   consumes the armed persona re-anchor through the first successful
@@ -15,6 +17,11 @@ StateRoot is pre-1.0 and milestones land as minor versions.
   checkpoints and may finalize; compiling inbox/wiki pages moves to `stop`
   so Composer shutdown is not blocked by a 20-second ingest on WSL mounts.
   Installed Cursor `sessionEnd` hooks now time out at 8 seconds.
+- **Transcript todo replay keeps content.** Standalone todo federation now
+  replays each transcript's todo state — the last full `TodoWrite` as the
+  base list with later merge calls applied by id — instead of taking only
+  the last call, which pushed contentless id-only items (the blank `[x]`
+  rows) whenever a session ended on a merge call.
 
 ## v0.1.11 — 2026-08-31
 
