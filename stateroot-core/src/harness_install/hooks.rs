@@ -54,6 +54,17 @@ fn nested_entries(quirk: &HarnessQuirk) -> Map<String, Value> {
     out
 }
 
+fn cursor_hook_timeout(harness_event: &str) -> u32 {
+    match harness_event {
+        // Window close waits on sessionEnd. Keep this short so a slow
+        // filesystem cannot stall Cursor's shutdown dialog for 30s.
+        "sessionEnd" => 8,
+        // session_start prints the digest first, then federation syncs.
+        "sessionStart" => 30,
+        _ => 15,
+    }
+}
+
 fn flat_entries(quirk: &HarnessQuirk) -> Map<String, Value> {
     let mut out = Map::new();
     for (harness_event, canonical) in quirk.event_map {
@@ -63,10 +74,7 @@ fn flat_entries(quirk: &HarnessQuirk) -> Map<String, Value> {
                 "type": "command",
                 "command": command_for(quirk, canonical),
                 "matcher": "",
-                // Cursor kills hooks at a short default timeout; session_start
-                // also runs federation syncs, which can take ~10s on slow
-                // filesystems. The digest prints first, then the syncs.
-                "timeout": 30,
+                "timeout": cursor_hook_timeout(harness_event),
             }]),
         );
     }
@@ -746,6 +754,16 @@ fn enable_openclaw_plugin_entry(openclaw_home: &Path) -> Result<Option<String>, 
 mod tests {
     use super::*;
     use crate::harness_install::registry::quirk;
+
+    #[test]
+    fn cursor_session_end_timeout_is_shorter_than_session_start() {
+        assert_eq!(cursor_hook_timeout("sessionEnd"), 8);
+        assert_eq!(cursor_hook_timeout("sessionStart"), 30);
+        let q = quirk("cursor").expect("cursor");
+        let entries = flat_entries(q);
+        assert_eq!(entries["sessionEnd"][0]["timeout"], 8);
+        assert_eq!(entries["sessionStart"][0]["timeout"], 30);
+    }
 
     #[test]
     fn flat_overlay_replaces_windows_exe_entries_without_duplicates() {

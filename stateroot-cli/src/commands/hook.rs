@@ -153,7 +153,12 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
                     note!("warning: could not record active harness: {err}");
                 }
                 let code = capture_observation(quirk, canonical, project_dir, &payload)?;
-                if canonical == "user_prompt_submit" && quirk.delivery().prompt_submit_injects {
+                let prompt_injects =
+                    canonical == "user_prompt_submit" && quirk.delivery().prompt_submit_injects;
+                let cursor_reanchors = canonical == "post_tool_use"
+                    && quirk.id == "cursor"
+                    && cursor_post_tool_needs_identity(ctx, quirk, project_dir, &payload);
+                if prompt_injects || cursor_reanchors {
                     resume_output(ctx, quirk, canonical, project_dir, &payload).await?;
                 }
                 Ok(code)
@@ -313,7 +318,39 @@ fn identity_event_prints(quirk: &registry::HarnessQuirk, canonical: &str) -> boo
     match canonical {
         "session_start" => policy.session_start_prints,
         "user_prompt_submit" => policy.prompt_submit_injects,
+        // Cursor cannot inject on beforeSubmitPrompt or preCompact. Its
+        // postToolUse response does support additional_context, making the
+        // first successful tool after compaction the only native re-anchor.
+        "post_tool_use" => quirk.id == "cursor",
         _ => false,
+    }
+}
+
+/// Cheap preflight for Cursor's high-frequency postToolUse event. Building a
+/// complete digest on every tool would be wasteful; read only the tiny
+/// per-session scheduler record unless a FULL can actually be due.
+fn cursor_post_tool_needs_identity(
+    ctx: &Ctx,
+    quirk: &registry::HarnessQuirk,
+    project_dir: &Path,
+    payload: &Value,
+) -> bool {
+    let home =
+        stateroot_core::harness_install::home_dir().unwrap_or_else(|_| ctx.config_dir.clone());
+    let identity = hook_identity_prefix(&ctx.config_dir, &home, Some(project_dir), quirk.id);
+    let hash = stateroot_core::persona_injection::content_hash(&identity);
+    let key = format!(
+        "{}:{}",
+        quirk.id,
+        stateroot_core::persona_injection::session_key(project_dir, payload)
+    );
+    match stateroot_core::persona_injection::load_state(&home, &key) {
+        None => true,
+        Some(state) => {
+            state.pending_compaction
+                || (!hash.is_empty() && hash != state.content_hash)
+                || !state.started
+        }
     }
 }
 
@@ -347,9 +384,9 @@ fn scheduled_identity_output(
         _ => true,
     };
     // Deliverable = the event's output can carry identity to the model on
-    // this harness: session_start where it marks (cursor/gemini ride it
-    // exclusively), prompt_submit where the policy injects. An armed
-    // compaction FULL waits for a deliverable event.
+    // this harness: session_start where it marks, prompt_submit where the
+    // policy injects, and Cursor postToolUse (its only post-compaction
+    // additional_context channel). An armed FULL waits for one of these.
     let deliverable = identity_event_marks(quirk, canonical);
     let decision = stateroot_core::persona_injection::decide_and_record(
         &home,
@@ -393,6 +430,7 @@ fn identity_event_marks(quirk: &registry::HarnessQuirk, canonical: &str) -> bool
     match canonical {
         "session_start" => policy.session_start_marks,
         "user_prompt_submit" => policy.prompt_submit_injects,
+        "post_tool_use" => quirk.id == "cursor",
         _ => false,
     }
 }
@@ -939,10 +977,15 @@ async fn checkpoint_from_spool(
         } else if !tail.is_empty() {
             note!("checkpoint recorded; existing structured handoff preserved");
         }
-        // Compile mined notes into wiki inbox / pages (not into learnings).
-        match super::compiler::try_ingest(&hook_ctx, false).await {
-            Ok(summary) => note!("{summary}"),
-            Err(err) => note!("ingest skipped: {err}"),
+        // Ingest is local but slow on Windows/WSL mounts (wiki + inbox rewrite).
+        // `stop` can pay that cost between turns. `session_end` runs while
+        // Cursor is closing the window — skip it so shutdown is not blocked
+        // for the full hook timeout. Next `stop` or `wiki compile` catches up.
+        if canonical == "stop" {
+            match super::compiler::try_ingest(&hook_ctx, false).await {
+                Ok(summary) => note!("{summary}"),
+                Err(err) => note!("ingest skipped: {err}"),
+            }
         }
         let path = spool_path(project_dir);
         if path.exists() {

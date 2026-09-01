@@ -92,7 +92,8 @@ fn cursor_session_start_injects_and_prompt_submit_is_capture_only() {
     seed_marid(config_home.path(), user_home.path());
     init_project(config_home.path(), user_home.path(), project.path());
 
-    // Cursor's real contract: additional_context only lands on sessionStart.
+    // Cursor's initial additional_context channel is sessionStart; postToolUse
+    // is reserved for gated fallback and post-compaction restoration.
     let start = stateroot(config_home.path(), user_home.path(), project.path())
         .args(["hook", "SessionStart", "--harness", "cursor"])
         .write_stdin(r#"{"conversation_id":"skills-chat"}"#)
@@ -118,6 +119,72 @@ fn cursor_session_start_injects_and_prompt_submit_is_capture_only() {
     assert!(
         !prompt_out.contains("additional_context"),
         "beforeSubmitPrompt must not inject: {prompt_out}"
+    );
+}
+
+#[test]
+fn cursor_post_tool_use_reanchors_once_after_compaction() {
+    let config_home = tempfile::tempdir().expect("config");
+    let user_home = tempfile::tempdir().expect("home");
+    let project = tempfile::tempdir().expect("project");
+    seed_marid(config_home.path(), user_home.path());
+    init_project(config_home.path(), user_home.path(), project.path());
+    let payload = r#"{"conversation_id":"cursor-compact"}"#;
+
+    let start = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["hook", "sessionStart", "--harness", "cursor"])
+        .write_stdin(payload)
+        .assert()
+        .success();
+    assert!(contains_marid(&stdout_of(&start)));
+
+    // Normal post-tool traffic remains silent: this is not per-tool
+    // reinjection.
+    let ordinary = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["hook", "postToolUse", "--harness", "cursor"])
+        .write_stdin(payload)
+        .assert()
+        .success();
+    assert!(
+        stdout_of(&ordinary).trim().is_empty(),
+        "ordinary postToolUse must stay silent"
+    );
+
+    // preCompact cannot inject in Cursor; it only arms the same-session
+    // record for the next event with a documented additional_context output.
+    let compact = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["hook", "preCompact", "--harness", "cursor"])
+        .write_stdin(payload)
+        .assert()
+        .success();
+    assert!(
+        stdout_of(&compact).trim().is_empty(),
+        "preCompact is observational"
+    );
+
+    let reanchor = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["hook", "postToolUse", "--harness", "cursor"])
+        .write_stdin(payload)
+        .assert()
+        .success();
+    let reanchor_out = stdout_of(&reanchor);
+    assert!(
+        reanchor_out.contains("additional_context"),
+        "Cursor postToolUse envelope: {reanchor_out}"
+    );
+    assert!(
+        contains_marid(&reanchor_out),
+        "post-compaction postToolUse must restore identity: {reanchor_out}"
+    );
+
+    let duplicate = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["hook", "postToolUse", "--harness", "cursor"])
+        .write_stdin(payload)
+        .assert()
+        .success();
+    assert!(
+        stdout_of(&duplicate).trim().is_empty(),
+        "re-anchor must be consumed exactly once"
     );
 }
 

@@ -5,6 +5,17 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- **Cursor restores working identity after context compaction.** Cursor cannot
+  inject context from `preCompact` or `beforeSubmitPrompt`, so StateRoot now
+  consumes the armed persona re-anchor through the first successful
+  `postToolUse` event, whose native response supports `additional_context`.
+  Ordinary post-tool events stay silent; the full identity is emitted once
+  after compaction (or when initial delivery was missed or identity changed).
+- **Cursor window close no longer waits on wiki ingest.** `session_end` still
+  checkpoints and may finalize; compiling inbox/wiki pages moves to `stop`
+  so Composer shutdown is not blocked by a 20-second ingest on WSL mounts.
+  Installed Cursor `sessionEnd` hooks now time out at 8 seconds.
+
 ## v0.1.11 — 2026-08-31
 
 - **Todos federate as first-class state.** Harness todo lists land in

@@ -105,11 +105,11 @@ impl DigestDeliveryPolicy {
                 session_start_prints: true,
                 session_start_marks: true,
                 // Cursor's beforeSubmitPrompt is continue-only (no
-                // additional_context) — prompt submits are capture-only;
-                // digest and identity ride sessionStart exclusively.
+                // additional_context) — prompt submits are capture-only.
+                // postToolUse provides the post-compaction/fallback channel.
                 prompt_submit_injects: false,
                 tier: DeliveryTier::Automatic,
-                note: "cursor injects only on sessionStart; prompt submits are capture-only",
+                note: "session-start inject; postToolUse restores identity after compaction",
             },
             "gemini-cli" | "antigravity" => Self {
                 primary_event: "session_start",
@@ -976,11 +976,12 @@ mod tests {
                     assert_eq!(policy.tier, DeliveryTier::Automatic);
                 }
                 "cursor" => {
-                    // Cursor injects additional_context ONLY on sessionStart;
-                    // beforeSubmitPrompt is continue-only (capture-only).
+                    // Cursor starts on sessionStart and restores an armed
+                    // compaction re-anchor through postToolUse.
                     assert!(policy.session_start_prints);
                     assert!(policy.session_start_marks);
                     assert!(!policy.prompt_submit_injects);
+                    assert!(policy.note.contains("postToolUse"));
                     assert_eq!(policy.tier, DeliveryTier::Automatic);
                 }
                 "openclaw" | "opencode" | "omp" => {

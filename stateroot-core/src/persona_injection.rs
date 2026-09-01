@@ -7,10 +7,10 @@
 //! content), COMPRESSED (a 1–2 line pointer), or NOTHING.
 //!
 //! Rules (binding):
-//! 1. FULL fires ONLY on (a) session start / first prompt_submit of a
-//!    session, (b) the first prompt_submit AFTER a compaction boundary, (c)
-//!    content change (the persona+user content hash differs from the last
-//!    FULL injection).
+//! 1. FULL fires ONLY on (a) session start / first deliverable event of a
+//!    session, (b) the first deliverable event AFTER a compaction boundary,
+//!    (c) content change (the persona+user content hash differs from the
+//!    last FULL injection).
 //! 2. COMPRESSED fires every 8th prompt_submit since the last FULL.
 //! 3. DEDUPE: no injection of any kind within 3 prompts OR 60 seconds of
 //!    the previous injection (state existing).
@@ -27,8 +27,9 @@
 //! never mark an injection: harnesses discard their stdout (kimi
 //! explicitly ignores PreCompact return values), so a "FULL" there was
 //! written into the void while the state believed identity had landed.
-//! They only ARM `pending_compaction`; the next prompt_submit — the
-//! channel that actually reaches the model — delivers the FULL.
+//! They only ARM `pending_compaction`; the next event whose harness contract
+//! can inject context delivers the FULL (usually prompt_submit; Cursor uses
+//! postToolUse).
 
 use std::path::{Path, PathBuf};
 
