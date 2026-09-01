@@ -406,31 +406,21 @@ fn sync_cursor_standalone(home: &Path, project_dir: &Path) -> TodoSyncReport {
                 if !transcript_head_belongs(&path, &project_key) {
                     continue;
                 }
-                let Some((merge, items)) = last_cursor_todowrite(&path) else {
+                let Some(items) = cursor_todowrite_state(&path) else {
                     continue;
                 };
                 let session_id = path
                     .file_stem()
                     .and_then(|s| s.to_str())
                     .unwrap_or("session");
-                let result = if merge {
-                    merge_by_id(
-                        project_dir,
-                        "cursor",
-                        session_id,
-                        items,
-                        &path.to_string_lossy(),
-                    )
-                } else {
-                    replace_list(
-                        project_dir,
-                        "cursor",
-                        session_id,
-                        items,
-                        &path.to_string_lossy(),
-                        None,
-                    )
-                };
+                let result = replace_list(
+                    project_dir,
+                    "cursor",
+                    session_id,
+                    items,
+                    &path.to_string_lossy(),
+                    None,
+                );
                 match result {
                     Ok(record) => report.written.push(format!(
                         "cursor/{} ({} items)",
@@ -467,18 +457,57 @@ fn transcript_head_belongs(path: &Path, project_key: &str) -> bool {
     false
 }
 
-fn last_cursor_todowrite(path: &Path) -> Option<(bool, Vec<TodoItem>)> {
-    let value = last_jsonl_value(path, is_cursor_todowrite)?;
-    let input = cursor_todowrite_input(&value)?;
-    let items = items_from_cursor_input(input);
-    if items.is_empty() {
-        return None;
+/// Replay one transcript's todo state: the last full TodoWrite (merge=false)
+/// is the base list; every merge call after it updates statuses by id with
+/// content preserved from the base. Reading only the LAST call leaves
+/// merge-only items contentless — the blank `[x]` bug: a transcript that
+/// ends on a merge call would push id+status items with no text at all.
+fn cursor_todowrite_state(path: &Path) -> Option<Vec<TodoItem>> {
+    let tail = read_tail(path, JSONL_TAIL).ok()?;
+    let mut base: Option<Vec<TodoItem>> = None;
+    let mut merges: Vec<Vec<TodoItem>> = Vec::new();
+    for line in tail.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(input) = cursor_todowrite_input(&value) else {
+            continue;
+        };
+        let items = items_from_cursor_input(input);
+        if items.is_empty() {
+            continue;
+        }
+        if cursor_merge_flag(input) {
+            if base.is_some() {
+                merges.push(items);
+            } else {
+                // A merge with no full write before it: treat as the base —
+                // nothing earlier exists to borrow content from.
+                base = Some(items);
+                merges.clear();
+            }
+        } else {
+            base = Some(items);
+            merges.clear();
+        }
     }
-    Some((cursor_merge_flag(input), items))
-}
-
-fn is_cursor_todowrite(value: &Value) -> bool {
-    cursor_todowrite_input(value).is_some()
+    let mut items = base?;
+    for merge_items in merges {
+        for item in merge_items {
+            if let Some(row) = items.iter_mut().find(|r| r.key == item.key) {
+                row.status = item.status;
+                if !item.content.is_empty() {
+                    row.content = item.content;
+                }
+            } else {
+                items.push(item);
+            }
+        }
+    }
+    Some(items)
 }
 
 fn cursor_todowrite_input(value: &Value) -> Option<&Value> {
@@ -521,12 +550,9 @@ fn sync_claude(home: &Path, project_dir: &Path) -> TodoSyncReport {
             if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                 continue;
             }
-            let Some(input) = last_jsonl_value(&path, |v| walk_tool_use(v, "TodoWrite").is_some())
-                .and_then(|v| walk_tool_use(&v, "TodoWrite").cloned())
-            else {
+            let Some(items) = cursor_todowrite_state(&path) else {
                 continue;
             };
-            let items = items_from_cursor_input(&input);
             if items.is_empty() {
                 continue;
             }
@@ -534,25 +560,14 @@ fn sync_claude(home: &Path, project_dir: &Path) -> TodoSyncReport {
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("session");
-            let merge = cursor_merge_flag(&input);
-            let result = if merge {
-                merge_by_id(
-                    project_dir,
-                    "claude-code",
-                    session_id,
-                    items,
-                    &path.to_string_lossy(),
-                )
-            } else {
-                replace_list(
-                    project_dir,
-                    "claude-code",
-                    session_id,
-                    items,
-                    &path.to_string_lossy(),
-                    None,
-                )
-            };
+            let result = replace_list(
+                project_dir,
+                "claude-code",
+                session_id,
+                items,
+                &path.to_string_lossy(),
+                None,
+            );
             match result {
                 Ok(record) => report.written.push(format!(
                     "claude-code/{} ({} items)",
@@ -973,6 +988,34 @@ isProject: false
         assert_eq!(record.items.len(), 1);
         assert_eq!(record.items[0].content, "Audit the seams");
         assert_eq!(record.items[0].status, "completed");
+    }
+
+    #[test]
+    fn todowrite_state_replays_full_write_then_merges() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let transcript = tmp.path().join("s1.jsonl");
+        let full = r#"{"role":"assistant","message":{"content":[{"type":"tool_use","name":"TodoWrite","input":{"merge":false,"todos":[{"id":"trace","content":"Trace the path","status":"in_progress"},{"id":"cause","content":"Name the cause","status":"pending"}]}}]}}"#;
+        let merge = r#"{"role":"assistant","message":{"content":[{"type":"tool_use","name":"TodoWrite","input":{"merge":true,"todos":[{"id":"trace","status":"completed"},{"id":"fix","status":"completed"}]}}]}}"#;
+        std::fs::write(&transcript, format!("{full}\n{merge}\n")).expect("write");
+        let items = cursor_todowrite_state(&transcript).expect("state");
+        let trace = items.iter().find(|i| i.key == "trace").expect("trace");
+        assert_eq!(trace.content, "Trace the path");
+        assert_eq!(trace.status, "completed");
+        let cause = items.iter().find(|i| i.key == "cause").expect("cause");
+        assert_eq!(cause.content, "Name the cause");
+        assert_eq!(cause.status, "pending");
+        // A merge-only id is added (contentless — nothing to borrow from).
+        let fix = items.iter().find(|i| i.key == "fix").expect("fix");
+        assert_eq!(fix.status, "completed");
+        // Crucially: the merge must not blank any content-bearing row.
+        assert!(items.iter().filter(|i| !i.content.is_empty()).count() >= 2);
+
+        // A merge before any full write becomes the base — no blanks panic.
+        std::fs::write(&transcript, format!("{merge}\n")).expect("rewrite");
+        let items = cursor_todowrite_state(&transcript).expect("merge-only");
+        assert!(items
+            .iter()
+            .any(|i| i.key == "trace" && i.status == "completed"));
     }
 
     #[test]
