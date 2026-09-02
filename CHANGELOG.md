@@ -5,6 +5,15 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- **The flagship split is taught, not discovered.** The session skill and the
+  one-agent block now carry the plan/implement flow as a first-class rule:
+  record the plan in the shared store (`stateroot plan record --stdin/--file`),
+  hand off with `handoff write --to <harness>` (plan_ref rides automatically),
+  and the executor's digest says execute — do not re-plan. Harness-native plan
+  files still federate in as drafts at boundaries, but the deliberate path is
+  immediate. (A fresh-project Claude session explored `.cursor/` and planned
+  natively because nothing in its context said otherwise — it does now.)
+
 ## v0.1.12 — 2026-09-01
 
 - **Cursor restores working identity after context compaction.** Cursor cannot

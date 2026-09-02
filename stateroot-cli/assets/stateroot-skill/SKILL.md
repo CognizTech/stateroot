@@ -62,6 +62,17 @@ Before attempting any non-trivial approach:
 1. run `scripts/search.sh "failed approach <topic>"` (wraps `stateroot memory recall`) or read `failed_approaches` in the current handoff
 2. if a matching failure exists, do not repeat it — state explicitly why the new attempt differs
 
+### The flagship flow: plan in one harness, implement in another
+
+When the user asks you to make a plan that another harness will implement — or any time a plan should outlive your session:
+
+1. **Record the plan in the shared store, never only in your harness's native plan location** (`~/.claude/plans/`, `~/.cursor/plans/`, plan-mode files):
+   - write the plan body and run `stateroot plan record --stdin --title "<title>"` (pipe the body; `--file <path>` also works), or `--from <your-harness>`
+   - on harnesses with native plan mode: author in plan mode as usual, then record the same body into the store before exiting plan mode
+2. **Hand it off**: `stateroot handoff write --from <you> --to <target harness> --objective "…" --task "Execute the plan at .stateroot/plans/<id>.md" [...]` — the store auto-attaches the approved/active plan's `plan_ref` to the handoff
+3. The executor's digest then says **"execute this plan; do not re-plan or re-explore"** — approve with `stateroot plan approve <id>` when the user has reviewed, `activate <id>` to mark it the running plan
+4. Harness-native plans written in native plan mode DO federate in automatically at session boundaries (as drafts) — but the record-then-handoff path is immediate and deliberate; use it when the plan is meant for another harness NOW
+
 ### 2b) Meaningful real-tree change -> snap
 
 After meaningful changes to the **real project tree** (not `.stateroot/` metadata alone):

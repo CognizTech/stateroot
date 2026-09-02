@@ -14,6 +14,7 @@
 - Privacy: files matching root `.gitignore` or `.staterootignore` never enter snap/root trees (plus hardcoded `.git/` and `.stateroot/local/`). `.staterootignore` is extra patterns for things git still tracks.
 - Shared rules: product-intent is always on (full body in the digest). Other harness instruction files join the pool via `stateroot rules sync`. Preserve product intent; do not add classifiers, approval gates, or generic architecture.
 - Self-improvement activates immediately: `learn_record`, soul propose, skill propose, and memory add/replace honor the caller's intent — no approve gate. Distill compiles into the wiki inbox (not learnings).
+- Planning for another harness to implement? Record the plan in the shared store: `stateroot plan record --stdin --title "…"` (or `--file`). Harness-native plan locations (`~/.claude/plans/`, `~/.cursor/plans/`, plan-mode files) are NOT the shared store — they federate in as drafts at session boundaries, but the deliberate cross-harness path is record-then-handoff: `stateroot handoff write --to <harness> …` and the executor's digest says *execute it; do not re-plan*.
 
 ### Capabilities
 
