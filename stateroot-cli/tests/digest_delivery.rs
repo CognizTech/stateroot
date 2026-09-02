@@ -389,9 +389,9 @@ fn legacy_hook_marker_suppresses_resume() {
             .join(".stateroot/local/digest-delivery.v1.json"),
     )
     .expect("remove ledger");
-    // Fresh timestamp: a stale migrated marker would (correctly) be treated
-    // as an earlier session under the resume staleness rule and redeliver.
-    let delivered_at = (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+    // Same-breath timestamp: under the resume retry-debounce rule an older
+    // migrated marker belongs to an earlier session and would redeliver.
+    let delivered_at = chrono::Utc::now().to_rfc3339();
     std::fs::write(
         project.path().join(".stateroot/hook-resume-delivered.json"),
         format!(

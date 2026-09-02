@@ -52,7 +52,7 @@ When the user asks to change the agent's personality, voice, name, character, or
 
 At the start of every session in a stateroot project, before doing any work:
 1. consume the auto-injected StateRoot digest (persona + USER.md + work body) when the harness put it in context. Automatic harnesses inject on session-start and/or the first prompt. Do not wait to be asked who you are.
-2. only run the harness-specific resume (e.g. `stateroot resume --harness cursor` / `--harness codex` / `--harness claude` / `--harness kimi`) — or `scripts/resume.sh --harness <id>` — if **no** identity/resume digest appeared. Manual resume is the last fallback, not the primary reliability mechanism. Degraded harnesses (Hermes, Copilot, Crush) need this fallback.
+2. only run the harness-specific resume (e.g. `stateroot resume --harness cursor` / `--harness codex` / `--harness claude` / `--harness kimi`) — or `scripts/resume.sh --harness <id>` — if **no** identity/resume digest appeared. Manual resume is the last fallback, not the primary reliability mechanism. Degraded harnesses (Hermes, Copilot, Crush) need this fallback. **Hook-less sessions (IDE/ACP integrations fire no hooks) never receive the digest — there resume at session start is required, not a fallback, and `stateroot resume --force` after any context compaction re-anchors identity.**
 3. treat that **entire** output — current handoff, hot-apex memory, context pack — as the project state of record
 4. **never truncate resume or the hook digest.** Run the command as-is. Do not pipe it through `head`, `tail`, `less`, `sed`, `awk`, `cut`, `wc`, or any line/byte limiter. Do not add `--budget`. The CLI already sized the digest. A clipped resume is a corrupted state of record.
 5. do not run resume again in the same session unless the user explicitly asks (`--force` reprints)
@@ -76,9 +76,10 @@ Before attempting any non-trivial approach:
 When the user asks you to make a plan that another harness will implement — or any time a plan should outlive your session:
 
 1. **Record the plan in the shared store, never only in your harness's native plan location** (`~/.claude/plans/`, `~/.cursor/plans/`, plan-mode files):
-   - write the plan body and run `stateroot plan record --stdin --title "<title>"` (pipe the body; `--file <path>` also works), or `--from <your-harness>`
-   - on harnesses with native plan mode: author in plan mode as usual, then record the same body into the store before exiting plan mode
-2. **Hand it off**: `stateroot handoff write --from <you> --to <target harness> --objective "…" --task "Execute the plan at .stateroot/plans/<id>.md" [...]` — the store auto-attaches the approved/active plan's `plan_ref` to the handoff
+   - write the plan body and run `stateroot plan record --stdin --title "<title>"` (pipe the body), or `--from <your-harness>`
+   - on harnesses with native plan mode: author in plan mode as usual, then record the same body into the store before exiting plan mode (`--file <path>` exists to ingest that existing plan-mode file)
+   - never author a plan markdown inside the project repo just to hand it off — repo docs are project artifacts; the shared store carries the plan and the executor reads it with `stateroot plan show <id>`
+2. **Hand it off**: `stateroot handoff write --from <you> --to <target harness> --objective "…" --task "Execute recorded plan <id> (stateroot plan show <id>)" [...]` — the store auto-attaches the approved/active plan's `plan_ref` to the handoff
 3. The executor's digest then says **"execute this plan; do not re-plan or re-explore"** — approve with `stateroot plan approve <id>` when the user has reviewed, `activate <id>` to mark it the running plan
 4. Harness-native plans written in native plan mode DO federate in automatically at session boundaries (as drafts) — but the record-then-handoff path is immediate and deliberate; use it when the plan is meant for another harness NOW
 

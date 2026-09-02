@@ -811,8 +811,8 @@ pub async fn run(
         if !decision.deliver {
             let seq = digest_delivery::handoff_seq(&ctx.cwd);
             println!(
-                "(StateRoot resume already delivered this session for handoff seq {seq} — \
-skipping duplicate. Pass --force to reprint.)\n\n{NO_REFETCH_FOOTER}"
+                "(StateRoot resume was delivered moments ago for handoff seq {seq} — \
+skipping duplicate. If this session has no digest in context, pass --force to reprint.)\n\n{NO_REFETCH_FOOTER}"
             );
             return Ok(());
         }

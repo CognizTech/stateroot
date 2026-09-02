@@ -21,6 +21,27 @@ StateRoot is pre-1.0 and milestones land as minor versions.
   full re-injection on every harness. Learnings stay taste; the soul stays
   identity. (OpenClaw filed a persona change under learnings because no
   contract surface said where identity lives — they all do now.)
+- **Manual resume no longer starves fresh sessions.** The resume channel
+  deduped on a 30-minute freshness window with no session id, so a brand-new
+  session starting minutes after another (demo takes, restarts) was told
+  "already delivered" and received no digest, no state, and no persona.
+  Resume now only collapses near-simultaneous retries (the 5s retry
+  debounce); anything older is treated as a new session and delivers. The
+  duplicate message now says to pass `--force` when the session has no
+  digest in context.
+- **Hook-less sessions are taught to resume.** IDE/ACP integrations (Kimi
+  Code in Cursor, Zed, JetBrains) fire no hooks, so no digest ever arrives:
+  every contract surface now says resume at session start is required there,
+  and `stateroot resume --force` after a context compaction re-anchors
+  identity. (Two recorded demo sessions lost the persona to exactly this.)
+- **Plan federation is stdin-first, never repo docs.** The plan/implement
+  rule on every surface now pipes the body (`plan record --stdin`), reserves
+  `--file` for ingesting an existing harness-native plan-mode file, and
+  forbids authoring a plan markdown inside the project repo just to hand it
+  off — the executor reads the store with `stateroot plan show <id>`, and
+  the handoff task references the plan id, not a repo path. (A demo session
+  wrote `docs/plans/*.md` and pointed the next harness at the repo file —
+  the old "(or --file)" wording licensed it.)
 
 ## v0.1.12 — 2026-09-01
 

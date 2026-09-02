@@ -13,7 +13,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::local_store::{self, SESSION_STALE_MINUTES};
+use crate::local_store;
+#[cfg(test)]
+use crate::local_store::SESSION_STALE_MINUTES;
 use crate::skill_federation::normalize_harness;
 
 /// Schema id written into the ledger.
@@ -248,13 +250,17 @@ fn decide(
 
     match channel {
         DeliveryChannel::Resume => {
-            // New-session staleness: a matching entry only suppresses a
-            // reprint while it is FRESH (SESSION_STALE_MINUTES). An older
-            // match belongs to an earlier session — deliver again instead
-            // of staying silenced project-forever; a malformed timestamp
-            // counts as stale.
+            // A manual resume carries no session id, so a matching entry
+            // may be THIS session's earlier print or a brand-new session
+            // that has received nothing (hook-less IDE/ACP sessions rely
+            // on resume as their only channel). Only collapse
+            // near-simultaneous retries; anything older is a new session
+            // and must receive the digest — a starved session (no state,
+            // no identity) costs far more than a rare double print.
             let duplicate = session_entries.iter().any(|e| {
-                e.handoff_seq == seq && e.content_fp == content_fp && is_fresh(&e.delivered_at, now)
+                e.handoff_seq == seq
+                    && e.content_fp == content_fp
+                    && within_debounce(&e.delivered_at, now)
             });
             if duplicate {
                 return DeliveryDecision::no("duplicate");
@@ -287,19 +293,6 @@ fn decide(
             DeliveryDecision::yes("fresh")
         }
     }
-}
-
-/// True when `delivered_at` is less than SESSION_STALE_MINUTES older than
-/// `now`. Malformed timestamps count as stale (deliver fresh, never
-/// suppress).
-fn is_fresh(delivered_at: &str, now: &str) -> bool {
-    let Ok(then) = chrono::DateTime::parse_from_rfc3339(delivered_at) else {
-        return false;
-    };
-    let Ok(now) = chrono::DateTime::parse_from_rfc3339(now) else {
-        return false;
-    };
-    (now - then).num_minutes() < SESSION_STALE_MINUTES
 }
 
 fn within_debounce(delivered_at: &str, now: &str) -> bool {
@@ -535,6 +528,38 @@ mod tests {
         assert_eq!(resume.reason, "duplicate");
     }
 
+    #[test]
+    fn hook_then_resume_after_debounce_delivers() {
+        // The tradeoff, documented: a manual resume carries no session id,
+        // so past the retry debounce an earlier hook delivery counts as a
+        // different (possibly hook-less) session and the digest reprints.
+        // A wasted reprint is cheap; a starved session is not.
+        let dir = project();
+        let fp = content_fingerprint(dir.path());
+        mark_delivered(
+            dir.path(),
+            "codex",
+            DeliveryIntent::Session,
+            DeliveryChannel::Hook,
+            "session_start",
+            &json!({}),
+            &fp,
+        );
+        edit_only_entry(&dir, |e| {
+            e.delivered_at = aged_rfc3339(1);
+        });
+        let resume = should_deliver(
+            dir.path(),
+            "codex",
+            DeliveryIntent::Session,
+            DeliveryChannel::Resume,
+            &json!({}),
+            &fp,
+            false,
+        );
+        assert!(resume.deliver, "{}", resume.reason);
+    }
+
     /// Rewrite the single ledger entry in place (the project() fixture
     /// records exactly one delivery per test before this runs).
     fn edit_only_entry(dir: &tempfile::TempDir, f: impl FnOnce(&mut LedgerEntry)) {
@@ -550,8 +575,8 @@ mod tests {
 
     #[test]
     fn resume_fresh_duplicate_is_still_suppressed() {
-        // Same-session reprint guard: a matching entry younger than the
-        // staleness threshold still collapses the duplicate.
+        // Same-breath reprint guard: a matching entry inside the retry
+        // debounce still collapses the duplicate.
         let dir = project();
         let fp = content_fingerprint(dir.path());
         mark_delivered(
@@ -574,6 +599,38 @@ mod tests {
         );
         assert!(!again.deliver);
         assert_eq!(again.reason, "duplicate");
+    }
+
+    #[test]
+    fn resume_minutes_old_entry_is_a_new_session_and_delivers() {
+        // Demo-take regression: back-to-back sessions start minutes apart,
+        // and a manual resume carries no session id — an entry a few
+        // minutes old belongs to a DIFFERENT session, never to a retry.
+        let dir = project();
+        let fp = content_fingerprint(dir.path());
+        mark_delivered(
+            dir.path(),
+            "kimi",
+            DeliveryIntent::Session,
+            DeliveryChannel::Resume,
+            "resume",
+            &json!({}),
+            &fp,
+        );
+        edit_only_entry(&dir, |e| {
+            e.delivered_at = aged_rfc3339(2);
+        });
+        let next = should_deliver(
+            dir.path(),
+            "kimi",
+            DeliveryIntent::Session,
+            DeliveryChannel::Resume,
+            &json!({}),
+            &fp,
+            false,
+        );
+        assert!(next.deliver, "{}", next.reason);
+        assert_eq!(next.reason, "fresh");
     }
 
     #[test]
@@ -770,9 +827,9 @@ mod tests {
     fn legacy_markers_migrate() {
         let dir = project();
         let root = local_store::root(dir.path());
-        // Fresh timestamp: a stale migrated marker would (correctly) be
-        // treated as an earlier session under the resume staleness rule.
-        let delivered_at = aged_rfc3339(5);
+        // Same-breath timestamp: an older migrated marker now belongs to
+        // an earlier session under the resume retry-debounce rule.
+        let delivered_at = aged_rfc3339(0);
         fs::write(
             root.join(local_store::LEGACY_HOOK_RESUME_MARKER),
             format!(
