@@ -39,6 +39,15 @@ Skills and capabilities are shared across harnesses. When the user asks for a ca
 3. on an explicit ask, delegate the bounded microtask: `stateroot delegate --to <harness> --skill <slug> --task "<task>"` — then inspect the produced outputs; do not replay the foreign transcript
 4. never claim another harness's capability as your own: say *which* harness would do it
 
+### Identity changes are soul changes — never learnings, never memory
+
+When the user asks to change the agent's personality, voice, name, character, or boundaries (anything about **who you are** or **how you speak**):
+
+1. that is a **soul** change, full stop — not a learning (taste for *work*), not a memory (facts about the *project*)
+2. write it to the canonical soul: `stateroot soul propose --stdin` (pipe the updated soul) or `soul edit` — it lands in `~/.stateroot/soul/SOUL.md` with a history snapshot
+3. soul sync then pushes it to every harness's native persona files (openclaw, hermes) — the change propagates to all harnesses at their next session
+4. the digest identity hash changes on adoption, so every harness re-anchors with a FULL injection automatically
+
 ### 1) Session start -> consume identity, resume only as fallback
 
 At the start of every session in a stateroot project, before doing any work:

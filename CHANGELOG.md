@@ -13,6 +13,14 @@ StateRoot is pre-1.0 and milestones land as minor versions.
   files still federate in as drafts at boundaries, but the deliberate path is
   immediate. (A fresh-project Claude session explored `.cursor/` and planned
   natively because nothing in its context said otherwise — it does now.)
+- **Persona changes route to the soul, not to learnings.** The session skill,
+  the AGENTS.md block, the Claude command, the Cursor rule, and the one-agent
+  projections now state it outright: personality/voice/name/boundary changes
+  go to `stateroot soul propose --stdin` (or `soul edit`), soul sync pushes
+  the persona to harness-native files, and the identity hash change forces a
+  full re-injection on every harness. Learnings stay taste; the soul stays
+  identity. (OpenClaw filed a persona change under learnings because no
+  contract surface said where identity lives — they all do now.)
 
 ## v0.1.12 — 2026-09-01
 
