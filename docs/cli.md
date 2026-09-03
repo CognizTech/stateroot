@@ -290,8 +290,8 @@ harnesses know the project.
 
 | Harness | Reads | Lands as |
 | --- | --- | --- |
-| `claude` | `~/.claude/projects/<slug>/memory/*.md` (slug decodes to the cwd, matched with walk-up/walk-down tolerance) | wiki pages `memories/pages/harness/claude/*.md` |
-| `codex` | `~/.codex/memories/*.md` (flat; the sqlite is pipeline state, never read) | wiki pages `memories/pages/harness/codex/*.md` |
+| `claude` | `~/.claude/projects/<slug>/memory/*.md` (slug decodes to the cwd, matched with walk-up/walk-down tolerance) | wiki pages `wiki/pages/harness/claude/*.md` |
+| `codex` | `~/.codex/memories/*.md` (flat; the sqlite is pipeline state, never read) | wiki pages `wiki/pages/harness/codex/*.md` |
 | `openclaw` | `~/.openclaw/workspace/memory/*.md` (daily logs) | episodic records (`harness-memory:openclaw:<hash>` source id) |
 
 `stateroot memory sync [--harness claude|codex|openclaw] [--dry-run]` — no

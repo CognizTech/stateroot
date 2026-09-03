@@ -465,6 +465,7 @@ mod tests {
             "JWT tokens live in crates/auth",
             "auth",
             "entity",
+            None,
         )
         .unwrap();
         local_store::append_episodic(

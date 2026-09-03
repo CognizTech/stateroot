@@ -434,14 +434,19 @@ fn deterministic_ingest(ctx: &Ctx, home: &std::path::Path) -> Result<String> {
     if added > 0 {
         let _ = stateroot_core::wiki::append_log(
             &ctx.cwd,
-            &format!("deterministic ingest: {added} bullet(s) → memories/pages/_inbox.md"),
+            &format!("deterministic ingest: {added} bullet(s) → wiki/pages/_inbox.md"),
         );
     }
     let _ = stateroot_core::memory_index::rebuild_if_needed(&ctx.cwd, home);
     Ok(format!("deterministic ingest: {added} new inbox bullet(s)"))
 }
 
-fn apply_agentic_ingest(ctx: &Ctx, home: &std::path::Path, parsed: &Value) -> Result<String> {
+fn apply_agentic_ingest(
+    ctx: &Ctx,
+    home: &std::path::Path,
+    parsed: &Value,
+    actor: Option<&str>,
+) -> Result<String> {
     let mut pages = 0usize;
     let mut facts = 0usize;
     if let Some(arr) = parsed.get("pages").and_then(|v| v.as_array()) {
@@ -460,7 +465,7 @@ fn apply_agentic_ingest(ctx: &Ctx, home: &std::path::Path, parsed: &Value) -> Re
             if slug.eq_ignore_ascii_case("soul") || slug.contains("SOUL") {
                 continue;
             }
-            let _ = stateroot_core::wiki::write_page(&ctx.cwd, slug, body, summary, kind)?;
+            let _ = stateroot_core::wiki::write_page(&ctx.cwd, slug, body, summary, kind, actor)?;
             pages += 1;
         }
     }
@@ -578,7 +583,7 @@ pub async fn try_ingest(ctx: &Ctx, force: bool) -> Result<String> {
     if mode(ctx) == CompilerMode::Agentic {
         let stmts = stateroot_core::learnings::distill_statements(&ctx.cwd, &home);
         let inbox =
-            stateroot_core::wiki::show(&ctx.cwd, "memories/pages/_inbox.md").unwrap_or_default();
+            stateroot_core::wiki::show(&ctx.cwd, "wiki/pages/_inbox.md").unwrap_or_default();
         let payload = serde_json::to_string_pretty(&json!({
             "schema_version": "stateroot.ingest.v1",
             "mined": stmts.iter().map(|(s, src, c)| json!({
@@ -599,7 +604,9 @@ pub async fn try_ingest(ctx: &Ctx, force: bool) -> Result<String> {
             .await
             {
                 if let Ok(parsed) = parse_ingest_json(&content) {
-                    if let Ok(agentic) = apply_agentic_ingest(ctx, &home, &parsed) {
+                    if let Ok(agentic) =
+                        apply_agentic_ingest(ctx, &home, &parsed, Some(&endpoint.model))
+                    {
                         summary = format!("{summary}; {agentic}");
                     }
                 }

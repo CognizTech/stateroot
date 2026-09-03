@@ -26,7 +26,7 @@ pub const TOOL_DEFS: &[(&str, &str, &str)] = &[
     ),
     (
         "wiki_show",
-        "Read one compiled wiki page body (path like memories/pages/auth.md or a slug).",
+        "Read one compiled wiki page (path like wiki/pages/auth.md or a slug).",
         r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#,
     ),
     (

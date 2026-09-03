@@ -58,10 +58,11 @@ fn sync_pulls_codex_then_pushes_managed_brief() {
     assert!(stdout.contains("1 found · 1 imported"), "stdout: {stdout}");
     let page = project
         .path()
-        .join(".stateroot/memories/pages/harness/codex/project-status.md");
+        .join(".stateroot/wiki/pages/harness/codex/project-status.md");
     assert!(page.is_file(), "page not written: {page:?}");
     let text = std::fs::read_to_string(&page).expect("page");
-    assert!(text.contains("stateroot:imported harness=codex"), "{text}");
+    assert!(text.contains("type: Harness Note"), "{text}");
+    assert!(text.contains("stateroot_import"), "{text}");
     assert!(text.contains("integration-token-99"), "{text}");
 
     // Idempotent: second pull reports duplicates.

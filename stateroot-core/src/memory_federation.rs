@@ -26,8 +26,8 @@ pub const FEDERATION_PATH: &str = "memories/federation.json";
 pub const FEDERATION_SCHEMA: &str = "stateroot.memory_federation.v1";
 /// Marker that identifies a StateRoot-managed push target.
 pub const MANAGED_MARKER: &str = "<!-- stateroot:managed v1 -->";
-/// Provenance header prefix written at the top of every imported page.
-pub const IMPORT_MARKER: &str = "stateroot:imported";
+/// Extension frontmatter key carrying import provenance on imported pages.
+pub const IMPORT_KEY: &str = "stateroot_import";
 /// Cap on the pushed brief body (chars, truncate at a line boundary).
 pub const PUSH_CAP: usize = 4000;
 
@@ -487,12 +487,40 @@ fn write_imported_page(
         .join("harness")
         .join(note.harness);
     std::fs::create_dir_all(&dir)?;
-    let header = format!(
-        "<!-- stateroot:imported harness={} source={} hash={} -->",
-        note.harness, note.source_path, note.hash
+    let mut extra = serde_yaml::Mapping::new();
+    let mut source = serde_yaml::Mapping::new();
+    source.insert(
+        serde_yaml::Value::String("resource".into()),
+        serde_yaml::Value::String(note.source_path.clone()),
     );
-    let body = format!("{header}\n\n{}\n", note.text.trim());
-    std::fs::write(dir.join(file), body)?;
+    extra.insert(
+        serde_yaml::Value::String("sources".into()),
+        serde_yaml::Value::Sequence(vec![serde_yaml::Value::Mapping(source)]),
+    );
+    let mut import = serde_yaml::Mapping::new();
+    import.insert(
+        serde_yaml::Value::String("harness".into()),
+        serde_yaml::Value::String(note.harness.to_string()),
+    );
+    import.insert(
+        serde_yaml::Value::String("hash".into()),
+        serde_yaml::Value::String(note.hash.clone()),
+    );
+    extra.insert(
+        serde_yaml::Value::String(IMPORT_KEY.into()),
+        serde_yaml::Value::Mapping(import),
+    );
+    let existing = std::fs::read_to_string(dir.join(file)).ok();
+    let doc = wiki::conform_page(
+        existing.as_deref(),
+        "harness",
+        &note.title,
+        &summary_of(note),
+        Some(note.harness),
+        &extra,
+        note.text.trim(),
+    );
+    std::fs::write(dir.join(file), doc)?;
     let rel = format!("{}/harness/{}/{}", wiki::PAGES_DIR, note.harness, file);
     wiki::upsert_index(project_dir, &rel, &summary_of(note), "harness")?;
     Ok(())
@@ -802,9 +830,11 @@ mod tests {
         assert_eq!(src.imported, 1);
         let page = p
             .path()
-            .join(".stateroot/memories/pages/harness/codex/project-status.md");
+            .join(".stateroot/wiki/pages/harness/codex/project-status.md");
         let text = std::fs::read_to_string(&page).unwrap();
-        assert!(text.contains("stateroot:imported harness=codex"), "{text}");
+        assert!(text.contains("type: Harness Note"), "{text}");
+        assert!(text.contains("stateroot_import"), "{text}");
+        assert!(text.contains("harness: codex"), "{text}");
         assert!(text.contains("unique-token-77"), "{text}");
 
         // Idempotent: second pull imports nothing, reports duplicates.
@@ -838,7 +868,7 @@ mod tests {
         assert_eq!(second.sources[0].imported, 0);
         assert_eq!(second.sources[0].conflicts, 1);
 
-        let pages = p.path().join(".stateroot/memories/pages/harness/codex");
+        let pages = p.path().join(".stateroot/wiki/pages/harness/codex");
         let mut names: Vec<String> = std::fs::read_dir(&pages)
             .unwrap()
             .flatten()
@@ -866,7 +896,7 @@ mod tests {
         assert!(episodic.contains("harness-memory:openclaw:"), "{episodic}");
         assert!(!p
             .path()
-            .join(".stateroot/memories/pages/harness/openclaw")
+            .join(".stateroot/wiki/pages/harness/openclaw")
             .exists());
     }
 

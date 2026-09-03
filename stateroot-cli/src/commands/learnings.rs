@@ -124,7 +124,7 @@ pub fn distill(ctx: &Ctx) -> Result<()> {
     if added == 0 {
         println!("distill: no new notes");
     } else {
-        println!("distill: {added} note(s) → memories/pages/_inbox.md");
+        println!("distill: {added} note(s) → wiki/pages/_inbox.md");
     }
     Ok(())
 }

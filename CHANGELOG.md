@@ -5,6 +5,21 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- **The wiki is an OKF v0.2 bundle, verified not just by construction.**
+  Every page under `.stateroot/wiki/` now carries YAML frontmatter — `type`
+  is required; `title`/`description` come from the index; `generated` and
+  `sources` are written only when honestly known (agentic compiles stamp the
+  synthesizing model; harness-imported notes carry the source path and a
+  `stateroot_import` extension key). Pages moved from `memories/pages/` into
+  the bundle at `wiki/pages/`; the first touch migrates legacy projects,
+  rewrites index paths, and backfills frontmatter without ever fabricating
+  provenance (unknown origin stays absent — empty stays empty). The
+  bundle-root `index.md` declares `okf_version: "0.2"`, `log.md` follows the
+  OKF date-grouped newest-first shape, and `stateroot wiki lint` now verifies
+  conformance (`okf_no_frontmatter`, `okf_no_type`, `okf_index_no_version`,
+  `okf_reserved_misuse`) instead of merely assuming it. Old
+  `memories/pages/…` paths keep resolving.
+
 ## v0.1.13 — 2026-09-03
 
 - **The flagship split is taught, not discovered.** The session skill and the
