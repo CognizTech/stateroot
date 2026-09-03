@@ -452,6 +452,11 @@ fn import_one(
     } else {
         (format!("{safe_title}.md"), Outcome::Imported)
     };
+    // OKF reserved filenames must not be used for concept pages.
+    let file = match file.as_str() {
+        "index.md" | "log.md" => format!("_{file}"),
+        _ => file,
+    };
 
     if !dry_run {
         write_imported_page(project_dir, note, &file)?;
@@ -487,6 +492,29 @@ fn write_imported_page(
         .join("harness")
         .join(note.harness);
     std::fs::create_dir_all(&dir)?;
+    // Absorb the source document's own frontmatter (harness memory files carry
+    // one) into the OKF frontmatter instead of leaving it as junk body text.
+    let (src_fm, src_body) = wiki::split_frontmatter(note.text.trim());
+    let src_fm = src_fm.map(|f| serde_yaml::from_str::<serde_yaml::Mapping>(f).unwrap_or_default());
+    let fm_str = |key: &str| {
+        src_fm.as_ref().and_then(|m| {
+            m.get(serde_yaml::Value::String(key.into()))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .filter(|s| !s.trim().is_empty())
+        })
+    };
+    let title = fm_str("name").unwrap_or_else(|| note.title.clone());
+    let body = src_body.trim();
+    let summary = fm_str("description").unwrap_or_else(|| {
+        body.lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or(&title)
+            .chars()
+            .take(70)
+            .collect()
+    });
     let mut extra = serde_yaml::Mapping::new();
     let mut source = serde_yaml::Mapping::new();
     source.insert(
@@ -514,27 +542,16 @@ fn write_imported_page(
     let doc = wiki::conform_page(
         existing.as_deref(),
         "harness",
-        &note.title,
-        &summary_of(note),
+        &title,
+        &summary,
         Some(note.harness),
         &extra,
-        note.text.trim(),
+        body,
     );
     std::fs::write(dir.join(file), doc)?;
     let rel = format!("{}/harness/{}/{}", wiki::PAGES_DIR, note.harness, file);
-    wiki::upsert_index(project_dir, &rel, &summary_of(note), "harness")?;
+    wiki::upsert_index(project_dir, &rel, &summary, "harness")?;
     Ok(())
-}
-
-/// First non-empty line of the note, truncated — the index summary.
-fn summary_of(note: &HarnessMemoryNote) -> String {
-    let line = note
-        .text
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .unwrap_or(&note.title);
-    truncate_chars(line, 70)
 }
 
 // ---------------------------------------------------------------------------
@@ -850,6 +867,52 @@ mod tests {
         assert!(
             hits.iter().any(|h| h.text.contains("unique-token-77")),
             "{hits:?}"
+        );
+    }
+
+    #[test]
+    fn pull_renames_okf_reserved_filenames() {
+        let p = project();
+        let home = tempfile::tempdir().unwrap();
+        write(
+            home.path(),
+            ".codex/memories/index.md",
+            "codex index note content",
+        );
+        let report = sync_pull(p.path(), home.path(), Some("codex"), false).unwrap();
+        assert_eq!(report.sources[0].imported, 1);
+        assert!(
+            p.path()
+                .join(".stateroot/wiki/pages/harness/codex/_index.md")
+                .is_file(),
+            "reserved index.md must be renamed to _index.md"
+        );
+    }
+
+    #[test]
+    fn pull_absorbs_source_frontmatter_into_okf() {
+        let p = project();
+        let home = tempfile::tempdir().unwrap();
+        write(
+            home.path(),
+            ".codex/memories/topic.md",
+            "---\nname: Real Title\ndescription: real source summary\n---\n\nbody token-55 content\n",
+        );
+        let report = sync_pull(p.path(), home.path(), Some("codex"), false).unwrap();
+        assert_eq!(report.sources[0].imported, 1);
+        let text = std::fs::read_to_string(
+            p.path()
+                .join(".stateroot/wiki/pages/harness/codex/topic.md"),
+        )
+        .unwrap();
+        let (fm, body) = wiki::split_frontmatter(&text);
+        let fm = fm.expect("frontmatter");
+        assert!(fm.contains("title: Real Title"), "{text}");
+        assert!(fm.contains("description: real source summary"), "{text}");
+        assert!(body.contains("body token-55 content"), "{text}");
+        assert!(
+            !body.contains("name: Real Title"),
+            "source frontmatter must not sit in the body: {text}"
         );
     }
 

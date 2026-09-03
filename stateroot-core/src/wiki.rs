@@ -99,7 +99,7 @@ pub struct LintFinding {
 /// Split a document into (frontmatter YAML, body). The frontmatter block is a
 /// leading `---` line closed by the next `---` line. Our own frontmatter is
 /// flat and never contains a `---` line inside a value.
-fn split_frontmatter(text: &str) -> (Option<&str>, &str) {
+pub(crate) fn split_frontmatter(text: &str) -> (Option<&str>, &str) {
     let Some(rest) = text.strip_prefix("---\n") else {
         return (None, text);
     };
@@ -108,8 +108,7 @@ fn split_frontmatter(text: &str) -> (Option<&str>, &str) {
     };
     let fm = &rest[..end];
     let after = &rest[end + 4..];
-    let body = after.strip_prefix('\n').unwrap_or(after);
-    (Some(fm), body)
+    (Some(fm), after.trim_start_matches('\n'))
 }
 
 /// Parse frontmatter YAML into a mapping (empty mapping on parse failure).
@@ -844,7 +843,12 @@ pub fn lint(project_dir: &Path) -> Result<Vec<LintFinding>, WikiError> {
             }
             if let Ok(text) = fs::read_to_string(&abs) {
                 let (_, body) = split_frontmatter(&text);
-                if let Some(title) = body.lines().next().map(|l| l.trim().to_string()) {
+                if let Some(title) = body
+                    .lines()
+                    .next()
+                    .map(|l| l.trim().to_string())
+                    .filter(|t| !t.is_empty())
+                {
                     titles.entry(title).or_default().push(p);
                 }
             }

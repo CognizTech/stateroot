@@ -193,7 +193,7 @@ Read first: `stateroot learnings list`, `stateroot learnings list --user`, `stat
 
 1. the user corrects you
 2. the user states a durable preference
-3. first session after `stateroot init`, if a layer is empty — seed **2–7 evidenced judgments**, then stop
+3. first session after `stateroot init`, if a layer is empty — seed **2–7 evidenced judgments**, then stop. Evidence means a user correction, a real failure, or completed work this session — never a decision or intention you formed moments ago. Seed at wrap-up or between tasks; the user's task always outranks seeding
 4. you just followed a rule the next harness would otherwise miss
 
 ### When not to write
@@ -201,8 +201,10 @@ Read first: `stateroot learnings list`, `stateroot learnings list --user`, `stat
 - inventory ("this is a TypeScript/Python monorepo", "uses uv") → `memory_save` / `memory` if it must persist at all
 - facts (deadline, version, port, "the dashboard is graphite") → `memory_save` (or `memory` add/replace)
 - slogans ("write good code", "be careful", "prefer evidence")
+- intentions ("ask before planning", "write the plan file now") — a decision you just made is not a learning
 - session recap, directory listings, one-off notes
 - anything already in `learnings list`
+- anything re-read from an empty store — an empty layer is a terminal answer; do not re-poll it
 
 ### Format (required)
 
@@ -223,4 +225,4 @@ Bad:
 - `prefer evidence over assertion` — too thin; no when, no never
 - `the deploy uses systemd` — inventory
 
-First session after init: seed whichever layer is empty **with this quality bar** before other work. Later harnesses inherit and must keep both current.
+First session after init: seed whichever layer is empty **with this quality bar** at wrap-up or between tasks — never before or instead of the user's first request. Later harnesses inherit and must keep both current.

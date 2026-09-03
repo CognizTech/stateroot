@@ -19,6 +19,20 @@ StateRoot is pre-1.0 and milestones land as minor versions.
   conformance (`okf_no_frontmatter`, `okf_no_type`, `okf_index_no_version`,
   `okf_reserved_misuse`) instead of merely assuming it. Old
   `memories/pages/…` paths keep resolving.
+- **Self-hosting hardened the bundle.** Migrating this repo's own store
+  surfaced three faults, fixed in the same pass: frontmatter splitting no
+  longer leaves a leading blank line (which produced empty duplicate-title
+  lint rows), harness imports absorb the source document's own frontmatter
+  into the OKF fields instead of leaving it as body junk, and imported pages
+  named `index.md`/`log.md` are renamed (`_index.md`) because OKF reserves
+  those names.
+- **Learning seeding respects the user's task.** The init-time seeding rule
+  now demands real evidence — a user correction, a real failure, or completed
+  work this session — at wrap-up or between tasks, never before the user's
+  first request, and never an intention formed moments ago. (A demo session
+  recorded its own minute-old decisions as workspace taste — four of them —
+  because the contract said "seed before other work" and never defined
+  evidence.) Empty stores are taught as terminal answers, not re-polled.
 
 ## v0.1.13 — 2026-09-03
 
