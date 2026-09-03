@@ -5,6 +5,8 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+## v0.1.13 — 2026-09-03
+
 - **The flagship split is taught, not discovered.** The session skill and the
   one-agent block now carry the plan/implement flow as a first-class rule:
   record the plan in the shared store (`stateroot plan record --stdin/--file`),
