@@ -72,6 +72,19 @@ fn payload_project_dir(payload: &Value) -> Option<PathBuf> {
         .and_then(stateroot_core::path_identity::resolve_existing_dir)
 }
 
+/// kimi-code IDE sessions report the extension host's cwd in hook payloads
+/// (kimi_code_vscode), so project resolution from the payload lands nowhere.
+/// The harness's session index maps sessionId → workDir — resolve the true
+/// project from it. Terminal kimi sessions already send the project cwd.
+fn kimi_session_project(quirk: &registry::HarnessQuirk, payload: &Value) -> Option<PathBuf> {
+    if quirk.id != "kimi" && quirk.id != "kimi-code" {
+        return None;
+    }
+    let home = stateroot_core::harness_install::home_dir().ok()?;
+    let dir = stateroot_core::session_identity::kimi_session_workdir(&home, payload)?;
+    find_project_root(&dir)
+}
+
 /// Lenient stdin payload parse (tolerates empty or non-JSON input).
 fn read_payload() -> Value {
     use std::io::Read;
@@ -86,15 +99,26 @@ fn read_payload() -> Value {
     serde_json::from_str(text).unwrap_or_else(|_| json!({"_raw": text}))
 }
 
-/// Debug capture: STATEROOT_HOOK_DEBUG=1 appends every hook payload to
+/// Debug capture: STATEROOT_HOOK_DEBUG=1 — or the marker file
+/// /tmp/stateroot-hook-debug.on, because IDE/ACP-spawned hook processes
+/// inherit no shell env — appends every hook payload to
 /// /tmp/stateroot-hook-payloads.jsonl (payload-shape forensics).
-fn debug_dump_payload(event: &str, harness: &str, payload: &Value) {
-    if std::env::var_os("STATEROOT_HOOK_DEBUG").is_none() {
+fn debug_dump_payload(event: &str, harness: &str, cwd: &Path, payload: &Value) {
+    let armed = std::env::var_os("STATEROOT_HOOK_DEBUG").is_some()
+        || Path::new("/tmp/stateroot-hook-debug.on").exists();
+    if !armed {
         return;
     }
     let line = serde_json::json!({
         "event": event,
         "harness": harness,
+        "cwd": cwd.display().to_string(),
+        "env": {
+            "HOME": std::env::var_os("HOME").is_some(),
+            "USERPROFILE": std::env::var_os("USERPROFILE").is_some(),
+            "STATEROOT_HOME": std::env::var_os("STATEROOT_HOME").is_some(),
+            "STATEROOT_TEST_HOME": std::env::var_os("STATEROOT_TEST_HOME").is_some(),
+        },
         "payload": payload,
     });
     if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -114,7 +138,7 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
     };
 
     let mut payload = read_payload();
-    debug_dump_payload(event, harness, &payload);
+    debug_dump_payload(event, harness, &ctx.cwd, &payload);
 
     let Some(canonical) = normalize_event(quirk, event) else {
         return Ok(0);
@@ -138,13 +162,16 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
     // the openclaw gateway bug), then walk-up from our process cwd, then the
     // registry.
     let payload_root = payload_project_dir(&payload).and_then(|d| find_project_root(&d));
+    let kimi_root = || kimi_session_project(quirk, &payload);
     let project_dir = payload_root.or_else(|| {
-        find_project_root(&ctx.cwd).or_else(|| {
-            ctx.current_project()
-                .ok()
-                .flatten()
-                .and_then(|_| ctx.cwd.canonicalize().ok())
-                .filter(|cwd| local_store::is_stateroot_dir(cwd))
+        kimi_root().or_else(|| {
+            find_project_root(&ctx.cwd).or_else(|| {
+                ctx.current_project()
+                    .ok()
+                    .flatten()
+                    .and_then(|_| ctx.cwd.canonicalize().ok())
+                    .filter(|cwd| local_store::is_stateroot_dir(cwd))
+            })
         })
     });
     let Some(kind) = event_kind(canonical) else {
@@ -159,7 +186,7 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
                 }
                 resume_output(ctx, quirk, canonical, project_dir, &payload).await
             }
-            None => resume_identity_only(ctx, quirk, canonical),
+            None => resume_identity_only(ctx, quirk, canonical, &payload),
         },
         EventKind::Capture => match project_dir.as_ref() {
             Some(project_dir) => {
@@ -178,7 +205,7 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
                 Ok(code)
             }
             None if canonical == "user_prompt_submit" && quirk.delivery().prompt_submit_injects => {
-                resume_identity_only(ctx, quirk, canonical)
+                resume_identity_only(ctx, quirk, canonical, &payload)
             }
             None => Ok(0),
         },
@@ -295,6 +322,7 @@ fn resume_identity_only(
     ctx: &Ctx,
     quirk: &registry::HarnessQuirk,
     canonical: &str,
+    payload: &Value,
 ) -> anyhow::Result<u8> {
     let Some(digest) = identity_only_digest(&ctx.config_dir, quirk.id) else {
         return Ok(0);
@@ -307,7 +335,7 @@ fn resume_identity_only(
         quirk,
         canonical,
         &ctx.cwd,
-        &json!({}),
+        payload,
         &digest,
         &|identity| Some(identity.to_string()),
     );

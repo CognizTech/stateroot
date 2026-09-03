@@ -125,6 +125,32 @@ pub fn tag_payload(home: &Path, harness: &str, event: &str, cwd: &Path, payload:
     payload["session_id"] = Value::String(id);
 }
 
+/// kimi-code IDE sessions (the VS Code extension / ACP) report the extension
+/// host's cwd in hook payloads, not the session's workdir. The harness's own
+/// session index maps sessionId → workDir; resolve the true project from it
+/// when the payload's cwd leads nowhere.
+pub fn kimi_session_workdir(home: &Path, payload: &Value) -> Option<PathBuf> {
+    let session_id = crate::digest_delivery::session_id_from_payload(payload)?;
+    let text = fs::read_to_string(home.join(".kimi-code/session_index.jsonl")).ok()?;
+    let mut found: Option<String> = None;
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if v.get("sessionId").and_then(|s| s.as_str()) != Some(session_id.as_str()) {
+            continue;
+        }
+        if v.get("deleted").and_then(|d| d.as_bool()).unwrap_or(false) {
+            found = None;
+            continue;
+        }
+        if let Some(wd) = v.get("workDir").and_then(|w| w.as_str()) {
+            found = Some(wd.to_string());
+        }
+    }
+    crate::path_identity::resolve_existing_dir(Path::new(&found?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

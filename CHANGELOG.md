@@ -5,21 +5,23 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
-- **Persona keys honor the harness's real session id — whatever its shape.**
-  kimi-code's ACP adapter identifies conversations as camelCase
-  `sessionId` in hook payloads; the persona scheduler only knew
-  `session_id`/`conversation_id`, so every IDE session collapsed onto the
-  bare shared key — a fresh session inherited `started=true` and got a
-  compressed ghost reminder ("unchanged since last full injection") instead
-  of the FULL identity (the demo's final answer came out voiceless on a take
-  where everything else went right). The scheduler now resolves ids through
-  the same canonical alias list the delivery layer uses, and anonymous
-  payloads (no id at all) get a StateRoot-managed `anon-…` id at the hook
-  boundary, rotated on `session_start`, after `session_end`, or after a
-  45-minute idle gap — so persona scheduler, delivery ledger, and todo
-  federation are per-session correct on every harness shape. Regression
-  tests: two camelCase-id sessions each get their own FULL; two fully
-  anonymous sessions each get their own FULL.
+- **IDE kimi sessions get the full project digest, with their voice.**
+  kimi-code's VS Code extension fires hooks with the extension host's cwd
+  (not the session's workdir), so project resolution failed and hooks fell
+  into identity-only mode — which then *discarded the payload entirely*,
+  collapsing every IDE session onto one bare scheduler key: a fresh session
+  inherited `started=true` and got a compressed ghost ("unchanged since last
+  full injection") instead of the FULL identity. (The demo's final answer
+  lost its voice to exactly this; payload capture via the new
+  `/tmp/stateroot-hook-debug.on` marker proved it.) The identity-only path
+  now forwards the real payload, and project resolution falls back to the
+  harness's own session index (`sessionId` → `workDir`), so IDE sessions
+  receive persona *and* project state on the first prompt. The persona
+  scheduler also resolves ids through the canonical alias list the delivery
+  layer uses, and fully anonymous payloads get a StateRoot-managed `anon-…`
+  id rotated on `session_start` / after `session_end` / 45-minute idle gap.
+  Regression tests cover all three shapes: identity-only per-session FULL,
+  session-index project resolution, and anonymous rotation.
 - **`stateroot remove --full` purges a project's cross-scope traces.** Plain
   `remove` has always cleaned the project store, registry entry, and our git
   refs — but sessions leak outward: harness-native transcripts

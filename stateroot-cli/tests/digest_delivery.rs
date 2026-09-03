@@ -318,12 +318,80 @@ fn kimi_code_injects_on_prompt_submit_not_session_start() {
 }
 
 #[test]
+fn kimi_vscode_identity_only_path_keeps_session_identity() {
+    // The kimi-code VS Code extension reports the extension host's cwd in hook
+    // payloads, so hooks land in identity-only mode (no project). That path
+    // once discarded the payload — every IDE session collapsed onto one bare
+    // shared key, and a fresh session inherited `started=true`, receiving a
+    // compressed ghost ("unchanged since last full injection") instead of the
+    // FULL identity. The demo's final answer lost its voice to exactly this.
+    let config_home = tempfile::tempdir().expect("config");
+    let user_home = tempfile::tempdir().expect("home");
+    let host = tempfile::tempdir().expect("host cwd (not a project)");
+    seed_marid(config_home.path(), user_home.path());
+
+    let session_a = stateroot(config_home.path(), user_home.path(), host.path())
+        .args(["hook", "UserPromptSubmit", "--harness", "kimi-code"])
+        .write_stdin(r#"{"session_id":"session-a1","cwd":"/host"}"#)
+        .assert()
+        .success();
+    assert!(
+        contains_marid(&stdout_of(&session_a)),
+        "identity-only session A gets the FULL identity"
+    );
+
+    let session_b = stateroot(config_home.path(), user_home.path(), host.path())
+        .args(["hook", "UserPromptSubmit", "--harness", "kimi-code"])
+        .write_stdin(r#"{"session_id":"session-b2","cwd":"/host"}"#)
+        .assert()
+        .success();
+    assert!(
+        contains_marid(&stdout_of(&session_b)),
+        "identity-only session B is a NEW session and gets its own FULL"
+    );
+}
+
+#[test]
+fn kimi_vscode_project_resolves_via_session_index() {
+    // The extension host's cwd names no project, but the harness's session
+    // index maps sessionId → workDir: the hook must land on the real project
+    // digest, not identity-only mode.
+    let config_home = tempfile::tempdir().expect("config");
+    let user_home = tempfile::tempdir().expect("home");
+    let host = tempfile::tempdir().expect("host cwd (not a project)");
+    let project = tempfile::tempdir().expect("project");
+    seed_marid(config_home.path(), user_home.path());
+    init_project(config_home.path(), user_home.path(), project.path());
+
+    // The harness's own session index entry: sessionId → workDir.
+    let kimi_dir = user_home.path().join(".kimi-code");
+    std::fs::create_dir_all(&kimi_dir).expect("kimi dir");
+    let work_dir = project.path().to_string_lossy().replace('\\', "\\\\");
+    std::fs::write(
+        kimi_dir.join("session_index.jsonl"),
+        format!(r#"{{"sessionId":"session-ide-1","workDir":"{work_dir}"}}"#),
+    )
+    .expect("session index");
+
+    let prompt = stateroot(config_home.path(), user_home.path(), host.path())
+        .args(["hook", "UserPromptSubmit", "--harness", "kimi-code"])
+        .write_stdin(r#"{"session_id":"session-ide-1","cwd":"/extension/host"}"#)
+        .assert()
+        .success();
+    let out = stdout_of(&prompt);
+    assert!(
+        out.contains("## Learnings"),
+        "the project digest rides the hook, not identity-only: {out}"
+    );
+    assert!(contains_marid(&out), "persona rides too: {out}");
+}
+
+#[test]
 fn kimi_acp_camelcase_session_id_keys_persona_per_session() {
-    // kimi-code's ACP adapter sends the conversation id as camelCase
-    // `sessionId`. A narrow alias list in the persona scheduler once ignored
-    // it: every ACP session collapsed onto the bare shared key, so a fresh
-    // session inherited `started=true` and got a compressed ghost reminder
-    // instead of the FULL identity (the demo's voiceless final answer).
+    // Aliases are honored end to end: a payload carrying camelCase
+    // `sessionId` must key the persona scheduler per session exactly like
+    // snake_case `session_id` (the canonical alias list is shared by the
+    // delivery layer, the scheduler, and the session-identity manager).
     let config_home = tempfile::tempdir().expect("config");
     let user_home = tempfile::tempdir().expect("home");
     let project = tempfile::tempdir().expect("project");
