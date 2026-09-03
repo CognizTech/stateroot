@@ -229,6 +229,11 @@ fn collect_full(
     workspace_id: &str,
 ) -> (Vec<FullTarget>, Vec<String>, usize) {
     let spellings = path_spellings(project_dir);
+    let debug = std::env::var_os("STATEROOT_REMOVE_DEBUG").is_some();
+    if debug {
+        eprintln!("remove --full debug: project_dir={}", project_dir.display());
+        eprintln!("remove --full debug: spellings={spellings:?}");
+    }
     let mut targets = Vec::new();
     let mut kimi_marks = Vec::new();
 
@@ -257,6 +262,9 @@ fn collect_full(
             let Some(key) = value.get("key").and_then(|v| v.as_str()) else {
                 continue;
             };
+            if debug {
+                eprintln!("remove --full debug: persona key={key:?}");
+            }
             if mentions_project(key, &spellings) {
                 targets.push(FullTarget {
                     kind: "persona-injection state",

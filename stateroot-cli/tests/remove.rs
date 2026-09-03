@@ -238,6 +238,7 @@ fn remove_full_purges_cross_scope_traces() {
     seed_traces(user_home.path(), project_b.path(), &ws_b);
 
     let out = stateroot(config_home.path(), user_home.path(), project_b.path())
+        .env("STATEROOT_REMOVE_DEBUG", "1")
         .args(["remove", "--yes", "--full"])
         .assert()
         .success();
@@ -258,9 +259,10 @@ fn remove_full_purges_cross_scope_traces() {
         std::fs::read_dir(user_home.path().join(".stateroot/local/persona-injection"))
             .map(|r| r.flatten().collect())
             .unwrap_or_default();
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).expect("utf8");
     assert!(
         persona_left.is_empty(),
-        "persona keys purged: {persona_left:?}"
+        "persona keys purged: {persona_left:?}\ncli debug: {stderr}"
     );
     let kimi_session_b = user_home
         .path()
