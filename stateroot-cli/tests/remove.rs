@@ -170,8 +170,22 @@ fn seed_traces(user_home: &Path, project: &Path, workspace_id: &str) {
         .replace('\\', "\\\\"),
     )
     .unwrap();
-    // claude-code transcript dir for this path.
-    let slug = native.replace(['/', '\\'], "-").replace(':', "");
+    // claude-code transcript dir for this path. Slug from the normalized
+    // path form (no `\\?\` verbatim prefix — `?` is illegal on Windows),
+    // colon folded to a dash; the CLI tries every spelling's variants.
+    let norm = {
+        let mut s = native.trim().replace('\\', "/");
+        if let Some(rest) = s.strip_prefix("//?/") {
+            s = rest.to_string();
+        }
+        if s.len() >= 2 && s.as_bytes()[1] == b':' {
+            let mut chars: Vec<char> = s.chars().collect();
+            chars[0] = chars[0].to_ascii_lowercase();
+            s = chars.into_iter().collect();
+        }
+        s
+    };
+    let slug = norm.replace(['/', ':'], "-");
     let claude_dir = user_home.join(format!(".claude/projects/{slug}"));
     std::fs::create_dir_all(&claude_dir).unwrap();
     std::fs::write(claude_dir.join("s.jsonl"), "{}\n").unwrap();
@@ -274,10 +288,19 @@ fn remove_full_purges_cross_scope_traces() {
     );
     let canonical_b =
         std::fs::canonicalize(project_b.path()).unwrap_or_else(|_| project_b.path().to_path_buf());
-    let slug_b = canonical_b
-        .to_string_lossy()
-        .replace(['/', '\\'], "-")
-        .replace(':', "");
+    let norm_b = {
+        let mut s = canonical_b.to_string_lossy().trim().replace('\\', "/");
+        if let Some(rest) = s.strip_prefix("//?/") {
+            s = rest.to_string();
+        }
+        if s.len() >= 2 && s.as_bytes()[1] == b':' {
+            let mut chars: Vec<char> = s.chars().collect();
+            chars[0] = chars[0].to_ascii_lowercase();
+            s = chars.into_iter().collect();
+        }
+        s
+    };
+    let slug_b = norm_b.replace(['/', ':'], "-");
     assert!(
         !user_home
             .path()

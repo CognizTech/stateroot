@@ -320,16 +320,23 @@ fn collect_full(
     }
 
     // claude-code transcript dir for this path (slug = path with dashes).
+    // Try every spelling in both colon conventions; spellings carrying the
+    // Windows verbatim prefix (`\\?\`) never name a real slug.
     let claude_projects = home.join(".claude/projects");
     if claude_projects.is_dir() {
         for spelling in &spellings {
-            let slug = spelling.replace(['/', '\\'], "-").replace(':', "");
-            let dir = claude_projects.join(&slug);
-            if dir.is_dir() && !targets.iter().any(|t| t.path == dir) {
-                targets.push(FullTarget {
-                    kind: "claude-code transcript dir",
-                    path: dir,
-                });
+            if spelling.contains('?') {
+                continue;
+            }
+            let dashed = spelling.replace(['/', '\\'], "-");
+            for slug in [dashed.replace(':', ""), dashed.replace(':', "-")] {
+                let dir = claude_projects.join(&slug);
+                if dir.is_dir() && !targets.iter().any(|t| t.path == dir) {
+                    targets.push(FullTarget {
+                        kind: "claude-code transcript dir",
+                        path: dir,
+                    });
+                }
             }
         }
     }
