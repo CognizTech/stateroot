@@ -5,6 +5,18 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- **`stateroot remove --full` purges a project's cross-scope traces.** Plain
+  `remove` has always cleaned the project store, registry entry, and our git
+  refs — but sessions leak outward: harness-native transcripts
+  (`~/.kimi-code/sessions/…`, `~/.claude/projects/…`) stay bound to the
+  project *path*, the workspace learnings bubble and persona-injection keys
+  are keyed to the path-derived id, and session-registry anchors hold the
+  cwd. Because the id is path-derived, a project re-initialized at the same
+  path silently re-inherited all of it (a wiped demo project's first
+  `memory recall` surfaced the previous take's transcript). `--full` adds
+  the purge to the plan preview: workspace bubble, persona keys, registry
+  anchors, and kimi/claude transcript sessions for this path (kimi sessions
+  are also marked deleted in `session_index.jsonl`).
 - **StateRoot manages session identity when the harness does not.** IDE/ACP
   adapters (kimi-code under Cursor today) fire hooks with no `session_id` and
   no usable `cwd` — every such session collapsed into one anonymous slot

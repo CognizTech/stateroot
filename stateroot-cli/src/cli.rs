@@ -987,4 +987,9 @@ pub struct RemoveArgs {
     /// Print the plan without touching anything.
     #[arg(long)]
     pub dry_run: bool,
+    /// Also purge cross-scope traces of this project: workspace learnings
+    /// bubble, persona-injection keys, session-registry anchors, and
+    /// kimi-code/claude-code transcript sessions bound to this path.
+    #[arg(long)]
+    pub full: bool,
 }

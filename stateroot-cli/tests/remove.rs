@@ -127,3 +127,157 @@ fn remove_refuses_non_interactive_without_yes() {
         .failure();
     assert!(project.path().join(".stateroot").is_dir());
 }
+
+/// Seed the cross-scope traces a project's sessions leave behind.
+fn seed_traces(user_home: &Path, project: &Path, workspace_id: &str) {
+    let native = project.to_string_lossy().to_string();
+    // Workspace learnings bubble.
+    let bubble = user_home.join(format!(".stateroot/workspaces/{workspace_id}/learnings"));
+    std::fs::create_dir_all(&bubble).unwrap();
+    std::fs::write(bubble.join("general.md"), "- a learning\n").unwrap();
+    // Persona-injection state keyed to this path.
+    let persona = user_home.join(".stateroot/local/persona-injection");
+    std::fs::create_dir_all(&persona).unwrap();
+    std::fs::write(
+        persona.join("aaa.json"),
+        format!(r#"{{"key":"kimi-code:{native}:sess-1"}}"#),
+    )
+    .unwrap();
+    // Session-registry anchor (plus one unrelated anchor that must survive).
+    let local = user_home.join(".stateroot/local");
+    std::fs::create_dir_all(&local).unwrap();
+    std::fs::write(
+        local.join("session-registry.json"),
+        format!(
+            r#"{{"kimi-code|{native}":{{"session_id":"anon-1","last_seen":"2026-09-03T06:00:00Z","last_event":"session_end"}},"kimi-code|/elsewhere":{{"session_id":"anon-2","last_seen":"2026-09-03T06:00:00Z","last_event":"user_prompt_submit"}}}}"#
+        ),
+    )
+    .unwrap();
+    // kimi-code transcript session for this path.
+    let session_dir = user_home.join(".kimi-code/sessions/wd_demo/session_demo-1");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    std::fs::write(session_dir.join("wire.jsonl"), "{}\n").unwrap();
+    std::fs::write(
+        user_home.join(".kimi-code/session_index.jsonl"),
+        format!(
+            r#"{{"sessionId":"session_demo-1","sessionDir":"{}","workDir":"{native}"}}"#,
+            session_dir.display()
+        )
+        .replace('\\', "\\\\"),
+    )
+    .unwrap();
+    // claude-code transcript dir for this path.
+    let slug = native.replace(['/', '\\'], "-").replace(':', "");
+    let claude_dir = user_home.join(format!(".claude/projects/{slug}"));
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    std::fs::write(claude_dir.join("s.jsonl"), "{}\n").unwrap();
+}
+
+#[test]
+fn remove_full_purges_cross_scope_traces() {
+    let config_home = tempfile::tempdir().expect("config home");
+    let user_home = tempfile::tempdir().expect("user home");
+
+    // Project A: plain remove must NOT touch cross-scope traces.
+    let project_a = tempfile::tempdir().expect("project a");
+    init_project(config_home.path(), user_home.path(), project_a.path());
+    let manifest_a = std::fs::read_to_string(project_a.path().join(".stateroot/manifest.json"))
+        .expect("manifest a");
+    let ws_a = serde_json::from_str::<serde_json::Value>(&manifest_a).unwrap()["project_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    seed_traces(user_home.path(), project_a.path(), &ws_a);
+    let kimi_session_a = user_home
+        .path()
+        .join(".kimi-code/sessions/wd_demo/session_demo-1");
+
+    stateroot(config_home.path(), user_home.path(), project_a.path())
+        .args(["remove", "--yes"])
+        .assert()
+        .success();
+    assert!(
+        kimi_session_a.is_dir(),
+        "plain remove keeps harness transcripts"
+    );
+    assert!(
+        user_home
+            .path()
+            .join(format!(".stateroot/workspaces/{ws_a}"))
+            .is_dir(),
+        "plain remove keeps the workspace bubble"
+    );
+
+    // Project B: --full purges everything keyed to its path.
+    let project_b = tempfile::tempdir().expect("project b");
+    init_project(config_home.path(), user_home.path(), project_b.path());
+    let manifest_b = std::fs::read_to_string(project_b.path().join(".stateroot/manifest.json"))
+        .expect("manifest b");
+    let ws_b = serde_json::from_str::<serde_json::Value>(&manifest_b).unwrap()["project_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    seed_traces(user_home.path(), project_b.path(), &ws_b);
+
+    let out = stateroot(config_home.path(), user_home.path(), project_b.path())
+        .args(["remove", "--yes", "--full"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains("workspace learnings/state bubble"),
+        "{stdout}"
+    );
+
+    assert!(
+        !user_home
+            .path()
+            .join(format!(".stateroot/workspaces/{ws_b}"))
+            .exists(),
+        "workspace bubble purged"
+    );
+    let persona_left: Vec<_> =
+        std::fs::read_dir(user_home.path().join(".stateroot/local/persona-injection"))
+            .map(|r| r.flatten().collect())
+            .unwrap_or_default();
+    assert!(
+        persona_left.is_empty(),
+        "persona keys purged: {persona_left:?}"
+    );
+    let kimi_session_b = user_home
+        .path()
+        .join(".kimi-code/sessions/wd_demo/session_demo-1");
+    assert!(!kimi_session_b.is_dir(), "kimi transcript dir purged");
+    let index = std::fs::read_to_string(user_home.path().join(".kimi-code/session_index.jsonl"))
+        .expect("index");
+    assert!(
+        index.contains(r#"{"sessionId":"session_demo-1","deleted":true}"#),
+        "session marked deleted: {index}"
+    );
+    let registry = std::fs::read_to_string(
+        user_home
+            .path()
+            .join(".stateroot/local/session-registry.json"),
+    )
+    .expect("registry");
+    assert!(
+        !registry.contains("anon-1"),
+        "project anchor pruned: {registry}"
+    );
+    assert!(
+        registry.contains("anon-2"),
+        "unrelated anchor survives: {registry}"
+    );
+    let slug_b = project_b
+        .path()
+        .to_string_lossy()
+        .replace(['/', '\\'], "-")
+        .replace(':', "");
+    assert!(
+        !user_home
+            .path()
+            .join(format!(".claude/projects/{slug_b}"))
+            .exists(),
+        "claude transcript dir purged"
+    );
+}

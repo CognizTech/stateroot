@@ -36,6 +36,15 @@ enum StubAction {
     KeepModified,
 }
 
+/// One cross-scope trace purged only under `--full`.
+#[derive(Debug)]
+struct FullTarget {
+    /// What this trace is (printed in the plan).
+    kind: &'static str,
+    /// File or directory to delete.
+    path: PathBuf,
+}
+
 /// The full removal plan (computed before any write).
 struct Plan {
     project_dir: PathBuf,
@@ -46,6 +55,12 @@ struct Plan {
     registered: bool,
     /// Refs under refs/stateroot/* present in the project's repo.
     stateroot_refs: Vec<String>,
+    /// Cross-scope traces (workspace bubble, persona keys, transcripts).
+    full_targets: Vec<FullTarget>,
+    /// kimi-code session ids to mark deleted in session_index.jsonl.
+    kimi_session_marks: Vec<String>,
+    /// Session-registry anchors to prune (harness|cwd mentioning the path).
+    registry_prune: usize,
 }
 
 /// Resolve the project for removal: walk up from cwd for `.stateroot/`
@@ -163,7 +178,141 @@ fn collect_stateroot_refs(project_dir: &Path) -> Vec<String> {
     refs
 }
 
-fn build_plan(ctx: &Ctx) -> anyhow::Result<Plan> {
+/// Path spellings a trace may carry: native (`/mnt/d/x`), normalized
+/// (`d:/x`), and Windows-native (`D:\x`).
+fn path_spellings(project_dir: &Path) -> Vec<String> {
+    let native = project_dir.to_string_lossy().to_string();
+    let norm = stateroot_core::path_identity::normalize_host_path(&native);
+    let mut out = vec![native, norm.clone()];
+    if norm.len() >= 2 && norm.as_bytes()[1] == b':' {
+        let drive = norm[..1].to_ascii_uppercase();
+        out.push(format!("{}:{}", drive, norm[2..].replace('/', "\\")));
+    }
+    out
+}
+
+fn mentions_project(haystack: &str, spellings: &[String]) -> bool {
+    spellings.iter().any(|s| haystack.contains(s.as_str()))
+}
+
+/// Collect the cross-scope traces `--full` purges: the workspace bubble, the
+/// persona-injection keys, session-registry anchors, and the harness-native
+/// transcript sessions (kimi-code, claude-code) bound to this project path.
+fn collect_full(
+    home: &Path,
+    project_dir: &Path,
+    workspace_id: &str,
+) -> (Vec<FullTarget>, Vec<String>, usize) {
+    let spellings = path_spellings(project_dir);
+    let mut targets = Vec::new();
+    let mut kimi_marks = Vec::new();
+
+    // Workspace bubble (learnings and any future workspace-scoped state).
+    if !workspace_id.is_empty() {
+        let bubble = home.join(".stateroot/workspaces").join(workspace_id);
+        if bubble.is_dir() {
+            targets.push(FullTarget {
+                kind: "workspace learnings/state bubble",
+                path: bubble,
+            });
+        }
+    }
+
+    // Persona-injection cadence state keyed to this project path.
+    let persona_dir = home.join(".stateroot/local/persona-injection");
+    if let Ok(entries) = std::fs::read_dir(&persona_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+                continue;
+            };
+            let Some(key) = value.get("key").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if mentions_project(key, &spellings) {
+                targets.push(FullTarget {
+                    kind: "persona-injection state",
+                    path,
+                });
+            }
+        }
+    }
+
+    // Session-registry anchors whose hook cwd was this project.
+    let registry = stateroot_core::session_identity::registry_path(home);
+    let registry_prune = std::fs::read_to_string(&registry)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.as_object().cloned())
+        .map(|obj| {
+            obj.keys()
+                .filter(|anchor| mentions_project(anchor, &spellings))
+                .count()
+        })
+        .unwrap_or(0);
+
+    // kimi-code session transcripts bound to this path (session_index.jsonl).
+    let kimi_index = home.join(".kimi-code/session_index.jsonl");
+    if let Ok(text) = std::fs::read_to_string(&kimi_index) {
+        let mut deleted = std::collections::BTreeSet::new();
+        let mut live: Vec<(String, String)> = Vec::new();
+        for line in text.lines() {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let Some(id) = v.get("sessionId").and_then(|s| s.as_str()) else {
+                continue;
+            };
+            if v.get("deleted").and_then(|d| d.as_bool()).unwrap_or(false) {
+                deleted.insert(id.to_string());
+                continue;
+            }
+            let Some(work_dir) = v.get("workDir").and_then(|w| w.as_str()) else {
+                continue;
+            };
+            if mentions_project(work_dir, &spellings) {
+                if let Some(dir) = v.get("sessionDir").and_then(|s| s.as_str()) {
+                    live.push((id.to_string(), dir.to_string()));
+                }
+            }
+        }
+        for (id, dir) in live {
+            if deleted.contains(&id) {
+                continue;
+            }
+            let path = PathBuf::from(&dir);
+            if path.is_dir() {
+                targets.push(FullTarget {
+                    kind: "kimi-code session transcript",
+                    path,
+                });
+                kimi_marks.push(id);
+            }
+        }
+    }
+
+    // claude-code transcript dir for this path (slug = path with dashes).
+    let claude_projects = home.join(".claude/projects");
+    if claude_projects.is_dir() {
+        for spelling in &spellings {
+            let slug = spelling.replace(['/', '\\'], "-").replace(':', "");
+            let dir = claude_projects.join(&slug);
+            if dir.is_dir() && !targets.iter().any(|t| t.path == dir) {
+                targets.push(FullTarget {
+                    kind: "claude-code transcript dir",
+                    path: dir,
+                });
+            }
+        }
+    }
+
+    (targets, kimi_marks, registry_prune)
+}
+
+fn build_plan(ctx: &Ctx, full: bool) -> anyhow::Result<Plan> {
     let (project_dir, entry) = resolve_project(ctx)?;
     let stateroot_dir = local_store::root(&project_dir).is_dir();
     let stubs = [
@@ -184,6 +333,14 @@ fn build_plan(ctx: &Ctx) -> anyhow::Result<Plan> {
         .is_some();
     let stateroot_refs = collect_stateroot_refs(&project_dir);
     let agents_md = agents_md_action(&project_dir);
+    let (full_targets, kimi_session_marks, registry_prune) = if full {
+        match stateroot_core::harness_install::home_dir() {
+            Ok(home) => collect_full(&home, &project_dir, &entry.workspace_id),
+            Err(_) => (Vec::new(), Vec::new(), 0),
+        }
+    } else {
+        (Vec::new(), Vec::new(), 0)
+    };
     Ok(Plan {
         stateroot_refs,
         project_dir,
@@ -192,6 +349,9 @@ fn build_plan(ctx: &Ctx) -> anyhow::Result<Plan> {
         agents_md,
         stubs,
         registered,
+        full_targets,
+        kimi_session_marks,
+        registry_prune,
     })
 }
 
@@ -237,11 +397,29 @@ fn print_plan(plan: &Plan) {
     if plan.registered {
         println!("  - unregister from projects.toml");
     }
+    if !plan.full_targets.is_empty() || plan.registry_prune > 0 {
+        println!("  --full cross-scope purge:");
+        for target in &plan.full_targets {
+            println!("  - delete {} ({})", target.path.display(), target.kind);
+        }
+        if !plan.kimi_session_marks.is_empty() {
+            println!(
+                "  - mark {} kimi-code session(s) deleted in session_index.jsonl",
+                plan.kimi_session_marks.len()
+            );
+        }
+        if plan.registry_prune > 0 {
+            println!(
+                "  - prune {} session-registry anchor(s) keyed to this path",
+                plan.registry_prune
+            );
+        }
+    }
 }
 
 /// Run `stateroot remove`.
-pub async fn run(ctx: &Ctx, yes: bool, dry_run: bool) -> anyhow::Result<()> {
-    let plan = build_plan(ctx)?;
+pub async fn run(ctx: &Ctx, yes: bool, dry_run: bool, full: bool) -> anyhow::Result<()> {
+    let plan = build_plan(ctx, full)?;
 
     if dry_run {
         print_plan(&plan);
@@ -323,6 +501,54 @@ pub async fn run(ctx: &Ctx, yes: bool, dry_run: bool) -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!(e))?
     {
         println!("  unregistered from projects.toml");
+    }
+
+    for target in &plan.full_targets {
+        if target.path.is_dir() {
+            std::fs::remove_dir_all(&target.path)?;
+        } else if target.path.exists() {
+            std::fs::remove_file(&target.path)?;
+        }
+        println!("  deleted {} ({})", target.path.display(), target.kind);
+    }
+    if !plan.kimi_session_marks.is_empty() {
+        if let Ok(home) = stateroot_core::harness_install::home_dir() {
+            let index = home.join(".kimi-code/session_index.jsonl");
+            if index.is_file() {
+                let mut lines = String::new();
+                for id in &plan.kimi_session_marks {
+                    lines.push_str(&format!("{{\"sessionId\":\"{id}\",\"deleted\":true}}\n"));
+                }
+                use std::io::Write as _;
+                if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&index) {
+                    let _ = f.write_all(lines.as_bytes());
+                }
+            }
+        }
+    }
+    if plan.registry_prune > 0 {
+        if let Ok(home) = stateroot_core::harness_install::home_dir() {
+            let spellings = path_spellings(&plan.project_dir);
+            let registry = stateroot_core::session_identity::registry_path(&home);
+            if let Ok(text) = std::fs::read_to_string(&registry) {
+                if let Ok(serde_json::Value::Object(mut map)) =
+                    serde_json::from_str::<serde_json::Value>(&text)
+                {
+                    let before = map.len();
+                    map.retain(|anchor, _| !mentions_project(anchor, &spellings));
+                    if map.len() != before {
+                        let tmp = registry.with_extension("json.tmp");
+                        if let Ok(out) = serde_json::to_string_pretty(&map) {
+                            if std::fs::write(&tmp, format!("{out}\n")).is_ok() {
+                                let _ = std::fs::remove_file(&registry);
+                                let _ = std::fs::rename(&tmp, &registry);
+                            }
+                        }
+                    }
+                }
+            }
+            println!("  pruned session-registry anchor(s)");
+        }
     }
 
     println!("removed project {}", plan.entry.project_id);
