@@ -144,17 +144,24 @@ fn seed_traces(user_home: &Path, project: &Path, workspace_id: &str) {
     std::fs::create_dir_all(&persona).unwrap();
     std::fs::write(
         persona.join("aaa.json"),
-        format!(r#"{{"key":"kimi-code:{native}:sess-1"}}"#),
+        serde_json::json!({"key": format!("kimi-code:{native}:sess-1")}).to_string(),
     )
     .unwrap();
     // Session-registry anchor (plus one unrelated anchor that must survive).
     let local = user_home.join(".stateroot/local");
     std::fs::create_dir_all(&local).unwrap();
+    let mut anchors = serde_json::Map::new();
+    anchors.insert(
+        format!("kimi-code|{native}"),
+        serde_json::json!({"session_id":"anon-1","last_seen":"2026-09-03T06:00:00Z","last_event":"session_end"}),
+    );
+    anchors.insert(
+        "kimi-code|/elsewhere".to_string(),
+        serde_json::json!({"session_id":"anon-2","last_seen":"2026-09-03T06:00:00Z","last_event":"user_prompt_submit"}),
+    );
     std::fs::write(
         local.join("session-registry.json"),
-        format!(
-            r#"{{"kimi-code|{native}":{{"session_id":"anon-1","last_seen":"2026-09-03T06:00:00Z","last_event":"session_end"}},"kimi-code|/elsewhere":{{"session_id":"anon-2","last_seen":"2026-09-03T06:00:00Z","last_event":"user_prompt_submit"}}}}"#
-        ),
+        serde_json::Value::Object(anchors).to_string(),
     )
     .unwrap();
     // kimi-code transcript session for this path.
@@ -163,11 +170,12 @@ fn seed_traces(user_home: &Path, project: &Path, workspace_id: &str) {
     std::fs::write(session_dir.join("wire.jsonl"), "{}\n").unwrap();
     std::fs::write(
         user_home.join(".kimi-code/session_index.jsonl"),
-        format!(
-            r#"{{"sessionId":"session_demo-1","sessionDir":"{}","workDir":"{native}"}}"#,
-            session_dir.display()
-        )
-        .replace('\\', "\\\\"),
+        serde_json::json!({
+            "sessionId": "session_demo-1",
+            "sessionDir": session_dir.to_string_lossy(),
+            "workDir": native,
+        })
+        .to_string(),
     )
     .unwrap();
     // claude-code transcript dir for this path. Slug from the normalized
