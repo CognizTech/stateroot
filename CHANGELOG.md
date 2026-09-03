@@ -5,6 +5,17 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- **StateRoot manages session identity when the harness does not.** IDE/ACP
+  adapters (kimi-code under Cursor today) fire hooks with no `session_id` and
+  no usable `cwd` — every such session collapsed into one anonymous slot
+  anchored at the extension host's cwd, so the persona's first-prompt FULL
+  injection only ever fired once and later sessions got nothing (the demo's
+  final answer came out voiceless). Anonymous hook events now get a managed
+  `anon-…` session id at the hook boundary, rotated on `session_start`, on
+  the first event after `session_end`, or after a 45-minute idle gap; the
+  persona scheduler, delivery ledger, and todo federation all see true
+  per-session ids with no per-consumer changes. Regression test: two
+  ACP-shaped anonymous kimi sessions each receive their own FULL identity.
 - **The wiki is an OKF v0.2 bundle, verified not just by construction.**
   Every page under `.stateroot/wiki/` now carries YAML frontmatter — `type`
   is required; `title`/`description` come from the index; `generated` and

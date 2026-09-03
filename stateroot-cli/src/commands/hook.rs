@@ -113,8 +113,25 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
         return Ok(0);
     };
 
-    let payload = read_payload();
+    let mut payload = read_payload();
     debug_dump_payload(event, harness, &payload);
+
+    let Some(canonical) = normalize_event(quirk, event) else {
+        return Ok(0);
+    };
+
+    // Harnesses whose hook payloads carry no conversation id (IDE/ACP
+    // adapters) get a StateRoot-managed session id, rotated per real
+    // conversation — every downstream consumer sees a true per-session id.
+    if let Ok(home) = stateroot_core::harness_install::home_dir() {
+        stateroot_core::session_identity::tag_payload(
+            &home,
+            quirk.id,
+            canonical,
+            &ctx.cwd,
+            &mut payload,
+        );
+    }
 
     // Project resolution: the event payload's cwd/workspace first (gateway
     // daemons and IDEs run hooks with THEIR cwd, not the agent's project —
@@ -130,9 +147,6 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
                 .filter(|cwd| local_store::is_stateroot_dir(cwd))
         })
     });
-    let Some(canonical) = normalize_event(quirk, event) else {
-        return Ok(0);
-    };
     let Some(kind) = event_kind(canonical) else {
         return Ok(0);
     };

@@ -318,6 +318,64 @@ fn kimi_code_injects_on_prompt_submit_not_session_start() {
 }
 
 #[test]
+fn kimi_acp_anonymous_sessions_each_get_identity() {
+    // kimi-code under an IDE/ACP adapter fires hooks with EMPTY payloads — no
+    // session id, no cwd. StateRoot manages session identity so every real
+    // conversation gets its own FULL identity injection (the demo regression:
+    // take two got no persona because every ACP session shared one anonymous
+    // slot whose `started` flag was already set).
+    let config_home = tempfile::tempdir().expect("config");
+    let user_home = tempfile::tempdir().expect("home");
+    let project = tempfile::tempdir().expect("project");
+    seed_marid(config_home.path(), user_home.path());
+    init_project(config_home.path(), user_home.path(), project.path());
+
+    // Session one: start, then first prompt delivers FULL.
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["hook", "SessionStart", "--harness", "kimi-code"])
+        .write_stdin("{}")
+        .assert()
+        .success();
+    let first = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["hook", "UserPromptSubmit", "--harness", "kimi-code"])
+        .write_stdin("{}")
+        .assert()
+        .success();
+    assert!(
+        contains_marid(&stdout_of(&first)),
+        "session one first prompt must inject FULL"
+    );
+
+    // Same conversation: the next prompt does not repeat the FULL.
+    let again = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["hook", "UserPromptSubmit", "--harness", "kimi-code"])
+        .write_stdin("{}")
+        .assert()
+        .success();
+    assert!(
+        !contains_marid(&stdout_of(&again)),
+        "same session must not re-inject FULL"
+    );
+
+    // Session two (the next take): a fresh session_start rotates the managed
+    // id, so this conversation gets its own FULL on its first prompt.
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["hook", "SessionStart", "--harness", "kimi-code"])
+        .write_stdin("{}")
+        .assert()
+        .success();
+    let second = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["hook", "UserPromptSubmit", "--harness", "kimi-code"])
+        .write_stdin("{}")
+        .assert()
+        .success();
+    assert!(
+        contains_marid(&stdout_of(&second)),
+        "session two must get its own FULL — anonymous slots must not leak across sessions"
+    );
+}
+
+#[test]
 fn openclaw_prompt_build_injects_identity() {
     let config_home = tempfile::tempdir().expect("config");
     let user_home = tempfile::tempdir().expect("home");
