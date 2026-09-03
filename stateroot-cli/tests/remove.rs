@@ -130,7 +130,11 @@ fn remove_refuses_non_interactive_without_yes() {
 
 /// Seed the cross-scope traces a project's sessions leave behind.
 fn seed_traces(user_home: &Path, project: &Path, workspace_id: &str) {
-    let native = project.to_string_lossy().to_string();
+    // Traces freeze the path as a running process sees it — canonicalize so
+    // the fixture matches CLI-side resolution on every host (Windows %TEMP%
+    // is an 8.3-short path on some runners).
+    let canonical = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
+    let native = canonical.to_string_lossy().to_string();
     // Workspace learnings bubble.
     let bubble = user_home.join(format!(".stateroot/workspaces/{workspace_id}/learnings"));
     std::fs::create_dir_all(&bubble).unwrap();
@@ -268,8 +272,9 @@ fn remove_full_purges_cross_scope_traces() {
         registry.contains("anon-2"),
         "unrelated anchor survives: {registry}"
     );
-    let slug_b = project_b
-        .path()
+    let canonical_b =
+        std::fs::canonicalize(project_b.path()).unwrap_or_else(|_| project_b.path().to_path_buf());
+    let slug_b = canonical_b
         .to_string_lossy()
         .replace(['/', '\\'], "-")
         .replace(':', "");

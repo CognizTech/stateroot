@@ -178,21 +178,46 @@ fn collect_stateroot_refs(project_dir: &Path) -> Vec<String> {
     refs
 }
 
-/// Path spellings a trace may carry: native (`/mnt/d/x`), normalized
-/// (`d:/x`), and Windows-native (`D:\x`).
+/// Path spellings a trace may carry. Built from both the path as given and
+/// its canonical form, because Windows traces may freeze an 8.3-short cwd
+/// (`RUNNER~1`) while a canonicalized lookup sees the long form. Each side
+/// yields native, normalized (`d:/x`), and Windows-native (`D:\x`) spellings.
 fn path_spellings(project_dir: &Path) -> Vec<String> {
-    let native = project_dir.to_string_lossy().to_string();
-    let norm = stateroot_core::path_identity::normalize_host_path(&native);
-    let mut out = vec![native, norm.clone()];
-    if norm.len() >= 2 && norm.as_bytes()[1] == b':' {
-        let drive = norm[..1].to_ascii_uppercase();
-        out.push(format!("{}:{}", drive, norm[2..].replace('/', "\\")));
+    let mut forms = vec![project_dir.to_path_buf()];
+    if let Ok(canonical) = std::fs::canonicalize(project_dir) {
+        if canonical != project_dir.to_path_buf() {
+            forms.push(canonical);
+        }
+    }
+    let mut out: Vec<String> = Vec::new();
+    for form in forms {
+        let native = form.to_string_lossy().to_string();
+        let norm = stateroot_core::path_identity::normalize_host_path(&native);
+        for s in [native, norm.clone()] {
+            if !out.contains(&s) {
+                out.push(s);
+            }
+        }
+        if norm.len() >= 2 && norm.as_bytes()[1] == b':' {
+            let drive = norm[..1].to_ascii_uppercase();
+            let win = format!("{}:{}", drive, norm[2..].replace('/', "\\"));
+            if !out.contains(&win) {
+                out.push(win);
+            }
+        }
     }
     out
 }
 
 fn mentions_project(haystack: &str, spellings: &[String]) -> bool {
-    spellings.iter().any(|s| haystack.contains(s.as_str()))
+    // Fold slashes and case on both sides: traces freeze whatever path form
+    // the harness happened to see (native, normalized, Windows-native, and
+    // on Windows possibly the 8.3-short form of the same directory).
+    let hay = stateroot_core::path_identity::normalize_host_path(haystack).to_lowercase();
+    spellings.iter().any(|s| {
+        haystack.contains(s.as_str())
+            || hay.contains(&stateroot_core::path_identity::normalize_host_path(s).to_lowercase())
+    })
 }
 
 /// Collect the cross-scope traces `--full` purges: the workspace bubble, the
