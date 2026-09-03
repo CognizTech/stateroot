@@ -5,6 +5,21 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- **Persona keys honor the harness's real session id — whatever its shape.**
+  kimi-code's ACP adapter identifies conversations as camelCase
+  `sessionId` in hook payloads; the persona scheduler only knew
+  `session_id`/`conversation_id`, so every IDE session collapsed onto the
+  bare shared key — a fresh session inherited `started=true` and got a
+  compressed ghost reminder ("unchanged since last full injection") instead
+  of the FULL identity (the demo's final answer came out voiceless on a take
+  where everything else went right). The scheduler now resolves ids through
+  the same canonical alias list the delivery layer uses, and anonymous
+  payloads (no id at all) get a StateRoot-managed `anon-…` id at the hook
+  boundary, rotated on `session_start`, after `session_end`, or after a
+  45-minute idle gap — so persona scheduler, delivery ledger, and todo
+  federation are per-session correct on every harness shape. Regression
+  tests: two camelCase-id sessions each get their own FULL; two fully
+  anonymous sessions each get their own FULL.
 - **`stateroot remove --full` purges a project's cross-scope traces.** Plain
   `remove` has always cleaned the project store, registry entry, and our git
   refs — but sessions leak outward: harness-native transcripts
@@ -17,17 +32,6 @@ StateRoot is pre-1.0 and milestones land as minor versions.
   the purge to the plan preview: workspace bubble, persona keys, registry
   anchors, and kimi/claude transcript sessions for this path (kimi sessions
   are also marked deleted in `session_index.jsonl`).
-- **StateRoot manages session identity when the harness does not.** IDE/ACP
-  adapters (kimi-code under Cursor today) fire hooks with no `session_id` and
-  no usable `cwd` — every such session collapsed into one anonymous slot
-  anchored at the extension host's cwd, so the persona's first-prompt FULL
-  injection only ever fired once and later sessions got nothing (the demo's
-  final answer came out voiceless). Anonymous hook events now get a managed
-  `anon-…` session id at the hook boundary, rotated on `session_start`, on
-  the first event after `session_end`, or after a 45-minute idle gap; the
-  persona scheduler, delivery ledger, and todo federation all see true
-  per-session ids with no per-consumer changes. Regression test: two
-  ACP-shaped anonymous kimi sessions each receive their own FULL identity.
 - **The wiki is an OKF v0.2 bundle, verified not just by construction.**
   Every page under `.stateroot/wiki/` now carries YAML frontmatter — `type`
   is required; `title`/`description` come from the index; `generated` and

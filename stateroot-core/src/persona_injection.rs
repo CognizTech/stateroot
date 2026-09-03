@@ -80,12 +80,12 @@ pub struct InjectionState {
     pub key: String,
 }
 
-/// Session key: payload session id when present, else the project dir.
+/// Session key: the payload's conversation id when present, else the project
+/// dir. Uses the canonical alias list (camelCase `sessionId` included) so
+/// every consumer agrees — a narrow list here once stranded IDE/ACP sessions
+/// on the bare shared key while the delivery layer saw a native id.
 pub fn session_key(project_dir: &Path, payload: &Value) -> String {
-    ["session_id", "conversation_id"]
-        .iter()
-        .find_map(|field| payload.get(field).and_then(|v| v.as_str()))
-        .filter(|s| !s.trim().is_empty())
+    crate::digest_delivery::session_id_from_payload(payload)
         .map(|s| format!("{}:{}", project_dir.display(), s.trim()))
         .unwrap_or_else(|| project_dir.display().to_string())
 }

@@ -318,6 +318,40 @@ fn kimi_code_injects_on_prompt_submit_not_session_start() {
 }
 
 #[test]
+fn kimi_acp_camelcase_session_id_keys_persona_per_session() {
+    // kimi-code's ACP adapter sends the conversation id as camelCase
+    // `sessionId`. A narrow alias list in the persona scheduler once ignored
+    // it: every ACP session collapsed onto the bare shared key, so a fresh
+    // session inherited `started=true` and got a compressed ghost reminder
+    // instead of the FULL identity (the demo's voiceless final answer).
+    let config_home = tempfile::tempdir().expect("config");
+    let user_home = tempfile::tempdir().expect("home");
+    let project = tempfile::tempdir().expect("project");
+    seed_marid(config_home.path(), user_home.path());
+    init_project(config_home.path(), user_home.path(), project.path());
+
+    let session_a = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["hook", "UserPromptSubmit", "--harness", "kimi-code"])
+        .write_stdin(r#"{"sessionId":"acp-a1"}"#)
+        .assert()
+        .success();
+    assert!(
+        contains_marid(&stdout_of(&session_a)),
+        "first camelCase session must inject FULL"
+    );
+
+    let session_b = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["hook", "UserPromptSubmit", "--harness", "kimi-code"])
+        .write_stdin(r#"{"sessionId":"acp-b2"}"#)
+        .assert()
+        .success();
+    assert!(
+        contains_marid(&stdout_of(&session_b)),
+        "a second camelCase session is a NEW session — it must get its own FULL"
+    );
+}
+
+#[test]
 fn kimi_acp_anonymous_sessions_each_get_identity() {
     // kimi-code under an IDE/ACP adapter fires hooks with EMPTY payloads — no
     // session id, no cwd. StateRoot manages session identity so every real
