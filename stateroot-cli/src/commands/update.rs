@@ -30,6 +30,15 @@ fn cache_path(ctx: &Ctx) -> PathBuf {
     ctx.config_dir.join("update-check.json")
 }
 
+/// True inside the test harness: every suite's spawned commands carry the
+/// STATEROOT_TEST_CMD_PROBES marker (empty or not). Update machinery must
+/// never run there — a background self-replace swaps `target/debug/stateroot`
+/// while sibling suites are mid-run, corrupting every later assertion.
+/// (The update suite unsets the marker deliberately to test this machinery.)
+fn in_test_harness() -> bool {
+    std::env::var_os("STATEROOT_TEST_CMD_PROBES").is_some()
+}
+
 /// Fire a DETACHED `self-update` when the release cache is stale — the
 /// automatic, agent-independent update path. Session-boundary hooks (already
 /// the slow-work zone) call this: when the check interval has passed, we
@@ -40,6 +49,9 @@ pub fn maybe_spawn_scheduled_update(config_dir: &Path, interval_hours: i64) {
     // release server and assert exact request counts — the detached worker
     // makes that nondeterministic by design.
     if std::env::var_os("STATEROOT_DISABLE_SCHEDULED_UPDATE").is_some() {
+        return;
+    }
+    if in_test_harness() {
         return;
     }
     if let Ok(worker) = std::env::current_exe() {
@@ -446,18 +458,29 @@ pub async fn fetch_tagged_release(ctx: &Ctx, tag: &str) -> anyhow::Result<Releas
     })
 }
 
+/// The running binary's version. The env override exists so integration
+/// tests can pose as a nightly or a prod build without recompiling.
+fn running_version() -> String {
+    std::env::var("STATEROOT_TEST_BUILD_VERSION")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| crate::cli::BUILD_VERSION.to_string())
+}
+
 /// True when the running binary is a dev/nightly build (`0.1.9-dev.122`).
 /// Detected from BUILD_VERSION — the binary's true identity (git-describe
 /// suffix); CURRENT_VERSION (CARGO_PKG_VERSION) is always plain `0.1.x` and
-/// would hide the channel.
+/// would hide the channel. Local builds report `-dev.local`.
 pub fn current_is_dev() -> bool {
-    crate::cli::BUILD_VERSION.contains("-dev.")
+    running_version().contains("-dev.")
 }
 
 /// Parse a dev-build version (`0.1.9-dev.122`) into (base, counter).
 /// Tolerant of prefixes (`stateroot 0.1.9-dev.122`) and suffixes (release
 /// names like `StateRoot 0.1.10-dev.125 (rolling preview)`): scans tokens
-/// for one carrying `-dev.`.
+/// for one carrying `-dev.`. A non-numeric counter (local builds report
+/// `-dev.local`) parses as counter 0: any numbered build of the same base
+/// is newer, and the base compare still works.
 pub fn parse_dev_version(text: &str) -> Option<((u64, u64, u64), u64)> {
     for token in text.split_whitespace() {
         let Some(pos) = token.find("-dev.") else {
@@ -471,7 +494,15 @@ pub fn parse_dev_version(text: &str) -> Option<((u64, u64, u64), u64)> {
             .chars()
             .take_while(|c| c.is_ascii_digit())
             .collect();
-        if let (Some(base), Ok(counter)) = (parse_semver(&base_text), counter_text.parse::<u64>()) {
+        let counter = if counter_text.is_empty() {
+            0 // non-numeric counter (e.g. `-dev.local`): orders before numbered builds
+        } else {
+            match counter_text.parse::<u64>() {
+                Ok(counter) => counter,
+                Err(_) => continue,
+            }
+        };
+        if let Some(base) = parse_semver(&base_text) {
             return Some((base, counter));
         }
     }
@@ -495,7 +526,7 @@ pub fn is_newer_than(current: &str, latest: &str) -> bool {
 
 /// True when `latest` is a newer version than the running binary.
 pub fn is_newer(latest: &str) -> bool {
-    is_newer_than(crate::cli::BUILD_VERSION, latest)
+    is_newer_than(&running_version(), latest)
 }
 
 /// Order a dev build against the nightly release's dev version (carried in
@@ -578,6 +609,18 @@ pub async fn download_and_install(ctx: &Ctx, info: &ReleaseInfo) -> anyhow::Resu
     download_and_install_quiet(ctx, info, false).await
 }
 
+/// True when the running executable is a cargo build artifact (`target/debug`
+/// or `target/release`). The updater must NEVER self-replace those: they are
+/// development surfaces, and replacing one mid-gate corrupts every test that
+/// spawns it. (The red-green farce of 2026-09-03/04: auto-update ate the
+/// binary under test and every sweep measured a different build.)
+fn is_cargo_build_artifact(exe: &Path) -> bool {
+    exe.components().any(|c| c.as_os_str() == "target")
+        && exe
+            .components()
+            .any(|c| c.as_os_str() == "debug" || c.as_os_str() == "release")
+}
+
 /// [`download_and_install`] with a quiet switch for the background path
 /// (no install output, failures only traced).
 pub async fn download_and_install_quiet(
@@ -587,6 +630,19 @@ pub async fn download_and_install_quiet(
 ) -> anyhow::Result<PathBuf> {
     let tmp = download_verified(ctx, &info.asset_url, &info.checksums_url).await?;
     let current_exe = std::env::current_exe().context("resolving current exe")?;
+    if is_cargo_build_artifact(&current_exe) {
+        let message = format!(
+            "refusing to self-replace a cargo build artifact ({}) — install it first",
+            current_exe.display()
+        );
+        if quiet {
+            tracing::warn!("{message}");
+        } else {
+            note_update(&message);
+        }
+        let _ = std::fs::remove_file(&tmp);
+        return Ok(current_exe);
+    }
     let outcome = self_replace(&current_exe, &tmp)?;
     let _ = std::fs::remove_file(&tmp);
     let detail = match &outcome.old_version {
@@ -635,18 +691,82 @@ fn note_update(message: &str) {
     println!("stateroot self-update: {message}");
 }
 
+fn nightly_cache_path(ctx: &Ctx) -> PathBuf {
+    ctx.config_dir.join("update-check-nightly.json")
+}
+
+/// Nightly-channel check with the same cache discipline as [`check_latest`].
+/// The rolling preview's display name carries the dev version, so the cache
+/// persists it for comparison.
+async fn check_nightly(ctx: &Ctx, force: bool) -> Option<ReleaseInfo> {
+    let interval = ctx.config.update.check_interval_hours.max(1);
+    if !force {
+        if let Ok(text) = std::fs::read_to_string(nightly_cache_path(ctx)) {
+            if let Ok(cached) = serde_json::from_str::<Value>(&text) {
+                let fresh = cached
+                    .get("checked_at")
+                    .and_then(|v| v.as_str())
+                    .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                    .map(|at| {
+                        (chrono::Utc::now() - at.with_timezone(&chrono::Utc)).num_hours() < interval
+                    })
+                    .unwrap_or(false);
+                if fresh {
+                    let name = cached.get("name").and_then(|v| v.as_str())?;
+                    let asset_url = cached.get("asset_url").and_then(|v| v.as_str())?;
+                    let checksums_url = cached.get("checksums_url").and_then(|v| v.as_str())?;
+                    return Some(ReleaseInfo {
+                        tag: "nightly".into(),
+                        name: name.into(),
+                        asset_url: asset_url.into(),
+                        checksums_url: checksums_url.into(),
+                    });
+                }
+            }
+        }
+    }
+    let info = fetch_tagged_release(ctx, "nightly").await.ok()?;
+    let _ = std::fs::create_dir_all(&ctx.config_dir);
+    let _ = std::fs::write(
+        nightly_cache_path(ctx),
+        serde_json::to_string_pretty(&json!({
+            "checked_at": stateroot_core::local_store::now_rfc3339(),
+            "name": info.name,
+            "asset_url": info.asset_url,
+            "checksums_url": info.checksums_url,
+        }))
+        .ok()?,
+    );
+    Some(info)
+}
+
 /// Background entry point (post-dispatch, whitelisted commands only):
 /// silent on every failure; never blocks past short timeouts.
+///
+/// Channel-strict by law: a dev/nightly build tracks ONLY the rolling
+/// preview — a newer production base release must never be installed over
+/// it silently (a local/nightly install of the next version's work was
+/// reverted to the current prod release on the first `init` of the day).
 pub async fn maybe_auto_update(ctx: &Ctx) {
     if disabled(ctx) {
         return;
     }
     let attempt = async {
-        let info = check_latest(ctx, false).await?;
-        if !is_newer(&info.tag) {
-            return None;
+        if current_is_dev() {
+            let info = check_nightly(ctx, false).await?;
+            match dev_update_order(&running_version(), &info.name) {
+                Some(std::cmp::Ordering::Less) => {
+                    download_and_install_quiet(ctx, &info, true).await.ok()
+                }
+                _ => None,
+            }
+        } else {
+            let info = check_latest(ctx, false).await?;
+            if !is_newer(&info.tag) {
+                return None;
+            }
+            download_and_install_quiet(ctx, &info, true).await.ok()
         }
-        download_and_install_quiet(ctx, &info, true).await.ok()
     }
     .await;
     // Deliberately discarded: silent background update — every failure is
@@ -672,6 +792,12 @@ pub async fn self_update(ctx: &Ctx, check_only: bool, tag: Option<&str>) -> anyh
     let info = if let Some(tag) = tag {
         fetch_tagged_release(ctx, tag).await?
     } else if follow_nightly {
+        // Mirror the production branch's graceful no-repo behavior.
+        let repo = ctx.config.update.repo.trim();
+        if repo.is_empty() || repo.contains("OWNER") || repo.contains("placeholder") {
+            println!("could not check for updates (no public release repo configured yet)");
+            return Ok(());
+        }
         fetch_tagged_release(ctx, "nightly").await?
     } else {
         // A user explicitly asked to check or update. Never report stale
@@ -684,7 +810,7 @@ pub async fn self_update(ctx: &Ctx, check_only: bool, tag: Option<&str>) -> anyh
             }
         }
     };
-    let current = crate::cli::BUILD_VERSION;
+    let current = running_version();
     let channel = if is_rolling_preview_tag(&info.tag) {
         "rolling preview"
     } else {
@@ -707,7 +833,7 @@ pub async fn self_update(ctx: &Ctx, check_only: bool, tag: Option<&str>) -> anyh
                 info.tag
             );
         } else if follow_nightly {
-            match dev_update_order(current, &info.name) {
+            match dev_update_order(&current, &info.name) {
                 Some(std::cmp::Ordering::Less) => println!(
                     "a newer rolling preview is available — run `stateroot self-update` to install it"
                 ),
@@ -725,7 +851,7 @@ pub async fn self_update(ctx: &Ctx, check_only: bool, tag: Option<&str>) -> anyh
     }
     if !explicit {
         if follow_nightly {
-            match dev_update_order(current, &info.name) {
+            match dev_update_order(&current, &info.name) {
                 Some(std::cmp::Ordering::Less) => {}
                 Some(_) => {
                     println!("already ahead of the rolling preview");
@@ -1570,6 +1696,21 @@ mod tests {
         );
         assert_eq!(parse_dev_version("v0.1.10"), None);
         assert_eq!(parse_dev_version("nightly"), None);
+    }
+
+    #[test]
+    fn updater_never_touches_cargo_build_artifacts() {
+        assert!(is_cargo_build_artifact(Path::new(
+            "/home/dev/stateroot/target/debug/stateroot"
+        )));
+        // Forward-slash Windows form: Path components split on '/' on every
+        // host (backslashes are data on unix).
+        assert!(is_cargo_build_artifact(Path::new(
+            "C:/dev/stateroot/target/release/stateroot.exe"
+        )));
+        assert!(!is_cargo_build_artifact(Path::new(
+            "/home/dev/.local/bin/stateroot"
+        )));
     }
 
     #[test]

@@ -11,7 +11,9 @@ fn stateroot(config_home: &Path, user_home: &Path, cwd: &Path) -> Command {
     let mut cmd = Command::cargo_bin("stateroot").expect("binary");
     cmd.env("STATEROOT_HOME", config_home)
         .env("STATEROOT_TEST_HOME", user_home)
-        .env("STATEROOT_TEST_CMD_PROBES", "")
+        // This suite tests the updater itself — release the test-harness
+        // marker so the updater stays live here (and only here).
+        .env_remove("STATEROOT_TEST_CMD_PROBES")
         .env_remove("DEEPSEEK_API_KEY")
         .env_remove("OPENAI_API_KEY")
         .env_remove("STATEROOT_SYNTHESIS_API_KEY")
@@ -77,11 +79,14 @@ async fn version_check_caches_for_24h() {
 
     // BACKGROUND path honors the 24h cache: first `status` fetches (cache
     // miss), the second is served from update-check.json (no request).
+    // The seam poses as a production build — dev builds check the nightly
+    // channel instead (background_update_never_crosses_channels).
     let project = tempfile::tempdir().expect("project");
     init_project(config_home.path(), user_home.path(), project.path());
     for _ in 0..2 {
         stateroot(config_home.path(), user_home.path(), project.path())
             .env("STATEROOT_GITHUB_API_BASE", server.uri())
+            .env("STATEROOT_TEST_BUILD_VERSION", "0.1.12")
             .arg("status")
             .assert()
             .success();
@@ -93,6 +98,7 @@ async fn version_check_caches_for_24h() {
     for _ in 0..2 {
         stateroot(config_home.path(), user_home.path(), cwd.path())
             .env("STATEROOT_GITHUB_API_BASE", server.uri())
+            .env("STATEROOT_TEST_BUILD_VERSION", "0.1.12")
             .args(["self-update", "--check"])
             .assert()
             .success();
@@ -128,16 +134,74 @@ async fn updater_never_runs_on_hook_but_runs_on_status() {
     stateroot(config_home.path(), user_home.path(), project.path())
         .env("STATEROOT_GITHUB_API_BASE", server.uri())
         .env("STATEROOT_DISABLE_SCHEDULED_UPDATE", "1")
+        .env("STATEROOT_TEST_BUILD_VERSION", "0.1.12")
         .args(["hook", "SessionStart", "--harness", "claude-code"])
         .assert()
         .success();
     // status path: the check fires (once — cached afterwards).
     stateroot(config_home.path(), user_home.path(), project.path())
         .env("STATEROOT_GITHUB_API_BASE", server.uri())
+        .env("STATEROOT_TEST_BUILD_VERSION", "0.1.12")
         .arg("status")
         .assert()
         .success();
     server.verify().await; // expect(1): exactly the status call
+}
+
+#[tokio::test]
+async fn background_update_never_crosses_channels() {
+    // The demo-day revert bug: a dev/nightly build whose base predates the
+    // newest prod tag was silently replaced by the PROD release on the first
+    // user-facing command. The background updater is channel-strict now:
+    // a dev build checks only the rolling preview — prod is never consulted.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/stateroot-dev/stateroot/releases/latest"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(release_body(
+            "v9.9.9",
+            "http://127.0.0.1:1/asset",
+            "http://127.0.0.1:1/checksums.txt",
+        )))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let mut nightly = release_body(
+        "nightly",
+        "http://127.0.0.1:1/asset",
+        "http://127.0.0.1:1/checksums.txt",
+    );
+    nightly["name"] = json!("StateRoot 0.1.13-dev.999 (rolling preview)");
+    Mock::given(method("GET"))
+        .and(path("/repos/stateroot-dev/stateroot/releases/tags/nightly"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(nightly))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let config_home = tempfile::tempdir().expect("config home");
+    seed_config(config_home.path(), &update_config_toml());
+    let user_home = tempfile::tempdir().expect("user home");
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+
+    // A dev build runs a user-facing command: the background updater checks
+    // the rolling preview (never prod), finds 0.1.13-dev.999 > 0.1.13-dev.100,
+    // and attempts the nightly asset (download fails against the stub URL —
+    // silently, by design).
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .env("STATEROOT_GITHUB_API_BASE", server.uri())
+        .env("STATEROOT_TEST_BUILD_VERSION", "0.1.13-dev.100")
+        .arg("status")
+        .assert()
+        .success();
+    server.verify().await;
+    assert!(
+        config_home
+            .path()
+            .join("update-check-nightly.json")
+            .is_file(),
+        "the nightly check cached"
+    );
 }
 
 #[tokio::test]

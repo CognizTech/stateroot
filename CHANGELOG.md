@@ -5,6 +5,29 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+## v0.1.14 — 2026-09-04
+
+- **The updater never eats a development binary.** `download_and_install`
+  refuses to self-replace any executable living in a cargo `target/` dir —
+  until now, any auto-update triggered from a dev-tree binary (a test-spawned
+  process, a detached scheduled worker, a probe) would download a release and
+  overwrite the binary under test mid-run, and every sweep measured a
+  different build. Plus the test-harness marker: update machinery stays out
+  of spawned test commands entirely.
+- **The background updater is channel-strict, and local builds admit it.**
+
+- **The background updater is channel-strict, and local builds admit it.**
+  `maybe_auto_update` ran after every user-facing command and compared only
+  base versions: the day a prod tag landed, any nightly whose base was older
+  was silently replaced by the prod release on the next `init`/`resume`/
+  `checkpoint` — the nightly with the fixes you just installed reverted
+  before the demo even started. Dev builds now track only the rolling
+  preview (prod is never consulted in the background), prod builds track
+  prod, and local builds self-identify as `-dev.local` instead of
+  masquerading as the release they share a base with. CI marks the channel
+  explicitly on both lanes (preview `-dev.<run>`, release bare semver).
+  Regression test: a dev build with a far-newer prod release available never
+  even consults the prod endpoint.
 - **IDE kimi sessions get the full project digest, with their voice.**
   kimi-code's VS Code extension fires hooks with the extension host's cwd
   (not the session's workdir), so project resolution failed and hooks fell

@@ -120,7 +120,9 @@ fn spawn_returns_immediately_and_worker_completes() {
     let log_rel = record["log"].as_str().expect("log").to_string();
 
     // The worker finalizes: outcome, exit code, log body, episodic lineage.
-    let record = wait_for_outcome(project.path(), 20);
+    // Wide window: only the failure path pays for it, and a loaded WSL host
+    // stretches process scheduling well past 20s (sweep-only flake).
+    let record = wait_for_outcome(project.path(), 60);
     assert_eq!(record["outcome"], "completed");
     assert_eq!(record["exit_code"], 0);
     assert!(record.get("status").is_none(), "status replaced by outcome");

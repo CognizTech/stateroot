@@ -92,7 +92,15 @@ fn doctor_oks_a_current_hook_binary() {
     let user_home = tempfile::tempdir().expect("user home");
     let cwd = tempfile::tempdir().expect("cwd");
     write_cursor_hooks(user_home.path());
-    let (_bin, path) = stub_on_path(env!("CARGO_PKG_VERSION"));
+    // The stub mirrors the binary under test exactly — local builds report
+    // `-dev.local`, CI builds their stamp; never hardcode the base version.
+    let current = stateroot(config_home.path(), user_home.path(), cwd.path())
+        .arg("--version")
+        .assert()
+        .success();
+    let current = String::from_utf8(current.get_output().stdout.clone()).expect("utf8");
+    let current = current.trim().trim_start_matches("stateroot ").to_string();
+    let (_bin, path) = stub_on_path(&current);
 
     let out = stateroot(config_home.path(), user_home.path(), cwd.path())
         .env("PATH", &path)

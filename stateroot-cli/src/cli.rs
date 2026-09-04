@@ -7,10 +7,13 @@
 use clap::{Args, Parser, Subcommand};
 
 /// Exact version embedded in this binary. Rolling CI previews append an
-/// automatically increasing `-dev.<run>` suffix without mutating Cargo.toml.
+/// automatically increasing `-dev.<run>` suffix without mutating Cargo.toml;
+/// release (tag) CI stamps the bare semver explicitly. A local build — one
+/// with no CI stamp at all — reports `-dev.local` so channel logic never
+/// mistakes it for a production install.
 pub const BUILD_VERSION: &str = match option_env!("STATEROOT_BUILD_VERSION") {
     Some(version) => version,
-    None => env!("CARGO_PKG_VERSION"),
+    None => concat!(env!("CARGO_PKG_VERSION"), "-dev.local"),
 };
 
 /// StateRoot — local-first continuity for every harness.
