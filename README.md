@@ -8,9 +8,9 @@ Close Claude Code. Open Codex. Keep working. The next agent starts already knowi
 
 **And it versions the work itself.** Snapshot, restore, fork, and compare the complete state of the project at any point — immutable, content-addressed, with receipts for how it changed.
 
-<!-- GIF SLOT: drop the continuity demo here (close one agent, open another — it just knows).
-     Suggested: <p align="center"><img alt="Close one agent, open another — it just knows" src="docs/assets/continuity-demo.gif"></p>
-     Record ~10s: work in one harness, open a second in the same project, first answer already has the context. -->
+<p align="center">
+  <img alt="Close one agent, open another — it just knows" src="demo.gif">
+</p>
 
 <p align="center">
   <a href="https://github.com/CognizTech/stateroot/releases"><img src="https://img.shields.io/github/v/release/CognizTech/stateroot?color=7ee0c8&labelColor=0c1016&logo=github&style=for-the-badge" alt="Release"></a>

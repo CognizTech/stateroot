@@ -5,5 +5,7 @@ temp/
 .agents/
 .cursor/
 AGENTS.md
-# Local-only: extension prototypes under design review (not shipped)
-editors/
+# Editor extension build outputs (source ships; artifacts are built)
+editors/vscode/node_modules/
+editors/vscode/out/
+editors/vscode/*.vsix

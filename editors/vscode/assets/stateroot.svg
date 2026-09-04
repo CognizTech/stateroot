@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="10 40 280 330" role="img" aria-label="stateroot">
+  <title>stateroot mark for dark background</title>
+  <g stroke-linecap="round" stroke-linejoin="round">
+    <path d="M145 325 L145 235 L86 195 L86 150 L175 95" stroke="#F7F9FC" fill="none" stroke-width="18"/>
+    <path d="M86 150 L42 70" stroke="#F7F9FC" fill="none" stroke-width="18"/>
+    <path d="M145 235 L225 185" stroke="#F7F9FC" fill="none" stroke-width="18"/>
+    <path d="M175 95 L222 67" stroke="#11C5C9" fill="none" stroke-width="18"/>
+    <path d="M225 185 L252 168" stroke="#11C5C9" fill="none" stroke-width="18"/>
+    <circle cx="145" cy="325" r="31" fill="#F7F9FC"/>
+    <circle cx="145" cy="235" r="20" stroke="#F7F9FC" fill="#03122F" stroke-width="13"/>
+    <circle cx="42" cy="70" r="21" stroke="#F7F9FC" fill="#03122F" stroke-width="13"/>
+    <circle cx="222" cy="67" r="21" stroke="#11C5C9" fill="#03122F" stroke-width="13"/>
+    <circle cx="252" cy="168" r="21" stroke="#11C5C9" fill="#03122F" stroke-width="13"/>
+  </g>
+</svg>

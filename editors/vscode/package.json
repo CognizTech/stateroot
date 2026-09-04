@@ -1,0 +1,107 @@
+{
+  "name": "stateroot",
+  "displayName": "StateRoot",
+  "description": "Cross-harness continuity for AI coding agents - project goal, plans, checkpoints, handoffs, and the shared state of record, inside your editor.",
+  "version": "0.2.11",
+  "publisher": "CognizTech",
+  "license": "Apache-2.0",
+  "homepage": "https://stateroot.dev",
+  "repository": "https://github.com/CognizTech/stateroot",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "SCM Providers"
+  ],
+  "activationEvents": [
+    "workspaceContains:**/.stateroot/manifest.json",
+    "onView:stateroot.overview",
+    "onCommand:stateroot.init",
+    "onCommand:stateroot.installCli"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "stateroot",
+          "title": "StateRoot",
+          "icon": "assets/stateroot.svg"
+        }
+      ]
+    },
+    "views": {
+      "stateroot": [
+        {
+          "id": "stateroot.overview",
+          "name": "StateRoot",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "stateroot.openWorkbench",
+        "title": "StateRoot: Open workbench"
+      },
+      {
+        "command": "stateroot.delegatePlan",
+        "title": "StateRoot: Delegate Plan"
+      },
+      {
+        "command": "stateroot.init",
+        "title": "StateRoot: Initialize Project"
+      },
+      {
+        "command": "stateroot.checkpoint",
+        "title": "StateRoot: Checkpoint"
+      },
+      {
+        "command": "stateroot.snap",
+        "title": "StateRoot: Snapshot (snap)"
+      },
+      {
+        "command": "stateroot.resume",
+        "title": "StateRoot: Resume Digest"
+      },
+      {
+        "command": "stateroot.handoff",
+        "title": "StateRoot: Write Handoff"
+      },
+      {
+        "command": "stateroot.doctor",
+        "title": "StateRoot: Doctor"
+      },
+      {
+        "command": "stateroot.refresh",
+        "title": "StateRoot: Refresh"
+      },
+      {
+        "command": "stateroot.installCli",
+        "title": "StateRoot: Install CLI"
+      }
+    ],
+    "configuration": {
+      "title": "StateRoot",
+      "properties": {
+        "stateroot.cliPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the stateroot binary (defaults to PATH)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "node ./node_modules/typescript/bin/tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3",
+    "typescript": "^5.5"
+  }
+}
