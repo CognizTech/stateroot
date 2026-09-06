@@ -7,6 +7,24 @@
   "license": "Apache-2.0",
   "homepage": "https://stateroot.dev",
   "repository": "https://github.com/CognizTech/stateroot",
+  "icon": "assets/stateroot-128.png",
+  "galleryBanner": {
+    "color": "#0c1016",
+    "theme": "dark"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "continuity",
+    "handoff",
+    "memory",
+    "plans",
+    "cross-harness",
+    "claude code",
+    "codex",
+    "cursor",
+    "kimi"
+  ],
   "engines": {
     "vscode": "^1.85.0"
   },
