@@ -2,7 +2,7 @@
   "name": "stateroot",
   "displayName": "StateRoot",
   "description": "Cross-harness continuity for AI coding agents - project goal, plans, checkpoints, handoffs, and the shared state of record, inside your editor.",
-  "version": "0.2.11",
+  "version": "0.2.12",
   "publisher": "CognizTech",
   "license": "Apache-2.0",
   "homepage": "https://stateroot.dev",
