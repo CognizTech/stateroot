@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import * as cp from "child_process";
 import {
-  confirmAndInstallCli,
+  autoInstallCli,
   findWorkingCli,
   type PlatformInfo,
   detectPlatform,
@@ -62,7 +62,7 @@ async function resolveCliForRun(
     return undefined;
   }
   installAttempted.value = true;
-  const installed = await confirmAndInstallCli(output);
+  const installed = await autoInstallCli(output);
   if (installed) {
     sessionCliPath = installed;
     lastProbeAvailable = true;
@@ -100,7 +100,7 @@ export function runCli(
 
 /** Deliberate install entry point (Command Palette / status bar). */
 export async function installCliCommand(output: vscode.OutputChannel): Promise<boolean> {
-  const installed = await confirmAndInstallCli(output);
+  const installed = await autoInstallCli(output);
   if (!installed) {
     return false;
   }

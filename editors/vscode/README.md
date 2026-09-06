@@ -15,6 +15,10 @@ lesson one agent learns becomes a rule for all of them.
 This extension is the Conductor UI for that CLI: the sidebar glance and the
 workbench for the human directing several harnesses at once.
 
+<p align="center">
+  <img alt="Close one agent, open another — it just knows" src="https://raw.githubusercontent.com/CognizTech/stateroot/main/demo.gif">
+</p>
+
 ## What the StateRoot CLI does
 
 One `stateroot` binary next to Git, sharing everything above each harness's

@@ -203,6 +203,39 @@ export async function installCli(output: vscode.OutputChannel): Promise<InstallR
   return { ok: true, binaryPath: platform.installDest };
 }
 
+/** Install the latest stable release with no confirmation gate — the default
+ * when the CLI is absent. The extension is dead weight without the CLI, so
+ * the first moment we notice it missing is the moment we fetch it. */
+export async function autoInstallCli(output: vscode.OutputChannel): Promise<string | undefined> {
+  const platform = detectPlatform();
+  if (!platform.supported) {
+    output.appendLine(`auto-install skipped: ${platform.reason}`);
+    return undefined;
+  }
+  const result = await vscode.window.withProgress(
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: "StateRoot CLI not found — installing latest stable release",
+      cancellable: false,
+    },
+    async () => installCli(output)
+  );
+  if (!result.ok) {
+    const pick = await vscode.window.showErrorMessage(
+      `StateRoot CLI auto-install failed: ${result.error}`,
+      "Open docs"
+    );
+    if (pick === "Open docs") {
+      await vscode.env.openExternal(vscode.Uri.parse(DOCS_URL));
+    }
+    output.appendLine(`auto-install failed: ${result.error}`);
+    output.show(true);
+    return undefined;
+  }
+  output.appendLine(`auto-installed: ${result.binaryPath}`);
+  return result.binaryPath;
+}
+
 export async function confirmAndInstallCli(output: vscode.OutputChannel): Promise<string | undefined> {
   const platform = detectPlatform();
   if (!platform.supported) {

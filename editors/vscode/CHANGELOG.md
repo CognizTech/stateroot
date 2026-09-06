@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.13
+
+- The CLI installs itself: when no `stateroot` binary is found (on extension
+  activation or first use), the latest stable release is downloaded and
+  installed automatically — no confirmation gate. The extension is no longer
+  dead weight on a fresh machine.
+- The continuity demo gif now opens the store overview.
+
 ## 0.2.12
 
 - Store overview rewritten: what the StateRoot CLI is and does, what the

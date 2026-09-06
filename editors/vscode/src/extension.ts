@@ -778,7 +778,20 @@ export function activate(context: vscode.ExtensionContext) {
   // Keep the read-only StateRoot view eventually consistent without invoking
   // the CLI or requiring a manual refresh.
   storePoll = setInterval(push, 3000);
-  void refreshCliProbe().then(() => push());
+  // First run on a fresh machine: the extension is useless without the CLI,
+  // so install the latest stable release the moment we notice it missing —
+  // no gate, then re-probe and paint the view.
+  void (async () => {
+    const available = await refreshCliProbe();
+    if (!available) {
+      const { autoInstallCli } = await import("./cliInstall");
+      const installed = await autoInstallCli(output);
+      if (installed) {
+        await refreshCliProbe();
+      }
+    }
+    push();
+  })();
   void refreshLive();
 }
 
