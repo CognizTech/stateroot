@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.14
+
+- After the CLI auto-installs, `stateroot init` runs automatically in the
+  open project (skipped when a manifest already exists) — the extension
+  works on first sight, not first command.
+
 ## 0.2.13
 
 - The CLI installs itself: when no `stateroot` binary is found (on extension

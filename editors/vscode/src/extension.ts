@@ -788,6 +788,18 @@ export function activate(context: vscode.ExtensionContext) {
       const installed = await autoInstallCli(output);
       if (installed) {
         await refreshCliProbe();
+        // A project is open and the CLI just landed: initialize it so the
+        // extension works on first sight, not first command. Idempotent —
+        // but skip projects that already carry a manifest.
+        const folder = vscode.workspace.workspaceFolders?.[0];
+        if (
+          folder &&
+          !fs.existsSync(
+            path.join(folder.uri.fsPath, ".stateroot", "manifest.json")
+          )
+        ) {
+          await runCliReport(["init"], folder.uri.fsPath, output, 60_000);
+        }
       }
     }
     push();
