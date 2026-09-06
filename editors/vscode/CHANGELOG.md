@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.12
+
+- Store overview rewritten: what the StateRoot CLI is and does, what the
+  extension adds on top, requirements, and links.
+
 ## 0.2.11
 
 - Wiki page listing reads the OKF bundle location (`wiki/pages/`) with a
