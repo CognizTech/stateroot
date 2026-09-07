@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.15
+
+- CLI auto-installs are tagged (`STATEROOT_INSTALL_VIA=extension`) so the
+  anonymous install counter can tell extension-driven installs from script
+  installs.
+
 ## 0.2.14
 
 - After the CLI auto-installs, `stateroot init` runs automatically in the
