@@ -223,16 +223,16 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
                         15,
                     ) {
                         for line in &report.ingested {
-                            note!("plan sync: ingested {line}");
+                            hook_note(quirk, &format!("plan sync: ingested {line}"));
                         }
                         for line in &report.updated {
-                            note!("plan sync: updated {line}");
+                            hook_note(quirk, &format!("plan sync: updated {line}"));
                         }
                         for line in &report.completed {
-                            note!("plan sync: completed {line}");
+                            hook_note(quirk, &format!("plan sync: completed {line}"));
                         }
                         for line in &report.notes {
-                            note!("plan sync: {line}");
+                            hook_note(quirk, &format!("plan sync: {line}"));
                         }
                     }
                 }
@@ -741,6 +741,15 @@ fn print_hook_injection(quirk: &registry::HarnessQuirk, canonical: &str, digest:
     }
 }
 
+/// Housekeeping notes print to stderr — which harnesses like VS Code Copilot
+/// surface as user-facing warning banners after every turn. Success-path
+/// chatter is gated per harness (`quiet_housekeeping`); failures always print.
+fn hook_note(quirk: &registry::HarnessQuirk, msg: &str) {
+    if !registry::quiet_housekeeping(quirk.id) {
+        eprintln!("{msg}");
+    }
+}
+
 async fn resume_output(
     ctx: &Ctx,
     quirk: &registry::HarnessQuirk,
@@ -1015,9 +1024,12 @@ async fn checkpoint_from_spool(
     // current seq.
     if matches!(canonical, "stop" | "session_end") {
         if super::handoff::try_auto_finalize(&hook_ctx, quirk.id).unwrap_or(false) {
-            note!("finalized observed session into handoff continuity");
+            hook_note(quirk, "finalized observed session into handoff continuity");
         } else if !tail.is_empty() {
-            note!("checkpoint recorded; existing structured handoff preserved");
+            hook_note(
+                quirk,
+                "checkpoint recorded; existing structured handoff preserved",
+            );
         }
         // Ingest is local but slow on Windows/WSL mounts (wiki + inbox rewrite).
         // `stop` can pay that cost between turns. `session_end` runs while
@@ -1041,16 +1053,19 @@ async fn checkpoint_from_spool(
                         .and_then(|v| v.as_u64())
                         .map(|n| n.to_string())
                         .unwrap_or_else(|| "?".to_string());
-                    note!(
-                        "auto-snap: root {} ({changed} file(s) changed)",
-                        &manifest.id[..12]
+                    hook_note(
+                        quirk,
+                        &format!(
+                            "auto-snap: root {} ({changed} file(s) changed)",
+                            &manifest.id[..12]
+                        ),
                     );
                 }
                 Ok(stateroot_core::roots::SnapOutcome::Unchanged { .. }) => {}
                 Err(err) => note!("auto-snap skipped: {err}"),
             }
             match super::compiler::try_ingest(&hook_ctx, false).await {
-                Ok(summary) => note!("{summary}"),
+                Ok(summary) => hook_note(quirk, &summary),
                 Err(err) => note!("ingest skipped: {err}"),
             }
         }

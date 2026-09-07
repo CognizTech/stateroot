@@ -11,6 +11,7 @@
 //! (stateroot-core/src/harness_install/hooks.rs) — keep them in sync.
 
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
 import { cliPath } from "./cli";
@@ -55,7 +56,21 @@ export function workspaceHooksPath(projectRoot: string): string {
   return path.join(projectRoot, ".github", "hooks", "stateroot.json");
 }
 
-/** Write the workspace hook file (idempotent overwrite — it is ours). */
+/** Copy the user-level StateRoot agent (written by `stateroot install`)
+ *  into the workspace, so Copilot users can pick it per project. */
+function copyAgentFile(projectRoot: string, output: vscode.OutputChannel): void {
+  const src = path.join(os.homedir(), ".copilot", "agents", "StateRoot.agent.md");
+  if (!fs.existsSync(src)) {
+    return;
+  }
+  const dest = path.join(projectRoot, ".github", "agents", "StateRoot.agent.md");
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.copyFileSync(src, dest);
+  output.appendLine(`copilot agent → ${dest}`);
+}
+
+/** Write the workspace hook file (idempotent overwrite — it is ours) and the
+ *  StateRoot agent file when the user-level one exists. */
 export function enableCopilotHooks(
   projectRoot: string,
   output: vscode.OutputChannel
@@ -64,8 +79,9 @@ export function enableCopilotHooks(
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.writeFileSync(dest, copilotHooksDocument(cliPath()));
   output.appendLine(`copilot hooks → ${dest}`);
+  copyAgentFile(projectRoot, output);
   void vscode.window.showInformationMessage(
-    "StateRoot hooks enabled for Copilot in this workspace — the agent gets persona, project state, and lineage from its first message."
+    "StateRoot enabled for Copilot in this workspace — hooks plus the StateRoot agent. Pick 'StateRoot' in the agent dropdown for the full persona."
   );
 }
 

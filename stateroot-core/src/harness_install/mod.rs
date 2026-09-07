@@ -557,6 +557,17 @@ pub fn install_quirk_full(home: &Path, quirk: &registry::HarnessQuirk, block: &s
     if actions.is_empty() {
         actions.push("managed — no files".to_string());
     }
+    // Custom-agent file (user-level) for harnesses with markdown agents:
+    // the persona as the agent's OWN instructions — the strong identity
+    // channel that hook-injected context cannot provide. Refreshed from the
+    // soul on every install; never hand-edited.
+    if let Some(rel) = registry::agent_file_target(quirk.id) {
+        match install_agent_file(home, rel) {
+            Ok(Some(line)) => actions.push(line),
+            Ok(None) => {}
+            Err(err) => tracing::warn!("  ! {} agent file failed: {err}", quirk.id),
+        }
+    }
     let policy = quirk.delivery();
     let tier = match policy.tier {
         registry::DeliveryTier::Automatic => "automatic",
@@ -564,6 +575,38 @@ pub fn install_quirk_full(home: &Path, quirk: &registry::HarnessQuirk, block: &s
     };
     actions.push(format!("identity delivery: {tier} — {}", policy.note));
     actions
+}
+
+/// Write the StateRoot custom-agent file (soul verbatim + identity and
+/// protocol sections) for harnesses with markdown agent definitions. Fully
+/// managed: rewritten when the rendered content changes, untouched when
+/// current. Returns the action line when a write happened.
+fn install_agent_file(home: &Path, rel: &str) -> Result<Option<String>, HarnessError> {
+    let path = home.join(rel);
+    let soul = crate::soul::read_canonical(home).unwrap_or_default();
+    let content = render_agent_file(&soul);
+    let current = std::fs::read_to_string(&path).unwrap_or_default();
+    if current == content {
+        return Ok(None);
+    }
+    write_file(&path, &content)?;
+    Ok(Some(format!("agent → {}", path.display())))
+}
+
+/// The StateRoot custom-agent document: frontmatter, the persona verbatim,
+/// then identity + protocol sections that work for ANY persona.
+fn render_agent_file(soul: &str) -> String {
+    let mut out = String::from(
+        "---\nname: StateRoot\ndescription: The StateRoot continuous agent — one persona, memory, plans, and lineage across every harness (Claude Code, Codex, Cursor, Kimi, Copilot).\n---\n\n<!-- stateroot:managed v1 — refreshed by `stateroot install`; do not edit by hand -->\n\n",
+    );
+    if !soul.trim().is_empty() {
+        out.push_str(soul.trim());
+        out.push_str("\n\n");
+    }
+    out.push_str(
+        "## Identity questions\n\nWhen asked your name or who you are, answer as the persona above — you are that agent, currently running inside GitHub Copilot. The harness is where you run, never who you are.\n\n## StateRoot protocol\n\n- Projects with a `.stateroot/` directory are managed by StateRoot. Lifecycle hooks inject the project digest (goal, plan, memory, lineage) at session start — trust it; do not re-read files to reconstruct it.\n- After meaningful changes: `stateroot checkpoint --note \"<what changed and why>\"` (lineage snapshots automatically on real change).\n- If the digest is missing, run `stateroot resume --harness vscode-copilot` unpiped and untruncated.\n",
+    );
+    out
 }
 
 /// Remove the stateroot MCP registration from a JSON `mcpServers` config:
@@ -1065,5 +1108,41 @@ mod tests {
         let rerun = install_quirk_full(tmp.path(), hermes, "BLOCK BODY").join("\n");
         assert!(rerun.contains("block already up to date"), "rerun: {rerun}");
         assert!(rerun.contains("MCP already registered"), "rerun: {rerun}");
+    }
+
+    #[test]
+    fn copilot_agent_file_carries_soul_and_protocol() {
+        let home = tempfile::tempdir().expect("home");
+        let soul_dir = home.path().join(".stateroot/soul");
+        std::fs::create_dir_all(&soul_dir).expect("soul dir");
+        std::fs::write(
+            soul_dir.join("SOUL.md"),
+            "# Soul — Test Persona\n\nYou are the test persona.",
+        )
+        .expect("soul");
+        let line = install_agent_file(home.path(), ".copilot/agents/StateRoot.agent.md")
+            .expect("write")
+            .expect("changed");
+        assert!(line.contains("agent →"), "{line}");
+        let text = std::fs::read_to_string(home.path().join(".copilot/agents/StateRoot.agent.md"))
+            .expect("agent file");
+        assert!(text.contains("stateroot:managed"), "{text}");
+        assert!(text.contains("You are the test persona"), "{text}");
+        assert!(text.contains("## Identity questions"), "{text}");
+        assert!(text.contains("## StateRoot protocol"), "{text}");
+        // Unchanged content → no rewrite.
+        assert!(
+            install_agent_file(home.path(), ".copilot/agents/StateRoot.agent.md")
+                .expect("again")
+                .is_none()
+        );
+        // A changed soul re-renders the file.
+        std::fs::write(soul_dir.join("SOUL.md"), "# Soul — V2 Persona").expect("soul v2");
+        install_agent_file(home.path(), ".copilot/agents/StateRoot.agent.md")
+            .expect("rewrite")
+            .expect("changed again");
+        let text = std::fs::read_to_string(home.path().join(".copilot/agents/StateRoot.agent.md"))
+            .expect("agent file v2");
+        assert!(text.contains("V2 Persona"), "{text}");
     }
 }

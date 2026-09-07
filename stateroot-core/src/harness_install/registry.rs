@@ -806,6 +806,25 @@ pub fn adapters() -> &'static [HarnessQuirk] {
     ADAPTERS
 }
 
+/// Harnesses that surface hook stderr as user-facing warning banners (VS Code
+/// Copilot): success-path housekeeping notes (checkpoint recorded, ingest
+/// summaries, auto-snap creations) are suppressed there. Failure notes always
+/// print.
+pub fn quiet_housekeeping(id: &str) -> bool {
+    matches!(id, "vscode-copilot")
+}
+
+/// User-level custom-agent file target (home-relative) for harnesses whose
+/// agent definitions are markdown files (VS Code Copilot: ~/.copilot/agents).
+/// The persona as the agent's OWN instructions — a stronger identity channel
+/// than hook-injected context.
+pub fn agent_file_target(id: &str) -> Option<&'static str> {
+    match id {
+        "vscode-copilot" => Some(".copilot/agents/StateRoot.agent.md"),
+        _ => None,
+    }
+}
+
 /// True when the harness is detected under `home`.
 pub fn quirk_detected(home: &Path, quirk: &HarnessQuirk) -> bool {
     super::paths::quirk_detected(home, quirk)
