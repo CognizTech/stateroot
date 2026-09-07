@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 
 use crate::harness_install::paths;
 use crate::local_store::{self, now_rfc3339};
-use crate::transcripts::{self, claude, codex, cursor, dsh, hermes, kimi, openclaw, pi};
+use crate::transcripts::{self, claude, codex, copilot, cursor, dsh, hermes, kimi, openclaw, pi};
 
 /// Schema tag on the header line.
 pub const SCHEMA_SESSION_V1: &str = "stateroot.session.v1";
@@ -574,6 +574,17 @@ pub fn import_from_readers_filtered(
             };
             for raw in hermes::raw_sessions(&db, project_dir) {
                 import_one(extract::canonical_from_hermes(&raw, &db_path), &mut report);
+            }
+        }
+    }
+
+    if harness.is_none_or(|h| h == "copilot") {
+        for db_path in copilot::db_candidates(home) {
+            let Ok(db) = cursor::open_readonly(&db_path) else {
+                continue;
+            };
+            for raw in copilot::raw_sessions(&db, project_dir) {
+                import_one(extract::canonical_from_copilot(&raw, &db_path), &mut report);
             }
         }
     }
