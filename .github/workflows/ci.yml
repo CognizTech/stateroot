@@ -15,6 +15,10 @@ on:
         description: Optional base version for manually built preview artifacts
         required: false
         type: string
+      release_tag:
+        description: Existing v* tag to backfill a macOS asset onto (e.g. v0.1.14)
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -269,8 +273,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macOS (aarch64-apple-darwin) intentionally omitted — costly runners;
-        # re-add when shipping a macOS release.
+        # macOS ships in tagged releases. Still omitted from the per-push
+        # preview matrix above (runner minutes on every push).
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
@@ -279,6 +283,9 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: stateroot-windows-x64.exe
+          - os: macos-14
+            target: aarch64-apple-darwin
+            artifact: stateroot-macos-aarch64
     steps:
       - uses: actions/checkout@v7
 
@@ -318,6 +325,9 @@ jobs:
           mkdir -p dist
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             cp target/${{ matrix.target }}/release/stateroot.exe dist/${{ matrix.artifact }}
+          elif [ "${{ runner.os }}" = "macOS" ]; then
+            cp target/${{ matrix.target }}/release/stateroot dist/${{ matrix.artifact }}
+            strip dist/${{ matrix.artifact }} || true
           else
             cp target/${{ matrix.target }}/release/stateroot dist/${{ matrix.artifact }}
             ./packaging/linux/check-glibc.sh dist/${{ matrix.artifact }} ${{ matrix.glibc }}
@@ -463,3 +473,53 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # One-off repair tool: build the macOS asset for an ALREADY-TAGGED release
+  # and attach it (plus a refreshed checksums.txt). Dispatch with release_tag.
+  backfill-macos:
+    name: backfill macOS asset for ${{ inputs.release_tag }}
+    if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+    runs-on: macos-14
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.release_tag }}
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Stamp release version
+        shell: bash
+        env:
+          TAG: ${{ inputs.release_tag }}
+        run: echo "STATEROOT_BUILD_VERSION=${TAG#v}" >> "$GITHUB_ENV"
+
+      - name: Build release binary
+        shell: bash
+        run: cargo build --release --target aarch64-apple-darwin -p stateroot-cli
+
+      - name: Package and smoke-test on this runner
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/aarch64-apple-darwin/release/stateroot dist/stateroot-macos-aarch64
+          strip dist/stateroot-macos-aarch64 || true
+          ./dist/stateroot-macos-aarch64 --version
+
+      - name: Attach asset and refresh checksums.txt
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          gh release upload "$TAG" dist/stateroot-macos-aarch64 --clobber
+          curl -fsSL "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/checksums.txt" -o checksums.txt
+          grep -v ' stateroot-macos-aarch64$' checksums.txt > checksums.new || true
+          (cd dist && shasum -a 256 stateroot-macos-aarch64) >> checksums.new
+          mv checksums.new checksums.txt
+          cat checksums.txt
+          gh release upload "$TAG" checksums.txt --clobber
