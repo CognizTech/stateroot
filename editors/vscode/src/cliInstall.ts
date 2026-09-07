@@ -135,7 +135,11 @@ function downloadUrl(url: string, dest: string): Promise<void> {
 
 function execInstaller(scriptPath: string, scriptName: SupportedPlatform["scriptName"]): Promise<string> {
   return new Promise((resolve, reject) => {
-    const opts = { maxBuffer: 8 * 1024 * 1024, timeout: 180_000 };
+    const opts = {
+      maxBuffer: 8 * 1024 * 1024,
+      timeout: 180_000,
+      env: { ...process.env, STATEROOT_INSTALL_VIA: "extension" },
+    };
     if (scriptName === "install.ps1") {
       cp.execFile(
         "powershell.exe",
