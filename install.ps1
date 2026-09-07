@@ -79,6 +79,9 @@ try {
     # Disable with: $env:STATEROOT_NO_PING = '1'
     if ($env:STATEROOT_NO_PING -ne '1') {
         try {
+            # PS 5.1 on older .NET defaults to TLS 1.0/1.1 and modern nginx
+            # refuses it - pin TLS 1.2 so the ping is not silently dropped.
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
             $ver = ((& $Dest --version 2>$null | Out-String).Trim() -replace '^stateroot\s*', '')
             if (-not $ver) { $ver = 'unknown' }
             $via = if ($env:STATEROOT_INSTALL_VIA) { $env:STATEROOT_INSTALL_VIA } else { 'script' }

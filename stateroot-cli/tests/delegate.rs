@@ -92,7 +92,12 @@ fn spawn_returns_immediately_and_worker_completes() {
     let (config_home, user_home) = homes();
     let project = tempfile::tempdir().expect("project");
     init_project(config_home.path(), user_home.path(), project.path());
-    let (_bin, path) = fake_claude("#!/bin/sh\nsleep 8\necho 'conclusion: parser wired'\n");
+    // The worker waits on a sentinel file instead of sleeping: the "running"
+    // observation window below is exactly as long as the test needs — no
+    // sleep to out-race on a loaded WSL/DrvFs host. (Worker cwd = project.)
+    let (_bin, path) = fake_claude(
+        "#!/bin/sh\nwhile [ ! -f .stateroot-delegate-test-go ]; do sleep 0.2; done\necho 'conclusion: parser wired'\n",
+    );
 
     // The spawn path exits 0 immediately with a running record.
     let out = stateroot(config_home.path(), user_home.path(), project.path())
@@ -111,8 +116,6 @@ fn spawn_returns_immediately_and_worker_completes() {
     );
 
     // The record the parent wrote before exiting: running, with a pid.
-    // The worker's 8s sleep keeps this observable even when a loaded
-    // WSL/DrvFs host stretches the parent + assert path well past 2s.
     let records = read_records(project.path());
     assert_eq!(records.len(), 1, "records: {records:?}");
     let record = &records[0];
@@ -121,9 +124,9 @@ fn spawn_returns_immediately_and_worker_completes() {
     let id = record["id"].as_str().expect("id").to_string();
     let log_rel = record["log"].as_str().expect("log").to_string();
 
-    // The worker finalizes: outcome, exit code, log body, episodic lineage.
-    // Wide window: only the failure path pays for it, and a loaded WSL host
-    // stretches process scheduling well past 20s (sweep-only flake).
+    // Release the worker, then it finalizes: outcome, exit code, log body,
+    // episodic lineage. The 60s window only pays out on failure.
+    std::fs::write(project.path().join(".stateroot-delegate-test-go"), b"go").expect("sentinel");
     let record = wait_for_outcome(project.path(), 60);
     assert_eq!(record["outcome"], "completed");
     assert_eq!(record["exit_code"], 0);
@@ -318,6 +321,50 @@ fn delegate_refuses_past_the_depth_cap_without_spawning() {
         !delegations(project.path()).exists(),
         "a refused delegation writes no records"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn delegate_to_copilot_spawns_and_completes() {
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    // Fake `copilot` CLI on PATH, echoing its argv so the template is proven.
+    let bin = tempfile::tempdir().expect("bin");
+    let fake = bin.path().join("copilot");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\nprintf '%s\\n' \"copilot argv: $*\"\necho 'copilot conclusion'\n",
+    )
+    .expect("fake copilot");
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("chmod");
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").expect("PATH")
+    );
+
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .env("PATH", &path)
+        .args([
+            "delegate",
+            "--to",
+            "copilot",
+            "--task",
+            "summarize the diff",
+        ])
+        .assert()
+        .success();
+
+    let record = wait_for_outcome(project.path(), 60);
+    assert_eq!(record["outcome"], "completed");
+    assert_eq!(record["exit_code"], 0);
+    let log_rel = record["log"].as_str().expect("log").to_string();
+    let log = std::fs::read_to_string(project.path().join(&log_rel)).expect("log");
+    assert!(log.contains("--allow-all-tools"), "log: {log}");
+    assert!(log.contains("--prompt="), "log: {log}");
+    assert!(log.contains("copilot conclusion"), "log: {log}");
 }
 
 #[test]

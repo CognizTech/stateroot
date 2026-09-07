@@ -1070,13 +1070,15 @@
         "vscode-copilot",
         "copilot"
       ],
-      "framing": "GitHub Copilot harness: MCP/handoff oriented coding assistant.",
-      "tier": "C",
+      "framing": "GitHub Copilot harness (VS Code agent + Copilot CLI): full lifecycle hooks via ~/.copilot/hooks, MCP, skills.",
+      "tier": "A",
       "detect": [
-        ".vscode"
+        ".vscode",
+        ".copilot"
       ],
       "detect_cmds": [
-        "code"
+        "code",
+        "copilot"
       ],
       "skill_source_roots": {
         "global": [
@@ -1097,17 +1099,23 @@
         ]
       },
       "delegation": {
-        "mode": "handoff_only",
-        "command": null,
+        "mode": "cli",
+        "command": "copilot",
         "pty": false,
-        "print_mode": false,
-        "handoff_only": true
+        "print_mode": true,
+        "handoff_only": false,
+        "argv": [
+          "--allow-all-tools",
+          "--prompt={prompt}"
+        ]
       },
       "reload": "none",
       "capabilities": [
         "skills",
+        "hooks",
         "mcp",
-        "gui"
+        "gui",
+        "delegation"
       ],
       "mcp_config": {
         "global": [],

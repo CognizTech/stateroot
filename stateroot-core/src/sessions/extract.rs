@@ -13,7 +13,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use super::{CanonicalEntry, CanonicalSession};
-use crate::transcripts::{self, codex, cursor, hermes, openclaw};
+use crate::transcripts::{self, codex, copilot, cursor, hermes, openclaw};
 
 fn entry(kind: &str) -> CanonicalEntry {
     CanonicalEntry {
@@ -856,6 +856,57 @@ pub(crate) fn canonical_from_hermes(
     }
     CanonicalSession {
         harness: "hermes".into(),
+        session_id: raw.id.clone(),
+        cwd: raw.cwd.clone(),
+        source_path: source_path.display().to_string(),
+        entries,
+    }
+}
+
+// ---------------------------------------------------------------------
+// copilot — session-store.db (sessions + turns)
+// ---------------------------------------------------------------------
+
+/// Canonicalize one copilot session's raw rows.
+pub(crate) fn canonical_from_copilot(
+    raw: &copilot::RawSession,
+    source_path: &Path,
+) -> CanonicalSession {
+    // Session-row span as provenance (entry timestamps come from the turns).
+    let mut entries = vec![meta_entry(
+        "session",
+        Some(compact(&serde_json::json!({
+            "summary": raw.summary,
+            "agent_name": raw.agent_name,
+            "created_at": raw.created_at,
+            "updated_at": raw.updated_at,
+        }))),
+    )];
+    for (turn_index, user_message, assistant_response, ts) in &raw.turns {
+        let ts = if ts.is_empty() {
+            None
+        } else {
+            Some(ts.clone())
+        };
+        if !user_message.trim().is_empty() {
+            let mut e = entry("message");
+            e.id = Some(format!("t{turn_index}"));
+            e.ts = ts.clone();
+            e.role = Some("user".into());
+            e.content = Some(user_message.clone());
+            entries.push(e);
+        }
+        if !assistant_response.trim().is_empty() {
+            let mut e = entry("message");
+            e.id = Some(format!("t{turn_index}:a"));
+            e.ts = ts;
+            e.role = Some("assistant".into());
+            e.content = Some(assistant_response.clone());
+            entries.push(e);
+        }
+    }
+    CanonicalSession {
+        harness: "copilot".into(),
         session_id: raw.id.clone(),
         cwd: raw.cwd.clone(),
         source_path: source_path.display().to_string(),

@@ -97,6 +97,10 @@ pub fn build_bundles(
     for session in super::hermes::HermesReader.scan(home, project_dir) {
         sessions.push(bundle_from_transcript_session(&session));
     }
+    // Copilot Chat session store (observed format; defensive parse).
+    for session in super::copilot::CopilotReader.scan(home, project_dir) {
+        sessions.push(bundle_from_transcript_session(&session));
+    }
 
     if let Some(ids) = session_ids {
         sessions.retain(|s| {

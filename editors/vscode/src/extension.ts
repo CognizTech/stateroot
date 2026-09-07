@@ -11,6 +11,11 @@ import {
 } from "./cli";
 import { SidebarProvider } from "./sidebarProvider";
 import {
+  enableCopilotHooks,
+  isVSCodeWithCopilot,
+  maybeOfferCopilotHooks,
+} from "./copilotAssist";
+import {
   CLI_MODE_HARNESSES,
   learningFilePath,
   listDelegations,
@@ -751,6 +756,25 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
+  context.subscriptions.push(
+    vscode.commands.registerCommand("stateroot.enableCopilotHooks", () => {
+      const folder = vscode.workspace.workspaceFolders?.[0];
+      if (!folder) {
+        void vscode.window.showInformationMessage(
+          "Open a project folder first — Copilot hooks live in the workspace."
+        );
+        return;
+      }
+      if (!isVSCodeWithCopilot()) {
+        void vscode.window.showInformationMessage(
+          "Copilot hooks are only available in VS Code with the Copilot Chat extension installed."
+        );
+        return;
+      }
+      enableCopilotHooks(folder.uri.fsPath, output);
+    })
+  );
+
   const watcher = vscode.workspace.createFileSystemWatcher(`**/${STORE}/**`);
   let timer: NodeJS.Timeout | undefined;
   const debounced = () => {
@@ -803,6 +827,12 @@ export function activate(context: vscode.ExtensionContext) {
       }
     }
     push();
+    // Copilot continuity assist: VS Code + Copilot Chat only, initialized
+    // projects only, one dismissible offer per project.
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    if (folder) {
+      void maybeOfferCopilotHooks(context, folder.uri.fsPath, output);
+    }
   })();
   void refreshLive();
 }

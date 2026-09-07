@@ -81,6 +81,35 @@ fn flat_entries(quirk: &HarnessQuirk) -> Map<String, Value> {
     out
 }
 
+/// Copilot timeout policy (PascalCase event keys). Same lessons as Cursor:
+/// SessionStart carries the digest (30s); SessionEnd must not stall a window
+/// close (8s).
+fn copilot_hook_timeout(harness_event: &str) -> u32 {
+    match harness_event {
+        "SessionEnd" => 8,
+        "SessionStart" => 30,
+        _ => 15,
+    }
+}
+
+/// Copilot entries: the documented shape — `type`/`command`/`timeout` only,
+/// no `matcher` (the CLI honors it only on filterable events, and an empty
+/// pattern there could silently drop the entry).
+fn copilot_entries(quirk: &HarnessQuirk) -> Map<String, Value> {
+    let mut out = Map::new();
+    for (harness_event, canonical) in quirk.event_map {
+        out.insert(
+            (*harness_event).to_string(),
+            json!([{
+                "type": "command",
+                "command": command_for(quirk, canonical),
+                "timeout": copilot_hook_timeout(harness_event),
+            }]),
+        );
+    }
+    out
+}
+
 /// True when a hook entry (nested or flat) invokes stateroot.
 fn is_stateroot_entry(entry: &Value) -> bool {
     let commands: Vec<&str> = entry
@@ -218,38 +247,44 @@ pub fn install_hooks(home: &Path, quirk: &HarnessQuirk) -> Result<Vec<String>, H
                 path.display()
             )])
         }
-        HookFormat::FlatJson => {
-            let mut doc = read_json_file(&path)?;
-            if !doc.is_object() {
-                doc = json!({});
-            }
-            let ours = flat_entries(quirk);
-            backup_once(&path)?;
-            let root = doc.as_object_mut().ok_or_else(|| {
-                HarnessError::Invalid(format!("{}: not a JSON object", path.display()))
-            })?;
-            root.entry("version".to_string()).or_insert(json!(1));
-            let hooks = root.entry("hooks".to_string()).or_insert_with(|| json!({}));
-            let hooks = hooks.as_object_mut().ok_or_else(|| {
-                HarnessError::Invalid(format!("{}: `hooks` is not an object", path.display()))
-            })?;
-            overlay(hooks, &ours);
-            let changed = write_json_if_changed(&path, &doc)?;
-            Ok(vec![format!(
-                "hooks {} → {}",
-                if changed {
-                    "installed"
-                } else {
-                    "already up to date"
-                },
-                path.display()
-            )])
-        }
+        HookFormat::FlatJson => install_flat_style(&path, &flat_entries(quirk)),
+        // Same `version` + `hooks` envelope as FlatJson, Copilot entry shape.
+        HookFormat::CopilotJson => install_flat_style(&path, &copilot_entries(quirk)),
         HookFormat::TomlHooks => install_toml_hooks(&path, quirk),
         HookFormat::ZeroExecJson => install_zero_hooks(&path, quirk),
         HookFormat::NamedGroupsJson => install_named_groups(&path, quirk),
         HookFormat::NativePlugin => install_native_plugin(&path, quirk),
     }
+}
+
+/// Shared writer for the `{"version": 1, "hooks": {…}}` envelope (cursor
+/// FlatJson, vscode-copilot CopilotJson) — read-merge-write with a `.bak`,
+/// foreign entries under the same events preserved.
+fn install_flat_style(path: &Path, ours: &Map<String, Value>) -> Result<Vec<String>, HarnessError> {
+    let mut doc = read_json_file(path)?;
+    if !doc.is_object() {
+        doc = json!({});
+    }
+    backup_once(path)?;
+    let root = doc
+        .as_object_mut()
+        .ok_or_else(|| HarnessError::Invalid(format!("{}: not a JSON object", path.display())))?;
+    root.entry("version".to_string()).or_insert(json!(1));
+    let hooks = root.entry("hooks".to_string()).or_insert_with(|| json!({}));
+    let hooks = hooks.as_object_mut().ok_or_else(|| {
+        HarnessError::Invalid(format!("{}: `hooks` is not an object", path.display()))
+    })?;
+    overlay(hooks, ours);
+    let changed = write_json_if_changed(path, &doc)?;
+    Ok(vec![format!(
+        "hooks {} → {}",
+        if changed {
+            "installed"
+        } else {
+            "already up to date"
+        },
+        path.display()
+    )])
 }
 
 /// `[[hooks]]` TOML entries: remove prior stateroot-marked blocks, append ours.
@@ -878,6 +913,81 @@ mod tests {
             text.matches("[[hooks]]").count(),
             q.event_map.len(),
             "exactly one set of hook blocks: {text}"
+        );
+    }
+
+    #[test]
+    fn copilot_hooks_file_shape_idempotency_and_backup() {
+        let home = tempfile::tempdir().expect("home");
+        let q = quirk("vscode-copilot").expect("vscode-copilot");
+        let first = install_hooks(home.path(), q).expect("first install");
+        assert!(
+            first.iter().any(|m| m.contains("hooks installed")),
+            "{first:?}"
+        );
+
+        let path = home.path().join(".copilot/hooks/stateroot.json");
+        let text = std::fs::read_to_string(&path).expect("hooks file");
+        let doc: serde_json::Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(doc["version"], json!(1));
+        let hooks = doc["hooks"].as_object().expect("hooks object");
+        let expected: [(&str, &str); 6] = [
+            ("SessionStart", "session_start"),
+            ("UserPromptSubmit", "user_prompt_submit"),
+            ("PostToolUse", "post_tool_use"),
+            ("PreCompact", "pre_compact"),
+            ("Stop", "stop"),
+            ("SessionEnd", "session_end"),
+        ];
+        assert_eq!(hooks.len(), expected.len(), "exactly our events: {text}");
+        for (event, canonical) in expected {
+            let arr = hooks
+                .get(event)
+                .and_then(|v| v.as_array())
+                .unwrap_or_else(|| panic!("missing {event}"));
+            assert_eq!(arr.len(), 1, "{event}");
+            let entry = &arr[0];
+            assert_eq!(entry["type"], json!("command"), "{event}");
+            let cmd = entry["command"].as_str().unwrap_or("");
+            assert!(
+                cmd.contains(&format!("stateroot hook {canonical} ")),
+                "{event}: {cmd}"
+            );
+            assert!(cmd.ends_with("--harness vscode-copilot"), "{event}: {cmd}");
+            assert!(
+                entry.get("matcher").is_none(),
+                "{event} must not carry matcher"
+            );
+        }
+        // SessionStart carries the digest; SessionEnd never stalls a close.
+        assert_eq!(hooks["SessionStart"][0]["timeout"], json!(30));
+        assert_eq!(hooks["SessionEnd"][0]["timeout"], json!(8));
+
+        // Idempotent.
+        let second = install_hooks(home.path(), q).expect("second install");
+        assert!(
+            second.iter().any(|m| m.contains("already up to date")),
+            "{second:?}"
+        );
+
+        // A hand edit is backed up before being replaced.
+        std::fs::write(&path, "{\"version\":1,\"hooks\":{}}\n").expect("hand edit");
+        install_hooks(home.path(), q).expect("third install");
+        assert!(
+            home.path()
+                .join(".copilot/hooks/stateroot.json.bak")
+                .is_file(),
+            "hand-edited file backed up"
+        );
+
+        // A foreign neighbor hook file is never touched.
+        let foreign = home.path().join(".copilot/hooks/foreign.json");
+        let foreign_body = "{\"version\":1,\"hooks\":{\"SessionStart\":[]}}\n";
+        std::fs::write(&foreign, foreign_body).expect("foreign");
+        install_hooks(home.path(), q).expect("fourth install");
+        assert_eq!(
+            std::fs::read_to_string(&foreign).expect("foreign read"),
+            foreign_body
         );
     }
 }
