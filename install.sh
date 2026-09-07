@@ -91,6 +91,21 @@ case ":$PATH:" in
         ;;
 esac
 
+# --- anonymous install ping ------------------------------------------------
+# One GET with os + version + channel, counted in the stateroot.dev web
+# server logs. Never blocks (3s cap), never fails the install.
+# Disable with: STATEROOT_NO_PING=1
+if [ "${STATEROOT_NO_PING:-}" != "1" ]; then
+    VER="$("$DEST_DIR/stateroot" --version 2>/dev/null | awk '{print $NF}')"
+    VIA="${STATEROOT_INSTALL_VIA:-script}"
+    PING_URL="https://stateroot.dev/api/install-ping?os=$TARGET&v=${VER:-unknown}&via=$VIA"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --max-time 3 "$PING_URL" -o /dev/null 2>/dev/null || true
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -T 3 -O /dev/null "$PING_URL" 2>/dev/null || true
+    fi
+fi
+
 cat <<'EOF'
 
 Quickstart:

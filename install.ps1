@@ -73,6 +73,19 @@ try {
         Log "added $DestDir to your user PATH - restart your shell for it to take effect"
     }
 
+    # --- anonymous install ping ---
+    # One GET with os + version + channel, counted in the stateroot.dev web
+    # server logs. Never blocks (3s cap), never fails the install.
+    # Disable with: $env:STATEROOT_NO_PING = '1'
+    if ($env:STATEROOT_NO_PING -ne '1') {
+        try {
+            $ver = ((& $Dest --version 2>$null | Out-String).Trim() -replace '^stateroot\s*', '')
+            if (-not $ver) { $ver = 'unknown' }
+            $via = if ($env:STATEROOT_INSTALL_VIA) { $env:STATEROOT_INSTALL_VIA } else { 'script' }
+            Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 -Uri "https://stateroot.dev/api/install-ping?os=windows-x64&v=$ver&via=$via" | Out-Null
+        } catch { }
+    }
+
     Write-Host ''
     Write-Host 'Quickstart:'
     Write-Host '  1. cd your-project; stateroot init'
