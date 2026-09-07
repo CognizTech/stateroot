@@ -45,7 +45,7 @@ try {
     # --- verify (fail closed) ---
     $lines = Get-Content (Join-Path $Work 'checksums.txt')
     $line = $lines | Where-Object { $_ -match "\s$Asset$" } | Select-Object -First 1
-    if (-not $line) { Fail "checksums.txt has no entry for $Asset — refusing to install" }
+    if (-not $line) { Fail "checksums.txt has no entry for $Asset - refusing to install" }
     $expected = ($line -split '\s+')[0].ToLower()
     $actual = (Get-FileHash -Algorithm SHA256 (Join-Path $Work $Asset)).Hash.ToLower()
     if ($actual -ne $expected) { Fail "checksum mismatch for $Asset (expected $expected, got $actual)" }
@@ -63,14 +63,14 @@ try {
         & $Dest install | Out-Host
         Log 'harness integration complete'
     } catch {
-        Log 'note: harness integration skipped — install a harness then re-run: stateroot install'
+        Log 'note: harness integration skipped - install a harness then re-run: stateroot install'
     }
 
     # --- PATH (user scope) ---
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     if (-not ($userPath -split ';' | Where-Object { $_ -eq $DestDir })) {
         [Environment]::SetEnvironmentVariable('Path', "$userPath;$DestDir", 'User')
-        Log "added $DestDir to your user PATH — restart your shell for it to take effect"
+        Log "added $DestDir to your user PATH - restart your shell for it to take effect"
     }
 
     Write-Host ''
