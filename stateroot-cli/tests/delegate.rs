@@ -323,6 +323,50 @@ fn delegate_refuses_past_the_depth_cap_without_spawning() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn delegate_to_copilot_spawns_and_completes() {
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    // Fake `copilot` CLI on PATH, echoing its argv so the template is proven.
+    let bin = tempfile::tempdir().expect("bin");
+    let fake = bin.path().join("copilot");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\nprintf '%s\\n' \"copilot argv: $*\"\necho 'copilot conclusion'\n",
+    )
+    .expect("fake copilot");
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("chmod");
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").expect("PATH")
+    );
+
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .env("PATH", &path)
+        .args([
+            "delegate",
+            "--to",
+            "copilot",
+            "--task",
+            "summarize the diff",
+        ])
+        .assert()
+        .success();
+
+    let record = wait_for_outcome(project.path(), 60);
+    assert_eq!(record["outcome"], "completed");
+    assert_eq!(record["exit_code"], 0);
+    let log_rel = record["log"].as_str().expect("log").to_string();
+    let log = std::fs::read_to_string(project.path().join(&log_rel)).expect("log");
+    assert!(log.contains("--allow-all-tools"), "log: {log}");
+    assert!(log.contains("--prompt="), "log: {log}");
+    assert!(log.contains("copilot conclusion"), "log: {log}");
+}
+
 #[test]
 fn delegate_rejects_non_cli_and_unknown_harnesses() {
     let (config_home, user_home) = homes();

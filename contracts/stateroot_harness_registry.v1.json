@@ -1099,18 +1099,23 @@
         ]
       },
       "delegation": {
-        "mode": "handoff_only",
-        "command": null,
+        "mode": "cli",
+        "command": "copilot",
         "pty": false,
-        "print_mode": false,
-        "handoff_only": true
+        "print_mode": true,
+        "handoff_only": false,
+        "argv": [
+          "--allow-all-tools",
+          "--prompt={prompt}"
+        ]
       },
       "reload": "none",
       "capabilities": [
         "skills",
         "hooks",
         "mcp",
-        "gui"
+        "gui",
+        "delegation"
       ],
       "mcp_config": {
         "global": [],
