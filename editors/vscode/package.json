@@ -98,6 +98,10 @@
       {
         "command": "stateroot.installCli",
         "title": "StateRoot: Install CLI"
+      },
+      {
+        "command": "stateroot.enableCopilotHooks",
+        "title": "StateRoot: Enable Copilot Hooks in This Workspace"
       }
     ],
     "configuration": {
