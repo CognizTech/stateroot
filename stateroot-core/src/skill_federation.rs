@@ -2413,6 +2413,21 @@ mod tests {
     }
 
     #[test]
+    fn copilot_delegation_argv_uses_prompt_flag_and_allow_all_tools() {
+        let reg = load_registry().expect("registry");
+        let entry = reg
+            .harnesses
+            .iter()
+            .find(|e| e.id == "github_copilot")
+            .expect("copilot row");
+        assert_eq!(entry.delegation.mode, "cli");
+        let argv = build_argv_from_spec(&entry.delegation, "do the thing").expect("argv");
+        assert_eq!(argv[0], "copilot");
+        assert_eq!(argv[1], "--allow-all-tools");
+        assert_eq!(argv[2], "--prompt=do the thing");
+    }
+
+    #[test]
     fn discovers_cursor_and_skips_projection_loop() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
