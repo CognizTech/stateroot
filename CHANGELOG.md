@@ -5,6 +5,35 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+## v0.2.0 — 2026-09-07
+
+- **GitHub Copilot is a first-class harness.** One hook file at
+  `~/.copilot/hooks/stateroot.json` serves both the VS Code agent (Preview
+  hooks) and Copilot CLI (GA): SessionStart injects the bounded digest via
+  `additionalContext`, prompt/tool events capture observations, and Stop
+  checkpoints + auto-snaps. A managed `~/.copilot/agents/StateRoot.agent.md`
+  carries the persona as the agent's OWN instructions — re-rendered from the
+  soul on every install, with an identity section that works for any
+  persona: the harness is where you run, never who you are. Copilot Chat
+  sessions canonicalize from the `session-store.db` (sessions + turns),
+  memory and learnings federate into `~/.copilot/instructions/`, and
+  `delegate --to copilot` runs headless subagents via `--prompt` +
+  `--allow-all-tools`. Deliberately no PreToolUse — Copilot command hooks
+  are fail-closed there, and we must never block a tool call. Hook
+  housekeeping notes are silenced on harnesses that surface stderr as
+  warning banners.
+- **The editor extension onboards strangers.** It now activates on editor
+  startup (previously only inside existing StateRoot projects or via its
+  view/commands — the catch-22 that made 1.2k marketplace downloads produce
+  ~zero CLI installs), and a host-gated Copilot assist offers workspace
+  hooks + the StateRoot agent in real VS Code only (Cursor never sees it).
+- **Install telemetry hardened**: the ps1 ping pins TLS 1.2 — PowerShell 5.1
+  on older .NET defaults to TLS 1.0/1.1, which modern nginx silently drops.
+- Test hardening: sentinel-gated delegate worker (deterministic, ~4x
+  faster), and the delegation argv template proven at unit level. A
+  pre-existing delegation-log byte-loss race under parallel load is
+  documented for its own fix.
+
 ## v0.1.15 — 2026-09-07
 
 - **Lineage is automatic.** `stateroot checkpoint` and the turn-end (`stop`)
