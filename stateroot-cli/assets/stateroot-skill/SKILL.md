@@ -83,10 +83,10 @@ When the user asks you to make a plan that another harness will implement — or
 3. The executor's digest then says **"execute this plan; do not re-plan or re-explore"** — approve with `stateroot plan approve <id>` when the user has reviewed, `activate <id>` to mark it the running plan
 4. Harness-native plans written in native plan mode DO federate in automatically at session boundaries (as drafts) — but the record-then-handoff path is immediate and deliberate; use it when the plan is meant for another harness NOW
 
-### 2b) Meaningful real-tree change -> snap
+### 2b) Work-state lineage -> automatic snap
 
-After meaningful changes to the **real project tree** (not `.stateroot/` metadata alone):
-1. run `stateroot snap [--reason "..."]` to record verified work-state lineage under `refs/stateroot`
+Lineage does not depend on you remembering: `stateroot checkpoint` and the turn-end (`stop`) hook automatically snap the working tree whenever **project files** actually changed (`.stateroot/` bookkeeping alone never creates a root).
+1. explicit milestones: run `stateroot snap [--reason "..."]` to record a root on demand under `refs/stateroot`
 2. use `stateroot log` / `stateroot show <root>` to inspect lineage; `stateroot diff` / `stateroot compare` for deltas
 3. use `stateroot revert <root>` only for verified restoration (append-only — creates a new root)
 4. use `stateroot fork <root>` when divergent work should branch from an earlier root
@@ -132,7 +132,7 @@ The CLI is offline-safe: when the server is unreachable it queues operations in 
 | `stateroot plan record` / `list` / `show` / `approve` / `activate` / `done` / `abandon` | central plan artifact + lifecycle | plan/implement split: the planner records a draft, the user approves, the executor's digest points at `.stateroot/plans/<id>.md` with an execute directive — do not re-plan; the digest never carries the body |
 | `stateroot memory recall <query> [--limit N]` | find decisions, failures, memories | FTS over memory, wiki, episodic, transcripts |
 | `stateroot memory sync [--harness H] [--dry-run]` | federate harness memory into the pool | pulls claude/codex/openclaw memories in as `observed` wiki pages / episodic; dedups by content hash, preserves conflicts; `--push` writes a curated brief into managed harness memory files |
-| `stateroot snap [--reason R]` | after meaningful real-tree changes | records verified root under `refs/stateroot` |
+| `stateroot snap [--reason R]` | explicit milestones (checkpoints and turn ends auto-snap real changes) | records verified root under `refs/stateroot` |
 | `stateroot log` / `stateroot show <root>` | inspect lineage | current root, transitions, coverage |
 | `stateroot diff` / `stateroot compare A B` | inspect tree deltas | verified git diff between roots |
 | `stateroot revert <root>` | verified restoration | append-only — creates a new root |

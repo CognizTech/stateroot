@@ -1024,6 +1024,31 @@ async fn checkpoint_from_spool(
         // Cursor is closing the window — skip it so shutdown is not blocked
         // for the full hook timeout. Next `stop` or `wiki compile` catches up.
         if canonical == "stop" {
+            // Automatic lineage: a finished turn's real work becomes a root
+            // (no-op when only `.stateroot/` bookkeeping moved). Skipped on
+            // session_end for the same window-closing reason as ingest.
+            match stateroot_core::roots::snap_if_changed(
+                project_dir,
+                quirk.id,
+                "auto: turn end",
+                None,
+            ) {
+                Ok(stateroot_core::roots::SnapOutcome::Created(manifest, transition)) => {
+                    let changed = transition
+                        .evidence
+                        .get("verified")
+                        .and_then(|v| v.get("files_changed"))
+                        .and_then(|v| v.as_u64())
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "?".to_string());
+                    note!(
+                        "auto-snap: root {} ({changed} file(s) changed)",
+                        &manifest.id[..12]
+                    );
+                }
+                Ok(stateroot_core::roots::SnapOutcome::Unchanged { .. }) => {}
+                Err(err) => note!("auto-snap skipped: {err}"),
+            }
             match super::compiler::try_ingest(&hook_ctx, false).await {
                 Ok(summary) => note!("{summary}"),
                 Err(err) => note!("ingest skipped: {err}"),

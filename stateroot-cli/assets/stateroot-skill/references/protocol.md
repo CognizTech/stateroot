@@ -34,7 +34,7 @@ Do not invent `--budget`. The CLI already sized the digest. A 2–3 sentence use
 
 Handoff carries **session continuity**. **Root lineage** records verified project-tree state under `refs/stateroot`:
 
-1. Run `stateroot snap [--reason "..."]` after meaningful changes to the real working tree.
+1. Automatic: checkpoints and finished turns snap the working tree whenever project files changed (store bookkeeping never creates a root). Run `stateroot snap [--reason "..."]` for explicit milestones.
 2. Resume and hook digests show the current root, prior transition when available, last actor, and verified tree delta when recorded.
 3. Run `stateroot revert <root>` only for verified restoration — append-only, creates a new root.
 4. Run `stateroot fork <root>` when work should diverge from an earlier root.

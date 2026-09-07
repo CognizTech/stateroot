@@ -92,7 +92,7 @@ fn spawn_returns_immediately_and_worker_completes() {
     let (config_home, user_home) = homes();
     let project = tempfile::tempdir().expect("project");
     init_project(config_home.path(), user_home.path(), project.path());
-    let (_bin, path) = fake_claude("#!/bin/sh\nsleep 2\necho 'conclusion: parser wired'\n");
+    let (_bin, path) = fake_claude("#!/bin/sh\nsleep 8\necho 'conclusion: parser wired'\n");
 
     // The spawn path exits 0 immediately with a running record.
     let out = stateroot(config_home.path(), user_home.path(), project.path())
@@ -111,6 +111,8 @@ fn spawn_returns_immediately_and_worker_completes() {
     );
 
     // The record the parent wrote before exiting: running, with a pid.
+    // The worker's 8s sleep keeps this observable even when a loaded
+    // WSL/DrvFs host stretches the parent + assert path well past 2s.
     let records = read_records(project.path());
     assert_eq!(records.len(), 1, "records: {records:?}");
     let record = &records[0];

@@ -21,7 +21,22 @@ pub fn run(ctx: &Ctx, note_text: &str, files: &[String]) -> anyhow::Result<()> {
     // The next harness should see who worked last even when no formal
     // handoff exists — stamp the current packet (additive, in place).
     local_store::stamp_handoff_activity(&ctx.cwd, LOCAL_HARNESS, "checkpoint");
-    println!("checkpoint recorded");
+    // Lineage is automatic, not agent-remembered: real work that moved the
+    // project tree becomes a root here, carrying this note as its reason.
+    // `.stateroot/` bookkeeping never creates one.
+    let reason = super::truncate(note_text, 160);
+    match stateroot_core::roots::snap_if_changed(&ctx.cwd, LOCAL_HARNESS, &reason, None) {
+        Ok(stateroot_core::roots::SnapOutcome::Created(manifest, _)) => {
+            println!("checkpoint recorded · root {}", &manifest.id[..12]);
+        }
+        Ok(stateroot_core::roots::SnapOutcome::Unchanged { .. }) => {
+            println!("checkpoint recorded");
+        }
+        Err(err) => {
+            println!("checkpoint recorded");
+            eprintln!("auto-snap skipped: {err}");
+        }
+    }
     // Compact digest footer (composed locally).
     if let Some(footer) = super::resume::digest_footer(&ctx.cwd) {
         println!("{footer}");

@@ -337,7 +337,91 @@ pub fn create_root(
 ) -> Result<(RootManifest, Transition), RootsError> {
     let repo = ensure_repo(project_dir)?;
     let (tree, pinned, tree_bytes) = build_tree(&repo, project_dir)?;
-    let parent = latest_oid(&repo);
+    commit_new_root(
+        &repo,
+        project_dir,
+        tree,
+        pinned,
+        tree_bytes,
+        harness,
+        reason,
+        snap_ctx,
+    )
+}
+
+/// Outcome of an automatic snap attempt (`snap_if_changed`).
+pub enum SnapOutcome {
+    /// The project tree moved since the last root — a new root was created.
+    /// Transition is boxed to keep the enum small next to `Unchanged`.
+    Created(RootManifest, Box<Transition>),
+    /// Project files are identical to the last root — no root created.
+    Unchanged {
+        /// The root that still describes the current project tree.
+        root: String,
+    },
+}
+
+/// Automatic snap for agent-independent surfaces (checkpoint, turn end).
+/// Lineage must never depend on an agent remembering to run `snap`: a root
+/// is created ONLY when project files changed since the last root.
+/// Bookkeeping churn inside `.stateroot/` is not work and never creates one.
+pub fn snap_if_changed(
+    project_dir: &Path,
+    harness: &str,
+    reason: &str,
+    snap_ctx: Option<&crate::snap_context::SnapContext>,
+) -> Result<SnapOutcome, RootsError> {
+    let repo = ensure_repo(project_dir)?;
+    let (tree, pinned, tree_bytes) = build_tree(&repo, project_dir)?;
+    if let Some(parent) = latest_oid(&repo) {
+        if !project_files_changed(&repo, parent, tree)? {
+            return Ok(SnapOutcome::Unchanged {
+                root: parent.to_string(),
+            });
+        }
+    }
+    let (manifest, transition) = commit_new_root(
+        &repo,
+        project_dir,
+        tree,
+        pinned,
+        tree_bytes,
+        harness,
+        reason,
+        snap_ctx,
+    )?;
+    Ok(SnapOutcome::Created(manifest, Box::new(transition)))
+}
+
+/// True when `new_tree` differs from `parent_root`'s tree anywhere outside
+/// `.stateroot/`. The store's own bookkeeping (checkpoints, handoff stamps)
+/// must not fabricate lineage.
+fn project_files_changed(
+    repo: &Repository,
+    parent_root: git2::Oid,
+    new_tree: git2::Oid,
+) -> Result<bool, RootsError> {
+    let old_tree = repo.find_commit(parent_root)?.tree()?;
+    let new_tree = repo.find_tree(new_tree)?;
+    let diff = repo.diff_tree_to_tree(Some(&old_tree), Some(&new_tree), None)?;
+    Ok(diff.deltas().any(|delta| {
+        let path = delta.new_file().path().or_else(|| delta.old_file().path());
+        path.map(|p| !p.starts_with(".stateroot")).unwrap_or(true)
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn commit_new_root(
+    repo: &Repository,
+    project_dir: &Path,
+    tree: git2::Oid,
+    pinned: i64,
+    tree_bytes: u64,
+    harness: &str,
+    reason: &str,
+    snap_ctx: Option<&crate::snap_context::SnapContext>,
+) -> Result<(RootManifest, Transition), RootsError> {
+    let parent = latest_oid(repo);
     let parents: Vec<git2::Oid> = parent.into_iter().collect();
     let parent_hashes: Vec<String> = parents.iter().map(|o| o.to_string()).collect();
     let from_root = parent_hashes.first().cloned().unwrap_or_default();
@@ -345,7 +429,7 @@ pub fn create_root(
         "" => format!("root by {harness}"),
         r => format!("root: {r} (by {harness})"),
     };
-    let oid = commit_root(&repo, tree, &parents, &message)?;
+    let oid = commit_root(repo, tree, &parents, &message)?;
     let to_root = oid.to_string();
     let evidence = crate::snap_context::build_snap_evidence(
         project_dir,
@@ -356,7 +440,7 @@ pub fn create_root(
         snap_ctx,
     );
     persist_root(
-        &repo,
+        repo,
         project_dir,
         oid,
         parent_hashes,
@@ -896,7 +980,7 @@ pub fn compose_digest_section(project_dir: &Path) -> String {
     }
 
     out.push_str(
-        "\nRun `stateroot snap` after meaningful real-tree changes. Use `stateroot revert` for verified restoration and `stateroot fork` for divergent work. Handoff carries continuity — it does not replace lineage.\n\n",
+        "\nLineage is automatic: checkpoints and finished turns snap the working tree whenever project files actually changed (bookkeeping never does). `stateroot snap` remains for explicit milestones. Use `stateroot revert` for verified restoration and `stateroot fork` for divergent work. Handoff carries continuity — it does not replace lineage.\n\n",
     );
     out
 }
@@ -1146,5 +1230,51 @@ mod tests {
         assert_eq!(first["path"], json!("a.txt"));
         assert!(first["diff"].as_str().unwrap().contains("-two"));
         assert_eq!(first["truncated"], json!(true));
+    }
+
+    #[test]
+    fn snap_if_changed_first_call_behaves_like_snap() {
+        let (_tmp, dir) = project();
+        write(&dir, "a.txt", "v1");
+        let outcome = snap_if_changed(&dir, "cli", "auto: checkpoint", None).expect("auto");
+        match outcome {
+            SnapOutcome::Created(m, _) => assert!(m.parents.is_empty()),
+            SnapOutcome::Unchanged { .. } => panic!("first snap must create a root"),
+        }
+    }
+
+    #[test]
+    fn snap_if_changed_skips_unchanged_and_bookkeeping() {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+
+        // Nothing moved -> unchanged, same root, no new manifest.
+        let outcome = snap_if_changed(&dir, "cli", "auto: checkpoint", None).expect("auto");
+        match outcome {
+            SnapOutcome::Unchanged { root } => assert_eq!(root, first.id),
+            SnapOutcome::Created(m, _) => panic!("expected unchanged, created {}", m.id),
+        }
+
+        // `.stateroot/` bookkeeping (outside local/) is pinned into trees but
+        // is NOT work — it must not fabricate a root.
+        write(&dir, ".stateroot/plans/plan-x.md", "# plan\n");
+        let outcome = snap_if_changed(&dir, "cli", "auto: stop", None).expect("auto2");
+        assert!(
+            matches!(outcome, SnapOutcome::Unchanged { .. }),
+            "store bookkeeping created a root"
+        );
+
+        // Real work moves the tree -> new root chained on the first.
+        write(&dir, "src/main.rs", "fn main() { println!(\"hi\"); }\n");
+        let outcome = snap_if_changed(&dir, "cli", "auto: checkpoint", None).expect("auto3");
+        match outcome {
+            SnapOutcome::Created(m, t) => {
+                assert_eq!(m.parents, vec![first.id.clone()]);
+                assert_eq!(t.from_root, first.id);
+                assert_eq!(latest_root(&dir).unwrap(), Some(m.id));
+            }
+            SnapOutcome::Unchanged { .. } => panic!("expected a new root for real work"),
+        }
     }
 }

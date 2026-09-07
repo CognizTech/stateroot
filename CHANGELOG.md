@@ -5,6 +5,34 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+## v0.1.15 — 2026-09-07
+
+- **Lineage is automatic.** `stateroot checkpoint` and the turn-end (`stop`)
+  hook now snapshot the working tree whenever project files actually changed
+  — lineage no longer depends on an agent remembering to `stateroot snap`.
+  Checkpoint-triggered roots carry the checkpoint note as their reason;
+  turn-end roots are labeled `auto: turn end` with the verified file-change
+  count in evidence. Bookkeeping churn inside `.stateroot/` never creates a
+  root, and explicit `stateroot snap` still creates milestone roots on demand.
+- **Live WAL transcripts are visible.** Cursor and Hermes SQLite stores open
+  live read-only (`mode=ro`) with an immutable-snapshot fallback, so committed
+  rows still sitting in the WAL — the currently running session — are seen
+  instead of silently skipped (fixes #1). Regression tests hold the writer
+  open with checkpoints disabled.
+- **Windows installer is encoding-proof.** install.ps1 is pure ASCII: without
+  a BOM, Windows PowerShell 5.1 misread em-dash bytes as smart quotes and
+  refused to parse, so the editor extension's auto-install never installed
+  the CLI (the fixed script was also hot-swapped onto the v0.1.14 release).
+- **macOS ships in tagged releases** (aarch64-apple-darwin), starting with a
+  backfilled, smoke-tested asset on v0.1.14; a dispatch job can backfill
+  future tags if a leg is ever missed.
+- **Anonymous install ping** (fail-silent, 3s cap): installers GET
+  stateroot.dev/api/install-ping with os + version + channel after a
+  successful install — a floor count of successful CLI installs, which
+  GitHub's download_count provably drops. Disable with STATEROOT_NO_PING=1.
+- Test hardening: the delegate spawn fixture's worker sleep survives loaded
+  WSL/DrvFs hosts (2s could elapse before the parent's first read).
+
 ## v0.1.14 — 2026-09-04
 
 - **The updater never eats a development binary.** `download_and_install`
