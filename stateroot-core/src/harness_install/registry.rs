@@ -48,6 +48,12 @@ pub enum HookFormat {
     NamedGroupsJson,
     /// Generated native plugin package (openclaw).
     NativePlugin,
+    /// `{"version": 1, "hooks": {"Event": [{"type": "command", "command": …,
+    /// "timeout": N}]}}` — one file per integration in a hooks directory,
+    /// PascalCase events, NO `matcher` field (Copilot CLI honors `matcher`
+    /// only on filterable events; VS Code parses the same file).
+    /// (vscode-copilot: `~/.copilot/hooks/stateroot.json`.)
+    CopilotJson,
 }
 
 /// One hook target: home-relative file (or directory for plugins).
@@ -175,7 +181,17 @@ impl DigestDeliveryPolicy {
                 tier: DeliveryTier::Degraded,
                 note: "no hooks in v1 — resume via MCP / `stateroot resume --harness hermes`",
             },
-            "vscode-copilot" | "crush" => Self {
+            "vscode-copilot" => Self {
+                primary_event: "session_start",
+                session_start_prints: true,
+                session_start_marks: true,
+                // Copilot drops command-hook output on UserPromptSubmit
+                // (CLI) and the IDE does not inject there — capture-only.
+                prompt_submit_injects: false,
+                tier: DeliveryTier::Automatic,
+                note: "session-start inject via additionalContext; one ~/.copilot/hooks file serves VS Code + Copilot CLI",
+            },
+            "crush" => Self {
                 primary_event: "",
                 session_start_prints: false,
                 session_start_marks: false,
@@ -396,6 +412,17 @@ const TIER_B_EVENTS: &[(&str, &str)] = &[
 
 /// Pi 0.84 extension events (`packages/coding-agent` `ExtensionAPI.on`).
 /// `session_start` is void for model context; identity rides `before_agent_start`.
+/// Copilot (VS Code agent + Copilot CLI): PascalCase events; no PostCompact
+/// or PreToolUse on purpose (see the quirk's hooks note).
+const COPILOT_EVENTS: &[(&str, &str)] = &[
+    ("SessionStart", "session_start"),
+    ("UserPromptSubmit", "user_prompt_submit"),
+    ("PostToolUse", "post_tool_use"),
+    ("PreCompact", "pre_compact"),
+    ("Stop", "stop"),
+    ("SessionEnd", "session_end"),
+];
+
 const PI_EVENTS: &[(&str, &str)] = &[
     ("session_start", "session_start"),
     ("before_agent_start", "user_prompt_submit"),
@@ -683,21 +710,32 @@ pub const ADAPTERS: &[HarnessQuirk] = &[
     HarnessQuirk {
         id: "vscode-copilot",
         display: "VS Code Copilot",
-        tier: Tier::C,
-        detect: &[".vscode"],
-        detect_cmds: &["code"],
+        tier: Tier::A,
+        detect: &[".vscode", ".copilot"],
+        detect_cmds: &["code", "copilot"],
         instruction_file: Some(".github/copilot-instructions.md"),
         mcp: Some(McpTarget {
             path: ".vscode/mcp.json",
             shape: McpShape::ServersJson,
         }),
-        hooks: None,
-        // Instruction file carries the digest protocol; MCP tools remain.
-        injection: Injection::None,
+        // One PascalCase file at `~/.copilot/hooks/stateroot.json` serves both
+        // the VS Code agent (Preview hooks, user scope) and the Copilot CLI
+        // (GA hooks). No PreToolUse: Copilot command hooks are fail-closed
+        // there, and we must never be able to block a tool call.
+        hooks: Some(HookTarget {
+            path: ".copilot/hooks/stateroot.json",
+            format: HookFormat::CopilotJson,
+        }),
+        injection: Injection::StdoutJson,
         compact_injection: false,
-        events: 0,
+        events: es::SESSION_START
+            | es::USER_PROMPT_SUBMIT
+            | es::POST_TOOL_USE
+            | es::PRE_COMPACT
+            | es::STOP
+            | es::SESSION_END,
         legacy_id: None,
-        event_map: &[],
+        event_map: COPILOT_EVENTS,
     },
     HarnessQuirk {
         id: "crush",
@@ -890,6 +928,29 @@ mod tests {
     }
 
     #[test]
+    fn copilot_row_shape_and_delivery() {
+        let copilot = quirk("vscode-copilot").expect("copilot row");
+        assert_eq!(copilot.tier, Tier::A);
+        let hooks = copilot.hooks.expect("copilot hooks");
+        assert_eq!(hooks.path, ".copilot/hooks/stateroot.json");
+        assert!(matches!(hooks.format, HookFormat::CopilotJson));
+        assert_eq!(copilot.injection, Injection::StdoutJson);
+        // Never PreToolUse: Copilot command hooks are fail-closed there —
+        // we must never be able to block a tool call.
+        assert!(!copilot
+            .event_map
+            .iter()
+            .any(|(event, _)| *event == "PreToolUse"));
+        // Every registered event normalizes to a known canonical event.
+        assert_eq!(copilot.event_map.len(), 6);
+        let policy = copilot.delivery();
+        assert_eq!(policy.tier, DeliveryTier::Automatic);
+        assert_eq!(policy.primary_event, "session_start");
+        assert!(policy.session_start_marks);
+        assert!(!policy.prompt_submit_injects);
+    }
+
+    #[test]
     fn legacy_ids_cover_the_original_seven() {
         for legacy in [
             "claude",
@@ -1000,9 +1061,20 @@ mod tests {
                         "pi note must name the verified injection event"
                     );
                 }
-                "hermes" | "vscode-copilot" | "crush" | "zero" => {
+                "hermes" | "crush" | "zero" => {
                     assert_eq!(policy.tier, DeliveryTier::Degraded);
                     assert!(!policy.prompt_submit_injects);
+                }
+                "vscode-copilot" => {
+                    assert_eq!(policy.primary_event, "session_start");
+                    assert!(policy.session_start_prints);
+                    assert!(policy.session_start_marks);
+                    assert!(!policy.prompt_submit_injects);
+                    assert_eq!(policy.tier, DeliveryTier::Automatic);
+                    assert!(
+                        policy.note.contains("additionalContext"),
+                        "copilot note must name the verified injection channel"
+                    );
                 }
                 "claude-code" | "codex" | "kimi" | "devin" => {
                     assert!(policy.session_start_marks);
