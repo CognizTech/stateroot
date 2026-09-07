@@ -9,6 +9,12 @@
 //!   we read only the `.md`, never the sqlite).
 //! - OpenClaw: `~/.openclaw/workspace/memory/*.md` (daily logs → episodic).
 //!
+//! Push-only: Copilot — `~/.copilot/instructions/stateroot.instructions.md`
+//! (user-level instructions honored by Copilot CLI + the VS Code agent). No
+//! pull source: server-side "Copilot Memory" has no readable local store.
+//! The pushed brief carries a learnings section (memory includes learnings —
+//! Copilot has no native learnings concept, so this is its taste channel).
+//!
 //! Every imported artifact carries a provenance header and is `observed`. The
 //! import ledger `.stateroot/memories/federation.json` is the dedup source of
 //! truth: dedup is by content hash, conflicts (same title, different content)
@@ -18,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{hot_apex, local_store, plans, wiki};
+use crate::{hot_apex, learnings, local_store, plans, wiki};
 
 /// Import ledger path relative to `.stateroot/`.
 pub const FEDERATION_PATH: &str = "memories/federation.json";
@@ -607,6 +613,17 @@ fn push_targets(home: &Path, project_dir: &Path) -> Vec<(String, PathBuf)> {
         };
         targets.push((id.to_string(), target));
     }
+    // Copilot is push-only (no readable local memory store): user-level
+    // instructions dir, honored by Copilot CLI and the VS Code agent.
+    let copilot_home = home.join(".copilot");
+    if copilot_home.is_dir() {
+        targets.push((
+            "copilot".to_string(),
+            copilot_home
+                .join("instructions")
+                .join("stateroot.instructions.md"),
+        ));
+    }
     targets
 }
 
@@ -662,6 +679,34 @@ pub fn render_push_brief(project_dir: &Path, home: &Path) -> String {
             }
         }
         out.push_str("\n\n");
+    }
+
+    // Learnings are taste that compounds — and memory includes learnings
+    // (owner directive 2026-09-07). Copilot has no native learnings concept,
+    // so this brief is its only taste channel. Current (non-superseded)
+    // judgments, project scope first, compact and capped; placed before the
+    // chattier sections so the 4000-char tail cut spares them.
+    let mut lines: Vec<String> = Vec::new();
+    for scope in ["project", "user"] {
+        for learning in learnings::read_scope(project_dir, home, scope) {
+            if !learning.superseded_by.is_empty() {
+                continue;
+            }
+            let statement = learning.statement.trim();
+            if statement.is_empty() {
+                continue;
+            }
+            lines.push(format!("- {}", truncate_chars(statement, 200)));
+        }
+    }
+    if !lines.is_empty() {
+        lines.truncate(8);
+        out.push_str("## Learnings (taste that compounds)\n\n");
+        for line in lines {
+            out.push_str(&line);
+            out.push('\n');
+        }
+        out.push('\n');
     }
 
     let checkpoints = local_store::recent_episodic(project_dir, 5);
@@ -1009,5 +1054,43 @@ mod tests {
         let before = std::fs::read_to_string(&target).unwrap();
         let _ = sync_push(p.path(), home.path(), true).unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), before);
+    }
+
+    #[test]
+    fn push_reaches_copilot_and_the_brief_carries_learnings() {
+        let p = project();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".copilot")).unwrap();
+        learnings::record_note(
+            p.path(),
+            home.path(),
+            "prefer sentinel files over sleeps in races",
+            "project",
+            "test",
+        )
+        .expect("record learning");
+
+        // The brief carries the learnings section (memory includes
+        // learnings; Copilot's only taste channel is this brief).
+        let brief = render_push_brief(p.path(), home.path());
+        assert!(brief.contains("## Learnings"), "{brief}");
+        assert!(
+            brief.contains("prefer sentinel files over sleeps"),
+            "{brief}"
+        );
+
+        // Copilot's push target is the user-level instructions file.
+        let results = sync_push(p.path(), home.path(), false).expect("push");
+        let copilot = results
+            .iter()
+            .find(|r| r.harness == "copilot")
+            .expect("copilot push target");
+        assert_eq!(copilot.status, "written");
+        assert!(copilot
+            .target
+            .ends_with(Path::new(".copilot/instructions/stateroot.instructions.md")));
+        let text = std::fs::read_to_string(&copilot.target).expect("written brief");
+        assert!(text.starts_with(MANAGED_MARKER), "{text}");
+        assert!(text.contains("prefer sentinel files over sleeps"), "{text}");
     }
 }
