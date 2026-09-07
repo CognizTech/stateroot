@@ -1,8 +1,8 @@
 //! Cursor transcript reader: Cursor's `state.vscdb` SQLite store
 //! (`<config>/Cursor/User/globalStorage/state.vscdb`).
 //!
-//! Format (verified against the user's 2.2 GB store, opened with
-//! `?immutable=1` so a locked live store still reads):
+//! Format (verified against the user's 2.2 GB store; opened live read-only
+//! with an immutable fallback so a locked live store still reads):
 //! - table `composerHeaders` — one row per session (composer), `value` is a
 //!   JSON head `{type: "head", name, createdAt, workspaceIdentifier: {uri:
 //!   {fsPath}}}`; `fsPath` may be a backslash-mangled WSL path
@@ -120,7 +120,7 @@ impl TranscriptReader for CursorReader {
     fn scan(&self, home: &Path, project_dir: &Path) -> Vec<TranscriptSession> {
         let mut sessions = Vec::new();
         for db_path in db_candidates(home) {
-            let Ok(db) = open_immutable(&db_path) else {
+            let Ok(db) = open_readonly(&db_path) else {
                 continue;
             };
             sessions.extend(scan_db(&db, project_dir));
@@ -129,14 +129,31 @@ impl TranscriptReader for CursorReader {
     }
 }
 
-/// Open the store read-only in immutable mode (skips the WAL so a live,
-/// locked Cursor store still reads — required for the user's 2.2 GB file).
+/// Open the store as an immutable snapshot: reads the main database file
+/// only and skips the WAL, so a live, locked store still opens (required
+/// for the user's 2.2 GB file). Committed rows still sitting in an
+/// uncheckpointed WAL are invisible here — prefer `open_readonly` for
+/// scans; this remains the fallback when the WAL index can't be built.
 pub(crate) fn open_immutable(path: &Path) -> Result<rusqlite::Connection, rusqlite::Error> {
     let uri = format!("file:{}?immutable=1", path.display());
     rusqlite::Connection::open_with_flags(
         uri,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
     )
+}
+
+/// Open the store live read-only (`mode=ro`): sees committed rows still in
+/// the WAL — which is where the *current* session lives while a harness is
+/// running. Falls back to `open_immutable` when the shared-memory WAL index
+/// can't be built read-only (locked/unrecovered store), so the worst case
+/// degrades to the old always-immutable behavior, never a missed open.
+pub(crate) fn open_readonly(path: &Path) -> Result<rusqlite::Connection, rusqlite::Error> {
+    let uri = format!("file:{}?mode=ro", path.display());
+    rusqlite::Connection::open_with_flags(
+        uri,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .or_else(|_| open_immutable(path))
 }
 
 fn scan_db(db: &rusqlite::Connection, project_dir: &Path) -> Vec<TranscriptSession> {
@@ -383,5 +400,73 @@ mod tests {
         // Truth contract: tool metadata is not parsed — empty, not invented.
         assert!(session.files_touched.is_empty());
         assert!(session.failed_approaches.is_empty());
+    }
+
+    /// Live-WAL regression (issue #1): a committed row still in an
+    /// uncheckpointed WAL must be visible to the scan even while the writer
+    /// stays open.
+    #[test]
+    fn cursor_reader_sees_committed_wal_rows_from_live_writer() {
+        let project = tempfile::tempdir().expect("project");
+        let home = tempfile::tempdir().expect("home");
+        let dir = home.path().join(".config/Cursor/User/globalStorage");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let db_path = dir.join("state.vscdb");
+        // Live writer: WAL mode, checkpoints disabled, kept OPEN for the scan.
+        let writer = rusqlite::Connection::open(&db_path).expect("db");
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 PRAGMA wal_autocheckpoint=0;
+                 CREATE TABLE composerHeaders (composerId TEXT, value TEXT);
+                 CREATE TABLE cursorDiskKV (key TEXT, value TEXT);
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .expect("schema");
+        let head = serde_json::json!({
+            "type": "head",
+            "composerId": "cmp-live",
+            "name": "live session",
+            "createdAt": 1781508855958i64,
+            "workspaceIdentifier": {"id": "w1", "uri": {"fsPath": crate::transcripts::path_for_json(project.path())}}
+        });
+        writer
+            .execute(
+                "INSERT INTO composerHeaders (composerId, value) VALUES ('cmp-live', ?1)",
+                [serde_json::to_string(&head).expect("head")],
+            )
+            .expect("insert head");
+        let bubble = serde_json::json!({
+            "_v": 3,
+            "type": 1,
+            "text": "continue the live session",
+            "createdAt": "2026-09-04T12:00:00Z",
+        });
+        writer
+            .execute(
+                "INSERT INTO cursorDiskKV (key, value) VALUES ('bubbleId:cmp-live:b-1', ?1)",
+                [serde_json::to_string(&bubble).expect("bubble")],
+            )
+            .expect("insert bubble");
+
+        // The fixture really exercises the WAL path: the immutable snapshot
+        // opener cannot see the uncheckpointed rows.
+        let snapshot = open_immutable(&db_path).expect("immutable");
+        let visible: i64 = snapshot
+            .query_row("SELECT COUNT(*) FROM composerHeaders", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(visible, 0, "immutable snapshot should miss live WAL rows");
+        drop(snapshot);
+
+        let sessions = CursorReader.scan(home.path(), project.path());
+        assert_eq!(
+            sessions.len(),
+            1,
+            "sessions: {:?}",
+            sessions.iter().map(|s| &s.session_id).collect::<Vec<_>>()
+        );
+        assert_eq!(sessions[0].session_id, "cmp-live");
+        assert!(sessions[0].objective.contains("continue the live session"));
+        drop(writer);
     }
 }

@@ -558,7 +558,7 @@ pub fn import_from_readers_filtered(
 
     if harness.is_none_or(|h| h == "cursor") {
         for db_path in cursor::db_candidates(home) {
-            let Ok(db) = cursor::open_immutable(&db_path) else {
+            let Ok(db) = cursor::open_readonly(&db_path) else {
                 continue;
             };
             for raw in cursor::raw_sessions(&db, project_dir) {
@@ -569,7 +569,7 @@ pub fn import_from_readers_filtered(
 
     if harness.is_none_or(|h| h == "hermes") {
         for db_path in hermes::db_candidates(home) {
-            let Ok(db) = cursor::open_immutable(&db_path) else {
+            let Ok(db) = cursor::open_readonly(&db_path) else {
                 continue;
             };
             for raw in hermes::raw_sessions(&db, project_dir) {

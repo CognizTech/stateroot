@@ -85,7 +85,7 @@ pub fn build_bundles(
 
     // Cursor state.vscdb (verified format; no compactions → full).
     for db_path in super::cursor::db_candidates(home) {
-        if let Ok(db) = super::cursor::open_immutable(&db_path) {
+        if let Ok(db) = super::cursor::open_readonly(&db_path) {
             sessions.extend(bundle_cursor_sessions(&db, project_dir));
         }
     }

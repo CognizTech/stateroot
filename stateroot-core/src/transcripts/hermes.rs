@@ -6,13 +6,14 @@
 //! - Legacy `~/.hermes/sessions/*.jsonl` is no longer primary — ignored.
 //!
 //! Project filter: prefer `git_repo_root`, else `cwd` via `cwd_matches`.
-//! Open immutable (`?immutable=1`) so a live WAL store still reads.
+//! Open via `open_readonly` (live `mode=ro`, immutable fallback) so a live
+//! WAL store still reads — including rows not yet checkpointed.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use super::cursor::open_immutable;
+use super::cursor::open_readonly;
 use super::kimi::rfc3339_millis;
 use super::{
     clean, cwd_matches, push_unique, Outcome, TailEntry, TranscriptReader, TranscriptSession,
@@ -109,7 +110,7 @@ impl TranscriptReader for HermesReader {
     fn scan(&self, home: &Path, project_dir: &Path) -> Vec<TranscriptSession> {
         let mut out = Vec::new();
         for db_path in db_candidates(home) {
-            let Ok(db) = open_immutable(&db_path) else {
+            let Ok(db) = open_readonly(&db_path) else {
                 continue;
             };
             out.extend(scan_db(&db, project_dir));
@@ -387,5 +388,67 @@ mod tests {
         .expect("s");
         drop(db);
         assert!(HermesReader.scan(home.path(), project.path()).is_empty());
+    }
+
+    /// Live-WAL regression (issue #1): a committed session still in an
+    /// uncheckpointed WAL must be visible to the scan even while the writer
+    /// stays open.
+    #[test]
+    fn hermes_reader_sees_committed_wal_rows_from_live_writer() {
+        let project = tempfile::tempdir().expect("project");
+        let cwd = crate::transcripts::path_for_json(project.path());
+        let home = tempfile::tempdir().expect("home");
+        let db_path = home.path().join(".hermes/state.db");
+        std::fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir");
+        // Live writer: WAL mode, checkpoints disabled, kept OPEN for the scan.
+        let writer = rusqlite::Connection::open(&db_path).expect("db");
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 PRAGMA wal_autocheckpoint=0;
+                 CREATE TABLE sessions (
+                    id TEXT PRIMARY KEY, cwd TEXT, git_repo_root TEXT,
+                    started_at REAL, ended_at REAL
+                 );
+                 CREATE TABLE messages (
+                    session_id TEXT, role TEXT, content TEXT,
+                    tool_calls TEXT, tool_name TEXT, timestamp REAL
+                 );
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .expect("schema");
+        writer
+            .execute(
+                "INSERT INTO sessions (id, cwd, git_repo_root, started_at, ended_at) VALUES (?1,?2,'',1700000000,1700000060)",
+                rusqlite::params!["ses-live", cwd],
+            )
+            .expect("session");
+        writer
+            .execute(
+                "INSERT INTO messages (session_id, role, content, tool_calls, tool_name, timestamp) VALUES (?1,'user',?2,'','',1700000001)",
+                rusqlite::params!["ses-live", "ship the live wal fix"],
+            )
+            .expect("u");
+        writer
+            .execute(
+                "INSERT INTO messages (session_id, role, content, tool_calls, tool_name, timestamp) VALUES (?1,'assistant',?2,'','',1700000002)",
+                rusqlite::params!["ses-live", "done"],
+            )
+            .expect("a");
+
+        // The fixture really exercises the WAL path: the immutable snapshot
+        // opener cannot see the uncheckpointed rows.
+        let snapshot = crate::transcripts::cursor::open_immutable(&db_path).expect("immutable");
+        let visible: i64 = snapshot
+            .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(visible, 0, "immutable snapshot should miss live WAL rows");
+        drop(snapshot);
+
+        let sessions = HermesReader.scan(home.path(), project.path());
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "ses-live");
+        assert!(sessions[0].objective.contains("live wal fix"));
+        drop(writer);
     }
 }
