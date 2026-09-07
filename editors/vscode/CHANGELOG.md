@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.16
+
+- The extension now activates on editor startup (`onStartupFinished`) —
+  previously it only activated inside an existing StateRoot project or via
+  its view/commands, so new users who installed from the marketplace never
+  activated it and the CLI auto-install never fired. This was the funnel
+  leak behind "downloads but no installs".
+
 ## 0.2.15
 
 - CLI auto-installs are tagged (`STATEROOT_INSTALL_VIA=extension`) so the
