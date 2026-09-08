@@ -3,10 +3,50 @@
 use anyhow::Result;
 use stateroot_core::{hot_apex, memory_federation, memory_index};
 
-use super::Ctx;
+use super::{compiler, Ctx};
 
 fn home() -> Result<std::path::PathBuf> {
     stateroot_core::harness_install::home_dir().map_err(|e| anyhow::anyhow!(e))
+}
+
+/// `stateroot memory compact` — pain-driven hot-apex compaction: the oldest
+/// entries demote into the tier-2 wiki archive (deterministic floor);
+/// `--synthesis` appends an LLM digest of the batch when a key is present.
+pub async fn compact(ctx: &Ctx, target: &str, dry_run: bool, synthesis: bool) -> Result<()> {
+    ctx.require_project()?;
+    let home = home()?;
+    let report = hot_apex::compact_for_capacity(&ctx.cwd, &home, target, 0, dry_run)?;
+    println!(
+        "apex compact: {} entries demoted · {} chars freed · archive {}{}",
+        report.demoted_entries.len(),
+        report.freed_chars,
+        report.archive.display(),
+        if report.note.is_empty() {
+            String::new()
+        } else {
+            format!(" · {}", report.note)
+        }
+    );
+    if synthesis && !dry_run && !report.demoted_entries.is_empty() {
+        match compiler::resolved_endpoint() {
+            Some(endpoint) => {
+                let batch = report.demoted_entries.join("\n- ");
+                let summary = compiler::call_provider(
+                    ctx,
+                    &endpoint,
+                    "You are the StateRoot memory compactor. Summarize the archived memory entries into one compact paragraph (max 600 chars), preserving every durable fact, decision, and preference. No invention; empty stays empty. Prose only, no preamble.",
+                    &format!("- {batch}"),
+                )
+                .await?;
+                hot_apex::append_synthesized_summary(&ctx.cwd, &summary)?;
+                println!("synthesized summary appended to the archive");
+            }
+            None => println!(
+                "synthesis skipped — no API key (DEEPSEEK_API_KEY/OPENAI_API_KEY); deterministic demotion intact"
+            ),
+        }
+    }
+    Ok(())
 }
 
 fn print_result(r: &hot_apex::MutationResult) {

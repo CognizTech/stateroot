@@ -368,7 +368,7 @@ fn wiki_path(project_dir: &Path, file: &str) -> PathBuf {
     local_store::root(project_dir).join(WIKI_DIR).join(file)
 }
 
-fn pages_dir(project_dir: &Path) -> PathBuf {
+pub fn pages_dir(project_dir: &Path) -> PathBuf {
     local_store::root(project_dir).join(PAGES_DIR)
 }
 

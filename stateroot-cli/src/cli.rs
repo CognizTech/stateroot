@@ -879,6 +879,20 @@ pub enum MemoryAction {
         #[arg(long, default_value_t = 5)]
         limit: usize,
     },
+    /// Pain-driven hot-apex compaction: demote the oldest entries into the
+    /// tier-2 wiki archive (deterministic), leaving a pointer in MEMORY.md.
+    Compact {
+        /// `memory` (default) or `global_memory`.
+        #[arg(long, default_value = "memory")]
+        target: String,
+        /// Read-only count; never a write path.
+        #[arg(long)]
+        dry_run: bool,
+        /// Also append an LLM-summarized digest of the demoted batch (needs
+        /// DEEPSEEK_API_KEY or OPENAI_API_KEY; deterministic floor without).
+        #[arg(long)]
+        synthesis: bool,
+    },
     /// Federate harness-native memory: pull in as observed tier (default) or
     /// push the curated brief back (`--push`).
     Sync {

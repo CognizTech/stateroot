@@ -297,6 +297,11 @@ async fn main() -> anyhow::Result<()> {
             MemoryAction::Remove { old, target } => commands::memory::remove(&ctx, &target, &old)?,
             MemoryAction::Show { target } => commands::memory::show(&ctx, &target)?,
             MemoryAction::Recall { query, limit } => commands::memory::recall(&ctx, &query, limit)?,
+            MemoryAction::Compact {
+                target,
+                dry_run,
+                synthesis,
+            } => commands::memory::compact(&ctx, &target, dry_run, synthesis).await?,
             MemoryAction::Sync {
                 harness,
                 dry_run,

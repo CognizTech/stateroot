@@ -295,9 +295,29 @@ pub fn add(
             true,
         ));
     }
-    entries.push(entry);
+    entries.push(entry.clone());
     let candidate = join_entries(&entries);
     if candidate.len() > limit {
+        // Pain-driven compaction: demote the oldest entries into the tier-2
+        // wiki archive, then retry the add once. The cap errors only when
+        // nothing more can be freed — never as the first answer.
+        let needed = candidate.len() - limit;
+        if let Ok(report) = compact_for_capacity(project_dir, home, target, needed, false) {
+            if report.freed_chars >= needed {
+                let after = fs::read_to_string(&path).unwrap_or_default();
+                let mut entries = split_entries(&after);
+                entries.push(entry);
+                let candidate = join_entries(&entries);
+                if candidate.len() <= limit {
+                    write_memory_body(&path, &entries, target == "global_memory")?;
+                    return Ok(MutationResult::ok(
+                        usage(candidate.len(), limit),
+                        path,
+                        false,
+                    ));
+                }
+            }
+        }
         let current = split_entries(&existing);
         return Ok(MutationResult::err(
             usage(existing.trim().len(), limit),
@@ -357,6 +377,192 @@ fn add_user(home: &Path, entry: &str, limit: usize) -> Result<MutationResult, Ho
         user_profile::path(home),
         false,
     ))
+}
+
+// ---------------------------------------------------------------------
+// Pain-driven hot-apex compaction (owner directive 2026-09-08)
+// ---------------------------------------------------------------------
+
+/// Wiki archive slug for demoted hot-apex entries (tier-2 store).
+pub const APEX_ARCHIVE_SLUG: &str = "memory/apex-archive";
+/// Prefix of the pointer entry left in the hot apex for the archive.
+const POINTER_PREFIX: &str = "[apex archive]";
+/// Headroom kept beyond the incoming entry so the next add does not
+/// immediately re-trigger compaction.
+const COMPACT_HEADROOM: usize = 512;
+
+/// Outcome of a compaction run.
+#[derive(Debug, Clone)]
+pub struct CompactReport {
+    /// Entries demoted into the archive (verbatim, oldest first).
+    pub demoted_entries: Vec<String>,
+    /// Chars freed in the hot apex (before the pointer line).
+    pub freed_chars: usize,
+    /// The archive page (tier-2 wiki).
+    pub archive: PathBuf,
+    /// True when nothing was written (read-only count).
+    pub dry_run: bool,
+    /// Human note (e.g. "dry-run", "nothing to demote").
+    pub note: String,
+}
+
+/// Parse the running total from a pointer entry.
+fn pointer_total(entry: &str) -> usize {
+    entry
+        .split_whitespace()
+        .nth(2)
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Pain-driven hot-apex compaction: demote the OLDEST entries (verbatim,
+/// order preserved) into the tier-2 wiki archive, leave a one-line pointer
+/// in the hot apex, and record a tier-3 episodic note. Deterministic floor
+/// always — summarization is a CLI-side, flag-gated addition, never part of
+/// the demotion itself. Write order is crash-safe: archive first, episodic
+/// second, the hot-apex rewrite last, so an interruption can only duplicate
+/// (never lose) entries, and the archive dedups on the next run.
+pub fn compact_for_capacity(
+    project_dir: &Path,
+    home: &Path,
+    target: &str,
+    needed_chars: usize,
+    dry_run: bool,
+) -> Result<CompactReport, HotApexError> {
+    if !matches!(target, "memory" | "global_memory") {
+        return Err(HotApexError::InvalidTarget(target.into()));
+    }
+    let limit = limit_for(target)?;
+    let path = path_for(project_dir, home, target)?;
+    let existing = fs::read_to_string(&path).unwrap_or_default();
+    let all = split_entries(&existing);
+    let (pointers, mut entries): (Vec<String>, Vec<String>) = all
+        .into_iter()
+        .partition(|e| e.trim_start().starts_with(POINTER_PREFIX));
+    let prior_total = pointers.first().map(|p| pointer_total(p)).unwrap_or(0);
+
+    // Demote oldest-first until survivors fit the budget.
+    let budget = limit.saturating_sub(needed_chars + COMPACT_HEADROOM);
+    let mut demoted: Vec<String> = Vec::new();
+    let mut survivor_body = join_entries(&entries);
+    while survivor_body.len() > budget && !entries.is_empty() {
+        demoted.push(entries.remove(0));
+        survivor_body = join_entries(&entries);
+    }
+    let freed_chars = existing.trim().len().saturating_sub(survivor_body.len());
+    let ts = local_store::now_rfc3339();
+    let archive = crate::wiki::pages_dir(project_dir).join(format!("{APEX_ARCHIVE_SLUG}.md"));
+
+    if demoted.is_empty() {
+        return Ok(CompactReport {
+            demoted_entries: Vec::new(),
+            freed_chars,
+            archive,
+            dry_run,
+            note: "nothing to demote (already within budget)".into(),
+        });
+    }
+    if dry_run {
+        return Ok(CompactReport {
+            demoted_entries: demoted,
+            freed_chars,
+            archive,
+            dry_run: true,
+            note: "dry-run (read-only count; nothing written)".into(),
+        });
+    }
+
+    // 1. Archive (tier-2 wiki): deduped bullets with a batch marker.
+    let archive_text = fs::read_to_string(&archive).unwrap_or_default();
+    let mut seen: std::collections::BTreeSet<String> = archive_text
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("- "))
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect();
+    let mut body = archive_text.trim_end().to_string();
+    if !body.is_empty() {
+        body.push_str("\n\n");
+    }
+    body.push_str(&format!(
+        "<!-- stateroot:demoted target={target} at={ts} count={} -->\n",
+        demoted.len()
+    ));
+    body.push_str(&format!(
+        "- [demoted {ts} · {target}] {} hot-apex entries archived\n",
+        demoted.len()
+    ));
+    let mut added = 0usize;
+    for entry in &demoted {
+        let key = entry.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !seen.insert(key) {
+            continue;
+        }
+        body.push_str(&format!("- {entry}\n"));
+        added += 1;
+    }
+    crate::wiki::write_page(
+        project_dir,
+        APEX_ARCHIVE_SLUG,
+        &body,
+        "hot-apex demotions archive (pain-driven compaction)",
+        "memory",
+        None,
+    )
+    .map_err(|e| HotApexError::Io(std::io::Error::other(e.to_string())))?;
+
+    // 2. Tier-3 episodic record (recall surface).
+    local_store::append_episodic(
+        project_dir,
+        &serde_json::json!({
+            "ts": ts,
+            "harness": "cli",
+            "kind": "apex_compact",
+            "target": target,
+            "demoted": added,
+            "note": format!("apex compaction: {added} entries demoted from {target} → {APEX_ARCHIVE_SLUG} (pain-driven)"),
+        }),
+    )
+    .map_err(|e| HotApexError::Io(std::io::Error::other(e.to_string())))?;
+
+    // 3. Hot-apex rewrite: pointer first, survivors after.
+    let pointer = format!(
+        "{POINTER_PREFIX} {} entries demoted (latest {ts}) → {APEX_ARCHIVE_SLUG} — recall: stateroot memory recall \"<topic>\"",
+        prior_total + added
+    );
+    let mut rewritten = vec![pointer];
+    rewritten.extend(entries);
+    write_memory_body(&path, &rewritten, target == "global_memory")?;
+
+    Ok(CompactReport {
+        demoted_entries: demoted,
+        freed_chars,
+        archive,
+        dry_run: false,
+        note: format!("{added} entries archived"),
+    })
+}
+
+/// Append a synthesized summary of a demoted batch to the archive page
+/// (flag-gated; labeled `synthesized` per the truth contract).
+pub fn append_synthesized_summary(project_dir: &Path, summary: &str) -> Result<(), HotApexError> {
+    let archive = crate::wiki::pages_dir(project_dir).join(format!("{APEX_ARCHIVE_SLUG}.md"));
+    let existing = fs::read_to_string(&archive).unwrap_or_default();
+    let ts = local_store::now_rfc3339();
+    let body = format!(
+        "{}\n\n<!-- stateroot:synthesized at={ts} -->\n- [synthesized summary {ts}] {}\n",
+        existing.trim_end(),
+        summary.trim()
+    );
+    crate::wiki::write_page(
+        project_dir,
+        APEX_ARCHIVE_SLUG,
+        &body,
+        "hot-apex demotions archive (pain-driven compaction)",
+        "memory",
+        None,
+    )
+    .map_err(|e| HotApexError::Io(std::io::Error::other(e.to_string())))?;
+    Ok(())
 }
 
 /// Replace the first entry (or substring) matching `old_text`.
@@ -685,7 +891,7 @@ mod tests {
     }
 
     #[test]
-    fn overflow_errors_without_write() {
+    fn overflow_compacts_instead_of_erroring() {
         let (project, home) = dirs();
         let big = "x".repeat(MEMORY_CHAR_LIMIT - 10);
         add(project.path(), home.path(), "memory", &big, false).unwrap();
@@ -697,9 +903,17 @@ mod tests {
             false,
         )
         .unwrap();
-        assert!(!r.success);
-        assert!(r.error.as_ref().unwrap().contains("exceed"));
-        assert!(r.current_entries.is_some());
+        // The cap is now answered by pain-driven compaction, not an error.
+        assert!(r.success, "overflow compacts: {:?}", r.error);
+        // The big entry demoted into the archive, never dropped.
+        let archive = std::fs::read_to_string(
+            crate::wiki::pages_dir(project.path()).join("memory/apex-archive.md"),
+        )
+        .expect("archive");
+        assert!(archive.contains(&"x".repeat(200)), "big entry archived");
+        let body = read_text(project.path(), home.path(), "memory").unwrap();
+        assert!(body.contains("another fact that is long enough"));
+        assert!(body.contains("[apex archive]"), "{body}");
     }
 
     #[test]
@@ -736,5 +950,121 @@ mod tests {
         let h = capacity_header("MEMORY", "abcd", 100);
         assert!(h.contains("MEMORY"));
         assert!(h.contains("4/100"));
+    }
+
+    fn fill_near_cap(project: &Path, home: &Path, count: usize, width: usize) {
+        let path = path_for(project, home, "memory").unwrap();
+        let entries: Vec<String> = (0..count)
+            .map(|i| format!("entry {i}: {}", "x".repeat(width)))
+            .collect();
+        write_memory_body(&path, &entries, false).unwrap();
+    }
+
+    #[test]
+    fn compact_demotes_oldest_into_archive_and_leaves_pointer() {
+        let (project, home) = dirs();
+        fill_near_cap(project.path(), home.path(), 10, 600);
+        let report = compact_for_capacity(project.path(), home.path(), "memory", 1500, false)
+            .expect("compact");
+        assert!(!report.demoted_entries.is_empty());
+        assert!(report.freed_chars > 0);
+        // Oldest first, verbatim.
+        assert!(report.demoted_entries[0].starts_with("entry 0:"));
+
+        let archive = std::fs::read_to_string(&report.archive).expect("archive");
+        assert!(archive.contains("stateroot:demoted"), "{archive}");
+        assert!(archive.contains("entry 0:"), "{archive}");
+        // Survivors keep their order.
+        let body = read_text(project.path(), home.path(), "memory").unwrap();
+        assert!(body.contains("[apex archive]"), "{body}");
+        let entries = split_entries(&body);
+        assert!(entries[0].starts_with("[apex archive]"), "{entries:?}");
+        let total: usize = entries[0]
+            .split_whitespace()
+            .nth(2)
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(total, report.demoted_entries.len());
+        // Tier-3 episodic record exists.
+        let episodic =
+            std::fs::read_to_string(project.path().join(".stateroot/memories/episodic.jsonl"))
+                .expect("episodic");
+        assert!(episodic.contains("apex_compact"), "{episodic}");
+    }
+
+    #[test]
+    fn add_over_capacity_triggers_compaction_and_succeeds() {
+        let (project, home) = dirs();
+        fill_near_cap(project.path(), home.path(), 12, 620);
+        let before = read_text(project.path(), home.path(), "memory").unwrap();
+        assert!(
+            before.trim().len() > 7000,
+            "near-cap fixture: {}",
+            before.len()
+        );
+        let r = add(
+            project.path(),
+            home.path(),
+            "memory",
+            &format!("the pain-trigger fact: {}", "y".repeat(400)),
+            false,
+        )
+        .unwrap();
+        assert!(
+            r.success,
+            "add should succeed after compaction: {:?}",
+            r.error
+        );
+        let body = read_text(project.path(), home.path(), "memory").unwrap();
+        assert!(body.contains("the pain-trigger fact"), "{body}");
+        assert!(body.contains("[apex archive]"), "{body}");
+        assert!(
+            body.trim().len() <= MEMORY_CHAR_LIMIT,
+            "over cap: {}",
+            body.len()
+        );
+        let archive = std::fs::read_to_string(
+            crate::wiki::pages_dir(project.path()).join("memory/apex-archive.md"),
+        )
+        .expect("archive");
+        assert!(archive.contains("entry 0:"), "{archive}");
+    }
+
+    #[test]
+    fn compact_dry_run_writes_nothing_and_rerun_idempotent() {
+        let (project, home) = dirs();
+        fill_near_cap(project.path(), home.path(), 10, 600);
+        let before = read_text(project.path(), home.path(), "memory").unwrap();
+        let report = compact_for_capacity(project.path(), home.path(), "memory", 1500, true)
+            .expect("dry-run");
+        assert!(report.dry_run);
+        let after = read_text(project.path(), home.path(), "memory").unwrap();
+        assert_eq!(before, after, "dry-run must not write");
+        assert!(
+            !crate::wiki::pages_dir(project.path())
+                .join("memory/apex-archive.md")
+                .exists(),
+            "dry-run must not create the archive"
+        );
+        // Two real runs: no duplicated archive bullets.
+        compact_for_capacity(project.path(), home.path(), "memory", 1500, false).expect("run 1");
+        compact_for_capacity(project.path(), home.path(), "memory", 1500, false).expect("run 2");
+        let archive = std::fs::read_to_string(
+            crate::wiki::pages_dir(project.path()).join("memory/apex-archive.md"),
+        )
+        .expect("archive");
+        let e0 = archive.matches("entry 0:").count();
+        assert_eq!(e0, 1, "no duplicated bullets: {archive}");
+    }
+
+    #[test]
+    fn add_single_entry_bigger_than_cap_still_errors_honestly() {
+        let (project, home) = dirs();
+        fill_near_cap(project.path(), home.path(), 6, 600);
+        let huge = "z".repeat(MEMORY_CHAR_LIMIT + 500);
+        let r = add(project.path(), home.path(), "memory", &huge, false).unwrap();
+        assert!(!r.success, "a too-large entry must keep the honest error");
+        assert!(r.error.unwrap_or_default().contains("would exceed cap"));
     }
 }
