@@ -362,11 +362,10 @@ fn delegate_to_copilot_spawns_and_completes() {
     assert_eq!(record["exit_code"], 0);
     let log_rel = record["log"].as_str().expect("log").to_string();
     let log = std::fs::read_to_string(project.path().join(&log_rel)).expect("log");
-    // Assert the conclusion, not the argv echo: the delegation log's
-    // spawn-redirect/finalize writers interleave under sweep load and can
-    // drop head bytes (pre-existing fidelity bug, tracked). The argv
-    // template itself is proven deterministically in the skill_federation
-    // unit test.
+    // Append-only log fds (open_log_append) keep the worker's late writes
+    // from overwriting finalize's sections even under sweep load.
+    assert!(log.contains("--allow-all-tools"), "log: {log}");
+    assert!(log.contains("--prompt="), "log: {log}");
     assert!(log.contains("copilot conclusion"), "log: {log}");
 }
 

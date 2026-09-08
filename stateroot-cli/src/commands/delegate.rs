@@ -143,8 +143,10 @@ fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
 
     // Detached worker = this binary in hidden worker mode; its stdout/stderr
     // redirect into the delegation log (diagnostics + worker header line).
-    let log_file = std::fs::File::create(&log_path)?;
-    let log_err = log_file.try_clone()?;
+    // The fds MUST be O_APPEND: the worker keeps writing after finalize()
+    // appends the outcome sections (e.g. the auto-update's tracing WARN at
+    // process exit), and a stale shared offset would overwrite that content.
+    let (log_file, log_err) = open_log_append(&log_path)?;
     let mut worker_args = vec![
         "delegate".to_string(),
         "--to".to_string(),
@@ -347,6 +349,20 @@ fn write_record(dir: &Path, record: &Value) -> Result<()> {
         format!("{}\n", serde_json::to_string_pretty(record)?),
     )?;
     Ok(())
+}
+
+/// Open the delegation log for the worker's redirected stdout/stderr:
+/// create-if-missing and ALWAYS O_APPEND on the shared description. Without
+/// append mode the worker's late writes (auto-update WARN, shutdown notes)
+/// land at a stale offset and overwrite the sections finalize() appended —
+/// the observed head-loss on loaded hosts.
+fn open_log_append(path: &Path) -> std::io::Result<(std::fs::File, std::fs::File)> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    let cloned = file.try_clone()?;
+    Ok((file, cloned))
 }
 
 /// Load one record by id (exact, or a unique prefix).
@@ -627,5 +643,39 @@ mod tests {
         let (_, reaped) = load_record(&project, "2026-test-claude").expect("record");
         assert_eq!(reaped["outcome"], "lost");
         assert!(reaped.get("status").is_none());
+    }
+
+    /// The delegation log's fds must be O_APPEND end-to-end: a late worker
+    /// write (auto-update WARN at process exit) must never overwrite the
+    /// sections finalize() appended. Pre-fix this exact interleave ate the
+    /// outcome line and the head of the child stdout under load.
+    #[cfg(unix)]
+    #[test]
+    fn delegation_log_fds_are_append_only_so_late_writes_cannot_overwrite() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().expect("dir");
+        let log = dir.path().join("d.log");
+        let (mut out, mut err) = open_log_append(&log).expect("open");
+        writeln!(out, "delegation header").expect("header");
+        // finalize() appends via its own fd.
+        let mut fin = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+            .expect("finalize open");
+        fin.write_all(b"\noutcome: completed\n\n--- stdout ---\ncopilot argv: --allow-all-tools --prompt=the contract\nconclusion\n\n--- stderr ---\n")
+            .expect("append");
+        // The worker's late write via the ORIGINAL (shared-offset) fds.
+        writeln!(err, "WARN late write").expect("late");
+        drop((out, err, fin));
+        let text = std::fs::read_to_string(&log).expect("read");
+        let header_at = text.find("delegation header").unwrap_or(usize::MAX);
+        let outcome_at = text.find("outcome: completed").unwrap_or(usize::MAX);
+        let argv_at = text.find("copilot argv").unwrap_or(usize::MAX);
+        let warn_at = text.find("WARN late write").unwrap_or(usize::MAX);
+        assert!(
+            header_at < outcome_at && outcome_at < argv_at && argv_at < warn_at,
+            "ordering destroyed: {text}"
+        );
     }
 }
