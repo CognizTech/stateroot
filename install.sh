@@ -83,11 +83,31 @@ else
 fi
 
 # --- PATH ------------------------------------------------------------------
+# The install must leave stateroot runnable, not just present: when
+# $DEST_DIR is missing from PATH, append a managed export line to the user's
+# shell profiles (rustup-style, marker-gated, idempotent).
 case ":$PATH:" in
     *":$DEST_DIR:"*) ;;
     *)
-        log "note: $DEST_DIR is not on your PATH — add this to your shell profile:"
-        printf '  export PATH="$HOME/.local/bin:$PATH"\n'
+        PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
+        MARKER='# stateroot PATH'
+        if grep -qsF "$MARKER" "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile" 2>/dev/null; then
+            log "PATH for $DEST_DIR already configured in your shell profile (restart your shell if needed)"
+        else
+            touched=""
+            for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
+                if [ -f "$rc" ]; then
+                    printf '\n%s\n%s\n' "$MARKER" "$PATH_LINE" >> "$rc"
+                    touched="$touched $rc"
+                fi
+            done
+            if [ -n "$touched" ]; then
+                log "added $DEST_DIR to your PATH in:$touched — restart your shell (or run: $PATH_LINE)"
+            else
+                log "note: $DEST_DIR is not on your PATH — add this to your shell profile:"
+                printf '  %s\n' "$PATH_LINE"
+            fi
+        fi
         ;;
 esac
 
