@@ -14,3 +14,4 @@ editors/vscode/assets/install.ps1
 editors/vscode/LICENSE
 
 .env
+.github/
