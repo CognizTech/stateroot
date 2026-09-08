@@ -12,6 +12,8 @@ fn stateroot(config_home: &Path, user_home: &Path, cwd: &Path) -> Command {
     cmd.env("STATEROOT_HOME", config_home)
         .env("STATEROOT_TEST_HOME", user_home)
         .env("STATEROOT_TEST_CMD_PROBES", "")
+        .env("STATEROOT_NO_AUTO_UPDATE", "1")
+        .env("STATEROOT_DISABLE_SCHEDULED_UPDATE", "1")
         .env_remove("DEEPSEEK_API_KEY")
         .env_remove("OPENAI_API_KEY")
         .env_remove("STATEROOT_SYNTHESIS_API_KEY")
@@ -131,16 +133,26 @@ fn spawn_returns_immediately_and_worker_completes() {
     assert_eq!(record["outcome"], "completed");
     assert_eq!(record["exit_code"], 0);
     assert!(record.get("status").is_none(), "status replaced by outcome");
-    let log = std::fs::read_to_string(project.path().join(&log_rel)).expect("log");
-    assert!(log.contains("conclusion: parser wired"), "log: {log}");
-    assert!(log.contains("--- stdout ---"), "log: {log}");
-    let episodic =
-        std::fs::read_to_string(project.path().join(".stateroot/memories/episodic.jsonl"))
-            .expect("episodic");
+    // The worker publishes its outcome before appending episodic lineage.
+    // Observe that final write before inspecting all of the worker's artifacts.
+    let episodic_path = project.path().join(".stateroot/memories/episodic.jsonl");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let episodic = loop {
+        let contents = std::fs::read_to_string(&episodic_path).expect("episodic");
+        if contents.contains("delegated to claude: slow build → completed")
+            || std::time::Instant::now() >= deadline
+        {
+            break contents;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
     assert!(
         episodic.contains("delegated to claude: slow build → completed"),
         "episodic: {episodic}"
     );
+    let log = std::fs::read_to_string(project.path().join(&log_rel)).expect("log");
+    assert!(log.contains("conclusion: parser wired"), "log: {log}");
+    assert!(log.contains("--- stdout ---"), "log: {log}");
 
     // status <id> shows the record + the tail; list shows the outcome.
     let out = stateroot(config_home.path(), user_home.path(), project.path())
