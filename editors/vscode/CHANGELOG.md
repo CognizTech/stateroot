@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.17
+
+- CLI auto-install now works on macOS: `detectPlatform` still claimed "macOS
+  release binaries are not shipped yet" even though releases have shipped
+  `stateroot-macos-aarch64` since v0.1.15 — so Apple Silicon machines never
+  got the CLI. arm64 now uses `install.sh`; Intel Macs get an honest
+  Apple-Silicon-only message.
+
 ## 0.2.16
 
 - The extension now activates on editor startup (`onStartupFinished`) —

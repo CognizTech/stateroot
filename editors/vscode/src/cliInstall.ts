@@ -47,11 +47,19 @@ export function detectPlatform(): PlatformInfo {
       scriptName: "install.ps1",
     };
   }
+  if (platform === "darwin" && arch === "arm64") {
+    return {
+      supported: true,
+      label: "macOS aarch64",
+      installDest: path.join(os.homedir(), ".local", "bin", "stateroot"),
+      scriptName: "install.sh",
+    };
+  }
   if (platform === "darwin") {
     return {
       supported: false,
       reason:
-        "macOS release binaries are not shipped yet. Build from source or install manually — see the StateRoot docs.",
+        "macOS on Intel is not shipped (Apple Silicon only) — install the CLI manually, see the StateRoot docs.",
     };
   }
   return {
