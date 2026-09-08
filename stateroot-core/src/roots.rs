@@ -149,14 +149,84 @@ fn signature() -> Result<git2::Signature<'static>, git2::Error> {
 /// `.staterootignore` hint.
 pub const TREE_SIZE_WARN_BYTES: u64 = 200 * 1024 * 1024;
 
-/// Build the working tree; returns (tree oid, files pinned, total bytes).
-fn build_tree(repo: &Repository, dir: &Path) -> Result<(git2::Oid, i64, u64), RootsError> {
+/// The outcome of one `build_tree` run (tree + counters for proof tests).
+#[derive(Debug, Clone)]
+pub(crate) struct TreeBuild {
+    pub(crate) tree: git2::Oid,
+    pub(crate) pinned: i64,
+    pub(crate) bytes: u64,
+    /// Files reused from the stat index without re-hashing.
+    #[allow(dead_code)]
+    pub(crate) index_hits: u64,
+    /// Files read + hashed this run.
+    #[allow(dead_code)]
+    pub(crate) index_misses: u64,
+}
+
+/// Machine-local stat index (`.stateroot/local/blob_index.json` — never
+/// pinned into roots, never synced). Maps rel path → ((mtime secs, nanos),
+/// len, oid).
+///
+/// The reuse rule is git's racy-clean rule, not naive stat matching: a
+/// stored blob is reused only when the file's mtime is STRICTLY OLDER than
+/// the index's own write time. Anything newer-or-equal is re-hashed — on
+/// filesystems with lying or coarse mtimes (DrvFs) that costs extra hashes
+/// (safe), never stale roots (correct). A missing or corrupt index is the
+/// recovery path: one full re-hash, then the index is rewritten.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct BlobIndex {
+    written_at: (u64, u32),
+    entries: std::collections::HashMap<String, ((u64, u32), u64, String)>,
+}
+
+fn blob_index_path(dir: &Path) -> PathBuf {
+    dir.join(".stateroot/local/blob_index.json")
+}
+
+fn load_blob_index(dir: &Path) -> BlobIndex {
+    let text = std::fs::read_to_string(blob_index_path(dir)).unwrap_or_default();
+    serde_json::from_str(&text).unwrap_or_default()
+}
+
+fn write_blob_index(dir: &Path, index: &BlobIndex) {
+    let path = blob_index_path(dir);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(text) = serde_json::to_string(index) {
+        let _ = std::fs::write(path, text);
+    }
+}
+
+fn now_stamp() -> (u64, u32) {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.as_secs(), d.subsec_nanos()))
+        .unwrap_or((0, 0))
+}
+
+/// Build the working tree; returns the tree, pin count, bytes, and index
+/// hit/miss counters (proof of the stat-cache contract in tests).
+fn build_tree(repo: &Repository, dir: &Path) -> Result<TreeBuild, RootsError> {
     let rules = IgnoreRules::load(dir);
+    let index_written_at = now_stamp();
+    let index = load_blob_index(dir);
+    let mut next_index = BlobIndex {
+        written_at: index_written_at,
+        ..Default::default()
+    };
+    let mut hits = 0u64;
+    let mut misses = 0u64;
+    #[allow(clippy::too_many_arguments)]
     fn walk(
         repo: &Repository,
         root: &Path,
         dir: &Path,
         rules: &IgnoreRules,
+        index: &BlobIndex,
+        next_index: &mut BlobIndex,
+        hits: &mut u64,
+        misses: &mut u64,
         pinned: &mut i64,
         total_bytes: &mut u64,
     ) -> Result<Option<git2::Oid>, RootsError> {
@@ -186,7 +256,18 @@ fn build_tree(repo: &Repository, dir: &Path) -> Result<(git2::Oid, i64, u64), Ro
                 if rules.is_ignored(&rel, true) {
                     continue;
                 }
-                if let Some(sub) = walk(repo, root, &path, rules, pinned, total_bytes)? {
+                if let Some(sub) = walk(
+                    repo,
+                    root,
+                    &path,
+                    rules,
+                    index,
+                    next_index,
+                    hits,
+                    misses,
+                    pinned,
+                    total_bytes,
+                )? {
                     builder.insert(&name, sub, 0o040000)?;
                     any = true;
                 }
@@ -197,9 +278,42 @@ fn build_tree(repo: &Repository, dir: &Path) -> Result<(git2::Oid, i64, u64), Ro
                 if rules.is_ignored(&rel, false) {
                     continue;
                 }
-                let bytes = std::fs::read(&path)?;
-                *total_bytes += bytes.len() as u64;
-                let blob = repo.blob(&bytes)?;
+                let meta = std::fs::metadata(&path)?;
+                let len = meta.len();
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| (d.as_secs(), d.subsec_nanos()))
+                    .unwrap_or((0, 0));
+                // Racy-clean reuse: only strictly-older mtimes trust the index.
+                let reused = index
+                    .entries
+                    .get(&rel)
+                    .filter(|(stored_mtime, stored_len, _)| {
+                        *stored_mtime == mtime && *stored_len == len && mtime < index.written_at
+                    })
+                    .and_then(|(_, _, oid)| git2::Oid::from_str(oid).ok());
+                let blob = match reused {
+                    Some(oid) => {
+                        *hits += 1;
+                        *total_bytes += len;
+                        next_index
+                            .entries
+                            .insert(rel.clone(), (mtime, len, oid.to_string()));
+                        oid
+                    }
+                    None => {
+                        *misses += 1;
+                        let bytes = std::fs::read(&path)?;
+                        *total_bytes += bytes.len() as u64;
+                        let oid = repo.blob(&bytes)?;
+                        next_index
+                            .entries
+                            .insert(rel.clone(), (mtime, len, oid.to_string()));
+                        oid
+                    }
+                };
                 builder.insert(&name, blob, 0o100644)?;
                 any = true;
                 if !rel.starts_with(".stateroot/") && rel != ".stateroot" {
@@ -216,13 +330,31 @@ fn build_tree(repo: &Repository, dir: &Path) -> Result<(git2::Oid, i64, u64), Ro
     }
     let mut pinned = 0i64;
     let mut total_bytes = 0u64;
-    let tree = walk(repo, dir, dir, &rules, &mut pinned, &mut total_bytes)?;
+    let tree = walk(
+        repo,
+        dir,
+        dir,
+        &rules,
+        &index,
+        &mut next_index,
+        &mut hits,
+        &mut misses,
+        &mut pinned,
+        &mut total_bytes,
+    )?;
     // An empty tree is legal (state_only roots before any project file).
     let tree = match tree {
         Some(oid) => oid,
         None => repo.treebuilder(None)?.write()?,
     };
-    Ok((tree, pinned, total_bytes))
+    write_blob_index(dir, &next_index);
+    Ok(TreeBuild {
+        tree,
+        pinned,
+        bytes: total_bytes,
+        index_hits: hits,
+        index_misses: misses,
+    })
 }
 
 fn latest_oid(repo: &Repository) -> Option<git2::Oid> {
@@ -336,13 +468,13 @@ pub fn create_root(
     snap_ctx: Option<&crate::snap_context::SnapContext>,
 ) -> Result<(RootManifest, Transition), RootsError> {
     let repo = ensure_repo(project_dir)?;
-    let (tree, pinned, tree_bytes) = build_tree(&repo, project_dir)?;
+    let build = build_tree(&repo, project_dir)?;
     commit_new_root(
         &repo,
         project_dir,
-        tree,
-        pinned,
-        tree_bytes,
+        build.tree,
+        build.pinned,
+        build.bytes,
         harness,
         reason,
         snap_ctx,
@@ -372,9 +504,9 @@ pub fn snap_if_changed(
     snap_ctx: Option<&crate::snap_context::SnapContext>,
 ) -> Result<SnapOutcome, RootsError> {
     let repo = ensure_repo(project_dir)?;
-    let (tree, pinned, tree_bytes) = build_tree(&repo, project_dir)?;
+    let build = build_tree(&repo, project_dir)?;
     if let Some(parent) = latest_oid(&repo) {
-        if !project_files_changed(&repo, parent, tree)? {
+        if !project_files_changed(&repo, parent, build.tree)? {
             return Ok(SnapOutcome::Unchanged {
                 root: parent.to_string(),
             });
@@ -383,9 +515,9 @@ pub fn snap_if_changed(
     let (manifest, transition) = commit_new_root(
         &repo,
         project_dir,
-        tree,
-        pinned,
-        tree_bytes,
+        build.tree,
+        build.pinned,
+        build.bytes,
         harness,
         reason,
         snap_ctx,
@@ -1276,5 +1408,106 @@ mod tests {
             }
             SnapOutcome::Unchanged { .. } => panic!("expected a new root for real work"),
         }
+    }
+
+    #[test]
+    fn stat_index_reuses_unchanged_blobs_and_rehashes_on_change() {
+        let (_tmp, dir) = project();
+        write(&dir, "a.txt", "alpha");
+        write(&dir, "b.txt", "beta");
+        write(&dir, "c.txt", "gamma");
+        let repo = ensure_repo(&dir).expect("repo");
+
+        let first = build_tree(&repo, &dir).expect("first build");
+        assert_eq!(first.index_hits, 0, "first build hashes everything");
+        assert_eq!(first.index_misses, 3);
+
+        let second = build_tree(&repo, &dir).expect("second build");
+        assert_eq!(second.index_hits, 3, "unchanged files reuse the index");
+        assert_eq!(second.index_misses, 0);
+        assert_eq!(first.tree, second.tree, "same content, same tree");
+
+        // One changed file: only that file is re-hashed.
+        write(&dir, "a.txt", "alpha v2");
+        let third = build_tree(&repo, &dir).expect("third build");
+        assert_eq!(third.index_hits, 2, "b and c reuse");
+        assert_eq!(third.index_misses, 1, "only a.txt re-hashed");
+        assert_ne!(first.tree, third.tree);
+    }
+
+    #[test]
+    fn stat_index_never_reuses_entries_newer_than_the_index_write() {
+        let (_tmp, dir) = project();
+        write(&dir, "a.txt", "alpha");
+        write(&dir, "b.txt", "beta");
+        let repo = ensure_repo(&dir).expect("repo");
+        build_tree(&repo, &dir).expect("first build");
+
+        // Poison the index's write time into the past: every stored entry is
+        // now "newer-or-equal" to it, so the racy-clean rule must re-hash
+        // everything instead of trusting possibly-stale stats.
+        let index_path = blob_index_path(&dir);
+        let mut index: BlobIndex =
+            serde_json::from_str(&std::fs::read_to_string(&index_path).unwrap()).unwrap();
+        index.written_at = (0, 0);
+        std::fs::write(&index_path, serde_json::to_string(&index).unwrap()).unwrap();
+
+        let build = build_tree(&repo, &dir).expect("second build");
+        assert_eq!(build.index_hits, 0, "racy entries are never reused");
+        assert_eq!(build.index_misses, 2);
+    }
+
+    #[test]
+    fn storage_amplification_is_bounded_by_changes_not_by_snaps() {
+        let (_tmp, dir) = project();
+        for i in 0..20 {
+            write(&dir, &format!("file-{i}.txt"), &format!("content {i}"));
+        }
+        let repo = ensure_repo(&dir).expect("repo");
+
+        let mut misses_total = 0u64;
+        let mut hits_total = 0u64;
+        build_tree(&repo, &dir).expect("initial");
+        for i in 0..100 {
+            // One changed file per snap; the other 19 must come from the index.
+            write(
+                &dir,
+                &format!("file-{}.txt", i % 20),
+                &format!("content {i} v{i}"),
+            );
+            let build = build_tree(&repo, &dir).expect("snap");
+            misses_total += build.index_misses;
+            hits_total += build.index_hits;
+        }
+        assert!(
+            misses_total <= 100 + 20,
+            "misses must track changes, not files x snaps: {misses_total}"
+        );
+        assert!(
+            hits_total >= 99 * 19,
+            "the index must dominate at steady state: {hits_total}"
+        );
+
+        // The index itself stays machine-local and small — never a
+        // per-snap copy, never inside roots.
+        let index_size = std::fs::metadata(blob_index_path(&dir))
+            .expect("index")
+            .len();
+        assert!(
+            index_size < 20 * 1024,
+            "index is a few KB for 20 files: {index_size}"
+        );
+        let (m, _) = create_root(&dir, "cli", "final", None).expect("final root");
+        let repo_read = git2::Repository::open(&dir).expect("open");
+        let tip = repo_read
+            .find_commit(git2::Oid::from_str(&m.id).unwrap())
+            .unwrap()
+            .tree()
+            .unwrap();
+        assert!(
+            tip.get_path(std::path::Path::new(".stateroot/local"))
+                .is_err(),
+            "local/ must never enter roots"
+        );
     }
 }
