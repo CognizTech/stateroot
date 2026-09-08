@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.18
+
+- Bundle installers with the extension so macOS and PATH fixes no longer depend
+  on a separate CLI release publishing an updated installation script.
+- Allow slow GitHub downloads to complete, retry transient failures, and stream
+  installation output with explicit timeout errors.
+- Use the macOS system HTTPS proxy and bypass list for downloads when no proxy
+  environment variable is configured. Explicit proxy settings take precedence.
+- Make the resolved CLI available in new integrated terminals and discover
+  source installations under `~/.cargo/bin`.
+- Create a missing zsh profile when configuring PATH, respecting `ZDOTDIR`.
+- Share concurrent installation attempts and verify the installed binary.
+- Add regression tests for platform selection, installation failures, checksum
+  verification, packaging, and terminal/shell PATH handling.
+
 ## 0.2.17
 
 - CLI auto-install now works on macOS: `detectPlatform` still claimed "macOS

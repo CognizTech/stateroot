@@ -1,4 +1,6 @@
 node_modules/
 *.vsix
 src/
+scripts/
+test/
 tsconfig.json

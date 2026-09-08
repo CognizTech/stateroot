@@ -2,7 +2,7 @@
   "name": "stateroot",
   "displayName": "StateRoot",
   "description": "Cross-harness continuity for AI coding agents - project goal, plans, checkpoints, handoffs, and the shared state of record, inside your editor.",
-  "version": "0.2.17",
+  "version": "0.2.18",
   "publisher": "CognizTech",
   "license": "Apache-2.0",
   "homepage": "https://stateroot.dev",
@@ -117,7 +117,9 @@
     }
   },
   "scripts": {
-    "compile": "node ./node_modules/typescript/bin/tsc -p ./",
+    "compile": "node scripts/prepare-installers.cjs && node ./node_modules/typescript/bin/tsc -p ./",
+    "vscode:prepublish": "npm run compile",
+    "test": "npm run compile && node --test test/*.test.cjs",
     "watch": "tsc -watch -p ./",
     "package": "vsce package"
   },

@@ -3,6 +3,7 @@ import * as path from "path";
 import * as fs from "fs";
 import { spawnSync } from "child_process";
 import {
+  cliPath,
   installCliCommand,
   isCliProbeAvailable,
   parseDelegateList,
@@ -33,11 +34,13 @@ import {
 } from "./store";
 import { snapshot, type Snapshot } from "./snapshot";
 import { WorkbenchPanel } from "./workbench";
+import { terminalPathUpdater } from "./terminalPath";
 
 const THIS_HARNESS = "cursor";
 
 export function activate(context: vscode.ExtensionContext) {
   const output = vscode.window.createOutputChannel("StateRoot");
+  const updateTerminalPath = terminalPathUpdater(context.environmentVariableCollection);
   const sidebar = new SidebarProvider(context.extensionUri, (msg) => void onMessage(msg));
   const workbench = new WorkbenchPanel(context.extensionUri, (msg) => void onMessage(msg));
 
@@ -80,6 +83,7 @@ export function activate(context: vscode.ExtensionContext) {
     if (probed !== undefined) {
       cliAvailable = probed;
     }
+    if (cliAvailable) updateTerminalPath(cliPath());
     const state = currentSnapshot();
     sidebar.post(state);
     workbench.post(state);

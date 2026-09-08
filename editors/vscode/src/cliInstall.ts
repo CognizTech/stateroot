@@ -1,13 +1,12 @@
 import * as cp from "child_process";
 import * as fs from "fs";
-import * as https from "https";
 import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
 
-const REPO = "CognizTech/stateroot";
-const INSTALL_BASE = `https://github.com/${REPO}/releases/latest/download`;
 const DOCS_URL = "https://stateroot.dev/docs/getting-started/installation";
+const INSTALL_TIMEOUT_MS = 600_000;
+let pendingInstall: Promise<InstallResult> | undefined;
 
 export type SupportedPlatform = {
   supported: true;
@@ -74,7 +73,10 @@ export function defaultCliCandidates(): string[] {
     const local = process.env.LOCALAPPDATA;
     return local ? [path.join(local, "Programs", "stateroot", "stateroot.exe")] : [];
   }
-  return [path.join(os.homedir(), ".local", "bin", "stateroot")];
+  return [
+    path.join(os.homedir(), ".local", "bin", "stateroot"),
+    path.join(os.homedir(), ".cargo", "bin", "stateroot"),
+  ];
 }
 
 export function probeCli(binaryPath: string): Promise<boolean> {
@@ -107,103 +109,68 @@ export async function findWorkingCli(configuredPath: string): Promise<string | u
   return undefined;
 }
 
-function downloadUrl(url: string, dest: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const request = (target: string, redirects = 0) => {
-      if (redirects > 8) {
-        reject(new Error("too many redirects"));
-        return;
-      }
-      https
-        .get(target, (res) => {
-          const status = res.statusCode || 0;
-          if (status >= 300 && status < 400 && res.headers.location) {
-            res.resume();
-            request(res.headers.location, redirects + 1);
-            return;
-          }
-          if (status !== 200) {
-            res.resume();
-            reject(new Error(`download failed (${status}): ${target}`));
-            return;
-          }
-          const file = fs.createWriteStream(dest);
-          res.pipe(file);
-          file.on("finish", () => {
-            file.close();
-            resolve();
-          });
-          file.on("error", reject);
-        })
-        .on("error", reject);
-    };
-    request(url);
-  });
-}
-
-function execInstaller(scriptPath: string, scriptName: SupportedPlatform["scriptName"]): Promise<string> {
+function execInstaller(
+  scriptPath: string,
+  scriptName: SupportedPlatform["scriptName"],
+  output: vscode.OutputChannel
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const opts = {
       maxBuffer: 8 * 1024 * 1024,
-      timeout: 180_000,
+      timeout: INSTALL_TIMEOUT_MS,
       env: { ...process.env, STATEROOT_INSTALL_VIA: "extension" },
     };
-    if (scriptName === "install.ps1") {
-      cp.execFile(
-        "powershell.exe",
-        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath],
-        opts,
-        (err, stdout, stderr) => {
-          if (err) {
-            reject(new Error((stderr || stdout || err.message).trim()));
-            return;
-          }
-          resolve([stdout, stderr].filter(Boolean).join("\n"));
-        }
-      );
-      return;
-    }
-    cp.execFile("sh", [scriptPath], opts, (err, stdout, stderr) => {
+    const windows = scriptName === "install.ps1";
+    const command = windows ? "powershell.exe" : "sh";
+    const args = windows
+      ? ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath]
+      : [scriptPath];
+    const child = cp.execFile(command, args, opts, (err, stdout, stderr) => {
       if (err) {
-        reject(new Error((stderr || stdout || err.message).trim()));
+        const reason = err.killed
+          ? `Installer timed out after ${INSTALL_TIMEOUT_MS / 60_000} minutes. Check connectivity to GitHub and retry.`
+          : typeof err.code === "number"
+            ? `Installer exited with code ${err.code}.`
+            : err.message;
+        const details = (stderr || stdout).trim().slice(-4_000);
+        reject(new Error([reason, details].filter(Boolean).join("\n")));
         return;
       }
-      resolve([stdout, stderr].filter(Boolean).join("\n"));
+      resolve();
     });
+    child.stdout?.on("data", (chunk: Buffer) => output.append(chunk.toString()));
+    child.stderr?.on("data", (chunk: Buffer) => output.append(chunk.toString()));
   });
 }
 
-/** Download and run the official stable installer; verify the resulting binary. */
-export async function installCli(output: vscode.OutputChannel): Promise<InstallResult> {
+/** Share one install between activation and commands in this extension host. */
+export function installCli(output: vscode.OutputChannel): Promise<InstallResult> {
+  if (!pendingInstall) {
+    pendingInstall = performInstall(output).finally(() => {
+      pendingInstall = undefined;
+    });
+  }
+  return pendingInstall;
+}
+
+/** Run the bundled installer; it downloads and verifies the stable CLI release. */
+async function performInstall(output: vscode.OutputChannel): Promise<InstallResult> {
   const platform = detectPlatform();
   if (!platform.supported) {
     return { ok: false, error: platform.reason };
   }
 
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "stateroot-install-"));
-  const scriptPath = path.join(tmpDir, platform.scriptName);
-  const scriptUrl = `${INSTALL_BASE}/${platform.scriptName}`;
+  const scriptPath = path.join(__dirname, "..", "assets", platform.scriptName);
+  if (!fs.existsSync(scriptPath)) {
+    return { ok: false, error: `Bundled ${platform.scriptName} is missing. Reinstall the StateRoot extension.` };
+  }
 
   try {
-    output.appendLine(`$ download ${scriptUrl}`);
-    await downloadUrl(scriptUrl, scriptPath);
-    if (platform.scriptName === "install.sh") {
-      fs.chmodSync(scriptPath, 0o755);
-    }
-    output.appendLine(`$ run ${platform.scriptName} (stable release)`);
-    const log = await execInstaller(scriptPath, platform.scriptName);
-    if (log.trim()) {
-      output.appendLine(log.trimEnd());
-    }
+    output.appendLine(`$ run bundled ${platform.scriptName} (latest stable CLI)`);
+    await execInstaller(scriptPath, platform.scriptName, output);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     return { ok: false, error: message };
-  } finally {
-    try {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-    } catch {
-      // best-effort cleanup
-    }
   }
 
   if (!(await probeCli(platform.installDest))) {
