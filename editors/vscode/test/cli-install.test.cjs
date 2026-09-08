@@ -216,3 +216,76 @@ test("fresh zsh profile is created in ZDOTDIR without deleting existing settings
     assert.match(result, /existing user setting/);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+function proxyDownloadFixture({ platform = "Darwin", enabled = "1", host = "127.0.0.1", port = "7890", proxyEnv = {} } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "stateroot-proxy-test-"));
+  try {
+    const bin = path.join(dir, "bin");
+    fs.mkdirSync(bin);
+    const scripts = {
+      uname: '#!/bin/sh\ncase "$1" in -s) printf "%s\\n" "$STATEROOT_TEST_OS" ;; -m) printf "%s\\n" "$STATEROOT_TEST_ARCH" ;; esac\n',
+      scutil: '#!/bin/sh\ncat "$STATEROOT_TEST_PROXY_SETTINGS"\n',
+      curl: `#!/bin/sh
+printf '%s|%s|%s|%s\\n' "\${https_proxy:-}" "\${HTTPS_PROXY:-}" "\${all_proxy:-\${ALL_PROXY:-}}" "\${no_proxy:-\${NO_PROXY:-}}" >> "$STATEROOT_TEST_PROXY_LOG"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) target="$2"; shift 2 ;;
+    https://*) source="$1"; shift ;;
+    *) shift ;;
+  esac
+done
+cp "$STATEROOT_TEST_ASSETS/\${source##*/}" "$target"
+`,
+    };
+    for (const [name, body] of Object.entries(scripts)) {
+      fs.writeFileSync(path.join(bin, name), body, { mode: 0o755 });
+    }
+    const settings = path.join(dir, "proxy-settings.txt");
+    fs.writeFileSync(settings, `<dictionary> {
+  HTTPSEnable : ${enabled}
+  HTTPSProxy : ${host}
+  HTTPSPort : ${port}
+  ExceptionsList : <array> {
+    0 : *.local
+    1 : 169.254.0.0/16
+  }
+}
+`);
+    const asset = platform === "Darwin" ? "stateroot-macos-aarch64" : "stateroot-linux-x64";
+    const payload = Buffer.from("verified proxy test payload");
+    fs.writeFileSync(path.join(dir, asset), payload);
+    fs.writeFileSync(path.join(dir, "checksums.txt"), `${createHash("sha256").update(payload).digest("hex")}  ${asset}\n`);
+    const env = { ...process.env };
+    for (const key of ["https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY", "no_proxy", "NO_PROXY"]) delete env[key];
+    Object.assign(env, proxyEnv, {
+      PATH: bin + path.delimiter + process.env.PATH,
+      STATEROOT_INSTALL_BASE: "https://github.com/CognizTech/stateroot/releases/latest/download",
+      STATEROOT_TEST_OS: platform,
+      STATEROOT_TEST_ARCH: platform === "Darwin" ? "arm64" : "x86_64",
+      STATEROOT_TEST_PROXY_SETTINGS: settings,
+      STATEROOT_TEST_PROXY_LOG: path.join(dir, "proxy.log"),
+      STATEROOT_TEST_ASSETS: dir,
+    });
+    const verifyStage = fs.readFileSync(path.join(repository, "install.sh"), "utf8").split("# --- install ")[0];
+    const output = execFileSync("sh", ["-c", verifyStage], { env, encoding: "utf8" });
+    assert.match(output, /checksum verified/);
+    const downloads = fs.readFileSync(path.join(dir, "proxy.log"), "utf8").trimEnd().split("\n").map((line) => line.split("|"));
+    assert.equal(downloads.length, 2, "binary and checksum downloads both use the selected proxy policy");
+    return downloads;
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+
+for (const [name, options, expected] of [
+  ["macOS system HTTPS proxy and bypass list apply to downloads", { proxyEnv: { NO_PROXY: "localhost" } }, ["http://127.0.0.1:7890", "", "", "localhost,.local,169.254.0.0/16"]],
+  ["explicit HTTPS proxy overrides macOS system proxy", { proxyEnv: { HTTPS_PROXY: "http://explicit.example:8080" } }, ["", "http://explicit.example:8080", "", ""]],
+  ["explicit all-protocol proxy overrides macOS system proxy", { proxyEnv: { ALL_PROXY: "socks5h://explicit.example:1080" } }, ["", "", "socks5h://explicit.example:1080", ""]],
+  ["disabled macOS HTTPS proxy is ignored", { enabled: "0" }, ["", "", "", ""]],
+  ["missing static macOS HTTPS proxy is ignored", { enabled: "" }, ["", "", "", ""]],
+  ["invalid macOS proxy port is ignored", { port: "invalid" }, ["", "", "", ""]],
+  ["IPv6 system proxy addresses are bracketed", { host: "::1" }, ["http://[::1]:7890", "", "", ".local,169.254.0.0/16"]],
+  ["Linux does not inherit macOS proxy discovery", { platform: "Linux" }, ["", "", "", ""]],
+]) {
+  test(name, { skip: process.platform === "win32" }, () => {
+    for (const download of proxyDownloadFixture(options)) assert.deepEqual(download, expected);
+  });
+}

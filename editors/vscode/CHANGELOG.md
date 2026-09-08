@@ -6,6 +6,8 @@
   on a separate CLI release publishing an updated installation script.
 - Allow slow GitHub downloads to complete, retry transient failures, and stream
   installation output with explicit timeout errors.
+- Use the macOS system HTTPS proxy and bypass list for downloads when no proxy
+  environment variable is configured. Explicit proxy settings take precedence.
 - Make the resolved CLI available in new integrated terminals and discover
   source installations under `~/.cargo/bin`.
 - Create a missing zsh profile when configuring PATH, respecting `ZDOTDIR`.

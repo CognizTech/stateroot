@@ -6,8 +6,9 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 ## Unreleased
 
 - Fix Apple Silicon CLI installation from the editor extension by bundling the
-  current installer, allowing slow GitHub downloads to finish, and reporting
-  installation failures with live output. Discover Cargo installations and add
+  current installer, allowing slow GitHub downloads to finish, honoring the
+  macOS system HTTPS proxy, and reporting installation failures with live output.
+  Discover Cargo installations and add
   the resolved CLI directory to new integrated terminals. The POSIX installer
   now creates missing shell profiles, respects `ZDOTDIR`, and supports CLI-only
   installation with `STATEROOT_SKIP_INTEGRATION=1`.

@@ -81,6 +81,10 @@ project state directly.
 - Open a new terminal after the first install. The extension adds the resolved
   CLI directory to new terminals. The POSIX installer also configures the shell
   profile, including a fresh Mac with no `.zshrc` yet.
+- On macOS, HTTPS downloads use the system's static HTTPS proxy and bypass list
+  when no proxy environment variable is configured. Explicit `HTTPS_PROXY`,
+  `https_proxy`, or `ALL_PROXY` settings take precedence. PAC-only configurations
+  require an explicit proxy environment variable.
 - For a CLI-only POSIX installation, set `STATEROOT_SKIP_INTEGRATION=1` when
   running `install.sh`; run `stateroot install` later to configure global hooks
   and persona. This flag does not disable download verification.

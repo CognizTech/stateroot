@@ -30,6 +30,48 @@ ASSET="stateroot-$TARGET"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# Native macOS apps use the system proxy, but curl only reads proxy environment
+# variables. Apply a static HTTPS system proxy to this download subprocess when
+# the user has not already supplied an explicit proxy. PAC scripts are not run.
+fetch_with_curl() (
+    case "$OS:$1" in
+        Darwin:https://*)
+            if [ -z "${https_proxy:-}${HTTPS_PROXY:-}${all_proxy:-}${ALL_PROXY:-}" ] && command -v scutil >/dev/null 2>&1; then
+                SYSTEM_PROXY_SETTINGS="$(scutil --proxy 2>/dev/null)" || SYSTEM_PROXY_SETTINGS=""
+                SYSTEM_PROXY_ENABLED="$(printf '%s\n' "$SYSTEM_PROXY_SETTINGS" | awk '$1 == "HTTPSEnable" { print $3; exit }')"
+                SYSTEM_PROXY_HOST="$(printf '%s\n' "$SYSTEM_PROXY_SETTINGS" | awk '$1 == "HTTPSProxy" { print $3; exit }')"
+                SYSTEM_PROXY_PORT="$(printf '%s\n' "$SYSTEM_PROXY_SETTINGS" | awk '$1 == "HTTPSPort" { print $3; exit }')"
+                case "$SYSTEM_PROXY_PORT" in
+                    ''|*[!0-9]*) SYSTEM_PROXY_ENABLED=0 ;;
+                esac
+                if [ "$SYSTEM_PROXY_ENABLED" = "1" ] && [ -n "$SYSTEM_PROXY_HOST" ]; then
+                    case "$SYSTEM_PROXY_HOST" in
+                        \[*\]) ;;
+                        *:*) SYSTEM_PROXY_HOST="[$SYSTEM_PROXY_HOST]" ;;
+                    esac
+                    https_proxy="http://$SYSTEM_PROXY_HOST:$SYSTEM_PROXY_PORT"
+                    export https_proxy
+                    SYSTEM_PROXY_EXCEPTIONS="$(printf '%s\n' "$SYSTEM_PROXY_SETTINGS" | awk '
+                        $1 == "ExceptionsList" { exceptions = 1; next }
+                        exceptions && $1 == "}" { exceptions = 0 }
+                        exceptions && $2 == ":" {
+                            host = $3; sub(/^\*\./, ".", host)
+                            printf "%s%s", separator, host; separator = ","
+                        }')"
+                    if [ -n "$SYSTEM_PROXY_EXCEPTIONS" ]; then
+                        no_proxy="${no_proxy:-${NO_PROXY:-}}"
+                        no_proxy="${no_proxy:+$no_proxy,}$SYSTEM_PROXY_EXCEPTIONS"
+                        export no_proxy
+                    fi
+                    log "using macOS system HTTPS proxy for download"
+                fi
+            fi
+            ;;
+    esac
+    curl --http1.1 -fsSL --connect-timeout 15 --max-time 300 --speed-time 30 --speed-limit 1024 \
+        --retry 2 --retry-delay 1 "$1" -o "$2"
+)
+
 fetch() {
     # fetch <url-or-file-url> <dest>
     case "$1" in
@@ -40,9 +82,7 @@ fetch() {
             ;;
         *)
             if command -v curl >/dev/null 2>&1; then
-                curl --http1.1 -fsSL --connect-timeout 15 --max-time 300 --speed-time 30 --speed-limit 1024 \
-                    --retry 2 --retry-delay 1 \
-                    "$1" -o "$2" || fail "download failed: $1 (check connectivity to GitHub and retry)"
+                fetch_with_curl "$1" "$2" || fail "download failed: $1 (check connectivity to GitHub and retry)"
             elif command -v wget >/dev/null 2>&1; then
                 wget -q --timeout=60 --tries=3 "$1" -O "$2" || fail "download failed: $1 (check connectivity to GitHub and retry)"
             else
