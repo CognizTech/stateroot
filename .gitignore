@@ -9,5 +9,8 @@ AGENTS.md
 editors/vscode/node_modules/
 editors/vscode/out/
 editors/vscode/*.vsix
+editors/vscode/assets/install.sh
+editors/vscode/assets/install.ps1
+editors/vscode/LICENSE
 
 .env

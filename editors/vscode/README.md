@@ -72,9 +72,18 @@ project state directly.
 
 ## Requirements
 
-- The **StateRoot CLI** on the machine:
-  - Linux: `curl -sSfL https://github.com/CognizTech/stateroot/releases/latest/download/install.sh | sh`
+- The **StateRoot CLI** on the machine. On supported platforms, the extension
+  installs it automatically using its bundled installer and the latest stable
+  release binary. The installer checks the download's SHA-256 before installation.
+  - macOS (Apple Silicon) and Linux x64: `curl -sSfL https://github.com/CognizTech/stateroot/releases/latest/download/install.sh | sh`
   - Windows: `irm https://github.com/CognizTech/stateroot/releases/latest/download/install.ps1 | iex` (or the `StateRootSetup-x64.msi` GUI installer)
+  - Intel Macs: build from source; automatic binary installation is not supported.
+- Open a new terminal after the first install. The extension adds the resolved
+  CLI directory to new terminals. The POSIX installer also configures the shell
+  profile, including a fresh Mac with no `.zshrc` yet.
+- For a CLI-only POSIX installation, set `STATEROOT_SKIP_INTEGRATION=1` when
+  running `install.sh`; run `stateroot install` later to configure global hooks
+  and persona. This flag does not disable download verification.
 - Run `stateroot init` in a project — the extension lights up on any
   workspace that has one.
 

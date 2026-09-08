@@ -40,9 +40,11 @@ fetch() {
             ;;
         *)
             if command -v curl >/dev/null 2>&1; then
-                curl -fsSL "$1" -o "$2" || fail "download failed: $1"
+                curl --http1.1 -fsSL --connect-timeout 15 --max-time 300 --speed-time 30 --speed-limit 1024 \
+                    --retry 2 --retry-delay 1 \
+                    "$1" -o "$2" || fail "download failed: $1 (check connectivity to GitHub and retry)"
             elif command -v wget >/dev/null 2>&1; then
-                wget -q "$1" -O "$2" || fail "download failed: $1"
+                wget -q --timeout=60 --tries=3 "$1" -O "$2" || fail "download failed: $1 (check connectivity to GitHub and retry)"
             else
                 fail "need curl or wget"
             fi
@@ -75,11 +77,15 @@ chmod 0755 "$DEST_DIR/stateroot" 2>/dev/null || true
 log "installed to $DEST_DIR/stateroot"
 
 # --- harness integration (global persona + hooks) --------------------------
-log "configuring harness integrations (global persona, hooks, MCP)"
-if "$DEST_DIR/stateroot" install; then
-    log "harness integration complete"
+if [ "${STATEROOT_SKIP_INTEGRATION:-}" = "1" ]; then
+    log "CLI-only installation; run stateroot install when ready to configure harness integrations"
 else
-    log "note: harness integration skipped — install a harness (Cursor, Codex, …) then re-run: stateroot install"
+    log "configuring harness integrations (global persona, hooks, MCP)"
+    if "$DEST_DIR/stateroot" install; then
+        log "harness integration complete"
+    else
+        log "note: harness integration skipped — install a harness (Cursor, Codex, …) then re-run: stateroot install"
+    fi
 fi
 
 # --- PATH ------------------------------------------------------------------
@@ -91,22 +97,22 @@ case ":$PATH:" in
     *)
         PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
         MARKER='# stateroot PATH'
-        if grep -qsF "$MARKER" "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile" 2>/dev/null; then
-            log "PATH for $DEST_DIR already configured in your shell profile (restart your shell if needed)"
-        else
-            touched=""
-            for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
-                if [ -f "$rc" ]; then
-                    printf '\n%s\n%s\n' "$MARKER" "$PATH_LINE" >> "$rc"
-                    touched="$touched $rc"
-                fi
-            done
-            if [ -n "$touched" ]; then
-                log "added $DEST_DIR to your PATH in:$touched — restart your shell (or run: $PATH_LINE)"
+        # A clean Mac may have no dotfiles yet. zsh reads .zshrc for both
+        # login and non-login interactive terminals; respect ZDOTDIR too.
+        case "${SHELL:-/bin/sh}" in
+            */zsh) PROFILE="${ZDOTDIR:-$HOME}/.zshrc" ;;
+            */bash) PROFILE="$HOME/.bashrc" ;;
+            *) PROFILE="$HOME/.profile" ;;
+        esac
+        if ! grep -qsF "$MARKER" "$PROFILE" 2>/dev/null; then
+            if mkdir -p "$(dirname "$PROFILE")" && printf '\n%s\n%s\n' "$MARKER" "$PATH_LINE" >> "$PROFILE"; then
+                log "added $DEST_DIR to your PATH in $PROFILE — open a new terminal"
             else
-                log "note: $DEST_DIR is not on your PATH — add this to your shell profile:"
+                log "could not update $PROFILE; add this line manually:"
                 printf '  %s\n' "$PATH_LINE"
             fi
+        else
+            log "PATH for $DEST_DIR already configured in $PROFILE (open a new terminal if needed)"
         fi
         ;;
 esac
@@ -131,5 +137,9 @@ cat <<'EOF'
 Quickstart:
   1. cd your-project && stateroot init
   2. work in any harness (Claude, Codex, Cursor, Kimi, OpenClaw, Hermes)
-  3. persona + hooks are already configured globally from this install
 EOF
+if [ "${STATEROOT_SKIP_INTEGRATION:-}" = "1" ]; then
+    printf '%s\n' '  3. run stateroot install when ready to configure global persona + hooks'
+else
+    printf '%s\n' '  3. persona + hooks are already configured globally from this install'
+fi
