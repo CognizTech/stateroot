@@ -32,7 +32,26 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    let cli = cli::Cli::parse();
+    let cli = match cli::Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(err) => {
+            // `--version` / `--help` short-circuit here before any command
+            // dispatch — and for a fresh manual install `--version` is often
+            // the first (and only) command run, so the first-run ping must
+            // fire on this path too or those installs never count.
+            if matches!(
+                err.kind(),
+                clap::error::ErrorKind::DisplayVersion | clap::error::ErrorKind::DisplayHelp
+            ) {
+                if let Ok(ctx) = Ctx::load() {
+                    if let Some(ping) = telemetry::maybe_ping(&ctx.config_dir, cli::BUILD_VERSION) {
+                        let _ = ping.await;
+                    }
+                }
+            }
+            err.exit();
+        }
+    };
     let ctx = Ctx::load()?;
 
     // Anonymous first-run telemetry: one ping per version change per machine
