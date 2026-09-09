@@ -41,6 +41,24 @@ export function pingUrl(current: string, kind: "install" | "update", from?: stri
   return url;
 }
 
+/** The marker as it stood before this activation (read-only — maybePing writes it). */
+export function previousVersion(context: vscode.ExtensionContext): string | undefined {
+  return context.globalState.get<string>(MARKER_KEY);
+}
+
+/** The agreed design: when the EXTENSION updates under a working CLI, the
+ * bundled installer re-runs and brings the CLI to latest stable. First
+ * marker version can only observe installs (no prior marker exists), so the
+ * first refresh-capable transition is the one after this ships. */
+export function shouldRefreshCli(
+  previous: string | undefined,
+  current: string,
+  cliAvailable: boolean,
+  noAutoUpdate: boolean
+): boolean {
+  return cliAvailable && !noAutoUpdate && previous !== undefined && previous !== current;
+}
+
 /** Fire one fail-silent ping when the extension version changed. */
 export function maybePing(context: vscode.ExtensionContext): void {
   try {

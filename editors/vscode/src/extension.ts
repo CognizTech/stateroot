@@ -35,12 +35,13 @@ import {
 import { snapshot, type Snapshot } from "./snapshot";
 import { WorkbenchPanel } from "./workbench";
 import { terminalPathUpdater } from "./terminalPath";
-import { maybePing } from "./installPing";
+import { maybePing, previousVersion, shouldRefreshCli } from "./installPing";
 
 const THIS_HARNESS = "cursor";
 
 export function activate(context: vscode.ExtensionContext) {
   const output = vscode.window.createOutputChannel("StateRoot");
+  const prevExtVersion = previousVersion(context);
   maybePing(context);
   const updateTerminalPath = terminalPathUpdater(context.environmentVariableCollection);
   const sidebar = new SidebarProvider(context.extensionUri, (msg) => void onMessage(msg));
@@ -830,6 +831,32 @@ export function activate(context: vscode.ExtensionContext) {
         ) {
           await runCliReport(["init"], folder.uri.fsPath, output, 60_000);
         }
+      }
+    } else if (
+      shouldRefreshCli(
+        prevExtVersion,
+        String(context.extension.packageJSON.version ?? ""),
+        true,
+        !!process.env.STATEROOT_NO_AUTO_UPDATE
+      )
+    ) {
+      // The extension updated under a working CLI: the bundled installer
+      // fetches the latest stable CLI, so re-running it IS the update path
+      // (agreed design: extension auto-update installs a missing CLI AND
+      // updates an existing one). Benign on failure — the next extension
+      // update retries.
+      const { installCli } = await import("./cliInstall");
+      output.appendLine(
+        `extension updated (${prevExtVersion} → ${context.extension.packageJSON.version}) — refreshing CLI to latest stable`
+      );
+      const result = await installCli(output);
+      if (result.ok) {
+        output.appendLine(`CLI refreshed: ${result.binaryPath}`);
+        await refreshCliProbe();
+      } else {
+        output.appendLine(
+          `CLI refresh failed (retries on the next extension update): ${result.error}`
+        );
       }
     }
     push();

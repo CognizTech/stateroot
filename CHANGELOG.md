@@ -5,6 +5,12 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- **Extension updates now update the CLI too** (the agreed design, finally
+  landed): when the extension version changes under a working CLI, the
+  bundled installer re-runs and brings the CLI to latest stable. Missing-CLI
+  auto-install is unchanged; `STATEROOT_NO_AUTO_UPDATE` opts out; failures
+  are benign and retry on the next extension update. First refresh-capable
+  transition is the one after this ships (first-marker caveat).
 - **The CLI updates itself even when nobody runs it.** `stateroot install`
   now registers a per-user OS schedule (Windows Task Scheduler, Linux cron,
   macOS launchd) that runs `stateroot self-update` once a day. Command-

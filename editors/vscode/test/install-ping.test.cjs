@@ -114,3 +114,25 @@ test("STATEROOT_NO_PING opts out and leaves the marker untouched", () => {
   assert.equal(calls.length, 0);
   assert.equal(store["stateroot.lastSeenVersion"], undefined);
 });
+
+test("shouldRefreshCli: only a real extension update under a working CLI refreshes", () => {
+  const { api } = loadInstallPing();
+  // Extension updated, CLI present → refresh.
+  assert.equal(api.shouldRefreshCli("0.2.18", "0.2.19", true, false), true);
+  // First marker version (no previous) → cannot know it's an update → skip.
+  assert.equal(api.shouldRefreshCli(undefined, "0.2.19", true, false), false);
+  // Same version → nothing to do.
+  assert.equal(api.shouldRefreshCli("0.2.19", "0.2.19", true, false), false);
+  // CLI missing → the missing-CLI flow owns that path, not refresh.
+  assert.equal(api.shouldRefreshCli("0.2.18", "0.2.19", false, false), false);
+  // Auto-update disabled → honor the CLI's own opt-out.
+  assert.equal(api.shouldRefreshCli("0.2.18", "0.2.19", true, true), false);
+});
+
+test("previousVersion reads the marker without writing it", () => {
+  const { api } = loadInstallPing();
+  const store = { "stateroot.lastSeenVersion": "0.2.17" };
+  assert.equal(api.previousVersion(fakeContext("0.2.18", store)), "0.2.17");
+  assert.equal(store["stateroot.lastSeenVersion"], "0.2.17");
+  assert.equal(api.previousVersion(fakeContext("0.2.18", {})), undefined);
+});
