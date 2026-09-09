@@ -15,6 +15,11 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 - The installer's ping now goes through the same macOS system-proxy bridge
   as the binary download (extracted as `maybe_apply_system_proxy`), so
   telemetry works on proxy-required networks too.
+- **The extension counts its own installs and updates too.** Same marker
+  contract as the CLI (globalState `stateroot.lastSeenVersion`,
+  `kind=install`/`kind=update&from=<old>`, marker written before firing, 3s
+  fire-and-forget, `STATEROOT_NO_PING=1` opts out). Extension updates never
+  reinstall the CLI, so this is the only instrument that sees them.
 - Fix Apple Silicon CLI installation from the editor extension by bundling the
   current installer, allowing slow GitHub downloads to finish, honoring the
   macOS system HTTPS proxy, and reporting installation failures with live output.

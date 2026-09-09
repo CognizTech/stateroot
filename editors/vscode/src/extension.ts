@@ -35,11 +35,13 @@ import {
 import { snapshot, type Snapshot } from "./snapshot";
 import { WorkbenchPanel } from "./workbench";
 import { terminalPathUpdater } from "./terminalPath";
+import { maybePing } from "./installPing";
 
 const THIS_HARNESS = "cursor";
 
 export function activate(context: vscode.ExtensionContext) {
   const output = vscode.window.createOutputChannel("StateRoot");
+  maybePing(context);
   const updateTerminalPath = terminalPathUpdater(context.environmentVariableCollection);
   const sidebar = new SidebarProvider(context.extensionUri, (msg) => void onMessage(msg));
   const workbench = new WorkbenchPanel(context.extensionUri, (msg) => void onMessage(msg));
