@@ -6,6 +6,7 @@
 
 mod cli;
 mod commands;
+mod telemetry;
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
@@ -33,6 +34,12 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = cli::Cli::parse();
     let ctx = Ctx::load()?;
+
+    // Anonymous first-run telemetry: one ping per version change per machine
+    // — spawned now (cheap), awaited after the command completes so a fast
+    // `--version` cannot exit before the ping lands. 3s cap, every error
+    // swallowed, never on dev builds or with STATEROOT_NO_PING=1 set.
+    let ping = telemetry::maybe_ping(&ctx.config_dir, cli::BUILD_VERSION);
 
     // The updater runs only on user-facing entrypoints — never on hook or
     // mcp-stdio (harness event flows must stay fast) and never on
@@ -401,6 +408,12 @@ async fn main() -> anyhow::Result<()> {
     }
     if update_allowed {
         commands::update::maybe_auto_update(&ctx).await;
+    }
+    // The telemetry ping, if any fired this run, completes here (bounded by
+    // the client's 3s timeout). Awaiting it is what makes `--version`-fast
+    // commands countable at all.
+    if let Some(ping) = ping {
+        let _ = ping.await;
     }
     Ok(())
 }

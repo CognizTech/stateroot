@@ -5,6 +5,16 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- **The CLI counts its own installs and updates.** One anonymous GET per
+  version change per machine (`kind=install` on first run, `kind=update` with
+  `from=<old>` when the binary changes) — the channel-agnostic floor: direct
+  binary copies and manual installs count too, not just installer flows.
+  Detached tokio task with a 3s cap, awaited after the command completes so
+  even `stateroot --version` can land it; every error swallowed;
+  `STATEROOT_NO_PING=1` opts out; dev builds never ping.
+- The installer's ping now goes through the same macOS system-proxy bridge
+  as the binary download (extracted as `maybe_apply_system_proxy`), so
+  telemetry works on proxy-required networks too.
 - Fix Apple Silicon CLI installation from the editor extension by bundling the
   current installer, allowing slow GitHub downloads to finish, honoring the
   macOS system HTTPS proxy, and reporting installation failures with live output.
