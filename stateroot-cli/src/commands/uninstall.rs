@@ -361,6 +361,13 @@ pub fn run(ctx: &Ctx, purge: bool, yes: bool, msi_cleanup: bool) -> Result<()> {
     println!("Removing harness integrations (home: {}):", home.display());
     remove_harness_registrations(ctx, &home)?;
 
+    // 1b. The OS-level auto-update schedule goes too — best-effort.
+    if let Err(err) =
+        super::update_schedule::manage(ctx, super::update_schedule::ScheduleAction::Remove)
+    {
+        println!("  warning: could not remove the auto-update schedule ({err:#})");
+    }
+
     // 2. Projects stay; say so.
     list_registered_projects(ctx);
 

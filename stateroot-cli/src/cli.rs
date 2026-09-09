@@ -129,6 +129,11 @@ pub enum Command {
         /// production tag such as `v0.1.2`. Bare `0.1.2` is accepted as `v0.1.2`.
         #[arg(long)]
         tag: Option<String>,
+        /// Manage the OS-level daily auto-update schedule (Task Scheduler /
+        /// cron / launchd). `install` registers it, `remove` unregisters,
+        /// `status` reports.
+        #[arg(long, value_enum)]
+        schedule: Option<crate::commands::update_schedule::ScheduleAction>,
     },
     /// Local stdio MCP server (line-delimited JSON-RPC; W8 tools, local stores).
     McpStdio,

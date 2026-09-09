@@ -3,6 +3,23 @@
 All notable changes to StateRoot. Format loosely follows Keep a Changelog;
 StateRoot is pre-1.0 and milestones land as minor versions.
 
+## Unreleased
+
+- **The CLI updates itself even when nobody runs it.** `stateroot install`
+  now registers a per-user OS schedule (Windows Task Scheduler, Linux cron,
+  macOS launchd) that runs `stateroot self-update` once a day. Command-
+  triggered checks only ever reached interactive users — hooks are
+  deliberately exempt for latency, so the passive install base starved on
+  old versions (found 2026-09-13: a v0.1.15 machine four releases behind).
+  The schedule is registered from `install`, which `rearm_install` re-runs
+  after every successful self-update, so it self-heals across versions.
+  `stateroot uninstall` removes it; `stateroot self-update --schedule
+  <install|remove|status>` manages it by hand. Every updater opt-out
+  applies (`STATEROOT_NO_AUTO_UPDATE`, config `[update] enabled = false`).
+- `stateroot --version` / `--help` now fire the first-run ping too (clap
+  short-circuits them before the command dispatch — the hole was found in
+  the v0.2.1 end-to-end artifact proof).
+
 ## v0.2.1 — 2026-09-09
 
 - **The CLI counts its own installs and updates.** One anonymous GET per

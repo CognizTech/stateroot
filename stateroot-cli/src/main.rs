@@ -421,8 +421,16 @@ async fn main() -> anyhow::Result<()> {
             let code = commands::ext::run_external(&ctx, &argv)?;
             std::process::exit(code);
         }
-        Command::SelfUpdate { check, tag } => {
-            commands::update::self_update(&ctx, check, tag.as_deref()).await?
+        Command::SelfUpdate {
+            check,
+            tag,
+            schedule,
+        } => {
+            if let Some(action) = schedule {
+                commands::update_schedule::manage(&ctx, action)?;
+            } else {
+                commands::update::self_update(&ctx, check, tag.as_deref()).await?
+            }
         }
     }
     if update_allowed {

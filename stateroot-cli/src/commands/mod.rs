@@ -52,6 +52,7 @@ pub mod todo;
 pub mod transplant;
 pub mod uninstall;
 pub mod update;
+pub mod update_schedule;
 pub mod wiki;
 
 /// Shared context built once per command invocation.
