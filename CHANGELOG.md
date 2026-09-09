@@ -3,7 +3,7 @@
 All notable changes to StateRoot. Format loosely follows Keep a Changelog;
 StateRoot is pre-1.0 and milestones land as minor versions.
 
-## Unreleased
+## v0.2.1 — 2026-09-09
 
 - **The CLI counts its own installs and updates.** One anonymous GET per
   version change per machine (`kind=install` on first run, `kind=update` with
