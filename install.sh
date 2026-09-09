@@ -33,7 +33,8 @@ trap 'rm -rf "$WORK"' EXIT
 # Native macOS apps use the system proxy, but curl only reads proxy environment
 # variables. Apply a static HTTPS system proxy to this download subprocess when
 # the user has not already supplied an explicit proxy. PAC scripts are not run.
-fetch_with_curl() (
+# Used by the binary download AND the install ping.
+maybe_apply_system_proxy() {
     case "$OS:$1" in
         Darwin:https://*)
             if [ -z "${https_proxy:-}${HTTPS_PROXY:-}${all_proxy:-}${ALL_PROXY:-}" ] && command -v scutil >/dev/null 2>&1; then
@@ -68,6 +69,10 @@ fetch_with_curl() (
             fi
             ;;
     esac
+}
+
+fetch_with_curl() (
+    maybe_apply_system_proxy "$1"
     curl --http1.1 -fsSL --connect-timeout 15 --max-time 300 --speed-time 30 --speed-limit 1024 \
         --retry 2 --retry-delay 1 "$1" -o "$2"
 )
@@ -166,7 +171,7 @@ if [ "${STATEROOT_NO_PING:-}" != "1" ]; then
     VIA="${STATEROOT_INSTALL_VIA:-script}"
     PING_URL="https://stateroot.dev/api/install-ping?os=$TARGET&v=${VER:-unknown}&via=$VIA"
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL --max-time 3 "$PING_URL" -o /dev/null 2>/dev/null || true
+        ( maybe_apply_system_proxy "$PING_URL"; curl -fsSL --max-time 3 "$PING_URL" -o /dev/null ) 2>/dev/null || true
     elif command -v wget >/dev/null 2>&1; then
         wget -q -T 3 -O /dev/null "$PING_URL" 2>/dev/null || true
     fi
