@@ -55,15 +55,35 @@ try {
     $DestDir = Join-Path $env:LOCALAPPDATA 'Programs\stateroot'
     New-Item -ItemType Directory -Force -Path $DestDir | Out-Null
     $Dest = Join-Path $DestDir 'stateroot.exe'
-    Copy-Item (Join-Path $Work $Asset) $Dest -Force
+    # A running Windows executable cannot be overwritten, but can be parked.
+    $Parked = $null
+    if (Test-Path $Dest) {
+        $Parked = "$Dest.old-$([Guid]::NewGuid().ToString('N'))"
+        Move-Item $Dest $Parked
+    }
+    try {
+        Copy-Item (Join-Path $Work $Asset) $Dest
+        & $Dest --version | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw 'installed binary failed verification' }
+    } catch {
+        if (Test-Path $Dest) { Remove-Item $Dest -Force }
+        if ($Parked) { Move-Item $Parked $Dest }
+        throw
+    }
+    if ($Parked) {
+        try { Remove-Item $Parked -Force } catch { Log "previous running binary retained at $Parked" }
+    }
     Log "installed to $Dest"
 
     Log 'configuring harness integrations (global persona, hooks, MCP)'
+    $IntegrationOk = $false
     try {
         & $Dest install | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "integration exited with code $LASTEXITCODE" }
+        $IntegrationOk = $true
         Log 'harness integration complete'
     } catch {
-        Log 'note: harness integration skipped - install a harness then re-run: stateroot install'
+        Log "ERROR: CLI installed, but harness integration failed: $($_.Exception.Message)"
     }
 
     # --- PATH (user scope) ---
@@ -93,7 +113,12 @@ try {
     Write-Host 'Quickstart:'
     Write-Host '  1. cd your-project; stateroot init'
     Write-Host '  2. work in any harness (Claude, Codex, Cursor, Kimi, OpenClaw, Hermes)'
-    Write-Host '  3. persona + hooks are already configured globally from this install'
+    if ($IntegrationOk) {
+        Write-Host '  3. persona + hooks are already configured globally from this install'
+    } else {
+        Write-Host '  3. setup incomplete - run stateroot install to retry agent integration'
+        exit 1
+    }
 } finally {
     Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
 }

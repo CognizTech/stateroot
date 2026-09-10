@@ -13,6 +13,11 @@ const DOCS_URL = "https://stateroot.dev/docs/getting-started/installation";
 let sessionCliPath: string | undefined;
 let lastProbeAvailable: boolean | undefined;
 
+export function useCli(binary: string): void {
+  sessionCliPath = binary;
+  lastProbeAvailable = true;
+}
+
 export function getPlatformInfo(): PlatformInfo {
   return detectPlatform();
 }

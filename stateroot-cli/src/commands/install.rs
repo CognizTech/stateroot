@@ -130,13 +130,6 @@ pub async fn install(ctx: &Ctx) -> Result<()> {
         .into_iter()
         .filter(|spec| spec_exists(&home, spec.id))
         .collect();
-    if specs.is_empty() {
-        println!(
-            "no harness roots found under {} — nothing to do",
-            home.display()
-        );
-        return Ok(());
-    }
 
     // Persona first: the one-agent block embeds it. Resume command is
     // harness-specific so each integration surface invokes resume once with
@@ -144,6 +137,7 @@ pub async fn install(ctx: &Ctx) -> Result<()> {
     let persona = super::persona::sync_best_effort(ctx).await;
 
     let mut installed: Vec<String> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
     println!("Installing stateroot globally (home: {}):", home.display());
     for spec in &specs {
         // Wave-2: each harness gets its own projection of the same soul.
@@ -159,11 +153,15 @@ pub async fn install(ctx: &Ctx) -> Result<()> {
         if let Some(guidance) = spec.guidance {
             println!("  note: {guidance}");
         }
-        installed.push(spec.id.to_string());
+        if actions.iter().any(|action| action.starts_with("ERROR:")) {
+            failed.push(spec.id.to_string());
+        } else {
+            installed.push(spec.id.to_string());
+        }
     }
 
     // Second pass: non-legacy registry rows, grouped by tier.
-    install_registry_tiers(ctx, &home, persona.as_deref(), &mut installed).await;
+    install_registry_tiers(ctx, &home, persona.as_deref(), &mut installed, &mut failed).await;
 
     match seed_product_skill(&home) {
         Ok(action) => println!("  product skill: {} — {}", action.action, action.detail),
@@ -221,6 +219,16 @@ pub async fn install(ctx: &Ctx) -> Result<()> {
     stateroot_core::config::save_config(&ctx.config_dir, &config)?;
     println!();
     println!("Installed for: {}", installed.join(", "));
+    if installed.is_empty() && failed.is_empty() {
+        println!("No agents detected. Install an agent, then run `stateroot install` again.");
+    }
+    println!("These are configured integrations; a fresh agent session confirms continuity.");
+    if !failed.is_empty() {
+        anyhow::bail!(
+            "Integration setup incomplete for: {}. Run `stateroot install` to retry.",
+            failed.join(", ")
+        );
+    }
     Ok(())
 }
 
@@ -257,6 +265,7 @@ async fn install_registry_tiers(
     home: &Path,
     persona: Option<&str>,
     installed: &mut Vec<String>,
+    failed: &mut Vec<String>,
 ) {
     use stateroot_core::harness_install::registry::{adapters, quirk_detected, Tier};
 
@@ -282,7 +291,8 @@ async fn install_registry_tiers(
         for quirk in group {
             let persona_h = super::persona::for_harness(ctx, quirk.id, persona).await;
             let block = render_one_agent_block(persona_h.as_deref(), quirk.id);
-            for action in stateroot_core::harness_install::install_quirk_full(home, quirk, &block) {
+            let actions = stateroot_core::harness_install::install_quirk_full(home, quirk, &block);
+            for action in &actions {
                 println!("    {}: {action}", quirk.id);
             }
             if quirk.id == "pi" {
@@ -290,7 +300,11 @@ async fn install_registry_tiers(
                     "    pi: launch with `stateroot harness run pi` to isolate it from shared .agents skills"
                 );
             }
-            installed.push(quirk.id.to_string());
+            if actions.iter().any(|action| action.starts_with("ERROR:")) {
+                failed.push(quirk.id.to_string());
+            } else {
+                installed.push(quirk.id.to_string());
+            }
         }
     }
 }

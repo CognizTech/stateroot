@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { glanceHtml, nonce } from "./ui";
 import type { Snapshot } from "./snapshot";
+import type { SetupState } from "./setup";
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
   public static readonly viewId = "stateroot.overview";
@@ -18,7 +19,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     webviewView.webview.onDidReceiveMessage((msg) => this.onMessage(msg));
   }
 
-  post(state: Snapshot | { initialized: false }): void {
+  post(state: (Snapshot | { initialized: false }) & { setup?: SetupState }): void {
     this.view?.webview.postMessage(state);
   }
 }

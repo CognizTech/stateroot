@@ -122,14 +122,16 @@ chmod 0755 "$DEST_DIR/stateroot" 2>/dev/null || true
 log "installed to $DEST_DIR/stateroot"
 
 # --- harness integration (global persona + hooks) --------------------------
+INTEGRATION_OK=0
 if [ "${STATEROOT_SKIP_INTEGRATION:-}" = "1" ]; then
     log "CLI-only installation; run stateroot install when ready to configure harness integrations"
 else
     log "configuring harness integrations (global persona, hooks, MCP)"
     if "$DEST_DIR/stateroot" install; then
+        INTEGRATION_OK=1
         log "harness integration complete"
     else
-        log "note: harness integration skipped — install a harness (Cursor, Codex, …) then re-run: stateroot install"
+        log "ERROR: CLI installed, but harness integration failed — retry: stateroot install"
     fi
 fi
 
@@ -185,6 +187,9 @@ Quickstart:
 EOF
 if [ "${STATEROOT_SKIP_INTEGRATION:-}" = "1" ]; then
     printf '%s\n' '  3. run stateroot install when ready to configure global persona + hooks'
-else
+elif [ "$INTEGRATION_OK" = "1" ]; then
     printf '%s\n' '  3. persona + hooks are already configured globally from this install'
+else
+    printf '%s\n' '  3. setup incomplete — run stateroot install to retry agent integration'
+    exit 1
 fi

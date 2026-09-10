@@ -1,3 +1,5 @@
+import { SWITCH_PROMPTS } from "./setup";
+
 export function nonce(): string {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
   let out = "";
@@ -152,7 +154,22 @@ ${body}
 export function glanceHtml(nonceVal: string): string {
   const body = `
 <div class="pad col" id="app">
+  <div class="card">
+    <strong id="setup-title">Checking setup…</strong>
+    <div id="setup-detail" class="muted"></div>
+    <div id="setup-integrations" class="muted"></div>
+    <button id="retry-setup" hidden>Retry setup</button>
+  </div>
+  <details id="switch-guide" class="card">
+    <summary>Your first agent switch</summary>
+    <p>Initialize this project, then start a fresh agent session here. Work normally; your agents manage StateRoot.</p>
+    <p>1. In your current agent: <button class="secondary" data-prompt="0">Copy start prompt</button></p>
+    <p>2. Before switching: <button class="secondary" data-prompt="1">Copy handoff prompt</button></p>
+    <p>3. Open another agent in the same project: <button class="secondary" data-prompt="2">Copy continue prompt</button></p>
+    <button class="link" id="watch-demo">Watch the demo</button>
+  </details>
   <div class="kicker">Now</div>
+  <div id="continuity" class="muted"></div>
   <div id="now">No project</div>
   <div class="kicker">Needs you <span class="count" id="need-count">0</span></div>
   <div id="needs"></div>
@@ -168,6 +185,15 @@ export function glanceHtml(nonceVal: string): string {
 </div>`;
   const script = `
 const vscode = acquireVsCodeApi();
+const prompts = ${JSON.stringify(SWITCH_PROMPTS)};
+document.getElementById('retry-setup').onclick = () => vscode.postMessage({ type: 'retrySetup' });
+document.getElementById('watch-demo').onclick = () => vscode.postMessage({ type: 'demo' });
+document.querySelectorAll('[data-prompt]').forEach(button => {
+  const index = Number(button.dataset.prompt);
+  button.title = prompts[index];
+  button.onclick = () => vscode.postMessage({ type: 'copySwitchPrompt', index });
+});
+let guideInitialized = false;
 window.addEventListener('message', (e) => render(e.data));
 vscode.postMessage({ type: 'ready' });
 function el(html) { const d = document.createElement('div'); d.innerHTML = html; return d.firstElementChild; }
@@ -208,6 +234,29 @@ function lineageMeta(root) {
 }
 function render(state) {
   if (!state) return;
+  const setup = state.setup;
+  if (setup) {
+    document.getElementById('setup-title').textContent = setup.phase === 'ready'
+      ? (setup.configured && !setup.configured.length ? 'CLI ready — connect an agent'
+        : state.initialized ? 'Ready to work with your agents' : 'CLI ready — initialize this project')
+      : setup.phase === 'error' ? 'Setup needs attention' : setup.detail;
+    document.getElementById('setup-detail').textContent = setup.phase === 'error' ? setup.detail : setup.version || '';
+    document.getElementById('setup-integrations').textContent = setup.configured
+      ? (setup.configured.length ? 'Configured: ' + setup.configured.join(', ') + '. Activity below confirms actual use.'
+        : 'No agents detected. Install your agent, then retry setup.') : '';
+    document.getElementById('retry-setup').hidden = setup.phase !== 'error' && !(setup.configured && !setup.configured.length);
+  }
+  if (!guideInitialized) {
+    document.getElementById('switch-guide').open = !state.initialized || state.emptyProject;
+    guideInitialized = true;
+  }
+  const nowActivity = state.now || {};
+  const activity = nowActivity.latest;
+  const handoffIsLatest = nowActivity.writtenAt && (!activity || Date.parse(nowActivity.writtenAt) >= Date.parse(activity.ts));
+  document.getElementById('continuity').textContent = handoffIsLatest
+    ? harnessName(nowActivity.writtenBy || 'An agent') + ' saved a handoff · ' + relTime(nowActivity.writtenAt)
+    : activity ? harnessName(activity.harness || 'An agent') + ' recorded ' + (activity.kind || 'activity') + ' · ' + relTime(activity.ts)
+    : state.initialized ? 'Waiting for your first agent activity. Start a fresh session in this project.' : '';
   if (!state.initialized) {
     document.getElementById('now').textContent = 'No StateRoot project in this workspace.';
     document.getElementById('needs').innerHTML = '';

@@ -527,12 +527,15 @@ pub fn install_quirk_full(home: &Path, quirk: &registry::HarnessQuirk, block: &s
         match ensure_marked_block(&file, block) {
             Ok(true) => actions.push(format!("block → {}", file.display())),
             Ok(false) => actions.push(format!("block already up to date ({})", file.display())),
-            Err(err) => tracing::warn!("  ! {} block failed: {err}", quirk.id),
+            Err(err) => actions.push(format!("ERROR: {} block failed: {err}", quirk.id)),
         }
     }
     match install_quirk_mcp(home, quirk) {
         Ok(lines) => actions.extend(lines),
-        Err(err) => tracing::warn!("  ! {} MCP registration failed: {err}", quirk.id),
+        Err(err) => actions.push(format!(
+            "ERROR: {} MCP registration failed: {err}",
+            quirk.id
+        )),
     }
     let tier_actions = if quirk.id == "crush" {
         Ok(vec![
@@ -552,7 +555,7 @@ pub fn install_quirk_full(home: &Path, quirk: &registry::HarnessQuirk, block: &s
     };
     match tier_actions {
         Ok(lines) => actions.extend(lines),
-        Err(err) => tracing::warn!("  ! {} tier install failed: {err}", quirk.id),
+        Err(err) => actions.push(format!("ERROR: {} tier install failed: {err}", quirk.id)),
     }
     if actions.is_empty() {
         actions.push("managed — no files".to_string());
@@ -565,7 +568,7 @@ pub fn install_quirk_full(home: &Path, quirk: &registry::HarnessQuirk, block: &s
         match install_agent_file(home, rel) {
             Ok(Some(line)) => actions.push(line),
             Ok(None) => {}
-            Err(err) => tracing::warn!("  ! {} agent file failed: {err}", quirk.id),
+            Err(err) => actions.push(format!("ERROR: {} agent file failed: {err}", quirk.id)),
         }
     }
     let policy = quirk.delivery();
@@ -849,7 +852,7 @@ pub fn install_spec(
             match ensure_marked_block(file, block) {
                 Ok(true) => actions.push(format!("block → {}", file.display())),
                 Ok(false) => actions.push(format!("block already up to date ({})", file.display())),
-                Err(err) => tracing::warn!("  ! {} block failed: {err}", spec.id),
+                Err(err) => actions.push(format!("ERROR: {} block failed: {err}", spec.id)),
             }
         }
     }
@@ -860,7 +863,9 @@ pub fn install_spec(
                 Ok(false) => {
                     actions.push(format!("MCP already registered ({})", mcp_file.display()))
                 }
-                Err(err) => tracing::warn!("  ! {} MCP registration failed: {err}", spec.id),
+                Err(err) => {
+                    actions.push(format!("ERROR: {} MCP registration failed: {err}", spec.id))
+                }
             }
         }
     }
@@ -870,11 +875,11 @@ pub fn install_spec(
             match extract_skill_bundle(&skill_dest, bundle) {
                 Ok(count) => {
                     if let Err(err) = write_product_install_marker(&skill_dest, bundle) {
-                        tracing::warn!("  ! claude product marker failed: {err}");
+                        actions.push(format!("ERROR: claude product marker failed: {err}"));
                     }
                     actions.push(format!("skill ({count} files) → {}", skill_dest.display()))
                 }
-                Err(err) => tracing::warn!("  ! claude skill copy failed: {err}"),
+                Err(err) => actions.push(format!("ERROR: claude skill copy failed: {err}")),
             }
             if let Some(bytes) = &bundle.claude_command_md {
                 let command_path = paths::claude_command_dest(home);
@@ -883,7 +888,7 @@ pub fn install_spec(
                 }
                 match std::fs::write(&command_path, bytes) {
                     Ok(()) => actions.push(format!("slash stub → {}", command_path.display())),
-                    Err(err) => tracing::warn!("  ! claude command stub failed: {err}"),
+                    Err(err) => actions.push(format!("ERROR: claude command stub failed: {err}")),
                 }
             }
         } else {
@@ -898,7 +903,9 @@ pub fn install_spec(
             if quirk.hooks.is_some() {
                 match hooks::install_hooks(home, quirk) {
                     Ok(lines) => actions.extend(lines),
-                    Err(err) => tracing::warn!("  ! {} hooks install failed: {err}", spec.id),
+                    Err(err) => {
+                        actions.push(format!("ERROR: {} hooks install failed: {err}", spec.id))
+                    }
                 }
             }
         }

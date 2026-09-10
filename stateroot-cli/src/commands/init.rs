@@ -118,6 +118,20 @@ pub async fn run(ctx: &Ctx, args: crate::cli::InitArgs) -> Result<()> {
     }
 
     println!("initialized '{}' ({project_id}) at {}", name, dir.display());
+    println!();
+    if ctx.config.installed_harnesses.is_empty() {
+        println!("Agent integration is not recorded yet. Run `stateroot install` to configure your agents.");
+    } else {
+        println!(
+            "Agent integrations recorded: {} (configuration, not proof of activity).",
+            ctx.config.installed_harnesses.join(", ")
+        );
+    }
+    println!("Your first agent switch:");
+    println!("  1. Start a fresh agent session in this project and work normally.");
+    println!("  2. Ask: Save our work and write a StateRoot handoff for another agent.");
+    println!("  3. Open another agent here and ask: Receive the StateRoot handoff and continue.");
+    println!("Check integration setup with `stateroot doctor`. Demo: https://stateroot.dev");
     Ok(())
 }
 

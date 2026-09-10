@@ -75,6 +75,7 @@ export function snapshot(opts?: {
   liveDelegations?: Array<{ id: string; harness: string; status: string; task: string }>;
   tab?: string;
   dismissedInbox?: string[];
+  thisHarness?: string;
   selectedLearningId?: string;
   selectedMemoryIndex?: number;
 }): Snapshot | { initialized: false } {
@@ -124,7 +125,7 @@ export function snapshot(opts?: {
     plans,
     delegations,
     handoff,
-    thisHarness: "cursor",
+    thisHarness: opts?.thisHarness || "vscode-copilot",
     dismissed: opts?.dismissedInbox,
   });
   const writtenAt = handoff ? handoffBoundary(handoff) : undefined;

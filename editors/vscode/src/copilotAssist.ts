@@ -19,7 +19,7 @@ import { cliPath } from "./cli";
 /** True only on real VS Code with the Copilot Chat extension installed. */
 export function isVSCodeWithCopilot(): boolean {
   return (
-    vscode.env.appName === "Visual Studio Code" &&
+    vscode.env.appName.startsWith("Visual Studio Code") &&
     vscode.extensions.getExtension("github.copilot-chat") !== undefined
   );
 }

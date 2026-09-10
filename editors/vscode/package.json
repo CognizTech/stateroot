@@ -2,7 +2,7 @@
   "name": "stateroot",
   "displayName": "StateRoot",
   "description": "Cross-harness continuity for AI coding agents - project goal, plans, checkpoints, handoffs, and the shared state of record, inside your editor.",
-  "version": "0.2.18",
+  "version": "0.2.19",
   "publisher": "CognizTech",
   "license": "Apache-2.0",
   "homepage": "https://stateroot.dev",
@@ -60,6 +60,14 @@
       ]
     },
     "commands": [
+      {
+        "command": "stateroot.retrySetup",
+        "title": "StateRoot: Retry Setup"
+      },
+      {
+        "command": "stateroot.openSetup",
+        "title": "StateRoot: Setup and First Agent Switch"
+      },
       {
         "command": "stateroot.openWorkbench",
         "title": "StateRoot: Open workbench"

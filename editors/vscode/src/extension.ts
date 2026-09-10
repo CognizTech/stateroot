@@ -4,11 +4,12 @@ import * as fs from "fs";
 import { spawnSync } from "child_process";
 import {
   cliPath,
-  installCliCommand,
   isCliProbeAvailable,
   parseDelegateList,
   refreshCliProbe,
   runCliReport,
+  runCli,
+  useCli,
 } from "./cli";
 import { SidebarProvider } from "./sidebarProvider";
 import {
@@ -35,13 +36,12 @@ import {
 import { snapshot, type Snapshot } from "./snapshot";
 import { WorkbenchPanel } from "./workbench";
 import { terminalPathUpdater } from "./terminalPath";
-import { maybePing, previousVersion, shouldRefreshCli } from "./installPing";
-
-const THIS_HARNESS = "cursor";
+import { maybePing } from "./installPing";
+import { editorHarness, ensureSetup, SWITCH_PROMPTS, type SetupState } from "./setup";
 
 export function activate(context: vscode.ExtensionContext) {
   const output = vscode.window.createOutputChannel("StateRoot");
-  const prevExtVersion = previousVersion(context);
+  const THIS_HARNESS = editorHarness(vscode.env.appName);
   maybePing(context);
   const updateTerminalPath = terminalPathUpdater(context.environmentVariableCollection);
   const sidebar = new SidebarProvider(context.extensionUri, (msg) => void onMessage(msg));
@@ -59,6 +59,8 @@ export function activate(context: vscode.ExtensionContext) {
   let poll: NodeJS.Timeout | undefined;
   let storePoll: NodeJS.Timeout | undefined;
   let cliAvailable = true;
+  let setup: SetupState = { phase: "checking", detail: "Checking StateRoot setup…" };
+  let setupPending: Promise<void> | undefined;
 
   const dismissedKey = (root: string) => `stateroot.inbox.dismissed:${root}`;
   const dismissedFor = (root?: string): string[] =>
@@ -77,6 +79,7 @@ export function activate(context: vscode.ExtensionContext) {
       liveDelegations,
       tab: selectedTab,
       dismissedInbox: dismissedFor(projectRoot()),
+      thisHarness: THIS_HARNESS,
       selectedLearningId,
       selectedMemoryIndex,
     });
@@ -88,12 +91,19 @@ export function activate(context: vscode.ExtensionContext) {
     }
     if (cliAvailable) updateTerminalPath(cliPath());
     const state = currentSnapshot();
-    sidebar.post(state);
+    sidebar.post({ ...state, setup });
     workbench.post(state);
     updateStatus(state);
   };
 
   const updateStatus = (state: Snapshot | { initialized: false }) => {
+    if (setup.phase !== "ready") {
+      status.text = setup.phase === "error" ? "$(warning) StateRoot: retry setup" : `$(sync~spin) ${setup.detail}`;
+      status.tooltip = setup.detail;
+      status.command = setup.phase === "error" ? "stateroot.retrySetup" : "stateroot.openSetup";
+      status.show();
+      return;
+    }
     if (!("initialized" in state) || !state.initialized) {
       status.text = "$(circle-slash) stateroot";
       status.tooltip = "No StateRoot project — click to initialize";
@@ -202,6 +212,19 @@ export function activate(context: vscode.ExtensionContext) {
     }
     if (type === "init") {
       await vscode.commands.executeCommand("stateroot.init");
+      return;
+    }
+    if (type === "retrySetup") {
+      await vscode.commands.executeCommand("stateroot.retrySetup");
+      return;
+    }
+    if (type === "copySwitchPrompt" && typeof msg.index === "number" && SWITCH_PROMPTS[msg.index]) {
+      await vscode.env.clipboard.writeText(SWITCH_PROMPTS[msg.index]);
+      void vscode.window.showInformationMessage("Prompt copied — paste it into your agent chat.");
+      return;
+    }
+    if (type === "demo") {
+      await vscode.env.openExternal(vscode.Uri.parse("https://stateroot.dev"));
       return;
     }
     if (type === "handoff") {
@@ -687,7 +710,13 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.window.showErrorMessage("Open a folder first.");
         return;
       }
-      await runCliReport(["init"], folder.uri.fsPath, output);
+      await runSetup();
+      if (setup.phase === "error") return;
+      const initialized = await runCliReport(["init"], folder.uri.fsPath, output, 60_000);
+      if (initialized !== undefined) {
+        await maybeOfferCopilotHooks(context, folder.uri.fsPath, output);
+        void vscode.commands.executeCommand("stateroot.overview.focus");
+      }
       push();
     }),
     vscode.commands.registerCommand("stateroot.refresh", () => {
@@ -713,7 +742,7 @@ export function activate(context: vscode.ExtensionContext) {
     ),
     vscode.commands.registerCommand("stateroot.resume", () =>
       withProject(async (root) => {
-        await runCliReport(["resume", "--harness", "cursor", "--force"], root, output);
+        await runCliReport(["resume", "--harness", THIS_HARNESS, "--force"], root, output);
         output.show(true);
       })
     ),
@@ -754,13 +783,11 @@ export function activate(context: vscode.ExtensionContext) {
       })
     ),
     vscode.commands.registerCommand("stateroot.installCli", async () => {
-      const ok = await installCliCommand(output);
-      if (ok) {
-        cliAvailable = true;
-        await refreshLive();
-        push();
-      }
-    })
+      await runSetup(true);
+    }),
+    vscode.commands.registerCommand("stateroot.retrySetup", () => runSetup(true)),
+    vscode.commands.registerCommand("stateroot.openSetup", () =>
+      vscode.commands.executeCommand("stateroot.overview.focus"))
   );
 
   context.subscriptions.push(
@@ -809,64 +836,59 @@ export function activate(context: vscode.ExtensionContext) {
   // Keep the read-only StateRoot view eventually consistent without invoking
   // the CLI or requiring a manual refresh.
   storePoll = setInterval(push, 3000);
-  // First run on a fresh machine: the extension is useless without the CLI,
-  // so install the latest stable release the moment we notice it missing —
-  // no gate, then re-probe and paint the view.
-  void (async () => {
-    const available = await refreshCliProbe();
-    if (!available) {
-      const { autoInstallCli } = await import("./cliInstall");
-      const installed = await autoInstallCli(output);
-      if (installed) {
-        await refreshCliProbe();
-        // A project is open and the CLI just landed: initialize it so the
-        // extension works on first sight, not first command. Idempotent —
-        // but skip projects that already carry a manifest.
+  function runSetup(retry = false): Promise<void> {
+    if (setupPending) return setupPending;
+    setupPending = (async () => {
+      try {
+        setup = { phase: "checking", detail: "Checking StateRoot setup…" };
+        push();
+        const available = await refreshCliProbe();
         const folder = vscode.workspace.workspaceFolders?.[0];
-        if (
-          folder &&
-          !fs.existsSync(
-            path.join(folder.uri.fsPath, ".stateroot", "manifest.json")
-          )
-        ) {
-          await runCliReport(["init"], folder.uri.fsPath, output, 60_000);
+        const binary = await ensureSetup({
+          state: context.globalState,
+          extensionVersion: String(context.extension.packageJSON.version),
+          binary: available ? cliPath() : undefined,
+          noAutoUpdate: !!process.env.STATEROOT_NO_AUTO_UPDATE,
+          retry,
+          install: async () => {
+            const { installCli } = await import("./cliInstall");
+            const result = await installCli(output);
+            if (!result.ok) throw new Error(result.error);
+            useCli(result.binaryPath);
+            return result.binaryPath;
+          },
+          run: async (args, selected) => {
+            const text = await runCli(args, folder?.uri.fsPath || path.dirname(context.extensionPath),
+              600_000, selected);
+            output.appendLine(`$ ${selected} ${args.join(" ")}`);
+            output.appendLine(text);
+            return text;
+          },
+          report: (state) => { setup = state; push(); },
+        });
+        useCli(binary);
+        if ((!available || retry) && folder && !fs.existsSync(path.join(folder.uri.fsPath, STORE, "manifest.json"))) {
+          const result = await runCliReport(["init"], folder.uri.fsPath, output, 60_000);
+          if (result === undefined) throw new Error("Project initialization failed. Retry setup or initialize the project again.");
+          void vscode.commands.executeCommand("stateroot.overview.focus");
         }
+        if (folder) void maybeOfferCopilotHooks(context, folder.uri.fsPath, output);
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        setup = { phase: "error", detail };
+        output.appendLine(`Setup incomplete: ${detail}`);
+        void vscode.window.showErrorMessage(`StateRoot setup incomplete: ${detail}`, "Retry setup", "Show details")
+          .then(pick => {
+            if (pick === "Retry setup") void runSetup(true);
+            if (pick === "Show details") output.show(true);
+          });
+      } finally {
+        push();
       }
-    } else if (
-      shouldRefreshCli(
-        prevExtVersion,
-        String(context.extension.packageJSON.version ?? ""),
-        true,
-        !!process.env.STATEROOT_NO_AUTO_UPDATE
-      )
-    ) {
-      // The extension updated under a working CLI: the bundled installer
-      // fetches the latest stable CLI, so re-running it IS the update path
-      // (agreed design: extension auto-update installs a missing CLI AND
-      // updates an existing one). Benign on failure — the next extension
-      // update retries.
-      const { installCli } = await import("./cliInstall");
-      output.appendLine(
-        `extension updated (${prevExtVersion} → ${context.extension.packageJSON.version}) — refreshing CLI to latest stable`
-      );
-      const result = await installCli(output);
-      if (result.ok) {
-        output.appendLine(`CLI refreshed: ${result.binaryPath}`);
-        await refreshCliProbe();
-      } else {
-        output.appendLine(
-          `CLI refresh failed (retries on the next extension update): ${result.error}`
-        );
-      }
-    }
-    push();
-    // Copilot continuity assist: VS Code + Copilot Chat only, initialized
-    // projects only, one dismissible offer per project.
-    const folder = vscode.workspace.workspaceFolders?.[0];
-    if (folder) {
-      void maybeOfferCopilotHooks(context, folder.uri.fsPath, output);
-    }
-  })();
+    })().finally(() => { setupPending = undefined; });
+    return setupPending;
+  }
+  void runSetup();
   void refreshLive();
 }
 

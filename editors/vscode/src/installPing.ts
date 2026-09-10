@@ -2,10 +2,7 @@ import * as vscode from "vscode";
 
 /**
  * First-run install/update telemetry: one anonymous GET when the extension's
- * version differs from the last seen one. Mirror of the CLI's telemetry.rs —
- * extension updates never reinstall the CLI, so without this the extension
- * channel (the main distribution surface) cannot tell installs from updates
- * at all.
+ * version differs from the last seen one. Independent of setup/update state.
  *
  * Contract: fire-and-forget (never blocks activation), 3s cap, every error
  * swallowed, STATEROOT_NO_PING=1 opts out. One attempt per version change per
@@ -46,17 +43,15 @@ export function previousVersion(context: vscode.ExtensionContext): string | unde
   return context.globalState.get<string>(MARKER_KEY);
 }
 
-/** The agreed design: when the EXTENSION updates under a working CLI, the
- * bundled installer re-runs and brings the CLI to latest stable. First
- * marker version can only observe installs (no prior marker exists), so the
- * first refresh-capable transition is the one after this ships. */
+/** Refresh once per successfully completed extension version, including
+ * migrations from versions with no marker. Never use the telemetry marker. */
 export function shouldRefreshCli(
   previous: string | undefined,
   current: string,
   cliAvailable: boolean,
   noAutoUpdate: boolean
 ): boolean {
-  return cliAvailable && !noAutoUpdate && previous !== undefined && previous !== current;
+  return cliAvailable && !noAutoUpdate && previous !== current;
 }
 
 /** Fire one fail-silent ping when the extension version changed. */

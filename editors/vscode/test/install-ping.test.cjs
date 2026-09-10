@@ -119,8 +119,8 @@ test("shouldRefreshCli: only a real extension update under a working CLI refresh
   const { api } = loadInstallPing();
   // Extension updated, CLI present → refresh.
   assert.equal(api.shouldRefreshCli("0.2.18", "0.2.19", true, false), true);
-  // First marker version (no previous) → cannot know it's an update → skip.
-  assert.equal(api.shouldRefreshCli(undefined, "0.2.19", true, false), false);
+  // No successful setup receipt: recover pre-marker installs as well.
+  assert.equal(api.shouldRefreshCli(undefined, "0.2.19", true, false), true);
   // Same version → nothing to do.
   assert.equal(api.shouldRefreshCli("0.2.19", "0.2.19", true, false), false);
   // CLI missing → the missing-CLI flow owns that path, not refresh.
