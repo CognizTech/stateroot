@@ -2,8 +2,8 @@
   "schema_version": "agent.native_skill.v1",
   "slug": "stateroot",
   "name": "StateRoot",
-  "description": "Cross-harness continuity for AI coding agents (Claude Code, Codex, Cursor, Kimi Code, Pi, DeepSeek Harness): shared persona, memory, plans, skills, sessions, and project history. Bootstrap-only: install the StateRoot CLI and run once-per-machine setup so harnesses get the built-in session skill. Expires after setup.",
-  "version": "1.1.1",
+  "description": "Install and set up StateRoot, the continuity layer for AI coding agents. Switch harnesses. Keep the agent: personality, plans, tools and skills, memories, learnings, and project context carry across supported harnesses. After setup, the built-in StateRoot skill owns daily workflow.",
+  "version": "1.1.2",
   "input_types": [
     "text"
   ],

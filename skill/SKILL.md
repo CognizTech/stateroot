@@ -1,17 +1,14 @@
 ---
 name: stateroot
 description: >-
-  StateRoot is the cross-harness continuity layer for AI coding agents
-  (Claude Code, Codex, Cursor, Kimi Code, Pi, DeepSeek Harness): shared
-  persona, memory, plans, skills, sessions, and project history.
-  Bootstrap-only: install the StateRoot CLI from official GitHub release
-  assets and run once-per-machine `stateroot setup` so harnesses get hooks
-  and the built-in session skill. Use when the user asks to install or set
-  up StateRoot, when `stateroot` is missing from PATH, or when setup has
-  not been run yet. Do not use after the CLI is installed and harnesses are
-  interfaced — that built-in skill (`stateroot skill show stateroot`) is
-  then the default. Not for resume, checkpoint, handoff, memory, or daily
-  workflow.
+  Install and set up StateRoot, the continuity layer for AI coding agents.
+  Switch harnesses. Keep the agent: personality, plans, tools and skills,
+  memories, learnings, and project context carry across Claude Code, Codex,
+  Cursor, Kimi Code, OpenClaw, and other supported harnesses. Use this
+  bootstrap skill when the user asks to install or set up StateRoot, when
+  `stateroot` is missing from PATH, or when setup has not run. After setup,
+  follow the built-in StateRoot skill for resume, checkpoint, handoff,
+  memory, and daily workflow.
 metadata:
   homepage: https://stateroot.dev
   source: https://github.com/CognizTech/stateroot
@@ -36,11 +33,11 @@ metadata:
       modifies_files: false
 ---
 
-# StateRoot (bootstrap)
+# Install StateRoot for AI coding agents
 
-StateRoot is the cross-harness continuity layer for AI coding agents: one continuous agent — persona, memory, plans, skills, sessions, and project history — across Claude Code, Codex, Cursor, Kimi Code, Pi, DeepSeek Harness and friends, while each model keeps its own native runtime.
+**Switch harnesses. Keep the agent.** StateRoot carries personality, plans, tools and skills, memories, learnings, and project context across Claude Code, Codex, Cursor, Kimi Code, OpenClaw, and other supported AI coding agents.
 
-This skill installs the CLI and runs **global** `stateroot setup`. That wires harnesses. After that, **this skill expires**. The CLI-embedded session skill becomes the default — do not keep using these bootstrap instructions, and do not copy the session protocol into this file.
+This is the install skill. It installs the CLI and runs global `stateroot setup` to connect supported harnesses. After setup, the CLI-embedded session skill becomes the default.
 
 Docs: https://stateroot.dev/docs/getting-started/installation · https://stateroot.dev/docs/getting-started/setup  
 Releases: https://github.com/CognizTech/stateroot/releases
@@ -119,7 +116,13 @@ irm https://github.com/CognizTech/stateroot/releases/latest/download/install.ps1
 
 `stateroot-windows-x64.exe` is the portable CLI, not an installer.
 
-**macOS:** current releases are Linux and Windows. Do not guess a macOS binary URL. Build from source per [references/install.md](references/install.md).
+**macOS (Apple Silicon):**
+
+```bash
+curl -sSfL https://github.com/CognizTech/stateroot/releases/latest/download/install.sh | sh
+```
+
+Installs the release artifact `stateroot-macos-aarch64` to `~/.local/bin` after SHA-256 verification. Intel Macs are not currently supported by a release binary; build from source per [references/install.md](references/install.md).
 
 Verify:
 
@@ -185,7 +188,7 @@ Do not continue from this file. Do not summarize a homemade session protocol. Ru
 ## Anti-patterns
 
 - Inventing download URLs or installing via `npm` / `pip` / a random clone
-- Guessing a macOS release asset
+- Guessing unsupported release assets or architectures
 - Piping `install.sh` without asking
 - Creating or editing `.stateroot/` or `~/.stateroot/` with file tools
 - Running `setup --blank-slate` unprompted
@@ -194,11 +197,11 @@ Do not continue from this file. Do not summarize a homemade session protocol. Ru
 
 ---
 
-## About StateRoot (marketplace listing copy)
+## About StateRoot
 
-*This section is for humans browsing skill registries (ClawHub and similar). It plays no role in agent routing or bootstrap behavior.*
+**StateRoot — for AI coding agents. Switch harnesses. Keep the agent.**
 
-StateRoot is an open-source, local-first CLI for **continuity across AI coding agents**. It keeps one shared project state — goal, plans, memory, learnings, skills, rules, personality, and sessions — so Claude Code, Codex, Cursor, Kimi Code, Pi, DeepSeek Harness, OpenClaw, and Hermes each pick up exactly where the last agent left off. No re-explaining the project, no re-reading the codebase, no rebuilding context when you hit a usage limit or a better model lands in a rival tool.
+StateRoot is an open-source, local-first CLI for continuity across AI coding agents. When a usage limit interrupts the work—or another harness is better for the next task—you can switch without rebuilding the working relationship and project context. Claude Code, Codex, Cursor, Kimi Code, OpenClaw, and other supported harnesses inherit the shared state around the work.
 
 What it does:
 

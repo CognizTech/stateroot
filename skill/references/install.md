@@ -3,7 +3,7 @@
 Authoritative: https://stateroot.dev/docs/getting-started/installation  
 Releases: https://github.com/CognizTech/stateroot/releases
 
-Do not invent other download URLs. Current CI release matrices ship **Linux x64** and **Windows x64**. One binary, no extra runtime.
+Do not invent other download URLs. Current tagged releases ship **Linux x64**, **Windows x64**, and **macOS Apple Silicon** binaries. One binary, no extra runtime.
 
 ## Linux
 
@@ -29,9 +29,15 @@ irm https://github.com/CognizTech/stateroot/releases/latest/download/install.ps1
 
 `stateroot-windows-x64.exe` is the portable CLI, not an installer.
 
-## macOS / from source
+## macOS (Apple Silicon)
 
-Until a `stateroot-macos-aarch64` asset is attached to a GitHub release, do not guess a binary URL.
+```bash
+curl -sSfL https://github.com/CognizTech/stateroot/releases/latest/download/install.sh | sh
+```
+
+The installer selects `stateroot-macos-aarch64`, verifies it against `checksums.txt`, and installs it to `~/.local/bin`.
+
+Intel Macs do not currently have a release binary. Build from source:
 
 ```bash
 git clone https://github.com/CognizTech/stateroot.git
