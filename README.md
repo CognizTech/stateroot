@@ -13,6 +13,7 @@ Close Claude Code. Open Codex. Keep working. The next agent starts already knowi
 </p>
 
 <p align="center">
+  <a href="https://marketplace.visualstudio.com/items?itemName=CognizTech.stateroot"><img src="https://img.shields.io/visual-studio-marketplace/v/CognizTech.stateroot?color=7ee0c8&labelColor=0c1016&logo=visualstudiocode&style=for-the-badge" alt="VS Code Marketplace"></a>
   <a href="https://github.com/CognizTech/stateroot/releases"><img src="https://img.shields.io/github/v/release/CognizTech/stateroot?color=7ee0c8&labelColor=0c1016&logo=github&style=for-the-badge" alt="Release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-7ee0c8?labelColor=0c1016&style=for-the-badge" alt="License"></a>
 </p>
@@ -101,7 +102,9 @@ Full map: **[stateroot.dev/docs](https://stateroot.dev/docs/intro)**.
 
 ## Install
 
-Current releases ship **Linux x64** and **Windows x64**. One binary, no extra runtime. macOS: [build from source](https://stateroot.dev/docs/getting-started/installation) until a release asset is published.
+Install the [**StateRoot extension for VS Code**](https://marketplace.visualstudio.com/items?itemName=CognizTech.stateroot) for guided setup and automatic CLI installation on supported platforms.
+
+The CLI ships for **Linux x64**, **Windows x64**, and **macOS Apple Silicon**. One binary, no extra runtime.
 
 ### Linux
 
@@ -120,6 +123,14 @@ irm https://github.com/CognizTech/stateroot/releases/latest/download/install.ps1
 ```
 
 `stateroot-windows-x64.exe` is the portable CLI, not an installer.
+
+### macOS (Apple Silicon)
+
+```bash
+curl -sSfL https://github.com/CognizTech/stateroot/releases/latest/download/install.sh | sh
+```
+
+Installs to `~/.local/bin`. Intel Macs can [build from source](https://stateroot.dev/docs/getting-started/installation#from-source).
 
 ```bash
 stateroot --version
@@ -169,7 +180,7 @@ User docs live at **[stateroot.dev](https://stateroot.dev)**. This repository is
 
 | Section | Contents |
 | --- | --- |
-| [Install](https://stateroot.dev/docs/getting-started/installation) | Linux, Windows MSI, from source |
+| [Install](https://stateroot.dev/docs/getting-started/installation) | VS Code, Linux, Windows, macOS, from source |
 | [Quickstart](https://stateroot.dev/docs/getting-started/quickstart) | Init → setup → first resume |
 | [Concepts](https://stateroot.dev/docs/concepts/overview) | Roots, continuity, identity, memory, provenance |
 | [Capabilities](https://stateroot.dev/docs/features/roots) | Lineage, handoffs, memory, wiki, skills, MCP, rules |

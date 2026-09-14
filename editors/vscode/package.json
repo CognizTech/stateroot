@@ -131,6 +131,9 @@
     "watch": "tsc -watch -p ./",
     "package": "vsce package"
   },
+  "vsce": {
+    "dependencies": false
+  },
   "devDependencies": {
     "@types/node": "^22",
     "@types/vscode": "^1.85.0",
