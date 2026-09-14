@@ -13,6 +13,7 @@ Close Claude Code. Open Codex. Keep working. The next agent starts already knowi
 </p>
 
 <p align="center">
+  <a href="https://open-vsx.org/extension/CognizTech/stateroot"><img src="https://img.shields.io/open-vsx/v/CognizTech/stateroot?color=7ee0c8&labelColor=0c1016&logo=cursor&style=for-the-badge&label=Cursor" alt="Install for Cursor"></a>
   <a href="https://marketplace.visualstudio.com/items?itemName=CognizTech.stateroot"><img src="https://img.shields.io/visual-studio-marketplace/v/CognizTech.stateroot?color=7ee0c8&labelColor=0c1016&logo=visualstudiocode&style=for-the-badge" alt="VS Code Marketplace"></a>
   <a href="https://github.com/CognizTech/stateroot/releases"><img src="https://img.shields.io/github/v/release/CognizTech/stateroot?color=7ee0c8&labelColor=0c1016&logo=github&style=for-the-badge" alt="Release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-7ee0c8?labelColor=0c1016&style=for-the-badge" alt="License"></a>
@@ -102,7 +103,7 @@ Full map: **[stateroot.dev/docs](https://stateroot.dev/docs/intro)**.
 
 ## Install
 
-Install the [**StateRoot extension for VS Code**](https://marketplace.visualstudio.com/items?itemName=CognizTech.stateroot) for guided setup and automatic CLI installation on supported platforms.
+Install the StateRoot extension for [**Cursor**](https://open-vsx.org/extension/CognizTech/stateroot) or [**VS Code**](https://marketplace.visualstudio.com/items?itemName=CognizTech.stateroot) for guided setup and automatic CLI installation on supported platforms.
 
 The CLI ships for **Linux x64**, **Windows x64**, and **macOS Apple Silicon**. One binary, no extra runtime.
 
@@ -180,7 +181,7 @@ User docs live at **[stateroot.dev](https://stateroot.dev)**. This repository is
 
 | Section | Contents |
 | --- | --- |
-| [Install](https://stateroot.dev/docs/getting-started/installation) | VS Code, Linux, Windows, macOS, from source |
+| [Install](https://stateroot.dev/docs/getting-started/installation) | Cursor, VS Code, Linux, Windows, macOS, from source |
 | [Quickstart](https://stateroot.dev/docs/getting-started/quickstart) | Init → setup → first resume |
 | [Concepts](https://stateroot.dev/docs/concepts/overview) | Roots, continuity, identity, memory, provenance |
 | [Capabilities](https://stateroot.dev/docs/features/roots) | Lineage, handoffs, memory, wiki, skills, MCP, rules |
