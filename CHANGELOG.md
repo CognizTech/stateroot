@@ -5,6 +5,15 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- **Forks can materialize into real worktrees (WS5 batch A).**
+  `stateroot fork <root> --worktree <path> [--branch NAME] [--plan ID]`
+  creates an isolated checkout of the fork's root — `.stateroot/` state
+  (plans, handoffs, memory) physically travels with it. Snaps in the
+  worktree chain on the fork ref, never on `refs/stateroot/latest`: parallel
+  lines of roots instead of one interleaved timeline. HEAD is detached at
+  the root commit by default (user branches untouched); `--branch` checks
+  out a real `refs/heads/NAME`. `.stateroot/worktrees/` is hardcoded-ignored
+  so a nested checkout can never bloat a snapshot.
 - **Snaps audit `.stateroot/` writes.** Every parented root now records a
   write-audit in its transition evidence: `.stateroot/` paths (minus
   `local/`) that changed without going through the new

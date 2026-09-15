@@ -181,14 +181,14 @@ fn diff_content_revert_and_fork() {
     );
     assert!(stdout.contains("M a.txt"), "receipt: {stdout}");
 
-    // fork: branch ref + report (no worktree in M2).
+    // fork: branch ref + report (worktree materialization is opt-in).
     let out = stateroot(config_home.path(), user_home.path(), project.path())
         .args(["fork", &first, "--branch", "claude-line"])
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
     assert!(stdout.contains("fork claude-line"), "fork: {stdout}");
-    assert!(stdout.contains("git worktree add"), "fork: {stdout}");
+    assert!(stdout.contains("--worktree <path>"), "fork: {stdout}");
 
     // append-only revert: new root with the v1 tree; v2 still listed.
     let out = stateroot(config_home.path(), user_home.path(), project.path())

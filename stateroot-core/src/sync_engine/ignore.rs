@@ -90,6 +90,13 @@ impl IgnoreRules {
         if rel == ".stateroot/local" || rel.starts_with(".stateroot/local/") {
             return true;
         }
+        // Hardcoded: .stateroot/worktrees/ stays out of trees — a fork
+        // materialized inside the project is a machine-local checkout;
+        // pinning it would snapshot the fork's whole tree into the trunk
+        // (recursively, on every snap).
+        if rel == ".stateroot/worktrees" || rel.starts_with(".stateroot/worktrees/") {
+            return true;
+        }
         // Doctrine: other `.stateroot/` paths ALWAYS sync — they are our state.
         if rel == ".stateroot" || rel.starts_with(".stateroot/") {
             return false;

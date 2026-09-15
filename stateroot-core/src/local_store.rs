@@ -369,6 +369,54 @@ pub fn append_episodic(project_dir: &Path, record: &Value) -> Result<(), LocalSt
 const WRITTEN_LOG_REL: &str = "local/written-log.jsonl";
 const WRITTEN_LOG_CAP: u64 = 128 * 1024;
 
+// ---------------------------------------------------------------------------
+// Fork-worktree context (WS5)
+//
+// A fork materialized with `fork --worktree` stamps the worktree's
+// machine-local store with its lineage identity. Snap/read paths in that
+// worktree parent on the fork ref instead of refs/stateroot/latest — the
+// fork's line of roots stays its own until an explicit merge.
+// ---------------------------------------------------------------------------
+
+const FORK_CONTEXT_REL: &str = "local/fork-context.json";
+
+/// Lineage identity of a fork worktree.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ForkContext {
+    /// Schema tag (`stateroot.fork-context.v1`).
+    pub schema: String,
+    /// Fork name (`refs/stateroot/forks/<fork>`).
+    pub fork: String,
+    /// Root the fork branched from.
+    pub parent_root: String,
+    /// Plan claimed by this fork, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+}
+
+/// Read the worktree's fork context (`None` on the trunk / unreadable).
+pub fn fork_context(project_dir: &Path) -> Option<ForkContext> {
+    let text = std::fs::read_to_string(root(project_dir).join(FORK_CONTEXT_REL)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Stamp a worktree as a fork checkout (tmp+sync+rename; local/ never syncs).
+pub fn write_fork_context(project_dir: &Path, ctx: &ForkContext) -> std::io::Result<()> {
+    let path = root(project_dir).join(FORK_CONTEXT_REL);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(
+        &tmp,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(ctx).unwrap_or_default()
+        ),
+    )?;
+    std::fs::rename(&tmp, &path)
+}
+
 /// `memories/x` → `.stateroot/memories/x` (the form git tree paths take).
 fn stateroot_rel(rel: &str) -> PathBuf {
     Path::new(".stateroot").join(rel)

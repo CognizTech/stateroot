@@ -369,8 +369,19 @@ fn build_tree(repo: &Repository, dir: &Path) -> Result<TreeBuild, RootsError> {
     })
 }
 
-fn latest_oid(repo: &Repository) -> Option<git2::Oid> {
-    repo.refname_to_id(LATEST_REF).ok()
+/// The ref this checkout's lineage hangs on (WS5): the fork ref inside a
+/// fork worktree (machine-local fork-context.json), else
+/// `refs/stateroot/latest`. Worktrees share the git dir, so the fork ref is
+/// readable and writable from inside the worktree — but everything else on
+/// the trunk keeps following `latest`.
+fn lineage_refname(project_dir: &Path) -> String {
+    local_store::fork_context(project_dir)
+        .map(|ctx| format!("{FORKS_REF_PREFIX}{}", ctx.fork))
+        .unwrap_or_else(|| LATEST_REF.to_string())
+}
+
+fn latest_oid_for(repo: &Repository, project_dir: &Path) -> Option<git2::Oid> {
+    repo.refname_to_id(&lineage_refname(project_dir)).ok()
 }
 
 fn read_objective(project_dir: &Path) -> String {
@@ -430,7 +441,9 @@ fn persist_root(
     let _ = WS3_ROOTS_COMMIT_LOCK;
     let hash = oid.to_string();
     repo.reference(&format!("{ROOTS_REF_PREFIX}{hash}"), oid, true, "root")?;
-    repo.reference(LATEST_REF, oid, true, "latest root")?;
+    // WS5: inside a fork worktree this advances the fork's tip ref, so the
+    // trunk's `latest` is untouched by fork-side work (and vice versa).
+    repo.reference(&lineage_refname(project_dir), oid, true, "latest root")?;
 
     let from = parent_hashes.first().cloned().unwrap_or_default();
     let transition = Transition {
@@ -520,7 +533,7 @@ pub fn snap_if_changed(
 ) -> Result<SnapOutcome, RootsError> {
     let repo = ensure_repo(project_dir)?;
     let build = build_tree(&repo, project_dir)?;
-    if let Some(parent) = latest_oid(&repo) {
+    if let Some(parent) = latest_oid_for(&repo, project_dir) {
         if !project_files_changed(&repo, parent, build.tree)? {
             return Ok(SnapOutcome::Unchanged {
                 root: parent.to_string(),
@@ -689,7 +702,7 @@ fn commit_new_root(
     reason: &str,
     snap_ctx: Option<&crate::snap_context::SnapContext>,
 ) -> Result<(RootManifest, Transition), RootsError> {
-    let parent = latest_oid(repo);
+    let parent = latest_oid_for(repo, project_dir);
     let parents: Vec<git2::Oid> = parent.into_iter().collect();
     let parent_hashes: Vec<String> = parents.iter().map(|o| o.to_string()).collect();
     let from_root = parent_hashes.first().cloned().unwrap_or_default();
@@ -732,7 +745,7 @@ fn commit_new_root(
 /// The latest root hash, if any.
 pub fn latest_root(project_dir: &Path) -> Result<Option<String>, RootsError> {
     let repo = ensure_repo(project_dir)?;
-    Ok(latest_oid(&repo).map(|oid| oid.to_string()))
+    Ok(latest_oid_for(&repo, project_dir).map(|oid| oid.to_string()))
 }
 
 /// Load a root manifest by hash (prefix match allowed, git-style).
@@ -803,7 +816,7 @@ pub fn lineage(project_dir: &Path) -> Result<Vec<LineageEntry>, RootsError> {
     let repo = ensure_repo(project_dir)?;
     let mut mainline: Vec<String> = Vec::new();
     let mut children: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    if let Some(tip) = latest_oid(&repo) {
+    if let Some(tip) = latest_oid_for(&repo, project_dir) {
         let mut current = Some(tip);
         while let Some(oid) = current {
             mainline.push(oid.to_string());
@@ -970,7 +983,7 @@ pub fn revert_to_root(
     let repo = ensure_repo(project_dir)?;
     let target = commit_for(&repo, project_dir, hash_prefix)?;
     let target_id = target.id().to_string();
-    let parent = latest_oid(&repo);
+    let parent = latest_oid_for(&repo, project_dir);
     let parents: Vec<git2::Oid> = parent.into_iter().collect();
     let parent_hashes: Vec<String> = parents.iter().map(|o| o.to_string()).collect();
     let message = format!("revert to {} (by {harness})", &target_id[..12]);
@@ -990,8 +1003,8 @@ pub fn revert_to_root(
     )
 }
 
-/// `fork <hash> --branch <name>`: branch ref at the root commit (no
-/// worktree checkout in M2 — the report prints the materialization command).
+/// `fork <hash> --branch <name>`: fork ref + record at the root commit.
+/// `fork_materialize` turns the ref into an isolated worktree on demand.
 pub fn fork_root(
     project_dir: &Path,
     hash_prefix: &str,
@@ -1020,6 +1033,85 @@ pub fn fork_root(
         &record,
     )?;
     Ok((name, refname))
+}
+
+/// Materialize a fork ref into a real worktree (WS5): the executor gets an
+/// isolated directory whose snaps chain on the fork ref, not on
+/// `refs/stateroot/latest`. The checkout contains the root's full tree —
+/// including `.stateroot/` (minus `local/`), so plans, handoffs, and memory
+/// physically travel with the fork.
+///
+/// HEAD shape: detached at the root commit by default, so plumbing ref
+/// writes never move a checked-out branch under the worktree (the user's
+/// branches stay clean). With `git_branch`, a real `refs/heads/<branch>` is
+/// created at the commit and checked out instead — PR-ready work on request.
+///
+/// The worktree is stamped with a machine-local fork context
+/// (`.stateroot/local/fork-context.json`, never synced) so every snap and
+/// read path there chains on the fork.
+pub fn fork_materialize(
+    project_dir: &Path,
+    name: &str,
+    worktree_path: &Path,
+    git_branch: Option<&str>,
+    plan: Option<&str>,
+) -> Result<(), RootsError> {
+    let repo = ensure_repo(project_dir)?;
+    let refname = format!("{FORKS_REF_PREFIX}{name}");
+    let tip = repo
+        .refname_to_id(&refname)
+        .map_err(|_| RootsError::NotFound(format!("no fork named {name}")))?;
+    let (checkout_ref, temp_branch) = match git_branch {
+        Some(branch) => {
+            let branch_ref = format!("refs/heads/{branch}");
+            repo.reference(&branch_ref, tip, true, "fork branch")?;
+            (branch_ref, None)
+        }
+        None => {
+            // libgit2's worktree-add accepts only branch refs — check out
+            // via a throwaway branch, then detach HEAD and delete it so no
+            // refs/heads entry survives by default.
+            let tmp = format!("refs/heads/stateroot-forktmp-{name}");
+            repo.reference(&tmp, tip, true, "fork tmp branch")?;
+            (tmp.clone(), Some(tmp))
+        }
+    };
+    {
+        let reference = repo.find_reference(&checkout_ref)?;
+        let mut opts = git2::WorktreeAddOptions::new();
+        opts.reference(Some(&reference));
+        repo.worktree(name, worktree_path, Some(&opts))?;
+    }
+    if let Some(tmp) = temp_branch {
+        let wt_repo = git2::Repository::open(worktree_path)?;
+        wt_repo.set_head_detached(tip)?;
+        if let Ok(mut branch) = repo.find_branch(&tmp, git2::BranchType::Local) {
+            branch.delete()?;
+        }
+    }
+    local_store::write_fork_context(
+        worktree_path,
+        &local_store::ForkContext {
+            schema: "stateroot.fork-context.v1".into(),
+            fork: name.to_string(),
+            parent_root: tip.to_string(),
+            plan: plan.map(str::to_string),
+        },
+    )?;
+    // Patch the fork record with the worktree path and claimed plan.
+    let record_path = local_store::root(project_dir)
+        .join(FORKS_DIR)
+        .join(format!("{name}.json"));
+    if let Ok(text) = std::fs::read_to_string(&record_path) {
+        if let Ok(mut record) = serde_json::from_str::<Value>(&text) {
+            record["worktree"] = json!(worktree_path.to_string_lossy());
+            if let Some(plan) = plan {
+                record["plan"] = json!(plan);
+            }
+            write_json(&record_path, &record)?;
+        }
+    }
+    Ok(())
 }
 
 /// Load a transition by id (prefix match allowed).
@@ -1801,5 +1893,103 @@ mod tests {
             .expect("log")
             .len();
         assert!(len <= 128 * 1024 + 4096, "log grew unbounded: {len}");
+    }
+
+    // -- WS5: fork worktrees + per-fork lineage ------------------------------
+
+    /// Materialize a fork with a claimed plan into a detached worktree.
+    fn forked_worktree(dir: &Path) -> (tempfile::TempDir, PathBuf, String, RootManifest) {
+        write(dir, "src/main.rs", "fn main() {}\n");
+        write(dir, ".stateroot/plans/plan-x.md", "# plan x\n");
+        let (first, _) = create_root(dir, "cli", "first", None).expect("snap");
+        let (name, _) = fork_root(dir, &first.id, Some("fork-x"), "cli").expect("fork");
+        let wt_tmp = tempfile::tempdir().expect("wt tmp");
+        let wt = wt_tmp.path().join("checkout");
+        fork_materialize(dir, &name, &wt, None, Some("plan-x")).expect("materialize");
+        (wt_tmp, wt, name, first)
+    }
+
+    #[test]
+    fn fork_materialize_detaches_head_and_carries_the_plan() {
+        let (_tmp, dir) = project();
+        let (_wt_tmp, wt, name, first) = forked_worktree(&dir);
+        // The worktree physically carries the snapshot's .stateroot state.
+        assert!(wt.join(".stateroot/plans/plan-x.md").is_file());
+        assert!(wt.join("src/main.rs").is_file());
+        // HEAD detached at the fork root commit (user branches untouched).
+        let wt_repo = git2::Repository::open(&wt).expect("wt repo");
+        assert!(wt_repo.head_detached().expect("detached"));
+        assert_eq!(
+            wt_repo
+                .head()
+                .expect("head")
+                .target()
+                .expect("oid")
+                .to_string(),
+            first.id
+        );
+        // Machine-local fork context stamped with the claimed plan.
+        let ctx = local_store::fork_context(&wt).expect("fork context");
+        assert_eq!(ctx.fork, name);
+        assert_eq!(ctx.plan.as_deref(), Some("plan-x"));
+        assert_eq!(ctx.parent_root, first.id);
+        // The fork record gained the worktree path and the plan.
+        let record =
+            std::fs::read_to_string(dir.join(".stateroot/forks").join(format!("{name}.json")))
+                .expect("fork record");
+        assert!(record.contains("\"worktree\""), "{record}");
+        assert!(record.contains("\"plan\": \"plan-x\""), "{record}");
+    }
+
+    #[test]
+    fn fork_worktree_snaps_chain_on_the_fork_ref_not_latest() {
+        let (_tmp, dir) = project();
+        let (_wt_tmp, wt, name, first) = forked_worktree(&dir);
+        write(&wt, "src/lib.rs", "pub fn work() {}\n");
+        let outcome = snap_if_changed(&wt, "codex", "auto: fork work", None).expect("fork snap");
+        let SnapOutcome::Created(m, t) = outcome else {
+            panic!("expected a root in the fork worktree");
+        };
+        // Parent is the fork tip (the original root), lineage is on the fork.
+        assert_eq!(m.parents, vec![first.id.clone()]);
+        assert_eq!(t.from_root, first.id);
+        let repo = git2::Repository::open(&dir).expect("repo");
+        let fork_tip = repo
+            .refname_to_id(&format!("{FORKS_REF_PREFIX}{name}"))
+            .expect("fork ref")
+            .to_string();
+        assert_eq!(fork_tip, m.id, "fork ref advanced to the fork snap");
+        let latest = repo.refname_to_id(LATEST_REF).expect("latest").to_string();
+        assert_eq!(latest, first.id, "trunk latest untouched by fork work");
+        // And the trunk's next snap still chains on the trunk's latest.
+        write(&dir, "src/other.rs", "fn other() {}\n");
+        let outcome = snap_if_changed(&dir, "kimi", "auto: trunk work", None).expect("trunk snap");
+        let SnapOutcome::Created(tm, _) = outcome else {
+            panic!("expected a root on the trunk");
+        };
+        assert_eq!(tm.parents, vec![first.id.clone()]);
+    }
+
+    #[test]
+    fn stateroot_worktrees_dir_never_enters_a_tree() {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        create_root(&dir, "cli", "first", None).expect("snap");
+        write(&dir, ".stateroot/worktrees/nested-checkout.txt", "bloat\n");
+        write(&dir, "src/main.rs", "fn main() { println!(\"hi\"); }\n");
+        let outcome = snap_if_changed(&dir, "cli", "auto", None).expect("snap2");
+        let SnapOutcome::Created(m, _) = outcome else {
+            panic!("expected a new root");
+        };
+        let repo = git2::Repository::open(&dir).expect("repo");
+        let tree = repo
+            .find_commit(m.id.parse().expect("oid"))
+            .expect("commit")
+            .tree()
+            .expect("tree");
+        assert!(
+            tree.get_path(Path::new(".stateroot/worktrees")).is_err(),
+            "nested worktree content entered the tree"
+        );
     }
 }

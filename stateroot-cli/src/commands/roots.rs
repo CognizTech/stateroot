@@ -1,6 +1,8 @@
 //! `stateroot snap|log|show|diff|revert|fork|receipt` — git-plumbing roots
 //! (M2). Append-only history; the user's branch log is never touched.
 
+use std::path::Path;
+
 use stateroot_core::roots as engine;
 
 use super::{note, truncate, Ctx};
@@ -237,13 +239,41 @@ pub fn revert(ctx: &Ctx, hash: &str, yes: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `stateroot fork <hash> [--branch NAME]` — branch ref from the root.
-pub fn fork(ctx: &Ctx, hash: &str, branch: Option<&str>) -> anyhow::Result<()> {
+/// `stateroot fork <hash> [--branch NAME] [--worktree PATH] [--plan ID]`
+/// — branch ref from the root; with --worktree, an isolated checkout whose
+/// snaps chain on the fork ref (WS5 parallel execution).
+pub fn fork(
+    ctx: &Ctx,
+    hash: &str,
+    branch: Option<&str>,
+    worktree: Option<&str>,
+    plan: Option<&str>,
+) -> anyhow::Result<()> {
     ctx.require_project()?;
     let (name, refname) =
         engine::fork_root(&ctx.cwd, hash, branch, LOCAL_HARNESS).map_err(|e| anyhow::anyhow!(e))?;
     println!("fork {name} → {refname}");
-    println!("materialize with: git worktree add .stateroot/worktrees/{name} {refname}");
+    if let Some(path) = worktree {
+        // --branch upgrades the worktree to a real refs/heads checkout;
+        // without it the worktree HEAD is detached at the root commit.
+        let git_branch = branch;
+        engine::fork_materialize(&ctx.cwd, &name, Path::new(path), git_branch, plan)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        println!("worktree: {path} (fork context stamped; snaps there chain on {refname})");
+        if git_branch.is_some() {
+            println!(
+                "branch: refs/heads/{} checked out in the worktree",
+                branch.unwrap_or("")
+            );
+        } else {
+            println!("HEAD: detached at the fork root (user branches untouched)");
+        }
+        if let Some(plan) = plan {
+            println!("plan claimed: {plan}");
+        }
+    } else {
+        println!("materialize with: stateroot fork {hash} --worktree <path>");
+    }
     Ok(())
 }
 
