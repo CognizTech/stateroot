@@ -97,6 +97,9 @@ async fn main() -> anyhow::Result<()> {
             SessionAction::Transfer { id, to, dry_run } => {
                 commands::session::transfer(&ctx, &id, &to, dry_run)?
             }
+            SessionAction::Purge { id, harness, yes } => {
+                commands::session::purge(&ctx, &id, harness.as_deref(), yes)?
+            }
         },
         Command::Plan(args) => match args.action {
             PlanAction::Record {

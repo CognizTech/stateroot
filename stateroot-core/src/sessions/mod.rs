@@ -22,6 +22,7 @@ use serde_json::{json, Value};
 
 use crate::harness_install::paths;
 use crate::local_store::{self, now_rfc3339};
+use crate::tombstones::{self, TombstoneError, TombstonePolicy};
 use crate::transcripts::{self, claude, codex, copilot, cursor, dsh, hermes, kimi, openclaw, pi};
 
 /// Schema tag on the header line.
@@ -426,22 +427,51 @@ pub struct SyncReport {
     pub per_harness: BTreeMap<String, usize>,
     /// DSH `.jsonl.zstd` artifacts skipped (no zstd in the dependency tree).
     pub skipped_zstd: usize,
+    /// Tombstoned session ids skipped (not rewritten).
+    pub skipped_tombstoned: usize,
+}
+
+/// What one canon-purge did.
+#[derive(Debug, Clone)]
+pub struct PurgeReport {
+    /// Canonical files actually deleted.
+    pub purged: usize,
+    /// Already in the tombstone set before this call.
+    pub skipped_tombstoned: usize,
+    /// Harness of the purged session.
+    pub harness: String,
+    /// Session id of the purged session.
+    pub session_id: String,
 }
 
 /// Import every pi/DSH session belonging to `project_dir` into the canonical
 /// store. Idempotent: each session file is rewritten whole.
+///
+/// Tombstone-read errors are fail-open (background / test path).
 pub fn import_from_readers(home: &Path, project_dir: &Path) -> SyncReport {
-    import_from_readers_filtered(home, project_dir, None)
+    import_from_readers_filtered(home, project_dir, None, TombstonePolicy::FailOpen)
+        .unwrap_or_else(|_| SyncReport::default())
 }
 
 /// [`import_from_readers`] restricted to one harness (`pi` | `dsh`).
+///
+/// [`TombstonePolicy::FailClosed`] is the explicit `session sync` path:
+/// an unreadable tombstone file refuses the import so a torn file cannot
+/// resurrect purged sessions. [`TombstonePolicy::FailOpen`] is the
+/// background path: unreadable tombstones are treated as empty.
 pub fn import_from_readers_filtered(
     home: &Path,
     project_dir: &Path,
     harness: Option<&str>,
-) -> SyncReport {
+    policy: TombstonePolicy,
+) -> Result<SyncReport, TombstoneError> {
+    let stones = tombstones::load(project_dir, policy)?;
     let mut report = SyncReport::default();
     let import_one = |session: CanonicalSession, report: &mut SyncReport| {
+        if tombstones::contains(&stones, &session.session_id, &session.harness) {
+            report.skipped_tombstoned += 1;
+            return;
+        }
         if write_session(project_dir, &session).is_ok() {
             report.written += 1;
             *report
@@ -588,7 +618,7 @@ pub fn import_from_readers_filtered(
             }
         }
     }
-    report
+    Ok(report)
 }
 
 /// Write one canonical session (rewrite whole — idempotent re-import).
@@ -666,8 +696,8 @@ fn read_store_file(path: &Path) -> Option<StoredSession> {
     })
 }
 
-/// Every canonical session in the store, sorted by harness then id.
-pub fn list(project_dir: &Path) -> Vec<StoredSession> {
+/// Every canonical session file on disk, including tombstoned leftovers.
+pub fn list_raw(project_dir: &Path) -> Vec<StoredSession> {
     let mut out: Vec<StoredSession> = transcripts::walk_files(&store_dir(project_dir), &|p| {
         p.file_name()
             .and_then(|n| n.to_str())
@@ -678,6 +708,14 @@ pub fn list(project_dir: &Path) -> Vec<StoredSession> {
     .filter_map(|p| read_store_file(p))
     .collect();
     out.sort_by(|a, b| (&a.harness, &a.session_id).cmp(&(&b.harness, &b.session_id)));
+    out
+}
+
+/// Live canonical sessions (tombstoned leftovers hidden).
+pub fn list(project_dir: &Path) -> Vec<StoredSession> {
+    let stones = tombstones::load(project_dir, TombstonePolicy::FailOpen).unwrap_or_default();
+    let mut out = list_raw(project_dir);
+    out.retain(|s| !tombstones::contains(&stones, &s.session_id, &s.harness));
     out
 }
 
@@ -721,6 +759,76 @@ pub fn resolve(project_dir: &Path, id: &str) -> Result<StoredSession, String> {
             ))
         }
     }
+}
+
+/// Resolve a session for purge: sees leftover files that [`list`] hides.
+///
+/// When `harness` is omitted and the same id exists on more than one
+/// harness, the caller must pass `--harness`.
+pub fn resolve_for_purge(
+    project_dir: &Path,
+    id: &str,
+    harness: Option<&str>,
+) -> Result<StoredSession, String> {
+    let all = list_raw(project_dir);
+    let matches: Vec<&StoredSession> = all
+        .iter()
+        .filter(|s| harness.is_none_or(|h| s.harness == h))
+        .filter(|s| s.session_id == id || s.session_id.starts_with(id))
+        .collect();
+    let exact: Vec<&StoredSession> = matches
+        .iter()
+        .copied()
+        .filter(|s| s.session_id == id)
+        .collect();
+    let pool = if exact.is_empty() { matches } else { exact };
+    match pool.len() {
+        0 => Err(format!(
+            "no canonical session matches `{id}` — run `stateroot session list`"
+        )),
+        1 => Ok(pool[0].clone()),
+        n => {
+            let mut ids: Vec<String> = pool
+                .iter()
+                .map(|s| format!("{} ({})", s.session_id, s.harness))
+                .collect();
+            ids.sort();
+            let preview = ids
+                .iter()
+                .take(5)
+                .map(|i| format!("  {i}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            Err(format!(
+                "`{id}` is ambiguous — {n} canonical sessions match:\n{preview}\npass --harness"
+            ))
+        }
+    }
+}
+
+/// Tombstone, then delete the canonical file. Never deletes without a
+/// tombstone on disk. Episodic / snapshots / handoffs are not touched.
+pub fn purge(project_dir: &Path, session: &StoredSession) -> Result<PurgeReport, String> {
+    let stones = tombstones::load(project_dir, TombstonePolicy::FailOpen).unwrap_or_default();
+    let skipped_tombstoned = usize::from(tombstones::contains(
+        &stones,
+        &session.session_id,
+        &session.harness,
+    ));
+    tombstones::record(project_dir, &session.session_id, &session.harness)
+        .map_err(|err| err.to_string())?;
+    let mut purged = 0;
+    if session.path.is_file() {
+        std::fs::remove_file(&session.path)
+            .map_err(|err| format!("failed to delete {}: {err}", session.path.display()))?;
+        purged = 1;
+    }
+    Ok(PurgeReport {
+        purged,
+        skipped_tombstoned,
+        harness: session.harness.clone(),
+        session_id: session.session_id.clone(),
+    })
 }
 
 /// Display-oriented summary of one stored session (list/show): span from the
@@ -894,5 +1002,116 @@ mod tests {
         let report = import_from_readers(home.path(), project.path());
         assert_eq!(report.skipped_zstd, 1);
         assert_eq!(report.written, 0);
+    }
+
+    fn write_pi_session(home: &Path, project: &Path, id: &str, phrase: &str) {
+        let cwd = crate::transcripts::path_for_json(project);
+        write_file(
+            &home.join(format!(".pi/agent/sessions/--tmp-demo--/{id}.jsonl")),
+            &[
+                &format!(
+                    r#"{{"type":"session","version":3,"id":"{id}","timestamp":"2026-08-20T10:00:00.000Z","cwd":"{cwd}"}}"#
+                ),
+                &format!(
+                    r#"{{"type":"message","id":"m1","parentId":null,"timestamp":"2026-08-20T10:00:01.000Z","message":{{"role":"user","content":"{phrase}","timestamp":1}}}}"#
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn purge_then_sync_does_not_recreate() {
+        let home = tempfile::tempdir().expect("home");
+        let project = tempfile::tempdir().expect("project");
+        write_pi_session(home.path(), project.path(), "ses-purge", "secret canary");
+        let report = import_from_readers(home.path(), project.path());
+        assert_eq!(report.written, 1);
+        let stored = load(project.path(), "ses-purge").expect("stored");
+        let purged = purge(project.path(), &stored).expect("purge");
+        assert_eq!(purged.purged, 1);
+        assert_eq!(purged.skipped_tombstoned, 0);
+        assert!(load(project.path(), "ses-purge").is_none());
+
+        let report = import_from_readers(home.path(), project.path());
+        assert_eq!(report.written, 0);
+        assert_eq!(report.skipped_tombstoned, 1);
+        assert!(load(project.path(), "ses-purge").is_none());
+        assert!(!store_dir(project.path())
+            .join("pi-ses-purge.jsonl")
+            .is_file());
+    }
+
+    #[test]
+    fn tombstone_before_delete_survives_kill() {
+        let home = tempfile::tempdir().expect("home");
+        let project = tempfile::tempdir().expect("project");
+        write_pi_session(home.path(), project.path(), "ses-kill", "keep me");
+        import_from_readers(home.path(), project.path());
+        let stored = load(project.path(), "ses-kill").expect("stored");
+        tombstones::record(project.path(), &stored.session_id, &stored.harness).unwrap();
+        assert!(
+            stored.path.is_file(),
+            "kill after tombstone: file still there"
+        );
+        // Sync must not rewrite; list hides the leftover.
+        let report = import_from_readers(home.path(), project.path());
+        assert_eq!(report.skipped_tombstoned, 1);
+        assert!(load(project.path(), "ses-kill").is_none());
+        let leftover = resolve_for_purge(project.path(), "ses-kill", None).expect("leftover");
+        let report = purge(project.path(), &leftover).expect("finish purge");
+        assert_eq!(report.purged, 1);
+        assert_eq!(report.skipped_tombstoned, 1);
+        assert!(!leftover.path.is_file());
+    }
+
+    #[test]
+    fn same_session_id_other_harness_unaffected() {
+        let home = tempfile::tempdir().expect("home");
+        let project = tempfile::tempdir().expect("project");
+        let cwd = crate::transcripts::path_for_json(project.path());
+        write_pi_session(home.path(), project.path(), "shared-1", "pi copy");
+        write_file(
+            &home
+                .path()
+                .join(".dsh/sessions/--tmp-demo--/shared-1/session.jsonl"),
+            &[
+                &format!(
+                    r#"{{"type":"session","version":0,"id":"shared-1","createdAt":1784272800000,"cwd":"{cwd}","delegationDepth":0}}"#
+                ),
+                r#"{"type":"user/message","seq":1,"time":1784272801001,"data":{"id":"u1","role":"user","content":[{"type":"text","text":"dsh copy"}],"source":{"kind":"user"}},"surfaceOp":"append"}"#,
+            ],
+        );
+        import_from_readers(home.path(), project.path());
+        let pi = resolve_for_purge(project.path(), "shared-1", Some("pi")).expect("pi");
+        purge(project.path(), &pi).expect("purge pi");
+        assert!(load(project.path(), "shared-1").is_some(), "dsh remains");
+        let remaining = list(project.path());
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].harness, "dsh");
+        let report = import_from_readers(home.path(), project.path());
+        assert_eq!(report.skipped_tombstoned, 1);
+        assert_eq!(report.written, 1); // dsh rewrite
+        assert!(load(project.path(), "shared-1")
+            .map(|s| s.harness == "dsh")
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn explicit_sync_fail_closed_on_corrupt_tombstones() {
+        let home = tempfile::tempdir().expect("home");
+        let project = tempfile::tempdir().expect("project");
+        write_pi_session(home.path(), project.path(), "ses-closed", "hello");
+        let path = crate::local_store::root(project.path()).join(tombstones::TOMBSTONES_REL);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{nope").unwrap();
+        assert!(import_from_readers_filtered(
+            home.path(),
+            project.path(),
+            None,
+            TombstonePolicy::FailClosed
+        )
+        .is_err());
+        let report = import_from_readers(home.path(), project.path());
+        assert_eq!(report.written, 1, "fail-open still imports");
     }
 }

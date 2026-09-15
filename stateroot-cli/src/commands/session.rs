@@ -5,8 +5,9 @@
 use serde_json::json;
 use stateroot_core::local_store::{self, now_rfc3339};
 use stateroot_core::sessions;
+use stateroot_core::tombstones::TombstonePolicy;
 
-use super::{truncate, Ctx};
+use super::{stdin_is_tty, truncate, Ctx};
 
 /// Display caps for `show`/`list` (the store itself is never capped).
 const DISPLAY_CAP: usize = 200;
@@ -26,13 +27,21 @@ fn per_harness_suffix(report: &sessions::SyncReport) -> String {
 pub fn sync(ctx: &Ctx, harness: Option<&str>) -> anyhow::Result<()> {
     ctx.require_project()?;
     let home = stateroot_core::harness_install::home_dir().map_err(|e| anyhow::anyhow!(e))?;
-    let report = sessions::import_from_readers_filtered(&home, &ctx.cwd, harness);
+    let report = sessions::import_from_readers_filtered(
+        &home,
+        &ctx.cwd,
+        harness,
+        TombstonePolicy::FailClosed,
+    )?;
     let summary = format!(
         "session sync: {} sessions canonicalized ({})",
         report.written,
         per_harness_suffix(&report)
     );
     println!("{summary}");
+    if report.skipped_tombstoned > 0 {
+        println!("  skipped_tombstoned: {}", report.skipped_tombstoned);
+    }
     if report.skipped_zstd > 0 {
         println!(
             "  ({} zstd-compressed dsh log(s) skipped — no zstd support in v1)",
@@ -187,5 +196,42 @@ pub fn transfer(ctx: &Ctx, id: &str, to: &str, dry_run: bool) -> anyhow::Result<
         "files": [plan.target_path.display().to_string()],
     });
     local_store::append_episodic(&ctx.cwd, &record)?;
+    Ok(())
+}
+
+/// Run `stateroot session purge <id> [--harness H] [--yes]`.
+pub fn purge(ctx: &Ctx, id: &str, harness: Option<&str>, yes: bool) -> anyhow::Result<()> {
+    ctx.require_project()?;
+    let session = sessions::resolve_for_purge(&ctx.cwd, id, harness).map_err(anyhow::Error::msg)?;
+    if !yes {
+        println!(
+            "session purge {} ({})\n  file: {}\n  Canonical session file + derived index only.\n  Episodic, snapshots/roots, and handoffs stay — the tombstone stops sync from resurrecting this id.",
+            session.session_id,
+            session.harness,
+            session.path.display()
+        );
+        if !stdin_is_tty() {
+            anyhow::bail!(
+                "refusing to purge without confirmation (non-interactive) — re-run with --yes"
+            );
+        }
+        let proceed = dialoguer::Confirm::new()
+            .with_prompt("Purge this canonical session?")
+            .default(false)
+            .interact()?;
+        if !proceed {
+            println!("aborted — nothing purged");
+            return Ok(());
+        }
+    }
+    let report = sessions::purge(&ctx.cwd, &session).map_err(anyhow::Error::msg)?;
+    if let Ok(home) = stateroot_core::harness_install::home_dir() {
+        let _ = stateroot_core::memory_index::rebuild(&ctx.cwd, &home);
+    }
+    println!(
+        "session purge: purged: {}, skipped_tombstoned: {} ({} {})",
+        report.purged, report.skipped_tombstoned, report.harness, report.session_id
+    );
+    println!("Canonical file + derived index only. Episodic, snapshots, and handoffs stay.");
     Ok(())
 }

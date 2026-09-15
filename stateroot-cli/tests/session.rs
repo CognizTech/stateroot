@@ -483,3 +483,88 @@ fn session_sync_covers_every_harness() {
         "{episodic}"
     );
 }
+
+#[test]
+fn session_purge_stops_sync_resurrection() {
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    let cwd = project.path().display().to_string();
+    let pi_agent = pi_fixture(&cwd);
+    let dsh_home = dsh_fixture(&cwd);
+
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .env("PI_CODING_AGENT_DIR", pi_agent.path())
+        .env("DSH_HOME", dsh_home.path())
+        .args(["session", "sync"])
+        .assert()
+        .success();
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["session", "purge", "pi-sess-1", "--yes"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains("purged: 1") && stdout.contains("skipped_tombstoned: 0"),
+        "purge: {stdout}"
+    );
+    assert!(
+        stdout.contains("Canonical file + derived index only"),
+        "doctrine: {stdout}"
+    );
+    let store = project.path().join(".stateroot/local/sessions");
+    assert!(!store.join("pi-pi-sess-1.jsonl").is_file());
+    assert!(store.join("dsh-dsh-sess-1.jsonl").is_file());
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .env("PI_CODING_AGENT_DIR", pi_agent.path())
+        .env("DSH_HOME", dsh_home.path())
+        .args(["session", "sync"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains("skipped_tombstoned: 1"),
+        "no resurrection: {stdout}"
+    );
+    assert!(!store.join("pi-pi-sess-1.jsonl").is_file());
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["session", "list"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(!stdout.contains("pi-sess-1"), "list hides purged: {stdout}");
+    assert!(
+        stdout.contains("dsh-sess-1"),
+        "other harness kept: {stdout}"
+    );
+
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["session", "purge", "dsh-sess-1"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn session_sync_fail_closed_on_corrupt_tombstones() {
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    let tomb_dir = project.path().join(".stateroot/local");
+    std::fs::create_dir_all(&tomb_dir).expect("local dir");
+    std::fs::write(tomb_dir.join("tombstones.json"), "{nope").expect("corrupt");
+    let cwd = project.path().display().to_string();
+    let pi_agent = pi_fixture(&cwd);
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .env("PI_CODING_AGENT_DIR", pi_agent.path())
+        .args(["session", "sync"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).expect("utf8");
+    assert!(
+        stderr.contains("tombstones unreadable"),
+        "fail-closed: {stderr}"
+    );
+}

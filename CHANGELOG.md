@@ -5,6 +5,12 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- **Canonical sessions can be purged.** `stateroot session purge <id> [--yes]`
+  writes a tombstone, then deletes the canonical file and rebuilds the
+  derived index. `session sync` will not resurrect a tombstoned id; episodic
+  log, snapshots, and handoffs stay. Same session id on another harness is
+  a different record.
+
 - **Snapshot races serialize.** Concurrent `snap`s take a roots commit lock
   (same 40×15ms `create_new` spin as digest delivery). Mid-write blob reads
   retry 4×/25ms. `blob_index.json` writes go tmp+sync+rename so a killed

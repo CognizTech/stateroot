@@ -209,24 +209,45 @@ fn rebuild_with_conn(
         }
     }
 
-    // Transcript bundles (best-effort; may be empty without harness homes)
-    let bundles = crate::transcripts::bundle::build_bundles(home, project_dir, None, 500_000);
-    for (i, bundle) in bundles.iter().enumerate() {
-        let text = serde_json::to_string(bundle).unwrap_or_default();
-        if text.trim().is_empty() {
-            continue;
+    // Transcript bundles (best-effort; may be empty without harness homes).
+    // Tombstone set is consulted once per pass — day-one design for any
+    // future incremental indexer. Unreadable tombstones skip ALL transcript
+    // inserts this pass so a torn file cannot resurrect purged content.
+    let transcript_stones =
+        crate::tombstones::load(project_dir, crate::tombstones::TombstonePolicy::FailClosed);
+    match transcript_stones {
+        Ok(stones) => {
+            let bundles =
+                crate::transcripts::bundle::build_bundles(home, project_dir, None, 500_000);
+            for (i, bundle) in bundles.iter().enumerate() {
+                let sid = bundle
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let harness = bundle.get("harness").and_then(|v| v.as_str()).unwrap_or("");
+                if crate::tombstones::contains(&stones, sid, harness) {
+                    continue;
+                }
+                let text = serde_json::to_string(bundle).unwrap_or_default();
+                if text.trim().is_empty() {
+                    continue;
+                }
+                let snippet = if text.len() > 20_000 {
+                    format!("{}…", &text[..20_000])
+                } else {
+                    text
+                };
+                let path = if sid.is_empty() {
+                    format!("transcript:{i}")
+                } else {
+                    sid.to_string()
+                };
+                insert_doc(conn, "transcript", &path, &snippet, false)?;
+            }
         }
-        let snippet = if text.len() > 20_000 {
-            format!("{}…", &text[..20_000])
-        } else {
-            text
-        };
-        let sid = bundle
-            .get("session_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("transcript:{i}"));
-        insert_doc(conn, "transcript", &sid, &snippet, false)?;
+        Err(_) => {
+            // Unreadable tombstones: omit harness transcripts this rebuild.
+        }
     }
 
     Ok(())
@@ -489,6 +510,40 @@ mod tests {
         );
         let hits3 = search(project.path(), home.path(), "7777", 5, true).unwrap();
         assert!(hits3.iter().any(|h| h.text.contains("7777")), "{hits3:?}");
+    }
+
+    #[test]
+    fn fts_skips_tombstoned_transcript_bundles() {
+        let project = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(project.path(), "p", "P", "default").unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let cwd = project.path().to_string_lossy().replace('\\', "/");
+        let claude_dir = home.path().join(".claude/projects/-work-demo");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let event = serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": "purge-canary-xyzzy unique"},
+            "timestamp": "2026-07-10T09:00:01Z",
+            "cwd": cwd,
+            "sessionId": "ses-canary",
+        });
+        std::fs::write(claude_dir.join("ses-canary.jsonl"), format!("{event}\n")).unwrap();
+        rebuild(project.path(), home.path()).unwrap();
+        let hits = search(project.path(), home.path(), "purge-canary-xyzzy", 8, true).unwrap();
+        assert!(
+            hits.iter()
+                .any(|h| h.kind == "transcript" && h.text.contains("purge-canary-xyzzy")),
+            "indexed before purge: {hits:?}"
+        );
+        crate::tombstones::record(project.path(), "ses-canary", "claude").unwrap();
+        rebuild(project.path(), home.path()).unwrap();
+        let hits = search(project.path(), home.path(), "purge-canary-xyzzy", 8, true).unwrap();
+        assert!(
+            hits.iter()
+                .filter(|h| h.kind == "transcript")
+                .all(|h| !h.text.contains("purge-canary-xyzzy")),
+            "tombstoned transcript gone: {hits:?}"
+        );
     }
 
     #[test]

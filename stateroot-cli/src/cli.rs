@@ -46,7 +46,7 @@ pub enum Command {
     Remove(RemoveArgs),
     /// Import sessions from native harness transcripts (all six readers).
     Import(ImportArgs),
-    /// Canonical session store (sync/list/show) and cross-harness transfer.
+    /// Canonical session store (sync/list/show/purge) and cross-harness transfer.
     Session(SessionArgs),
     /// Central plan artifacts + lifecycle (record/list/show/approve/activate/done/abandon).
     Plan(PlanArgs),
@@ -248,6 +248,17 @@ pub enum SessionAction {
         /// Print the plan + fidelity report without writing anything.
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Tombstone and delete one canonical session (file + derived index only).
+    Purge {
+        /// Session id (prefix allowed).
+        id: String,
+        /// Disambiguate when the same id exists on more than one harness.
+        #[arg(long)]
+        harness: Option<String>,
+        /// Skip the interactive confirmation.
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
 }
 

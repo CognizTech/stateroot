@@ -43,6 +43,7 @@ pub mod soul;
 pub mod soul_sync;
 pub mod sync_engine;
 pub mod todo_federation;
+pub mod tombstones;
 pub mod transcripts;
 pub mod user_profile;
 pub mod wiki;
