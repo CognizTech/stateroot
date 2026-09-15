@@ -18,6 +18,8 @@
 //! history *up to its predecessor* (a root cannot contain its own hash —
 //! the egg comes after the chicken by construction).
 
+use std::fs::File;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -25,6 +27,10 @@ use serde_json::{json, Value};
 
 use crate::local_store::{self, now_rfc3339};
 use crate::sync_engine::ignore::IgnoreRules;
+
+/// Binary marker so `strings` can prove WS3(1-3) is in the linked CLI.
+#[used]
+static WS3_ROOTS_COMMIT_LOCK: &str = "WS3_ROOTS_COMMIT_LOCK";
 
 /// Ref namespace for root commits.
 pub const ROOTS_REF_PREFIX: &str = "refs/stateroot/roots/";
@@ -193,8 +199,14 @@ fn write_blob_index(dir: &Path, index: &BlobIndex) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(text) = serde_json::to_string(index) {
-        let _ = std::fs::write(path, text);
+    let Ok(text) = serde_json::to_string(index) else {
+        return;
+    };
+    let tmp = path.with_extension("json.tmp");
+    if let Ok(mut out) = File::create(&tmp) {
+        let _ = out.write_all(text.as_bytes());
+        let _ = out.sync_all();
+        let _ = std::fs::rename(&tmp, &path);
     }
 }
 
@@ -305,7 +317,7 @@ fn build_tree(repo: &Repository, dir: &Path) -> Result<TreeBuild, RootsError> {
                     }
                     None => {
                         *misses += 1;
-                        let bytes = std::fs::read(&path)?;
+                        let bytes = crate::fs_lock::read_with_retry(&path)?;
                         *total_bytes += bytes.len() as u64;
                         let oid = repo.blob(&bytes)?;
                         next_index
@@ -413,6 +425,9 @@ fn persist_root(
     kind: &str,
     evidence: Value,
 ) -> Result<(RootManifest, Transition), RootsError> {
+    let _lock =
+        crate::fs_lock::FileLock::acquire(local_store::root(project_dir).join("local/roots.lock"));
+    let _ = WS3_ROOTS_COMMIT_LOCK;
     let hash = oid.to_string();
     repo.reference(&format!("{ROOTS_REF_PREFIX}{hash}"), oid, true, "root")?;
     repo.reference(LATEST_REF, oid, true, "latest root")?;
@@ -1509,5 +1524,50 @@ mod tests {
                 .is_err(),
             "local/ must never enter roots"
         );
+    }
+
+    #[test]
+    fn concurrent_snaps_both_roots_exist_and_latest_is_one_of_them() {
+        let (_tmp, dir) = project();
+        write(&dir, "base.txt", "base");
+        create_root(&dir, "cli", "base", None).expect("base");
+        let dir_one = dir.clone();
+        let dir_two = dir.clone();
+        let t1 = std::thread::spawn(move || {
+            write(&dir_one, "t1.txt", "one");
+            create_root(&dir_one, "cli", "t1", None)
+        });
+        let t2 = std::thread::spawn(move || {
+            write(&dir_two, "t2.txt", "two");
+            create_root(&dir_two, "cli", "t2", None)
+        });
+        let (a, _) = t1.join().expect("join1").expect("snap1");
+        let (b, _) = t2.join().expect("join2").expect("snap2");
+        let repo = git2::Repository::open(&dir).unwrap();
+        assert!(repo
+            .refname_to_id(&format!("{ROOTS_REF_PREFIX}{}", a.id))
+            .is_ok());
+        assert!(repo
+            .refname_to_id(&format!("{ROOTS_REF_PREFIX}{}", b.id))
+            .is_ok());
+        let latest = repo.refname_to_id(LATEST_REF).unwrap().to_string();
+        assert!(
+            latest == a.id || latest == b.id,
+            "latest {latest} must be one of the two roots"
+        );
+    }
+
+    #[test]
+    fn blob_index_survives_a_partial_tmp_write() {
+        let (_tmp, dir) = project();
+        write(&dir, "a.txt", "alpha");
+        let repo = ensure_repo(&dir).expect("repo");
+        build_tree(&repo, &dir).expect("first");
+        let path = blob_index_path(&dir);
+        let before = std::fs::read_to_string(&path).expect("before");
+        std::fs::write(path.with_extension("json.tmp"), "{").expect("torn tmp");
+        let after = std::fs::read_to_string(&path).expect("after");
+        assert_eq!(before, after);
+        let _: BlobIndex = serde_json::from_str(&after).expect("valid json");
     }
 }

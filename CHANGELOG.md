@@ -5,6 +5,10 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- **Snapshot races serialize.** Concurrent `snap`s take a roots commit lock
+  (same 40×15ms `create_new` spin as digest delivery). Mid-write blob reads
+  retry 4×/25ms. `blob_index.json` writes go tmp+sync+rename so a killed
+  write cannot tear the live index.
 - **Session-end finalize is spool-first.** `stop`/`session_end` still write the
   cheap checkpoint, then enqueue `finalize`/`snap`/`ingest` on the existing
   outbox and return. A detached `_drain-finalize` worker (setsid / job

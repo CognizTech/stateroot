@@ -5,10 +5,8 @@
 //! session-start can still inject on the first prompt, and two chats are
 //! not collapsed into one delivery slot.
 
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::path::Path;
-use std::thread;
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -214,7 +212,9 @@ pub fn mark_delivered(
     payload: &Value,
     content_fp: &str,
 ) {
-    let _lock = LedgerLock::acquire(project_dir);
+    let _lock = crate::fs_lock::FileLock::acquire(
+        local_store::root(project_dir).join("local/digest-delivery.v1.json.lock"),
+    );
     let mut ledger = load_or_migrate(project_dir);
     ledger.entries.push(LedgerEntry {
         harness: normalize_harness(harness),
@@ -387,32 +387,6 @@ fn write_ledger(project_dir: &Path, ledger: &Ledger) -> std::io::Result<()> {
     fs::rename(&tmp, path)
 }
 
-struct LedgerLock {
-    path: std::path::PathBuf,
-}
-
-impl LedgerLock {
-    fn acquire(project_dir: &Path) -> Option<Self> {
-        let path = local_store::root(project_dir).join("local/digest-delivery.v1.json.lock");
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        for _ in 0..40 {
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(_) => return Some(Self { path }),
-                Err(_) => thread::sleep(Duration::from_millis(15)),
-            }
-        }
-        None
-    }
-}
-
-impl Drop for LedgerLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,7 +458,9 @@ mod tests {
         assert_eq!(retry.reason, "retry_debounce");
         assert!(!retry.deliver);
 
-        let _lock = LedgerLock::acquire(dir.path());
+        let _lock = crate::fs_lock::FileLock::acquire(
+            local_store::root(dir.path()).join("local/digest-delivery.v1.json.lock"),
+        );
         let mut ledger = load_or_migrate(dir.path());
         ledger.entries[0].delivered_at = "2020-01-01T00:00:00Z".into();
         write_ledger(dir.path(), &ledger).unwrap();
@@ -563,7 +539,9 @@ mod tests {
     /// Rewrite the single ledger entry in place (the project() fixture
     /// records exactly one delivery per test before this runs).
     fn edit_only_entry(dir: &tempfile::TempDir, f: impl FnOnce(&mut LedgerEntry)) {
-        let _lock = LedgerLock::acquire(dir.path());
+        let _lock = crate::fs_lock::FileLock::acquire(
+            local_store::root(dir.path()).join("local/digest-delivery.v1.json.lock"),
+        );
         let mut ledger = load_or_migrate(dir.path());
         f(&mut ledger.entries[0]);
         write_ledger(dir.path(), &ledger).unwrap();
