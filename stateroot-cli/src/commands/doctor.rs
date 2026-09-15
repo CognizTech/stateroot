@@ -503,17 +503,42 @@ fn continuity_chain_checks(home: &Path, project_dir: &Path) -> Vec<Check> {
         });
     }
 
-    // Legacy outbox: ops queued for the removed server sync, never drained.
+    // Finalize outbox: snap/finalize/ingest queued by stop/session_end.
+    // Leftover ops without an ingest_key are the pre-revival server-sync
+    // queue and can be deleted.
     let outbox = stateroot_core::local_store::root(project_dir)
         .join(stateroot_core::local_store::OUTBOX_PATH);
     if let Ok(text) = std::fs::read_to_string(&outbox) {
-        let pending = text.lines().filter(|l| !l.trim().is_empty()).count();
-        if pending > 0 {
+        let mut finalize = 0usize;
+        let mut legacy = 0usize;
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            match serde_json::from_str::<serde_json::Value>(line) {
+                Ok(op)
+                    if op.get("ingest_key").and_then(|v| v.as_str()).is_some()
+                        && stateroot_core::local_store::FINALIZE_KINDS
+                            .contains(&op.get("kind").and_then(|v| v.as_str()).unwrap_or("")) =>
+                {
+                    finalize += 1;
+                }
+                _ => legacy += 1,
+            }
+        }
+        if finalize > 0 {
+            checks.push(Check {
+                label: "finalize outbox".into(),
+                ok: true,
+                detail: format!(
+                    "{finalize} op(s) queued for `_drain-finalize` (snap/finalize/ingest)"
+                ),
+                hard: false,
+            });
+        }
+        if legacy > 0 {
             checks.push(Check {
                 label: "legacy outbox".into(),
                 ok: false,
                 detail: format!(
-                    "{pending} op(s) queued for the removed server-sync — never delivered; safe to delete {}",
+                    "{legacy} op(s) queued for the removed server-sync — never delivered; safe to delete {}",
                     outbox.display()
                 ),
                 hard: false,

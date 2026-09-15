@@ -70,6 +70,7 @@ async fn main() -> anyhow::Result<()> {
             | cli::Command::SelfUpdate { .. }
             | cli::Command::Uninstall { .. }
             | cli::Command::External(_)
+            | cli::Command::DrainFinalize
     );
 
     match cli.command {
@@ -417,6 +418,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Ext(args) => match args.action {
             ExtAction::List => commands::ext::list()?,
         },
+        Command::DrainFinalize => commands::drain_finalize::run(&ctx).await?,
         Command::External(argv) => {
             let code = commands::ext::run_external(&ctx, &argv)?;
             std::process::exit(code);

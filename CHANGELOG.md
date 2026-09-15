@@ -5,6 +5,12 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- **Session-end finalize is spool-first.** `stop`/`session_end` still write the
+  cheap checkpoint, then enqueue `finalize`/`snap`/`ingest` on the existing
+  outbox and return. A detached `_drain-finalize` worker (setsid / job
+  breakaway, capped log, single-flight lock) finishes the heavy work outside
+  the harness timeout. Delegate and auto-update spawns share the same detach
+  hygiene; argv stays env-only.
 - **Codex canon is proven-fields-only.** Session identity accepts the
   verified `payload.id` plus deliberate case variants (`session_id` /
   `sessionId` / `sessionID` / `conversationId`) so copies don't double-import.

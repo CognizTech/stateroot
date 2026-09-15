@@ -33,6 +33,9 @@ git2.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile.workspace = true
 assert_cmd.workspace = true

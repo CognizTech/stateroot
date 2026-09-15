@@ -1800,6 +1800,7 @@ dependencies = [
  "dialoguer",
  "git2",
  "include_dir",
+ "libc",
  "predicates",
  "reqwest",
  "rusqlite",

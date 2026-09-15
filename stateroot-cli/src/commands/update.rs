@@ -100,12 +100,19 @@ fn spawn_scheduled_update(config_dir: &Path, interval_hours: i64, worker: &Path)
     let Ok(log_err) = log.try_clone() else {
         return;
     };
-    let spawned = std::process::Command::new(worker)
-        .arg("self-update")
-        .stdin(std::process::Stdio::null())
-        .stdout(log)
-        .stderr(log_err)
-        .spawn();
+    let spawned = {
+        let mut cmd = std::process::Command::new(worker);
+        cmd.arg("self-update").stdout(log).stderr(log_err);
+        let plan = super::detached::DetachPlan {
+            args: vec!["self-update".into()],
+            setsid: cfg!(unix),
+            breakaway: cfg!(windows),
+            stdin_null: true,
+        };
+        debug_assert!(!super::detached::argv_looks_like_secret(&plan.args));
+        super::detached::apply_detach_flags(&mut cmd, &plan);
+        cmd.spawn()
+    };
     if let Ok(child) = spawned {
         let entry = serde_json::json!({
             "pid": child.id(),

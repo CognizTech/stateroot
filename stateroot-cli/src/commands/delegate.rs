@@ -146,7 +146,7 @@ fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
     // The fds MUST be O_APPEND: the worker keeps writing after finalize()
     // appends the outcome sections (e.g. the auto-update's tracing WARN at
     // process exit), and a stale shared offset would overwrite that content.
-    let (log_file, log_err) = open_log_append(&log_path)?;
+    let (log_file, log_err) = super::detached::open_log_append(&log_path)?;
     let mut worker_args = vec![
         "delegate".to_string(),
         "--to".to_string(),
@@ -164,16 +164,25 @@ fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
     if args.ambient_skills {
         worker_args.push("--ambient-skills".to_string());
     }
-    let child = std::process::Command::new(
-        std::env::current_exe().map_err(|e| anyhow::anyhow!("resolve own binary: {e}"))?,
-    )
-    .args(&worker_args)
-    .current_dir(&ctx.cwd)
-    .env(DEPTH_ENV, (depth + 1).to_string())
-    .stdin(Stdio::null())
-    .stdout(log_file)
-    .stderr(log_err)
-    .spawn()?;
+    let child = {
+        let mut cmd = std::process::Command::new(
+            std::env::current_exe().map_err(|e| anyhow::anyhow!("resolve own binary: {e}"))?,
+        );
+        cmd.args(&worker_args)
+            .current_dir(&ctx.cwd)
+            .env(DEPTH_ENV, (depth + 1).to_string())
+            .stdout(log_file)
+            .stderr(log_err);
+        let plan = super::detached::DetachPlan {
+            args: worker_args.clone(),
+            setsid: cfg!(unix),
+            breakaway: cfg!(windows),
+            stdin_null: true,
+        };
+        debug_assert!(!super::detached::argv_looks_like_secret(&plan.args));
+        super::detached::apply_detach_flags(&mut cmd, &plan);
+        cmd.spawn()?
+    };
     let pid = child.id();
     drop(child); // detached: no wait, no kill, ever.
 
@@ -349,20 +358,6 @@ fn write_record(dir: &Path, record: &Value) -> Result<()> {
         format!("{}\n", serde_json::to_string_pretty(record)?),
     )?;
     Ok(())
-}
-
-/// Open the delegation log for the worker's redirected stdout/stderr:
-/// create-if-missing and ALWAYS O_APPEND on the shared description. Without
-/// append mode the worker's late writes (auto-update WARN, shutdown notes)
-/// land at a stale offset and overwrite the sections finalize() appended —
-/// the observed head-loss on loaded hosts.
-fn open_log_append(path: &Path) -> std::io::Result<(std::fs::File, std::fs::File)> {
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    let cloned = file.try_clone()?;
-    Ok((file, cloned))
 }
 
 /// Load one record by id (exact, or a unique prefix).
@@ -655,7 +650,7 @@ mod tests {
         use std::io::Write as _;
         let dir = tempfile::tempdir().expect("dir");
         let log = dir.path().join("d.log");
-        let (mut out, mut err) = open_log_append(&log).expect("open");
+        let (mut out, mut err) = crate::commands::detached::open_log_append(&log).expect("open");
         writeln!(out, "delegation header").expect("header");
         // finalize() appends via its own fd.
         let mut fin = std::fs::OpenOptions::new()

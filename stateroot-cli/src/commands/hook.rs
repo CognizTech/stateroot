@@ -18,9 +18,9 @@
 //!   (256KB rotation), fire-and-forget.
 //! - checkpoint (`tool_failure`, `pre_compact`, `post_compaction`, `stop`,
 //!   `session_end`): checkpoint from the spool tail into the local episodic
-//!   log; `stop`/`session_end` preserve any explicit structured handoff
-//!   (automatic paths never rewrite `handoffs/current.json`), then rotate
-//!   the spool.
+//!   log; `stop`/`session_end` enqueue transcript finalize + snap + ingest
+//!   onto the outbox and return (a detached `_drain-finalize` worker finishes
+//!   the heavy work). The spool is then rotated.
 
 use std::path::{Path, PathBuf};
 
@@ -1019,55 +1019,18 @@ async fn checkpoint_from_spool(
         }
     }
 
-    // stop/session_end: checkpoint already recorded above. Try transcript
-    // finalize when gates pass; never clobber an explicit handoff at the
-    // current seq.
+    // stop/session_end: checkpoint already recorded above. Enqueue the
+    // heavy trio (transcript finalize, snap, wiki ingest) and return —
+    // the detached drainer runs outside the harness timeout window.
+    // session_end used to skip snap/ingest because Cursor closes the
+    // window; spool-first makes that skip unnecessary.
     if matches!(canonical, "stop" | "session_end") {
-        if super::handoff::try_auto_finalize(&hook_ctx, quirk.id).unwrap_or(false) {
-            hook_note(quirk, "finalized observed session into handoff continuity");
-        } else if !tail.is_empty() {
-            hook_note(
-                quirk,
-                "checkpoint recorded; existing structured handoff preserved",
-            );
-        }
-        // Ingest is local but slow on Windows/WSL mounts (wiki + inbox rewrite).
-        // `stop` can pay that cost between turns. `session_end` runs while
-        // Cursor is closing the window — skip it so shutdown is not blocked
-        // for the full hook timeout. Next `stop` or `wiki compile` catches up.
-        if canonical == "stop" {
-            // Automatic lineage: a finished turn's real work becomes a root
-            // (no-op when only `.stateroot/` bookkeeping moved). Skipped on
-            // session_end for the same window-closing reason as ingest.
-            match stateroot_core::roots::snap_if_changed(
-                project_dir,
-                quirk.id,
-                "auto: turn end",
-                None,
-            ) {
-                Ok(stateroot_core::roots::SnapOutcome::Created(manifest, transition)) => {
-                    let changed = transition
-                        .evidence
-                        .get("verified")
-                        .and_then(|v| v.get("files_changed"))
-                        .and_then(|v| v.as_u64())
-                        .map(|n| n.to_string())
-                        .unwrap_or_else(|| "?".to_string());
-                    hook_note(
-                        quirk,
-                        &format!(
-                            "auto-snap: root {} ({changed} file(s) changed)",
-                            &manifest.id[..12]
-                        ),
-                    );
-                }
-                Ok(stateroot_core::roots::SnapOutcome::Unchanged { .. }) => {}
-                Err(err) => note!("auto-snap skipped: {err}"),
+        match local_store::enqueue_finalize_trio(project_dir, quirk.id) {
+            Ok(_) => {
+                hook_note(quirk, "finalize queued (spool-first)");
+                super::drain_finalize::kick(project_dir);
             }
-            match super::compiler::try_ingest(&hook_ctx, false).await {
-                Ok(summary) => hook_note(quirk, &summary),
-                Err(err) => note!("ingest skipped: {err}"),
-            }
+            Err(err) => note!("finalize enqueue skipped: {err}"),
         }
         let path = spool_path(project_dir);
         if path.exists() {
@@ -1318,5 +1281,36 @@ mod tests {
             "work body must not be char-truncated: {}",
             digest.len()
         );
+    }
+
+    #[tokio::test]
+    async fn stop_hook_enqueues_under_one_second_even_if_snap_would_fail() {
+        let project = tempfile::tempdir().expect("project");
+        local_store::init_skeleton(project.path(), "p-test", "proj", "local").expect("skeleton");
+        std::fs::write(project.path().join(".git"), "not-a-repo").expect("poison git");
+        let home = tempfile::tempdir().expect("home");
+        let ctx = Ctx {
+            cwd: project.path().to_path_buf(),
+            config_dir: home.path().to_path_buf(),
+            config: stateroot_core::config::AppConfig::default(),
+        };
+        let quirk = quirk_any("cursor").expect("cursor");
+        let start = std::time::Instant::now();
+        let code = checkpoint_from_spool(&ctx, quirk, "stop", project.path(), &json!({}))
+            .await
+            .expect("stop");
+        assert_eq!(code, 0);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "elapsed {:?}",
+            start.elapsed()
+        );
+        let pending = local_store::outbox_pending(project.path()).expect("pending");
+        assert_eq!(pending.len(), 3, "{pending:?}");
+        let kinds: Vec<&str> = pending
+            .iter()
+            .map(|v| v["kind"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(kinds, ["finalize", "snap", "ingest"]);
     }
 }

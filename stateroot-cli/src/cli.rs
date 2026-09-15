@@ -168,6 +168,9 @@ pub enum Command {
     Mcp(McpArgs),
     /// External extensions (`stateroot-<name>` executables on PATH).
     Ext(ExtArgs),
+    /// Hidden: drain spool-first session-end finalize (snap/finalize/ingest).
+    #[command(name = "_drain-finalize", hide = true)]
+    DrainFinalize,
     /// External extension (any `stateroot-<name>` executable on PATH).
     #[command(external_subcommand)]
     External(Vec<String>),
