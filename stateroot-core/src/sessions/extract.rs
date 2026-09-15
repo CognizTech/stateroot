@@ -268,11 +268,8 @@ pub(crate) fn canonical_from_codex(
     if !transcripts::cwd_matches(&cwd, project_dir) {
         return None;
     }
-    let session_id = payload
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown")
-        .to_string();
+    let session_id =
+        codex::session_id_from_payload(&payload).unwrap_or_else(|| "unknown".to_string());
     let mut entries = vec![meta_entry("session_meta", Some(compact(&payload)))];
     for event in events {
         let ts = event
@@ -348,21 +345,39 @@ pub(crate) fn canonical_from_codex(
             }
             ("response_item", "function_call_output")
             | ("response_item", "custom_tool_call_output") => {
-                let mut e = entry("tool_result");
-                e.ts = ts;
-                e.parent_id = payload
+                let parent = payload
                     .get("call_id")
                     .and_then(|v| v.as_str())
                     .map(str::to_string);
-                e.content = Some(match payload.get("output") {
-                    Some(Value::String(s)) => s.clone(),
-                    Some(other) => compact(other),
-                    None => String::new(),
-                });
-                if payload_type == "custom_tool_call_output" {
-                    e.native_type = Some("custom_tool_call_output".into());
+                match payload.get("output") {
+                    Some(Value::String(s)) => {
+                        // Proven: string `output`. Canonical tool_result is
+                        // success-free — never an outcome field, never a
+                        // parsed exit_code.
+                        let mut e = entry("tool_result");
+                        e.ts = ts;
+                        e.parent_id = parent;
+                        e.content = Some(s.clone());
+                        if payload_type == "custom_tool_call_output" {
+                            e.native_type = Some("custom_tool_call_output".into());
+                        }
+                        entries.push(e);
+                    }
+                    other => {
+                        // Unproven shapes (object `{stdout,exit_code}`,
+                        // content-block arrays, nested payloads) stay meta
+                        // — nothing silently vanishes, nothing is promoted.
+                        let label = if payload_type == "custom_tool_call_output" {
+                            "custom_tool_call_output (shape unverified)"
+                        } else {
+                            "function_call_output (shape unverified)"
+                        };
+                        let mut e = meta_entry(label, other.map(compact));
+                        e.ts = ts;
+                        e.parent_id = parent;
+                        entries.push(e);
+                    }
                 }
-                entries.push(e);
             }
             ("compacted", _) => {
                 let message = payload
@@ -1254,5 +1269,47 @@ mod tests {
         assert_eq!(e[4].name.as_deref(), Some("search"));
         assert_eq!(e[4].content.as_deref(), Some("results here"));
         assert_eq!(e[6].native_type.as_deref(), Some("message role `mystery`"));
+    }
+
+    #[test]
+    fn codex_output_shapes_string_is_tool_result_unproven_is_meta() {
+        let project = tempfile::tempdir().expect("project");
+        let cwd = crate::transcripts::path_for_json(project.path());
+        let meta = json!({"type":"session_meta","payload":{"sessionId":"c-shapes","cwd":cwd}});
+        let events = vec![
+            json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"plain string stdout"},"timestamp":"2026-07-01T10:00:01Z"}),
+            json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"c2","output":{"stdout":"obj","exit_code":1}},"timestamp":"2026-07-01T10:00:02Z"}),
+            json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"c3","output":[{"type":"text","text":"block"}]},"timestamp":"2026-07-01T10:00:03Z"}),
+            json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"c4","output":{"nested":{"stdout":"deep"}}},"timestamp":"2026-07-01T10:00:04Z"}),
+        ];
+        let session = canonical_from_codex(
+            &meta,
+            &events,
+            Path::new("/x/rollout-shapes.jsonl"),
+            project.path(),
+        )
+        .expect("session");
+        assert_eq!(session.session_id, "c-shapes");
+        assert_eq!(
+            kinds(&session),
+            ["meta", "tool_result", "meta", "meta", "meta"]
+        );
+        let e = &session.entries;
+        assert_eq!(e[1].kind, "tool_result");
+        assert_eq!(e[1].content.as_deref(), Some("plain string stdout"));
+        assert_eq!(e[1].parent_id.as_deref(), Some("c1"));
+        assert!(e[1].native_type.is_none(), "success-free: {:?}", e[1]);
+        assert_eq!(
+            e[2].native_type.as_deref(),
+            Some("function_call_output (shape unverified)")
+        );
+        assert!(e[2].content.as_deref().unwrap_or("").contains("exit_code"));
+        assert_eq!(e[2].kind, "meta");
+        assert_eq!(
+            e[3].native_type.as_deref(),
+            Some("function_call_output (shape unverified)")
+        );
+        assert_eq!(e[4].kind, "meta");
+        assert!(e[4].content.as_deref().unwrap_or("").contains("nested"));
     }
 }

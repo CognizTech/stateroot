@@ -5,6 +5,12 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- **Codex canon is proven-fields-only.** Session identity accepts the
+  verified `payload.id` plus deliberate case variants (`session_id` /
+  `sessionId` / `sessionID` / `conversationId`) so copies don't double-import.
+  Tool arguments use one proven key per shape (`input`, `path`, `cmd`);
+  unproven aliases and nested/object outputs stay metadata, never structured
+  fields. `failure_excerpt` is labeled heuristic-only — not an outcome source.
 - **Extension updates now update the CLI too** (the agreed design, finally
   landed): when the extension version changes under a working CLI, the
   bundled installer re-runs and brings the CLI to latest stable. Missing-CLI

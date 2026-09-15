@@ -1,16 +1,30 @@
 //! Codex transcript reader: `~/.codex/sessions/**/rollout-*.jsonl`.
 //!
-//! Format (verified against this machine's rollouts): line 1 is
-//! `session_meta` (`payload.id`, `payload.cwd`, `payload.timestamp`);
-//! events are `response_item` lines whose `payload.type` is `message`
-//! (`role` user/developer/assistant, `content[].text`), `function_call`
-//! (`name`, `arguments` as a JSON string, `call_id`), or
-//! `function_call_output` (`call_id`, `output`). `event_msg` lines carry
-//! turn lifecycle (`task_complete`).
+//! Format (verified against Codex CLI rollout JSONL on this machine):
+//! line 1 is `session_meta` (`payload.id`, `payload.cwd`,
+//! `payload.timestamp`); events are `response_item` lines whose
+//! `payload.type` is `message` (`role` user/developer/assistant,
+//! `content[].text`), `function_call` (`name`, `arguments` as a JSON
+//! string, `call_id`), or `function_call_output` (`call_id`, `output`).
+//! `event_msg` lines carry turn lifecycle (`task_complete`).
+//!
+//! Proven field families (unproven aliases are never promoted to
+//! structured fields; canonical extract degrades them to `meta`):
+//! - session id — `payload.id` (Codex CLI session_meta). Deliberate case
+//!   variants also accepted for dedup: `session_id`, `sessionId`,
+//!   `sessionID`, `conversationId`.
+//! - `function_call` `apply_patch` — `arguments.input` (string).
+//! - `function_call` write/edit — `arguments.path` (string).
+//! - `function_call` shell/exec — `arguments.cmd` (string).
+//! - `custom_tool_call` — top-level `input` (string); apply_patch body
+//!   is the raw string.
+//! - `function_call_output.output` — string. Objects/arrays stay meta.
 //!
 //! Skip rules for prompts: developer role, `<environment_context>` /
 //! `<permissions …>` wrappers, injected context blocks (`# AGENTS.md
 //! instructions for …`, `# Context from my IDE setup:`).
+//!
+//! Binary marker: WS1_CODEX_CANON_PROVEN_FIELDS
 
 use std::path::Path;
 
@@ -21,6 +35,11 @@ use super::{
     TranscriptReader, TranscriptSession,
 };
 use crate::harness_install::paths;
+
+/// Survives into the linked CLI so `strings` can prove this workstream
+/// is in the binary (stash/A-B builds otherwise lie).
+#[used]
+static WS1_CODEX_CANON_MARKER: &str = "WS1_CODEX_CANON_PROVEN_FIELDS";
 
 /// Codex rollout reader.
 pub struct CodexReader;
@@ -43,11 +62,7 @@ pub(crate) fn session_files(home: &Path) -> Vec<std::path::PathBuf> {
         .into_iter()
         .filter(|file| {
             let id = parse_session_file(file)
-                .and_then(|(meta, _)| {
-                    meta.pointer("/payload/id")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string)
-                })
+                .and_then(|(meta, _)| session_id_from_meta(&meta))
                 .unwrap_or_else(|| file.display().to_string());
             seen.insert(id)
         })
@@ -70,6 +85,33 @@ pub(crate) fn parse_session_file(path: &Path) -> Option<(Value, Vec<Value>)> {
         }
     }
     Some((meta, events))
+}
+
+/// Proven Codex session-identity keys, preference order.
+///
+/// Verified against Codex CLI `session_meta.payload.id`. Deliberate case
+/// variants are accepted so desktop/archived copies that serialize the
+/// same identity under a different key still collapse to one session.
+pub(crate) fn session_id_from_payload(payload: &Value) -> Option<String> {
+    const KEYS: &[&str] = &[
+        "id",
+        "session_id",
+        "sessionId",
+        "sessionID",
+        "conversationId",
+    ];
+    for key in KEYS {
+        if let Some(id) = payload.get(*key).and_then(|v| v.as_str()) {
+            if !id.is_empty() {
+                return Some(id.to_string());
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn session_id_from_meta(meta: &Value) -> Option<String> {
+    session_id_from_payload(meta.get("payload").unwrap_or(&Value::Null))
 }
 
 impl TranscriptReader for CodexReader {
@@ -163,16 +205,12 @@ fn parse_rollout(file: &Path, project_dir: &Path) -> Option<TranscriptSession> {
     if !cwd_matches(&cwd, project_dir) {
         return None;
     }
-    let session_id = payload
-        .get("id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            file.file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown")
-                .to_string()
-        });
+    let session_id = session_id_from_payload(&payload).unwrap_or_else(|| {
+        file.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string()
+    });
 
     let mut session = TranscriptSession {
         harness: "codex",
@@ -452,32 +490,26 @@ fn extract_function_call(payload: &Value, session: &mut TranscriptSession) {
     let args: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
     match name {
         "apply_patch" => {
-            let patch = args
-                .get("input")
-                .or_else(|| args.get("patch"))
-                .and_then(|v| v.as_str())
-                .unwrap_or(arguments);
-            extract_patch_paths(patch, session);
+            // Proven: `input`. Unproven aliases (`patch`) and a missing
+            // or wrong-typed field never promote into files_touched.
+            if let Some(patch) = args.get("input").and_then(|v| v.as_str()) {
+                extract_patch_paths(patch, session);
+            }
         }
         "write_file" | "edit_file" | "create_file" | "write" | "edit" => {
-            for key in ["path", "file_path", "filename"] {
-                if let Some(path) = args.get(key).and_then(|v| v.as_str()) {
-                    push_unique(&mut session.files_touched, clean(path, 300));
-                }
+            if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                push_unique(&mut session.files_touched, clean(path, 300));
             }
         }
         "update_plan" => apply_update_plan(&args, session),
         _ => {
             // Shell-style calls (exec_command, shell_command, write_stdin):
-            // extract write targets only — never file content.
-            let command = args
-                .get("cmd")
-                .or_else(|| args.get("command"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if !command.is_empty() {
-                for target in shell_write_targets(command) {
-                    push_unique(&mut session.files_touched, clean(&target, 300));
+            // proven field is `cmd`. Unproven `command` is ignored.
+            if let Some(command) = args.get("cmd").and_then(|v| v.as_str()) {
+                if !command.is_empty() {
+                    for target in shell_write_targets(command) {
+                        push_unique(&mut session.files_touched, clean(&target, 300));
+                    }
                 }
             }
         }
@@ -492,12 +524,11 @@ fn extract_custom_tool_call(payload: &Value, session: &mut TranscriptSession) {
     match name {
         "apply_patch" => extract_patch_paths(input, session),
         "write_file" | "edit_file" | "create_file" | "write" | "edit" => {
-            // Defensive: these may carry raw JSON in `input` too.
+            // Proven payload is `input`. If it is a JSON object, only
+            // `path` is structured; `file_path`/`filename` stay unpromoted.
             let args: Value = serde_json::from_str(input).unwrap_or(Value::Null);
-            for key in ["path", "file_path", "filename"] {
-                if let Some(path) = args.get(key).and_then(|v| v.as_str()) {
-                    push_unique(&mut session.files_touched, clean(path, 300));
-                }
+            if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                push_unique(&mut session.files_touched, clean(path, 300));
             }
         }
         "update_plan" => {
@@ -512,7 +543,12 @@ fn extract_custom_tool_call(payload: &Value, session: &mut TranscriptSession) {
     }
 }
 
-/// Non-zero exits and hard error shapes from a tool output.
+/// Heuristic-only scan of tool-output *text* for likely-failure lines
+/// (non-zero `Process exited with code N`, Traceback, `Error:`).
+///
+/// This is NEVER an outcome source — session [`Outcome`] comes from
+/// [`classify`] on the event tail (`task_complete` / dangling tool call /
+/// assistant finale). Canonical `tool_result` entries stay success-free.
 pub(crate) fn failure_excerpt(output: &str) -> Option<&str> {
     for line in output.lines() {
         if let Some(rest) = line.strip_prefix("Process exited with code ") {
@@ -1065,5 +1101,70 @@ mod tests {
         assert_eq!(session.progress_summaries.len(), 8);
         assert_eq!(session.progress_summaries[0], "summary 10");
         assert_eq!(session.progress_summaries[7], "summary 3");
+    }
+
+    #[test]
+    fn session_id_case_variants_parse_and_dedup() {
+        let variants = [
+            r#"{"id":"same-session"}"#,
+            r#"{"session_id":"same-session"}"#,
+            r#"{"sessionId":"same-session"}"#,
+            r#"{"sessionID":"same-session"}"#,
+            r#"{"conversationId":"same-session"}"#,
+        ];
+        for payload in variants {
+            let meta: Value =
+                serde_json::from_str(&format!(r#"{{"type":"session_meta","payload":{payload}}}"#))
+                    .expect("meta");
+            assert_eq!(
+                session_id_from_meta(&meta).as_deref(),
+                Some("same-session"),
+                "payload={payload}"
+            );
+        }
+
+        let home = tempfile::tempdir().expect("home");
+        write_rollout(
+            &home.path().join(".codex/sessions/2026/07/01"),
+            "rollout-id.jsonl",
+            &[r#"{"type":"session_meta","payload":{"id":"same-session","cwd":"/x"}}"#],
+        );
+        write_rollout(
+            &home.path().join(".codex/archived_sessions"),
+            "rollout-sessionId.jsonl",
+            &[r#"{"type":"session_meta","payload":{"sessionId":"same-session","cwd":"/x"}}"#],
+        );
+        let files = session_files(home.path());
+        assert_eq!(files.len(), 1, "files: {files:?}");
+    }
+
+    #[test]
+    fn unproven_argument_aliases_are_not_promoted() {
+        let project = project();
+        let cwd = crate::transcripts::path_for_json(project.path());
+        let home = tempfile::tempdir().expect("home");
+        let rollout = write_rollout(
+            &home.path().join(".codex/sessions/2026/07/01"),
+            "rollout-unproven.jsonl",
+            &[
+                &meta(&cwd).replace("s-1", "s-unproven"),
+                r#"{"timestamp":"2026-07-01T10:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"touch files"}]}}"#,
+                r#"{"timestamp":"2026-07-01T10:00:02Z","type":"response_item","payload":{"type":"function_call","name":"apply_patch","arguments":"{\"patch\":\"*** Add File: alias.rs\\n\"}","call_id":"c1"}}"#,
+                r#"{"timestamp":"2026-07-01T10:00:03Z","type":"response_item","payload":{"type":"function_call","name":"write_file","arguments":"{\"file_path\":\"via-file-path.rs\",\"filename\":\"via-filename.rs\"}","call_id":"c2"}}"#,
+                r#"{"timestamp":"2026-07-01T10:00:04Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"command\":\"cat > via-command.md <<'EOF'\\n\"}","call_id":"c3"}}"#,
+                r#"{"timestamp":"2026-07-01T10:00:05Z","type":"response_item","payload":{"type":"function_call","name":"write_file","arguments":"{\"path\":\"proven.rs\"}","call_id":"c4"}}"#,
+                r#"{"timestamp":"2026-07-01T10:00:06Z","type":"response_item","payload":{"type":"function_call","name":"apply_patch","arguments":"{\"input\":\"*** Add File: proven-patch.rs\\n\"}","call_id":"c5"}}"#,
+                r#"{"timestamp":"2026-07-01T10:00:07Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cat > proven-cmd.md <<'EOF'\\n\"}","call_id":"c6"}}"#,
+                r#"{"timestamp":"2026-07-01T10:00:08Z","type":"response_item","payload":{"type":"function_call","name":"write_file","arguments":"{\"path\":[\"nested.rs\"]}","call_id":"c7"}}"#,
+            ],
+        );
+        let session = parse_rollout(&rollout, project.path()).expect("session");
+        assert_eq!(
+            session.files_touched,
+            vec!["proven.rs", "proven-patch.rs", "proven-cmd.md"],
+            "files: {:?}",
+            session.files_touched
+        );
+        let _ = WS1_CODEX_CANON_MARKER;
     }
 }
