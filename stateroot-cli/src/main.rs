@@ -178,6 +178,7 @@ async fn main() -> anyhow::Result<()> {
             args.worktree.as_deref(),
             args.plan.as_deref(),
         )?,
+        Command::Merge(args) => commands::roots::merge(&ctx, &args.forks)?,
         Command::Receipt { id } => commands::roots::receipt(&ctx, &id)?,
         Command::Status => commands::status::run(&ctx)?,
         Command::Projects { json, prune } => commands::projects::run(&ctx, json, prune)?,

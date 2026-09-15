@@ -75,6 +75,8 @@ pub enum Command {
     Revert(RevertArgs),
     /// Branch-materialize a root under refs/stateroot/forks/<name>.
     Fork(ForkArgs),
+    /// Fold fork lineages back into the trunk (3-way merge, N-parent root).
+    Merge(MergeArgs),
     /// Render a transition receipt (verified tier = git delta).
     Receipt {
         /// Transition id or prefix.
@@ -688,6 +690,13 @@ pub struct ForkArgs {
     /// worktree's fork context).
     #[arg(long)]
     pub plan: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct MergeArgs {
+    /// Fork names to fold into the trunk (as shown by `stateroot fork`).
+    #[arg(required = true)]
+    pub forks: Vec<String>,
 }
 
 #[derive(Debug, Args)]

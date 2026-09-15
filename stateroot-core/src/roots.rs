@@ -67,6 +67,9 @@ pub enum RootsError {
     /// A named object does not exist.
     #[error("{0}")]
     NotFound(String),
+    /// A merge cannot complete cleanly (conflicts or nothing to fold).
+    #[error("{0}")]
+    Merge(String),
 }
 
 /// Persisted root manifest (`.stateroot/roots/<hash>.json`).
@@ -1114,6 +1117,159 @@ pub fn fork_materialize(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Merge (WS5 batch B)
+//
+// Fold fork lineages back into the trunk with a git 3-way merge. Executions
+// were never serialized; only this step is (the WS3 roots lock inside
+// persist_root). Clean fold across all forks → ONE merge root with N
+// parents [trunk, fork tips…]. Any conflict → per-path report, NO merge
+// root — nothing is ever half-applied (immutability makes that free).
+// ---------------------------------------------------------------------------
+
+/// One fork's contribution to a merge: name + tip at merge time.
+#[derive(Debug)]
+pub struct MergedFork {
+    /// Fork name.
+    pub name: String,
+    /// Tip root merged in (empty when the fork was already contained).
+    pub tip: String,
+}
+
+/// `stateroot merge <fork>…` — fold fork tips into `refs/stateroot/latest`.
+/// Returns the merge root and the forks that contributed.
+pub fn merge_forks(
+    project_dir: &Path,
+    forks: &[String],
+    harness: &str,
+) -> Result<(RootManifest, Transition, Vec<MergedFork>), RootsError> {
+    if forks.is_empty() {
+        return Err(RootsError::Merge(
+            "no forks named — pass at least one fork to merge".into(),
+        ));
+    }
+    let repo = ensure_repo(project_dir)?;
+    let base_oid = repo
+        .refname_to_id(LATEST_REF)
+        .map_err(|_| RootsError::NotFound("no roots yet — nothing to merge into".into()))?;
+    // The accumulated fold: `current_tree` is the union so far, `head_oid`
+    // is the line's head for the NEXT merge_base. After folding fork A the
+    // union contains A's work, so B must merge against (A's tip) as the
+    // base line — never against the original trunk, or A's edits are
+    // silently dropped (and cross-fork conflicts go undetected).
+    let mut head_oid = base_oid;
+    let mut current_tree = repo.find_commit(base_oid)?.tree()?;
+    let mut parents: Vec<git2::Oid> = vec![base_oid];
+    let mut merged: Vec<MergedFork> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+
+    for name in forks {
+        let refname = format!("{FORKS_REF_PREFIX}{name}");
+        let tip = repo
+            .refname_to_id(&refname)
+            .map_err(|_| RootsError::NotFound(format!("no fork named {name}")))?;
+        let fork_commit = repo.find_commit(tip)?;
+        let ancestor_oid = repo.merge_base(head_oid, tip)?;
+        if ancestor_oid == tip {
+            // The accumulated line already contains this fork entirely.
+            skipped.push(name.clone());
+            continue;
+        }
+        let ancestor_tree = repo.find_commit(ancestor_oid)?.tree()?;
+        let mut index =
+            repo.merge_trees(&ancestor_tree, &current_tree, &fork_commit.tree()?, None)?;
+        if index.has_conflicts() {
+            let mut paths: Vec<String> = index
+                .conflicts()?
+                .filter_map(|c| {
+                    let c = c.ok()?;
+                    c.their
+                        .or(c.our)
+                        .or(c.ancestor)
+                        .and_then(|f| String::from_utf8(f.path).ok())
+                })
+                .collect();
+            paths.sort();
+            paths.dedup();
+            return Err(RootsError::Merge(format!(
+                "merge conflict in fork `{name}` — no merge root created; resolve and retry. Conflicting paths: {}",
+                paths.join(", ")
+            )));
+        }
+        let tree_oid = index.write_tree_to(&repo)?;
+        current_tree = repo.find_tree(tree_oid)?;
+        head_oid = tip;
+        parents.push(tip);
+        merged.push(MergedFork {
+            name: name.clone(),
+            tip: tip.to_string(),
+        });
+    }
+
+    if merged.is_empty() {
+        return Err(RootsError::Merge(format!(
+            "nothing to merge — every named fork is already contained in the trunk ({})",
+            skipped.join(", ")
+        )));
+    }
+
+    let reason = format!(
+        "merge {}{}",
+        merged
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        if skipped.is_empty() {
+            String::new()
+        } else {
+            format!(" (skipped contained: {})", skipped.join(", "))
+        }
+    );
+    let message = format!("{reason} (by {harness})");
+    let oid = commit_root(&repo, current_tree.id(), &parents, &message)?;
+    let parent_hashes: Vec<String> = parents.iter().map(|o| o.to_string()).collect();
+    let (files_pinned, tree_bytes) = tree_stats(&repo, current_tree.id());
+    let evidence = json!({
+        "kind_detail": "fork merge",
+        "merged_forks": merged.iter().map(|f| json!({"name": f.name, "tip": f.tip})).collect::<Vec<_>>(),
+        "skipped_contained": skipped,
+        "base": base_oid.to_string(),
+        "harness": harness,
+    });
+    let (manifest, transition) = persist_root(
+        &repo,
+        project_dir,
+        oid,
+        parent_hashes,
+        harness,
+        &reason,
+        files_pinned,
+        tree_bytes,
+        "merge",
+        evidence,
+    )?;
+    Ok((manifest, transition, merged))
+}
+
+/// Blob count + total bytes of a tree (metadata-only walk).
+fn tree_stats(repo: &Repository, tree_oid: git2::Oid) -> (i64, u64) {
+    let mut files: i64 = 0;
+    let mut bytes: u64 = 0;
+    if let Ok(tree) = repo.find_tree(tree_oid) {
+        let _ = tree.walk(git2::TreeWalkMode::PreOrder, |_, entry| {
+            if entry.kind() == Some(git2::ObjectType::Blob) {
+                files += 1;
+                if let Ok(blob) = entry.to_object(repo).and_then(|o| o.peel_to_blob()) {
+                    bytes += blob.size() as u64;
+                }
+            }
+            git2::TreeWalkResult::Ok
+        });
+    }
+    (files, bytes)
+}
+
 /// Load a transition by id (prefix match allowed).
 pub fn get_transition(project_dir: &Path, id_prefix: &str) -> Result<Transition, RootsError> {
     let dir = local_store::root(project_dir).join(TRANSITIONS_DIR);
@@ -1991,5 +2147,123 @@ mod tests {
             tree.get_path(Path::new(".stateroot/worktrees")).is_err(),
             "nested worktree content entered the tree"
         );
+    }
+
+    // -- WS5 batch B: merge -------------------------------------------------
+
+    /// Fork from `root_id`, materialize, write `file`, snap, return the fork tip.
+    fn fork_with_change(
+        dir: &Path,
+        root_id: &str,
+        name: &str,
+        file: &str,
+        content: &str,
+    ) -> (tempfile::TempDir, String) {
+        let (fork_name, _) = fork_root(dir, root_id, Some(name), "cli").expect("fork");
+        let wt_tmp = tempfile::tempdir().expect("wt tmp");
+        let wt = wt_tmp.path().join("checkout");
+        fork_materialize(dir, &fork_name, &wt, None, None).expect("materialize");
+        write(&wt, file, content);
+        let outcome = snap_if_changed(&wt, "codex", "auto: fork work", None).expect("fork snap");
+        let SnapOutcome::Created(m, _) = outcome else {
+            panic!("expected a root in fork {name}");
+        };
+        (wt_tmp, m.id)
+    }
+
+    #[test]
+    fn merge_folds_two_forks_into_one_multi_parent_root() {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        let (_wa, tip_a) =
+            fork_with_change(&dir, &first.id, "fork-a", "src/lib_a.rs", "pub fn a() {}\n");
+        let (_wb, tip_b) =
+            fork_with_change(&dir, &first.id, "fork-b", "src/lib_b.rs", "pub fn b() {}\n");
+
+        let (manifest, transition, merged) =
+            merge_forks(&dir, &["fork-a".to_string(), "fork-b".to_string()], "kimi")
+                .expect("merge");
+        assert_eq!(merged.len(), 2);
+        assert_eq!(
+            manifest.parents,
+            vec![first.id.clone(), tip_a.clone(), tip_b.clone()],
+            "one merge root with trunk + both fork tips as parents"
+        );
+        assert_eq!(transition.kind, "merge");
+        let repo = git2::Repository::open(&dir).expect("repo");
+        let tree = repo
+            .find_commit(manifest.id.parse().expect("oid"))
+            .expect("commit")
+            .tree()
+            .expect("tree");
+        assert!(
+            tree.get_path(Path::new("src/lib_a.rs")).is_ok(),
+            "fork-a work missing"
+        );
+        assert!(
+            tree.get_path(Path::new("src/lib_b.rs")).is_ok(),
+            "fork-b work missing"
+        );
+        assert!(
+            tree.get_path(Path::new("src/main.rs")).is_ok(),
+            "trunk file lost"
+        );
+        let latest = repo.refname_to_id(LATEST_REF).expect("latest").to_string();
+        assert_eq!(latest, manifest.id, "trunk advanced to the merge root");
+        // Fork refs stay as history.
+        assert_eq!(
+            repo.refname_to_id(&format!("{FORKS_REF_PREFIX}fork-a"))
+                .expect("fork-a ref")
+                .to_string(),
+            tip_a
+        );
+    }
+
+    #[test]
+    fn merge_conflict_reports_paths_and_creates_no_root() {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        let (_wa, _ta) = fork_with_change(
+            &dir,
+            &first.id,
+            "fork-a",
+            "src/main.rs",
+            "fn main() { println!(\"a\"); }\n",
+        );
+        let (_wb, _tb) = fork_with_change(
+            &dir,
+            &first.id,
+            "fork-b",
+            "src/main.rs",
+            "fn main() { println!(\"b\"); }\n",
+        );
+
+        let err = merge_forks(&dir, &["fork-a".to_string(), "fork-b".to_string()], "kimi")
+            .expect_err("conflicting forks must not merge");
+        let text = err.to_string();
+        assert!(
+            text.contains("src/main.rs"),
+            "conflict path not reported: {text}"
+        );
+        assert!(text.contains("no merge root created"), "{text}");
+        let repo = git2::Repository::open(&dir).expect("repo");
+        assert_eq!(
+            repo.refname_to_id(LATEST_REF).expect("latest").to_string(),
+            first.id,
+            "trunk moved despite the conflict"
+        );
+    }
+
+    #[test]
+    fn merge_reports_nothing_when_forks_are_contained() {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        let (_name, _) = fork_root(&dir, &first.id, Some("fork-still"), "cli").expect("fork");
+        let err = merge_forks(&dir, &["fork-still".to_string()], "kimi")
+            .expect_err("a fork that never moved contributes nothing");
+        assert!(err.to_string().contains("nothing to merge"), "{err}");
     }
 }

@@ -5,6 +5,14 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- **`stateroot merge` folds fork lineages back into the trunk (WS5 batch
+  B).** `stateroot merge <fork>…` 3-way-merges each fork tip into an
+  accumulated union (never against the stale trunk, so earlier forks' work
+  can't be silently dropped), then commits ONE merge root with N parents —
+  trunk + every merged fork tip — and advances `refs/stateroot/latest`
+  under the roots lock. Conflicts produce a per-path report and no merge
+  root; contained forks are reported as nothing-to-merge; fork refs stay
+  as history. Executions were never serialized — only the merge is.
 - **Forks can materialize into real worktrees (WS5 batch A).**
   `stateroot fork <root> --worktree <path> [--branch NAME] [--plan ID]`
   creates an isolated checkout of the fork's root — `.stateroot/` state

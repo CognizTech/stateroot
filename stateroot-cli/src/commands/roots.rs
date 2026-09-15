@@ -277,6 +277,27 @@ pub fn fork(
     Ok(())
 }
 
+/// `stateroot merge <fork>…` — fold fork lineages into the trunk (3-way
+/// merge → one N-parent root; conflicts report paths, never half-apply).
+pub fn merge(ctx: &Ctx, forks: &[String]) -> anyhow::Result<()> {
+    ctx.require_project()?;
+    let (manifest, transition, merged) =
+        engine::merge_forks(&ctx.cwd, forks, LOCAL_HARNESS).map_err(|e| anyhow::anyhow!(e))?;
+    println!(
+        "merged {} → root {} ({} parents)",
+        merged
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        short(&manifest.id),
+        manifest.parents.len()
+    );
+    println!("transition {}", short(&transition.id));
+    println!("the fork refs stay as history; remove worktrees with: git worktree remove <path>");
+    Ok(())
+}
+
 /// `stateroot receipt <transition>` — markdown from transition + git delta.
 pub fn receipt(ctx: &Ctx, id_prefix: &str) -> anyhow::Result<()> {
     ctx.require_project()?;
