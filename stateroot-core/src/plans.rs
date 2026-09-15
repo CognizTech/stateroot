@@ -151,7 +151,17 @@ fn latest_root_ref(project_dir: &Path) -> Option<String> {
 fn write_meta(project_dir: &Path, meta: &PlanMeta) -> Result<(), String> {
     let path = meta_path(project_dir, &meta.id);
     let text = serde_json::to_string_pretty(meta).map_err(|e| e.to_string())?;
-    std::fs::write(&path, format!("{text}\n")).map_err(|e| format!("write {}: {e}", path.display()))
+    std::fs::write(&path, format!("{text}\n"))
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    report_plan_path(project_dir, &path);
+    Ok(())
+}
+
+/// Report a written plan file to the WS3.4 write-audit ledger.
+fn report_plan_path(project_dir: &Path, abs: &Path) {
+    if let Ok(rel) = abs.strip_prefix(crate::local_store::root(project_dir)) {
+        crate::local_store::report_written(project_dir, &rel.to_string_lossy());
+    }
 }
 
 /// Record a plan body as a new DRAFT (verbatim markdown + sidecar).
@@ -192,8 +202,9 @@ pub fn record(
         source_path: source_path.map(str::to_string),
         notes: String::new(),
     };
-    std::fs::write(body_path(project_dir, &id), body)
-        .map_err(|e| format!("write plan body: {e}"))?;
+    let body_file = body_path(project_dir, &id);
+    std::fs::write(&body_file, body).map_err(|e| format!("write plan body: {e}"))?;
+    report_plan_path(project_dir, &body_file);
     write_meta(project_dir, &meta)?;
     Ok(meta)
 }
@@ -290,6 +301,7 @@ pub fn update_draft_body(
         return Err("plan body is empty — refusing to blank a draft".into());
     }
     std::fs::write(&path, body).map_err(|e| format!("write plan body: {e}"))?;
+    report_plan_path(project_dir, &path);
     meta.updated_at = now_rfc3339();
     if !note.is_empty() {
         meta.notes = note.to_string();

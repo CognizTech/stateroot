@@ -352,7 +352,78 @@ pub fn append_episodic(project_dir: &Path, record: &Value) -> Result<(), LocalSt
         .open(&path)
         .map_err(io_err(&path))?;
     file.write_all(line.as_bytes()).map_err(io_err(&path))?;
+    report_written(project_dir, EPISODIC_PATH);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Write-audit ledger (WS3.4)
+//
+// High-traffic `.stateroot/` writers report each path they touch, so `snap`
+// can name writes that BYPASSED the funnel and re-verify ignore rules (the
+// privacy net). Cross-process analog of an in-process report set:
+// append-only JSONL at `local/written-log.jsonl`, rotated at ~128 KiB.
+// Best-effort — reporting never fails the writer.
+// ---------------------------------------------------------------------------
+
+const WRITTEN_LOG_REL: &str = "local/written-log.jsonl";
+const WRITTEN_LOG_CAP: u64 = 128 * 1024;
+
+/// `memories/x` → `.stateroot/memories/x` (the form git tree paths take).
+fn stateroot_rel(rel: &str) -> PathBuf {
+    Path::new(".stateroot").join(rel)
+}
+
+/// Record that `root_rel` (relative to the `.stateroot/` root) was written.
+pub fn report_written(project_dir: &Path, root_rel: &str) {
+    let path = root(project_dir).join(WRITTEN_LOG_REL);
+    let line = format!(
+        "{}\n",
+        serde_json::json!({"ts": now_rfc3339(), "path": stateroot_rel(root_rel).to_string_lossy()})
+    );
+    let _ = (|| -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        file.write_all(line.as_bytes())?;
+        file.sync_all()?;
+        if file.metadata()?.len() > WRITTEN_LOG_CAP {
+            let text = std::fs::read_to_string(&path)?;
+            let tail = (WRITTEN_LOG_CAP / 2) as usize;
+            let from = text.len().saturating_sub(tail);
+            let from = text[from..]
+                .find('\n')
+                .map(|i| from + i + 1)
+                .unwrap_or(from);
+            let tmp = path.with_extension("tmp");
+            std::fs::write(&tmp, &text[from..])?;
+            std::fs::rename(&tmp, &path)?;
+        }
+        Ok(())
+    })();
+}
+
+/// Ledger paths with `ts >= since` (RFC3339; empty string matches all).
+pub fn reported_writes_since(project_dir: &Path, since: &str) -> Vec<String> {
+    let path = root(project_dir).join(WRITTEN_LOG_REL);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|v| {
+            v.get("ts")
+                .and_then(|t| t.as_str())
+                .map(|t| t >= since)
+                .unwrap_or(false)
+        })
+        .filter_map(|v| v.get("path").and_then(|p| p.as_str()).map(str::to_string))
+        .collect()
 }
 
 /// Read the last `limit` episodic records, oldest-of-kept first. Tolerant:
@@ -388,7 +459,9 @@ pub fn stamp_handoff_activity(project_dir: &Path, harness: &str, kind: &str) {
         "at": now_rfc3339(),
     });
     if let Ok(text) = serde_json::to_string_pretty(&packet) {
-        let _ = std::fs::write(&path, format!("{text}\n"));
+        if std::fs::write(&path, format!("{text}\n")).is_ok() {
+            report_written(project_dir, HANDOFF_CURRENT_PATH);
+        }
     }
 }
 
@@ -416,6 +489,11 @@ pub fn write_handoff_local(project_dir: &Path, packet: &Value) -> Result<(), Loc
     std::fs::create_dir_all(&history_dir).map_err(io_err(&history_dir))?;
     let history = history_dir.join(format!("{ts}-{harness}.json"));
     std::fs::write(&history, format!("{text}\n")).map_err(io_err(&history))?;
+    report_written(project_dir, HANDOFF_CURRENT_PATH);
+    report_written(
+        project_dir,
+        &format!("{HANDOFF_HISTORY_DIR}/{ts}-{harness}.json"),
+    );
     Ok(())
 }
 
@@ -448,6 +526,7 @@ pub fn update_handoff_current(
     let path = root(project_dir).join(HANDOFF_CURRENT_PATH);
     let text = serde_json::to_string_pretty(&packet).map_err(json_err(&path))?;
     std::fs::write(&path, format!("{text}\n")).map_err(io_err(&path))?;
+    report_written(project_dir, HANDOFF_CURRENT_PATH);
     Ok(true)
 }
 

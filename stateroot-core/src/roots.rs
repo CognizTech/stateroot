@@ -557,6 +557,127 @@ fn project_files_changed(
     }))
 }
 
+// ---------------------------------------------------------------------------
+// Write audit (WS3.4)
+//
+// Two checks run at every parented root creation, recorded into the
+// transition's evidence:
+// 1. **Funnel drift** — `.stateroot/` paths (minus `local/`) that changed
+//    since the parent root but were never reported through
+//    `local_store::report_written`. The funnel only tracks our own
+//    high-traffic writers (episodic, handoffs, plans); project code is
+//    out of scope by design.
+// 2. **Privacy re-verification** — every path in the NEW tree is re-run
+//    through the ignore rules. The build walk applies them on the way in;
+//    this is the independent net for a rule bug ever letting one through.
+// ---------------------------------------------------------------------------
+
+/// Audit outcome for the transition evidence (empty vecs → nothing recorded).
+pub struct WriteAudit {
+    /// Changed-but-unreported `.stateroot/` paths (capped).
+    pub unreported: Vec<String>,
+    /// Total unreported count before capping.
+    pub unreported_total: usize,
+    /// Tree paths that fail the ignore rules (capped).
+    pub privacy_violations: Vec<String>,
+    /// Total violation count before capping.
+    pub privacy_violations_total: usize,
+}
+
+const AUDIT_CAP: usize = 20;
+
+fn audit_writes(
+    repo: &Repository,
+    project_dir: &Path,
+    parent: git2::Oid,
+    new_tree: git2::Oid,
+) -> WriteAudit {
+    // Changed `.stateroot/` paths since the parent (bookkeeping IS in the
+    // tree; the audit is exactly about who wrote it).
+    let mut changed: Vec<String> = Vec::new();
+    if let (Ok(old), Ok(new)) = (
+        repo.find_commit(parent).and_then(|c| c.tree()),
+        repo.find_tree(new_tree),
+    ) {
+        if let Ok(diff) = repo.diff_tree_to_tree(Some(&old), Some(&new), None) {
+            for delta in diff.deltas() {
+                let path = delta.new_file().path().or_else(|| delta.old_file().path());
+                if let Some(p) = path {
+                    let rel = p.to_string_lossy().replace('\\', "/");
+                    if rel.starts_with(".stateroot/") && !rel.starts_with(".stateroot/local/") {
+                        changed.push(rel);
+                    }
+                }
+            }
+        }
+    }
+    // Watermark: the parent commit's time (ledger entries at/after it are
+    // "since the last root"). Same format as local_store::now_rfc3339
+    // (Zulu seconds) so string comparison is exact.
+    let since = repo
+        .find_commit(parent)
+        .ok()
+        .and_then(|c| chrono::DateTime::from_timestamp(c.time().seconds(), 0))
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_default();
+    let reported: std::collections::HashSet<String> =
+        local_store::reported_writes_since(project_dir, &since)
+            .into_iter()
+            .collect();
+    let mut unreported: Vec<String> = changed
+        .into_iter()
+        .filter(|p| !reported.contains(p))
+        .collect();
+    unreported.sort();
+    unreported.dedup();
+    let unreported_total = unreported.len();
+    unreported.truncate(AUDIT_CAP);
+
+    let privacy_violations = tree_violations(repo, project_dir, new_tree);
+    let privacy_violations_total = privacy_violations.len();
+    WriteAudit {
+        unreported,
+        unreported_total,
+        privacy_violations: privacy_violations.into_iter().take(AUDIT_CAP).collect(),
+        privacy_violations_total,
+    }
+}
+
+/// Re-run the ignore rules over every blob path in a tree (metadata-only;
+/// reads no file contents). Any hit is a privacy violation: that path must
+/// never be in a root.
+fn tree_violations(repo: &Repository, project_dir: &Path, tree_oid: git2::Oid) -> Vec<String> {
+    let rules = crate::sync_engine::ignore::IgnoreRules::load(project_dir);
+    let mut violations = Vec::new();
+    let Ok(tree) = repo.find_tree(tree_oid) else {
+        return violations;
+    };
+    let _ = tree.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
+        if entry.kind() == Some(git2::ObjectType::Blob) {
+            let name = entry.name().unwrap_or("");
+            let full = format!("{dir}{name}");
+            if rules.is_ignored(&full, false) {
+                violations.push(full);
+            }
+        }
+        git2::TreeWalkResult::Ok
+    });
+    violations
+}
+
+/// The audit's evidence value, or None when everything is clean.
+fn audit_evidence(audit: &WriteAudit) -> Option<serde_json::Value> {
+    if audit.unreported_total == 0 && audit.privacy_violations_total == 0 {
+        return None;
+    }
+    Some(serde_json::json!({
+        "unreported_writes": audit.unreported,
+        "unreported_total": audit.unreported_total,
+        "privacy_violations": audit.privacy_violations,
+        "privacy_violations_total": audit.privacy_violations_total,
+    }))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn commit_new_root(
     repo: &Repository,
@@ -578,7 +699,7 @@ fn commit_new_root(
     };
     let oid = commit_root(repo, tree, &parents, &message)?;
     let to_root = oid.to_string();
-    let evidence = crate::snap_context::build_snap_evidence(
+    let mut evidence = crate::snap_context::build_snap_evidence(
         project_dir,
         harness,
         reason,
@@ -586,6 +707,14 @@ fn commit_new_root(
         &to_root,
         snap_ctx,
     );
+    // WS3.4 write audit: parented roots only — genesis has no baseline and
+    // its whole-tree diff would be pure noise.
+    if let Some(p) = parent {
+        let audit = audit_writes(repo, project_dir, p, tree);
+        if let Some(value) = audit_evidence(&audit) {
+            evidence["write_audit"] = value;
+        }
+    }
     persist_root(
         repo,
         project_dir,
@@ -1569,5 +1698,108 @@ mod tests {
         let after = std::fs::read_to_string(&path).expect("after");
         assert_eq!(before, after);
         let _: BlobIndex = serde_json::from_str(&after).expect("valid json");
+    }
+
+    #[test]
+    fn write_audit_names_an_unreported_stateroot_write() {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        create_root(&dir, "cli", "first", None).expect("snap");
+        // Bypass the funnel with a bare write (what the audit must catch),
+        // then move a project file so a root is created.
+        write(&dir, ".stateroot/custom.md", "unreported\n");
+        write(&dir, "src/main.rs", "fn main() { println!(\"hi\"); }\n");
+        let outcome = snap_if_changed(&dir, "cli", "auto: checkpoint", None).expect("snap2");
+        let SnapOutcome::Created(_, transition) = outcome else {
+            panic!("expected a new root");
+        };
+        let audit = &transition.evidence["write_audit"];
+        let unreported = audit["unreported_writes"]
+            .as_array()
+            .expect("unreported_writes array");
+        assert!(
+            unreported
+                .iter()
+                .any(|p| p.as_str() == Some(".stateroot/custom.md")),
+            "audit must name the bypassed write: {audit}"
+        );
+    }
+
+    #[test]
+    fn write_audit_lets_funnel_reported_writes_pass() {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        create_root(&dir, "cli", "first", None).expect("snap");
+        // Routed write (append_episodic reports to the ledger) + real work.
+        local_store::append_episodic(
+            &dir,
+            &serde_json::json!({"ts": local_store::now_rfc3339(), "harness": "cli", "note": "n", "files": []}),
+        )
+        .expect("episodic");
+        write(&dir, "src/main.rs", "fn main() { println!(\"hi\"); }\n");
+        let outcome = snap_if_changed(&dir, "cli", "auto: checkpoint", None).expect("snap2");
+        let SnapOutcome::Created(_, transition) = outcome else {
+            panic!("expected a new root");
+        };
+        let unreported = transition.evidence["write_audit"]["unreported_writes"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            !unreported
+                .iter()
+                .any(|p| p.as_str() == Some(".stateroot/memories/episodic.jsonl")),
+            "funnel-reported write flagged: {:?}",
+            transition.evidence["write_audit"]
+        );
+    }
+
+    #[test]
+    fn tree_violations_flags_a_path_the_rules_forbid() {
+        let (_tmp, dir) = project();
+        let repo = ensure_repo(&dir).expect("repo");
+        // Hand-build a tree the walk would never produce: `.stateroot/local/`
+        // is hardcoded-ignored and must never appear in any root.
+        let blob = repo.blob(b"nope").expect("blob");
+        let mut builder = repo.treebuilder(None).expect("treebuilder");
+        let mut stateroot = repo.treebuilder(None).expect("treebuilder");
+        let mut local = repo.treebuilder(None).expect("treebuilder");
+        local
+            .insert("secret.txt", blob, git2::FileMode::Blob.into())
+            .expect("insert");
+        let local_oid = repo
+            .find_tree(local.write().expect("local tree"))
+            .expect("t")
+            .id();
+        stateroot
+            .insert("local", local_oid, git2::FileMode::Tree.into())
+            .expect("insert");
+        let stateroot_oid = repo
+            .find_tree(stateroot.write().expect("stateroot tree"))
+            .expect("t")
+            .id();
+        builder
+            .insert(".stateroot", stateroot_oid, git2::FileMode::Tree.into())
+            .expect("insert");
+        let tree_oid = builder.write().expect("tree");
+        let violations = tree_violations(&repo, &dir, tree_oid);
+        assert!(
+            violations
+                .iter()
+                .any(|p| p == ".stateroot/local/secret.txt"),
+            "violation not flagged: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn written_log_rotation_bounds_its_size() {
+        let (_tmp, dir) = project();
+        for i in 0..3000 {
+            local_store::report_written(&dir, &format!("memories/fill-{i}.md"));
+        }
+        let len = std::fs::metadata(dir.join(".stateroot/local/written-log.jsonl"))
+            .expect("log")
+            .len();
+        assert!(len <= 128 * 1024 + 4096, "log grew unbounded: {len}");
     }
 }

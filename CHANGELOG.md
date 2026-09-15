@@ -5,6 +5,13 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- **Snaps audit `.stateroot/` writes.** Every parented root now records a
+  write-audit in its transition evidence: `.stateroot/` paths (minus
+  `local/`) that changed without going through the new
+  `local_store::report_written` funnel (episodic, handoffs, and plan writes
+  are routed through it), plus an independent re-verification that every
+  path in the tree still passes `.gitignore`/`.staterootignore` — a second
+  privacy net behind the build walk. Clean audits record nothing.
 - **Canonical sessions can be purged.** `stateroot session purge <id> [--yes]`
   writes a tombstone, then deletes the canonical file and rebuilds the
   derived index. `session sync` will not resurrect a tombstoned id; episodic
