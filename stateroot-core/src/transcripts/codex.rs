@@ -503,16 +503,44 @@ fn extract_function_call(payload: &Value, session: &mut TranscriptSession) {
         }
         "update_plan" => apply_update_plan(&args, session),
         _ => {
-            // Shell-style calls (exec_command, shell_command, write_stdin):
-            // proven field is `cmd`. Unproven `command` is ignored.
-            if let Some(command) = args.get("cmd").and_then(|v| v.as_str()) {
-                if !command.is_empty() {
-                    for target in shell_write_targets(command) {
-                        push_unique(&mut session.files_touched, clean(&target, 300));
-                    }
+            // Shell-style calls — proven shapes BY TOOL FAMILY (repair
+            // Phase 2; the audit measured the loss on real transcripts).
+            // exec_command/write_stdin: `cmd` as a string or argv array.
+            // shell_command/shell: the historical `command` as a string or
+            // argv array (`cmd` accepted where observed). Anything else
+            // stays unpromoted.
+            let command_text: Option<String> =
+                match name {
+                    "exec_command" | "write_stdin" => string_or_argv(args.get("cmd"))
+                        .or_else(|| string_or_argv(args.get("command"))),
+                    "shell_command" | "shell" => string_or_argv(args.get("command"))
+                        .or_else(|| string_or_argv(args.get("cmd"))),
+                    _ => string_or_argv(args.get("cmd"))
+                        .or_else(|| string_or_argv(args.get("command"))),
+                };
+            if let Some(command) = command_text.filter(|c| !c.is_empty()) {
+                for target in shell_write_targets(&command) {
+                    push_unique(&mut session.files_touched, clean(&target, 300));
                 }
             }
         }
+    }
+}
+
+/// A proven command field as a plain string or an argv array joined back
+/// into shell text (both are observed historical shapes).
+fn string_or_argv(value: Option<&Value>) -> Option<String> {
+    match value {
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(Value::Array(items)) => {
+            let parts: Vec<&str> = items.iter().filter_map(|v| v.as_str()).collect();
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join(" "))
+            }
+        }
+        _ => None,
     }
 }
 
@@ -1159,9 +1187,18 @@ mod tests {
             ],
         );
         let session = parse_rollout(&rollout, project.path()).expect("session");
+        // Phase 2 restored contract: exec_command's `command` (string) IS a
+        // proven historical shape and yields via-command.md; the genuinely
+        // unproven aliases (`patch`, file_path/filename, array paths) still
+        // never promote into files_touched.
         assert_eq!(
             session.files_touched,
-            vec!["proven.rs", "proven-patch.rs", "proven-cmd.md"],
+            vec![
+                "via-command.md",
+                "proven.rs",
+                "proven-patch.rs",
+                "proven-cmd.md"
+            ],
             "files: {:?}",
             session.files_touched
         );
@@ -1169,7 +1206,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "repair fixture: red until Phase 2 (historical shell shapes)"]
     fn historical_shell_command_string_and_array_forms_keep_their_files() {
         // Repair-plan F3 fixture (audit: 4,157 historical records): the
         // historical `shell_command` shapes use `command` — as a plain

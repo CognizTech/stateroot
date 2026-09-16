@@ -356,17 +356,52 @@ pub(crate) fn canonical_from_codex(
                         // parsed exit_code.
                         let mut e = entry("tool_result");
                         e.ts = ts;
-                        e.parent_id = parent;
+                        e.parent_id = parent.clone();
                         e.content = Some(s.clone());
                         if payload_type == "custom_tool_call_output" {
                             e.native_type = Some("custom_tool_call_output".into());
                         }
                         entries.push(e);
                     }
+                    Some(Value::Array(blocks)) => {
+                        // Proven: content-block arrays. Text-bearing blocks
+                        // join into the tool_result content (repair Phase 2
+                        // — the audit's 1,997 demoted arrays); a call with
+                        // real output must not dangle as interrupted.
+                        let texts: Vec<&str> = blocks
+                            .iter()
+                            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                            .collect();
+                        if !texts.is_empty() {
+                            let mut e = entry("tool_result");
+                            e.ts = ts;
+                            e.parent_id = parent.clone();
+                            e.content = Some(texts.join("\n"));
+                            if payload_type == "custom_tool_call_output" {
+                                e.native_type = Some("custom_tool_call_output".into());
+                            }
+                            entries.push(e);
+                        } else {
+                            // Non-text blocks (image/mixed without text):
+                            // scoped fidelity representation, NOT disposable
+                            // metadata — the block kinds are recorded.
+                            let kinds: Vec<&str> = blocks
+                                .iter()
+                                .filter_map(|b| b.get("type").and_then(|t| t.as_str()))
+                                .collect();
+                            let mut e = meta_entry(
+                                "function_call_output (non-text blocks)",
+                                Some(compact(&serde_json::json!({"block_kinds": kinds}))),
+                            );
+                            e.ts = ts;
+                            e.parent_id = parent.clone();
+                            entries.push(e);
+                        }
+                    }
                     other => {
                         // Unproven shapes (object `{stdout,exit_code}`,
-                        // content-block arrays, nested payloads) stay meta
-                        // — nothing silently vanishes, nothing is promoted.
+                        // nested payloads) stay meta — nothing silently
+                        // vanishes, nothing is promoted.
                         let label = if payload_type == "custom_tool_call_output" {
                             "custom_tool_call_output (shape unverified)"
                         } else {
@@ -1290,9 +1325,11 @@ mod tests {
         )
         .expect("session");
         assert_eq!(session.session_id, "c-shapes");
+        // Phase 2 restored contract: string outputs AND text-block arrays
+        // are tool_results; objects and nested payloads stay meta.
         assert_eq!(
             kinds(&session),
-            ["meta", "tool_result", "meta", "meta", "meta"]
+            ["meta", "tool_result", "meta", "tool_result", "meta"]
         );
         let e = &session.entries;
         assert_eq!(e[1].kind, "tool_result");
@@ -1305,8 +1342,11 @@ mod tests {
         );
         assert!(e[2].content.as_deref().unwrap_or("").contains("exit_code"));
         assert_eq!(e[2].kind, "meta");
+        assert_eq!(e[3].kind, "tool_result");
+        assert_eq!(e[3].parent_id.as_deref(), Some("c3"));
+        assert_eq!(e[3].content.as_deref(), Some("block"));
         assert_eq!(
-            e[3].native_type.as_deref(),
+            e[4].native_type.as_deref(),
             Some("function_call_output (shape unverified)")
         );
         assert_eq!(e[4].kind, "meta");
@@ -1314,7 +1354,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "repair fixture: red until Phase 2 (text-block outputs)"]
     fn codex_text_block_output_arrays_become_tool_results() {
         // Repair-plan F3 fixture (audit: 1,997 historical arrays): proven
         // content-block arrays with text blocks carry the command's output

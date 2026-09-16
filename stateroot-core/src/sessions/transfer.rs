@@ -891,4 +891,52 @@ mod tests {
         assert_eq!(dsh_encode_segment("a/b"), "a~002Fb");
         assert_eq!(dsh_encode_segment("a~b"), "a~007Eb");
     }
+
+    #[test]
+    fn codex_array_output_transfers_as_a_completed_call_not_pending() {
+        // Repair Phase 2 downstream fixture: a Codex call whose output is a
+        // text-block array must arrive in DSH as a call WITH its result —
+        // demoted outputs leave the call pending (a false "interrupted").
+        let target_home = tempfile::tempdir().expect("target home");
+        let project = tempfile::tempdir().expect("project");
+        let cwd = crate::transcripts::path_for_json(project.path());
+        let meta = serde_json::json!({"type":"session_meta","payload":{"id":"c-dsh","cwd":cwd,"timestamp":"2026-07-01T10:00:00Z"}});
+        let events = vec![
+            serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"run ls"}]},"timestamp":"2026-07-01T10:00:01Z"}),
+            serde_json::json!({"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"ls -la\"}","call_id":"c1"},"timestamp":"2026-07-01T10:00:02Z"}),
+            serde_json::json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":[{"type":"output_text","text":"total 42"},{"type":"output_text","text":"drwxr-xr-x src"}]},"timestamp":"2026-07-01T10:00:03Z"}),
+        ];
+        let session = crate::sessions::extract::canonical_from_codex(
+            &meta,
+            &events,
+            std::path::Path::new("/x/rollout-dsh.jsonl"),
+            project.path(),
+        )
+        .expect("canonical");
+        let stored = crate::sessions::StoredSession {
+            session_id: "c-dsh".into(),
+            harness: "codex".into(),
+            path: std::path::PathBuf::from("/x/rollout-dsh.jsonl"),
+            cwd: project.path().to_string_lossy().to_string(),
+            imported_at: "2026-07-01T10:00:04Z".into(),
+            source_path: "/x/rollout-dsh.jsonl".into(),
+            entries: session.entries,
+        };
+        let plan = plan_dsh(&stored, target_home.path(), project.path(), "dsh-out").expect("plan");
+        crate::sessions::transfer::write(&plan).expect("write");
+        let text = std::fs::read_to_string(&plan.target_path).expect("read");
+        assert!(
+            text.contains("tool-result"),
+            "no tool-result emitted: {text}"
+        );
+        assert!(text.contains("total 42"), "result content lost: {text}");
+        assert!(
+            text.contains("drwxr-xr-x src"),
+            "result content lost: {text}"
+        );
+        assert!(
+            !text.contains("\"reason\":{\"kind\":\"pending\"}"),
+            "the call dangled as pending: {text}"
+        );
+    }
 }
