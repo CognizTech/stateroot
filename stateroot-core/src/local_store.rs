@@ -400,21 +400,13 @@ pub fn fork_context(project_dir: &Path) -> Option<ForkContext> {
     serde_json::from_str(&text).ok()
 }
 
-/// Stamp a worktree as a fork checkout (tmp+sync+rename; local/ never syncs).
+/// Stamp a worktree as a fork checkout (checked atomic replace; local/
+/// never syncs).
 pub fn write_fork_context(project_dir: &Path, ctx: &ForkContext) -> std::io::Result<()> {
     let path = root(project_dir).join(FORK_CONTEXT_REL);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(
-        &tmp,
-        format!(
-            "{}\n",
-            serde_json::to_string_pretty(ctx).unwrap_or_default()
-        ),
-    )?;
-    std::fs::rename(&tmp, &path)
+    let text = serde_json::to_string_pretty(ctx)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    crate::safe_io::atomic_replace(&path, format!("{text}\n").as_bytes())
 }
 
 /// `memories/x` → `.stateroot/memories/x` (the form git tree paths take).
@@ -448,9 +440,7 @@ pub fn report_written(project_dir: &Path, root_rel: &str) {
                 .find('\n')
                 .map(|i| from + i + 1)
                 .unwrap_or(from);
-            let tmp = path.with_extension("tmp");
-            std::fs::write(&tmp, &text[from..])?;
-            std::fs::rename(&tmp, &path)?;
+            crate::safe_io::atomic_replace(&path, &text.as_bytes()[from..])?;
         }
         Ok(())
     })();

@@ -13,8 +13,7 @@
 //! Migrates legacy `.stateroot/memory.md` / `~/.stateroot/memory.md` bullets
 //! into `MEMORY.md` once, then stops writing those files.
 
-use std::fs::{self, File};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::local_store;
@@ -225,19 +224,9 @@ fn is_only_skeleton(text: &str) -> bool {
     split_entries(text).is_empty()
 }
 
-/// Atomic write via temp + rename (best-effort drift guard between harnesses).
+/// Atomic write via checked replacement (drift guard between harnesses).
 fn atomic_write_locked(path: &Path, content: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("tmp");
-    {
-        let mut out = File::create(&tmp)?;
-        out.write_all(content.as_bytes())?;
-        out.sync_all()?;
-    }
-    fs::rename(&tmp, path)?;
-    Ok(())
+    crate::safe_io::atomic_replace(path, content.as_bytes())
 }
 
 fn write_memory_body(path: &Path, entries: &[String], global: bool) -> std::io::Result<()> {

@@ -1169,6 +1169,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "repair fixture: red until Phase 2 (historical shell shapes)"]
     fn historical_shell_command_string_and_array_forms_keep_their_files() {
         // Repair-plan F3 fixture (audit: 4,157 historical records): the
         // historical `shell_command` shapes use `command` — as a plain

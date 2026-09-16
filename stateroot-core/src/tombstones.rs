@@ -17,13 +17,11 @@
 //! resurrection shield; an incremental indexer that skipped this gate
 //! would resurrect purged sessions into FTS.
 
-use std::fs::{self, File};
-use std::io::Write as _;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::fs_lock::FileLock;
 use crate::local_store::{self, now_rfc3339};
 
 /// Binary marker so `strings` can prove WS4 is in the linked CLI.
@@ -125,23 +123,11 @@ fn read_file(project_dir: &Path) -> Result<TombstoneFile, TombstoneError> {
 
 fn atomic_write(project_dir: &Path, file: &TombstoneFile) -> Result<(), TombstoneError> {
     let path = path(project_dir);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(io_err(&path))?;
-    }
-    let tmp = path.with_file_name("tombstones.json.tmp");
     let text = serde_json::to_string(file).map_err(|source| TombstoneError::Json {
         path: path.clone(),
         source,
     })?;
-    {
-        let mut out = File::create(&tmp).map_err(io_err(&tmp))?;
-        out.write_all(text.as_bytes()).map_err(io_err(&tmp))?;
-        out.sync_all().map_err(io_err(&tmp))?;
-    }
-    #[cfg(windows)]
-    let _ = fs::remove_file(&path);
-    fs::rename(&tmp, &path).map_err(io_err(&path))?;
-    Ok(())
+    crate::safe_io::atomic_replace(&path, text.as_bytes()).map_err(io_err(&path))
 }
 
 /// Load the tombstone set. Missing file is empty. Unreadable file follows
@@ -171,7 +157,14 @@ pub fn record(
     harness: &str,
 ) -> Result<Tombstone, TombstoneError> {
     let _ = WS4_TOMBSTONE_SESSION_PURGE;
-    let _lock = FileLock::acquire(lock_path(project_dir));
+    // Mandatory lock with stale recovery (repair Phase 1) — a failed
+    // acquisition fails closed, it never proceeds unlocked.
+    let _lock = crate::safe_io::ResourceLock::acquire(lock_path(project_dir)).map_err(|e| {
+        TombstoneError::Io {
+            path: lock_path(project_dir),
+            source: std::io::Error::new(std::io::ErrorKind::ResourceBusy, e),
+        }
+    })?;
     let mut file = read_file(project_dir)?;
     if let Some(existing) = file
         .records

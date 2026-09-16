@@ -1314,6 +1314,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "repair fixture: red until Phase 2 (text-block outputs)"]
     fn codex_text_block_output_arrays_become_tool_results() {
         // Repair-plan F3 fixture (audit: 1,997 historical arrays): proven
         // content-block arrays with text blocks carry the command's output

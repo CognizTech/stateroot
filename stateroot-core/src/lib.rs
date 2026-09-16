@@ -34,6 +34,7 @@ pub mod presentation;
 pub mod proposals;
 pub mod roots;
 pub mod rules;
+pub mod safe_io;
 pub mod seed;
 pub mod session_identity;
 pub mod sessions;

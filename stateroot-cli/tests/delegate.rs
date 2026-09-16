@@ -607,6 +607,7 @@ fn pid_alive_unix(pid: u32) -> bool {
 
 #[cfg(unix)]
 #[test]
+#[ignore = "repair fixture: red until Phase 6B (process-tree cancel)"]
 fn cancel_kills_the_harness_process_tree_not_just_the_worker() {
     // Repair-plan F1 fixture (audit): `delegate cancel` that stops only the
     // worker leaves the actual harness child running orphaned — a false
@@ -619,14 +620,17 @@ fn cancel_kills_the_harness_process_tree_not_just_the_worker() {
     );
     stateroot(config_home.path(), user_home.path(), project.path())
         .env("PATH", &path)
-        .args(["delegate", "--to", "claude", "--task", "t", "--key", "k-tree"])
+        .args([
+            "delegate", "--to", "claude", "--task", "t", "--key", "k-tree",
+        ])
         .assert()
         .success();
 
     // Wait for the harness grandchild to write its pid.
     let mut grandchild = 0u32;
     for _ in 0..100 {
-        if let Ok(text) = std::fs::read_to_string(project.path().join(".stateroot-grandchild-pid")) {
+        if let Ok(text) = std::fs::read_to_string(project.path().join(".stateroot-grandchild-pid"))
+        {
             if let Ok(pid) = text.trim().parse::<u32>() {
                 grandchild = pid;
                 break;

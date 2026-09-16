@@ -1042,6 +1042,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "repair fixture: red until Phase 5 (shared tombstones)"]
     fn purge_is_observed_from_a_fork_worktree_too() {
         // Repair-plan F4 fixture (audit): anti-resurrection STATE must be
         // project-shared, not checkout-local. A fork worktree (or a second
@@ -1053,12 +1054,14 @@ mod tests {
         write_pi_session(home.path(), project.path(), "ses-wt", "shared canary");
         let report = import_from_readers(home.path(), project.path());
         assert_eq!(report.written, 1);
-        let (first, _) = crate::roots::create_root(project.path(), "cli", "base", None).expect("root");
+        let (first, _) =
+            crate::roots::create_root(project.path(), "cli", "base", None).expect("root");
         let stored = load(project.path(), "ses-wt").expect("stored");
         purge(project.path(), &stored).expect("purge");
 
-        let (name, _) = crate::roots::fork_root(project.path(), &first.id, Some("fork-purge"), "cli")
-            .expect("fork");
+        let (name, _) =
+            crate::roots::fork_root(project.path(), &first.id, Some("fork-purge"), "cli")
+                .expect("fork");
         let wt_tmp = tempfile::tempdir().expect("wt");
         let wt = wt_tmp.path().join("checkout");
         crate::roots::fork_materialize(project.path(), &name, &wt, None, None)

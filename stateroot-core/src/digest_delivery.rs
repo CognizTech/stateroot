@@ -378,13 +378,8 @@ fn migrate_legacy(project_dir: &Path, ledger: &mut Ledger) {
 
 fn write_ledger(project_dir: &Path, ledger: &Ledger) -> std::io::Result<()> {
     let path = ledger_path(project_dir);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
     let text = serde_json::to_string_pretty(ledger).unwrap_or_else(|_| "{}".into());
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, format!("{text}\n"))?;
-    fs::rename(&tmp, path)
+    crate::safe_io::atomic_replace(&path, format!("{text}\n").as_bytes())
 }
 
 #[cfg(test)]

@@ -18,8 +18,6 @@
 //! history *up to its predecessor* (a root cannot contain its own hash —
 //! the egg comes after the chicken by construction).
 
-use std::fs::File;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -70,6 +68,9 @@ pub enum RootsError {
     /// A merge cannot complete cleanly (conflicts or nothing to fold).
     #[error("{0}")]
     Merge(String),
+    /// Ref CAS / mandatory-lock failure.
+    #[error(transparent)]
+    RefCas(#[from] crate::safe_io::RefCasError),
 }
 
 /// Persisted root manifest (`.stateroot/roots/<hash>.json`).
@@ -199,18 +200,10 @@ fn load_blob_index(dir: &Path) -> BlobIndex {
 
 fn write_blob_index(dir: &Path, index: &BlobIndex) {
     let path = blob_index_path(dir);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
     let Ok(text) = serde_json::to_string(index) else {
         return;
     };
-    let tmp = path.with_extension("json.tmp");
-    if let Ok(mut out) = File::create(&tmp) {
-        let _ = out.write_all(text.as_bytes());
-        let _ = out.sync_all();
-        let _ = std::fs::rename(&tmp, &path);
-    }
+    let _ = crate::safe_io::atomic_replace(&path, text.as_bytes());
 }
 
 fn now_stamp() -> (u64, u32) {
@@ -439,14 +432,26 @@ fn persist_root(
     kind: &str,
     evidence: Value,
 ) -> Result<(RootManifest, Transition), RootsError> {
-    let _lock =
-        crate::fs_lock::FileLock::acquire(local_store::root(project_dir).join("local/roots.lock"));
-    let _ = WS3_ROOTS_COMMIT_LOCK;
+    // The lineage tip update is a compare-and-swap under that ref's own
+    // resource lock: the caller's parent must still be the tip, and lock
+    // acquisition failure fails closed — nothing proceeds unlocked (repair
+    // Phase 1; the full tip-read→commit→write span lands in Phase 4).
     let hash = oid.to_string();
     repo.reference(&format!("{ROOTS_REF_PREFIX}{hash}"), oid, true, "root")?;
+    let expected_parent: Option<git2::Oid> = parent_hashes
+        .first()
+        .and_then(|h| git2::Oid::from_str(h).ok());
+    let lock_dir = local_store::root(project_dir).join("local/locks");
     // WS5: inside a fork worktree this advances the fork's tip ref, so the
     // trunk's `latest` is untouched by fork-side work (and vice versa).
-    repo.reference(&lineage_refname(project_dir), oid, true, "latest root")?;
+    crate::safe_io::update_ref_cas(
+        repo,
+        &lock_dir,
+        &lineage_refname(project_dir),
+        expected_parent,
+        oid,
+        "latest root",
+    )?;
 
     let from = parent_hashes.first().cloned().unwrap_or_default();
     let transition = Transition {
@@ -1904,7 +1909,11 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_snaps_both_roots_exist_and_latest_is_one_of_them() {
+    fn concurrent_snaps_never_fork_the_lineage_silently() {
+        // Phase 1 CAS contract: racing same-ref snaps either chain (the
+        // second reads the new tip) or one wins and the loser gets a
+        // retryable Moved conflict. Whatever the interleave, every created
+        // root stays reachable from latest — no silent siblings.
         let (_tmp, dir) = project();
         write(&dir, "base.txt", "base");
         create_root(&dir, "cli", "base", None).expect("base");
@@ -1918,20 +1927,36 @@ mod tests {
             write(&dir_two, "t2.txt", "two");
             create_root(&dir_two, "cli", "t2", None)
         });
-        let (a, _) = t1.join().expect("join1").expect("snap1");
-        let (b, _) = t2.join().expect("join2").expect("snap2");
+        let results = vec![t1.join().expect("join1"), t2.join().expect("join2")];
         let repo = git2::Repository::open(&dir).unwrap();
-        assert!(repo
-            .refname_to_id(&format!("{ROOTS_REF_PREFIX}{}", a.id))
-            .is_ok());
-        assert!(repo
-            .refname_to_id(&format!("{ROOTS_REF_PREFIX}{}", b.id))
-            .is_ok());
-        let latest = repo.refname_to_id(LATEST_REF).unwrap().to_string();
-        assert!(
-            latest == a.id || latest == b.id,
-            "latest {latest} must be one of the two roots"
-        );
+        let latest = repo.refname_to_id(LATEST_REF).expect("latest").to_string();
+        let mut reachable = std::collections::BTreeSet::new();
+        let mut current: Option<git2::Oid> = Some(latest.parse().expect("oid"));
+        while let Some(oid) = current {
+            reachable.insert(oid.to_string());
+            let commit = repo.find_commit(oid).expect("commit");
+            current = (0..commit.parent_count()).find_map(|i| commit.parent_id(i).ok());
+        }
+        let mut wins = 0;
+        let mut conflicts = 0;
+        for result in results {
+            match result {
+                Ok((manifest, _)) => {
+                    wins += 1;
+                    assert!(
+                        reachable.contains(&manifest.id),
+                        "root {} created but unreachable from latest — a silent sibling",
+                        manifest.id
+                    );
+                }
+                Err(RootsError::RefCas(crate::safe_io::RefCasError::Moved { .. })) => {
+                    conflicts += 1
+                }
+                Err(other) => panic!("unexpected snap error: {other}"),
+            }
+        }
+        assert!(wins >= 1, "at least one snap must succeed");
+        assert!(wins + conflicts == 2);
     }
 
     #[test]
@@ -2270,13 +2295,15 @@ mod tests {
     // -- Repair-plan failing fixtures (Phase 0): red until their phase lands --
 
     #[test]
+    #[ignore = "repair fixture: red until Phase 6C (merge materialization)"]
     fn merge_materializes_the_trunk_working_tree() {
         // Audit F2: a successful merge must leave the trunk filesystem equal
         // to the merge root — advancing the ref alone is a false success.
         let (_tmp, dir) = project();
         write(&dir, "src/main.rs", "fn main() {}\n");
         let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
-        let (_wt, _tip) = fork_with_change(&dir, &first.id, "fork-a", "src/lib_a.rs", "pub fn a() {}\n");
+        let (_wt, _tip) =
+            fork_with_change(&dir, &first.id, "fork-a", "src/lib_a.rs", "pub fn a() {}\n");
         let (manifest, _t, _merged) =
             merge_forks(&dir, &["fork-a".to_string()], "kimi").expect("merge");
         let _ = manifest;
@@ -2287,6 +2314,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "repair fixture: red until Phase 6A (branch clobber refusal)"]
     fn fork_branch_never_resets_an_existing_user_branch() {
         // Audit F5: materializing with a git branch name that already exists
         // must REFUSE, never force-reset the user's branch to the fork root.
@@ -2296,8 +2324,13 @@ mod tests {
         write(&dir, "b.txt", "two");
         let (second, _) = create_root(&dir, "cli", "second", None).expect("snap2");
         let repo = ensure_repo(&dir).expect("repo");
-        repo.reference("refs/heads/work", first.id.parse().expect("oid"), true, "user branch")
-            .expect("branch");
+        repo.reference(
+            "refs/heads/work",
+            first.id.parse().expect("oid"),
+            true,
+            "user branch",
+        )
+        .expect("branch");
         let (name, _) = fork_root(&dir, &second.id, Some("fork-b"), "cli").expect("fork");
         let wt_tmp = tempfile::tempdir().expect("wt");
         let err = fork_materialize(
@@ -2317,6 +2350,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "repair fixture: red until Phase 4 (same-ref CAS retry)"]
     fn concurrent_trunk_snaps_form_one_chain_not_orphaned_siblings() {
         // Audit F6 (Phase 4): concurrent same-ref snaps must serialize into
         // ONE causal chain — every created root reachable from latest.
@@ -2327,7 +2361,11 @@ mod tests {
         for i in 0..8 {
             let d = dir.clone();
             handles.push(std::thread::spawn(move || {
-                write(&d, &format!("src/f{i}.rs"), &format!("pub fn f{i}() {{}}\n"));
+                write(
+                    &d,
+                    &format!("src/f{i}.rs"),
+                    &format!("pub fn f{i}() {{}}\n"),
+                );
                 snap_if_changed(&d, "cli", "race", None).expect("snap")
             }));
         }

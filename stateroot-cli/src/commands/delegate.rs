@@ -87,7 +87,7 @@ fn append_event(record: &mut Value, event: &str, detail: &str) {
 }
 
 fn save_record(path: &Path, record: &Value) -> Result<()> {
-    std::fs::write(path, format!("{}\n", serde_json::to_string_pretty(record)?))?;
+    stateroot_core::safe_io::atomic_replace_json(path, record)?;
     Ok(())
 }
 
@@ -453,10 +453,7 @@ fn write_record(dir: &Path, record: &Value) -> Result<()> {
         .get("id")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("record without id"))?;
-    std::fs::write(
-        dir.join(format!("{id}.json")),
-        format!("{}\n", serde_json::to_string_pretty(record)?),
-    )?;
+    stateroot_core::safe_io::atomic_replace_json(&dir.join(format!("{id}.json")), record)?;
     Ok(())
 }
 
@@ -561,13 +558,7 @@ pub(crate) fn live_status(path: &Path, record: &Value) -> String {
         obj.remove("status");
         obj.insert("outcome".into(), json!("lost"));
         obj.insert("ended_at".into(), json!(now_rfc3339()));
-        let _ = std::fs::write(
-            path,
-            format!(
-                "{}\n",
-                serde_json::to_string_pretty(&reaped).unwrap_or_default()
-            ),
-        );
+        let _ = stateroot_core::safe_io::atomic_replace_json(path, &reaped);
         return "lost".to_string();
     }
     "unknown".to_string()
