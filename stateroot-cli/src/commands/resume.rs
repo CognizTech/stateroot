@@ -298,6 +298,14 @@ pub fn render_handoff_digest_full(
     if !objective.is_empty() {
         out.push_str(&format!("## Objective\n\n{objective}\n\n"));
     }
+    // WS5: a worktree-bound handoff redirects WHERE the receiver works —
+    // print it before anything else work-related so it cannot be missed.
+    let worktree = get_str("worktree");
+    if !worktree.is_empty() {
+        out.push_str(&format!(
+            "**Work in: {worktree}** — this handoff is bound to a fork worktree; do NOT edit the caller's tree.\n\n"
+        ));
+    }
     let lineage = project_dir
         .map(stateroot_core::roots::compose_digest_section)
         .unwrap_or_default();

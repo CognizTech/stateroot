@@ -55,6 +55,42 @@ fn delegations_dir(project_dir: &Path) -> PathBuf {
     local_store::root(project_dir).join("delegations")
 }
 
+/// Append one event to a record's bounded history (64 events / 32 KiB of
+/// JSON — honest, lossy observability: drops are counted, never silent).
+fn append_event(record: &mut Value, event: &str, detail: &str) {
+    const MAX_EVENTS: usize = 64;
+    const MAX_BYTES: usize = 32 * 1024;
+    let obj = record.as_object_mut().expect("record object");
+    let mut dropped = obj
+        .get("dropped_events")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    {
+        let events = obj.entry("events").or_insert_with(|| json!([]));
+        let arr = events.as_array_mut().expect("events array");
+        let seq = dropped + arr.len() as u64 + 1;
+        arr.push(json!({"seq": seq, "ts": now_rfc3339(), "event": event, "detail": detail}));
+        while arr.len() > MAX_EVENTS {
+            arr.remove(0);
+            dropped += 1;
+        }
+        while arr.len() > 1
+            && serde_json::to_string(&*arr).map(|s| s.len()).unwrap_or(0) > MAX_BYTES
+        {
+            arr.remove(0);
+            dropped += 1;
+        }
+    }
+    if dropped > 0 {
+        obj.insert("dropped_events".into(), json!(dropped));
+    }
+}
+
+fn save_record(path: &Path, record: &Value) -> Result<()> {
+    std::fs::write(path, format!("{}\n", serde_json::to_string_pretty(record)?))?;
+    Ok(())
+}
+
 /// Run `stateroot delegate` (spawn by default; `list` / `status` observe).
 pub fn run(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
     match &args.action {
@@ -64,6 +100,10 @@ pub fn run(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
         }
         Some(DelegateAction::Status { id }) => {
             status(ctx, id)?;
+            Ok(0)
+        }
+        Some(DelegateAction::Cancel { id }) => {
+            cancel(ctx, id)?;
             Ok(0)
         }
         None if args._worker => worker(ctx, args),
@@ -134,9 +174,48 @@ fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
 
     let ts = now_rfc3339();
     let stamp = ts.replace([':', '.'], "-");
-    let record_id = format!("{stamp}-{id}");
+    // Idempotency key (WS5): a caller-supplied key IS the record id, so a
+    // replayed spawn re-attaches (live) or resubmits (lost) instead of
+    // blind double-spawning — OpenViking's Idempotency-Key pattern.
+    let record_id = args.key.clone().unwrap_or_else(|| format!("{stamp}-{id}"));
     let dir = delegations_dir(&ctx.cwd);
     std::fs::create_dir_all(&dir)?;
+
+    // Idempotency gate: an existing record with the same key decides.
+    if let Some((_path, existing)) = load_record(&ctx.cwd, &record_id) {
+        if let Some(outcome) = existing.get("outcome").and_then(Value::as_str) {
+            anyhow::bail!(
+                "delegation key `{record_id}` already finished ({outcome}) — pick a new key"
+            );
+        }
+        let pid = existing.get("pid").and_then(Value::as_u64).unwrap_or(0) as u32;
+        if pid != 0 && pid_alive(pid) {
+            println!(
+                "delegation {record_id} already running (pid {pid}) — same key, no double-spawn"
+            );
+            return Ok(0);
+        }
+        // Lost worker: fall through and resubmit under the same key.
+    }
+
+    // The work directory: a fork worktree isolates the subagent (WS5);
+    // records and lineage stay with the CALLING project.
+    let work_dir: PathBuf = match &args.worktree {
+        Some(w) => {
+            let p = PathBuf::from(w);
+            if !p.is_dir() {
+                anyhow::bail!("worktree {w} is not a directory");
+            }
+            if !p.join(".stateroot").is_dir() {
+                anyhow::bail!(
+                    "worktree {w} has no .stateroot — `stateroot fork <root> --worktree` carries it, or run `stateroot init` there"
+                );
+            }
+            p
+        }
+        None => ctx.cwd.clone(),
+    };
+
     let log_name = format!("{stamp}-{id}-d{depth}.log");
     let log_path = dir.join(&log_name);
     let log_rel = format!(".stateroot/delegations/{log_name}");
@@ -156,7 +235,13 @@ fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
         "--_worker".to_string(),
         "--record-id".to_string(),
         record_id.clone(),
+        "--record-in".to_string(),
+        ctx.cwd.to_string_lossy().to_string(),
     ];
+    if let Some(w) = &args.worktree {
+        worker_args.push("--worktree".to_string());
+        worker_args.push(w.clone());
+    }
     for skill in &args.skills {
         worker_args.push("--skill".to_string());
         worker_args.push(skill.clone());
@@ -169,7 +254,7 @@ fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
             std::env::current_exe().map_err(|e| anyhow::anyhow!("resolve own binary: {e}"))?,
         );
         cmd.args(&worker_args)
-            .current_dir(&ctx.cwd)
+            .current_dir(&work_dir)
             .env(DEPTH_ENV, (depth + 1).to_string())
             .stdout(log_file)
             .stderr(log_err);
@@ -188,7 +273,7 @@ fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
 
     // The running record exists before the parent exits, so `list` sees
     // `running` even if the worker dies instantly.
-    let record = json!({
+    let mut record = json!({
         "schema_version": "stateroot.delegation.v1",
         "id": record_id,
         "ts": ts,
@@ -200,6 +285,10 @@ fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
         "pid": pid,
         "log": log_rel,
     });
+    if let Some(w) = &args.worktree {
+        record["worktree"] = json!(w);
+    }
+    append_event(&mut record, "spawn", &format!("pid {pid}"));
     write_record(&dir, &record)?;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&record)?);
@@ -232,6 +321,13 @@ fn worker(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
         .task
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("worker requires --task <text>"))?;
+    // The record and the lineage note belong to the CALLING project even
+    // when the work runs in a fork worktree (WS5 --worktree).
+    let record_root: PathBuf = args
+        .record_in
+        .clone()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| ctx.cwd.clone());
     let started = std::time::Instant::now();
     let result = worker_run(ctx, args, to, task);
     match result {
@@ -242,7 +338,7 @@ fn worker(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
                 "failed"
             };
             finalize(
-                ctx,
+                &record_root,
                 record_id,
                 outcome,
                 output.status.code(),
@@ -255,12 +351,18 @@ fn worker(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
                     output.stderr
                 ),
             )?;
-            episodic_lineage(ctx, &id, task, outcome, started.elapsed().as_secs())?;
+            episodic_lineage(
+                &record_root,
+                &id,
+                task,
+                outcome,
+                started.elapsed().as_secs(),
+            )?;
             Ok(output.status.code().unwrap_or(1))
         }
         Err(err) => {
             let _ = finalize(
-                ctx,
+                &record_root,
                 record_id,
                 "failed",
                 None,
@@ -316,18 +418,18 @@ fn worker_run(
 
 /// Rewrite a record file with final fields (status → outcome).
 fn finalize(
-    ctx: &Ctx,
+    record_root: &Path,
     record_id: &str,
     outcome: &str,
     exit_code: Option<i32>,
     duration_ms: u128,
     log_append: &str,
 ) -> Result<()> {
-    let Some((path, mut record)) = load_record(&ctx.cwd, record_id) else {
+    let Some((path, mut record)) = load_record(record_root, record_id) else {
         anyhow::bail!("worker record `{record_id}` is gone — cannot finalize");
     };
     if let Some(log_rel) = record.get("log").and_then(Value::as_str) {
-        let log_path = ctx.cwd.join(log_rel);
+        let log_path = record_root.join(log_rel);
         use std::io::Write as _;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
@@ -341,10 +443,8 @@ fn finalize(
     obj.insert("exit_code".into(), json!(exit_code));
     obj.insert("duration_ms".into(), json!(duration_ms));
     obj.insert("ended_at".into(), json!(now_rfc3339()));
-    std::fs::write(
-        &path,
-        format!("{}\n", serde_json::to_string_pretty(&record)?),
-    )?;
+    append_event(&mut record, "finalize", outcome);
+    save_record(&path, &record)?;
     Ok(())
 }
 
@@ -525,7 +625,7 @@ fn status(ctx: &Ctx, id: &str) -> Result<()> {
 
 /// Episodic lineage note (written by the worker at completion).
 fn episodic_lineage(
-    ctx: &Ctx,
+    record_root: &Path,
     harness_id: &str,
     task: &str,
     outcome: &str,
@@ -540,8 +640,91 @@ fn episodic_lineage(
         ),
         "files": [],
     });
-    local_store::append_episodic(&ctx.cwd, &record)?;
+    local_store::append_episodic(record_root, &record)?;
     Ok(())
+}
+
+/// Two-phase cancel (WS5): persist `cancelling` first — `list`/`status`
+/// show the transient phase — then stop the worker and record `salvaged`.
+/// Partial work is kept and marked mergeable, never silently discarded
+/// (OpenViking documents "no rollback"; we can say "no rollback needed").
+fn cancel(ctx: &Ctx, id: &str) -> Result<()> {
+    ctx.require_project()?;
+    let Some((path, mut record)) = load_record(&ctx.cwd, id) else {
+        anyhow::bail!("no delegation matches `{id}` — run `stateroot delegate list`");
+    };
+    if let Some(outcome) = record.get("outcome").and_then(Value::as_str) {
+        println!("delegation {id} is already {outcome}");
+        return Ok(());
+    }
+    let pid = record.get("pid").and_then(Value::as_u64).unwrap_or(0) as u32;
+
+    // Phase 1: persisted cancelling — observers see it immediately.
+    {
+        let obj = record.as_object_mut().unwrap();
+        obj.remove("status");
+        obj.insert("outcome".into(), json!("cancelling"));
+    }
+    append_event(&mut record, "cancel-requested", &format!("pid {pid}"));
+    save_record(&path, &record)?;
+
+    if pid != 0 && pid_alive(pid) {
+        stop_pid(pid);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while pid_alive(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+    let confirmed = pid == 0 || !pid_alive(pid);
+
+    // Phase 2: terminal salvaged — partial work kept, honesty about whether
+    // the worker was confirmed stopped.
+    {
+        let obj = record.as_object_mut().unwrap();
+        obj.insert("outcome".into(), json!("salvaged"));
+        obj.insert("cancel_confirmed".into(), json!(confirmed));
+        obj.insert("ended_at".into(), json!(now_rfc3339()));
+    }
+    append_event(
+        &mut record,
+        if confirmed {
+            "cancel-confirmed"
+        } else {
+            "cancel-unconfirmed"
+        },
+        "partial work kept",
+    );
+    save_record(&path, &record)?;
+    let log_rel = record.get("log").and_then(Value::as_str).unwrap_or("");
+    println!(
+        "delegation {id} salvaged{} — partial work kept (log: {log_rel})",
+        if confirmed {
+            ""
+        } else {
+            " (worker not confirmed stopped)"
+        }
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+fn stop_pid(pid: u32) {
+    let _ = std::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+#[cfg(windows)]
+fn stop_pid(pid: u32) {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 }
 
 /// The last N delegation records for the digest section.
@@ -580,6 +763,27 @@ mod tests {
         assert_eq!(parse_depth(Some("1")), 1);
         assert_eq!(parse_depth(Some(" 2 ")), 2);
         assert!(parse_depth(Some("2")) >= MAX_DELEGATION_DEPTH);
+    }
+
+    #[test]
+    fn append_event_caps_count_and_bytes_with_a_dropped_counter() {
+        let mut record = json!({"id": "r1"});
+        for i in 0..70 {
+            append_event(&mut record, "tick", &format!("event {i}"));
+        }
+        let events = record["events"].as_array().expect("events");
+        assert_eq!(events.len(), 64, "count-capped");
+        assert_eq!(record["dropped_events"], json!(6));
+        assert_eq!(events[0]["event"], "tick");
+        // Monotonic seq continues across the drop boundary.
+        assert_eq!(events[0]["seq"], json!(7));
+        // Byte cap: a huge detail drops ALL older history but never the
+        // newest entry, even when that entry alone exceeds the budget.
+        let big = "x".repeat(40 * 1024);
+        append_event(&mut record, "big", &big);
+        let events = record["events"].as_array().expect("events");
+        assert_eq!(events.len(), 1, "older history must be dropped");
+        assert_eq!(events.last().expect("last")["event"], "big");
     }
 
     #[test]

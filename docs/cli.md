@@ -71,9 +71,53 @@ stateroot delegate status <id>             # the record + a bounded log tail
   skill discovery; `--json` prints the running record as the spawn envelope.
   `--timeout-secs` and `--max-output-chars` no longer exist (the sync
   contract they belonged to is gone).
+- **Idempotency** — `--key <k>` makes the record id the key: a replayed
+  spawn re-attaches to a live worker or refuses a finished one, never a
+  blind double-spawn.
+- **Two-phase cancel** — `stateroot delegate cancel <id>` persists
+  `cancelling` (visible in `list` immediately), stops the worker per-OS
+  with a 5s confirm, and records `salvaged`: partial work is kept and
+  marked, never silently discarded. `cancel_confirmed` records whether the
+  worker was verified stopped.
+- **Event history** — records carry a bounded `events` array (64 events /
+  32 KiB, `dropped_events` counts the loss).
+- **Fork worktrees** — `--worktree <path>` runs the subagent inside a fork
+  checkout (see below); the record and episodic lineage stay with the
+  calling project.
 
 For an interactive harness session use `stateroot harness run` instead;
 `delegate` is the detached, recorded, non-interactive route.
+
+## `stateroot fork` / `stateroot merge` — parallel plan execution
+
+```bash
+stateroot fork <root> --worktree <path> [--branch NAME] [--plan ID]
+stateroot merge <fork> [<fork>…]
+```
+
+`fork --worktree` materializes an isolated checkout of the fork root's
+tree at `<path>` — the snapshot's `.stateroot/` state (plans, handoffs,
+memory) physically travels with it, so the parallel agent starts fully
+briefed. `--plan` records which plan the fork claims. HEAD is detached at
+the root commit by default (your branches stay clean); `--branch NAME`
+checks out a real `refs/heads/NAME` for PR-ready work. A machine-local
+`fork-context.json` stamp makes snaps inside the worktree chain on the
+fork ref (`refs/stateroot/forks/<name>`), never on the trunk's
+`refs/stateroot/latest` — parallel lines of roots, not one interleaved
+timeline. `.stateroot/worktrees/` is hardcoded-ignored; nest checkouts
+outside the project tree (a sibling directory is the recommended shape).
+
+`stateroot merge` folds fork tips back into the trunk: each fork is
+3-way-merged into the accumulated union (a fast fold head, so earlier
+forks' work can't be silently dropped), then committed as ONE root with N
+parents — trunk + every merged fork tip. Conflicts produce a per-path
+report and no merge root (nothing is ever half-applied); forks already
+contained are reported as nothing-to-merge. Fork refs stay as history;
+remove checkouts with `git worktree remove <path>`.
+
+`stateroot handoff write --worktree <path>` binds a handoff to a
+directory: the receiver's digest opens with **Work in: \<path\>** so the
+executor works in the fork, not the caller's tree.
 
 ## Extension subcommands — git-style `stateroot-<name>` on PATH
 

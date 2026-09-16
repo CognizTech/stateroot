@@ -72,6 +72,7 @@ pub struct HandoffWriteFlags<'a> {
     pub next: &'a [String],
     pub decisions: &'a [String],
     pub failures: &'a [String],
+    pub worktree: Option<&'a str>,
 }
 
 const HANDOFF_INPUT_KEYS: &[&str] = &[
@@ -139,6 +140,8 @@ struct HandoffInput {
     relevant_skills: Option<Vec<String>>,
     artifacts: Option<Vec<String>>,
     traces: Option<Vec<String>>,
+    /// WS5: bind the receiving agent to a directory (fork worktree).
+    worktree: Option<String>,
 }
 
 fn coerce_decision_item(item: &Value) -> Option<String> {
@@ -277,6 +280,9 @@ fn apply_write_flags(mut input: HandoffInput, flags: &HandoffWriteFlags<'_>) -> 
     }
     if !flags.failures.is_empty() {
         input.failures = Some(flags.failures.to_vec());
+    }
+    if let Some(worktree) = flags.worktree.filter(|text| !text.trim().is_empty()) {
+        input.worktree = Some(worktree.to_string());
     }
     input
 }
@@ -677,6 +683,12 @@ fn assemble_packet(
         if !tail.is_empty() {
             packet["conversation_tail"] = Value::Array(tail);
         }
+    }
+
+    // WS5: a handoff can bind the receiving agent to a fork worktree —
+    // the digest then tells them to work THERE, not in the caller's tree.
+    if let Some(worktree) = nonempty(input.worktree.take()) {
+        packet["worktree"] = json!(worktree);
     }
 
     if let Ok(Some(root)) = stateroot_core::roots::latest_root(context.project_dir) {

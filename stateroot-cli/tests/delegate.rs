@@ -441,3 +441,154 @@ fn digest_section_stays_absent_without_delegations() {
         "stdout: {stdout}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn same_key_never_double_spawns() {
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    let (_bin, path) = fake_claude(
+        "#!/bin/sh\nwhile [ ! -f .stateroot-delegate-test-go ]; do sleep 0.2; done\necho done\n",
+    );
+
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .env("PATH", &path)
+        .args(["delegate", "--to", "claude", "--task", "t", "--key", "k1"])
+        .assert()
+        .success();
+    // Same key while the worker is alive: re-attach, never a second spawn.
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .env("PATH", &path)
+        .args(["delegate", "--to", "claude", "--task", "t", "--key", "k1"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(stdout.contains("already running"), "stdout: {stdout}");
+    assert!(stdout.contains("no double-spawn"), "stdout: {stdout}");
+    assert_eq!(read_records(project.path()).len(), 1, "one record only");
+
+    // Same key after a terminal outcome is a hard error, not a respawn.
+    std::fs::write(project.path().join(".stateroot-delegate-test-go"), b"go").expect("sentinel");
+    let record = wait_for_outcome(project.path(), 60);
+    assert_eq!(record["outcome"], "completed");
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .env("PATH", &path)
+        .args(["delegate", "--to", "claude", "--task", "t", "--key", "k1"])
+        .assert()
+        .failure();
+}
+
+#[cfg(unix)]
+#[test]
+fn cancel_is_two_phase_and_salvages() {
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    let (_bin, path) = fake_claude(
+        "#!/bin/sh\nwhile [ ! -f .stateroot-delegate-test-go ]; do sleep 0.2; done\necho done\n",
+    );
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .env("PATH", &path)
+        .args(["delegate", "--to", "claude", "--task", "t", "--key", "k2"])
+        .assert()
+        .success();
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["delegate", "cancel", "k2"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(stdout.contains("salvaged"), "stdout: {stdout}");
+
+    let records = read_records(project.path());
+    assert_eq!(records.len(), 1);
+    let record = &records[0];
+    assert_eq!(record["outcome"], "salvaged");
+    assert_eq!(record["cancel_confirmed"], true);
+    let events: Vec<&str> = record["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .filter_map(|e| e["event"].as_str())
+        .collect();
+    assert!(events.contains(&"spawn"), "{events:?}");
+    assert!(events.contains(&"cancel-requested"), "{events:?}");
+    assert!(events.contains(&"cancel-confirmed"), "{events:?}");
+
+    // Second cancel reports the terminal state, changes nothing.
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["delegate", "cancel", "k2"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(stdout.contains("already salvaged"), "stdout: {stdout}");
+    // Let the orphaned fake harness exit so the tempdir cleans up.
+    std::fs::write(project.path().join(".stateroot-delegate-test-go"), b"go").expect("sentinel");
+}
+
+#[cfg(unix)]
+#[test]
+fn worktree_runs_there_and_the_record_stays_with_the_caller() {
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    // A second initialized project plays the fork worktree (carries .stateroot).
+    let worktree = tempfile::tempdir().expect("worktree");
+    init_project(config_home.path(), user_home.path(), worktree.path());
+    let (_bin, path) = fake_claude("#!/bin/sh\necho ran-in-$(pwd)\n");
+
+    // A worktree without .stateroot is rejected up front.
+    let plain = tempfile::tempdir().expect("plain");
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .env("PATH", &path)
+        .args([
+            "delegate",
+            "--to",
+            "claude",
+            "--task",
+            "t",
+            "--worktree",
+            &plain.path().to_string_lossy(),
+        ])
+        .assert()
+        .failure();
+
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .env("PATH", &path)
+        .args([
+            "delegate",
+            "--to",
+            "claude",
+            "--task",
+            "t",
+            "--worktree",
+            &worktree.path().to_string_lossy(),
+            "--key",
+            "k3",
+        ])
+        .assert()
+        .success();
+    let record = wait_for_outcome(project.path(), 60);
+    assert_eq!(record["outcome"], "completed");
+    assert_eq!(
+        record["worktree"].as_str().expect("worktree field"),
+        worktree.path().to_string_lossy().as_ref()
+    );
+    // The worker ran IN the worktree: the fake harness's pwd is in the log.
+    let log = std::fs::read_to_string(
+        project
+            .path()
+            .join(record["log"].as_str().expect("log rel")),
+    )
+    .expect("log");
+    assert!(
+        log.contains(&format!("ran-in-{}", worktree.path().display())),
+        "worker did not run in the worktree: {log}"
+    );
+    // The record lives with the CALLER, not the worktree.
+    assert!(
+        read_records(worktree.path()).is_empty(),
+        "worktree must not own the delegation record"
+    );
+}

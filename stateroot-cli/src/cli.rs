@@ -408,12 +408,23 @@ pub struct DelegateArgs {
     /// Machine-readable spawn envelope (the running delegation record).
     #[arg(long)]
     pub json: bool,
+    /// Run the subagent inside this directory (a fork worktree); the
+    /// delegation record stays with the calling project.
+    #[arg(long)]
+    pub worktree: Option<String>,
+    /// Idempotency key: replaying the same key re-attaches to a live
+    /// delegation or resubmits a lost one — never a blind double-spawn.
+    #[arg(long)]
+    pub key: Option<String>,
     /// Hidden: run the delegation to completion (internal worker mode).
     #[arg(long = "_worker", hide = true)]
     pub _worker: bool,
     /// Hidden: the record id this worker finalizes (internal worker mode).
     #[arg(long, hide = true)]
     pub record_id: Option<String>,
+    /// Hidden: the project dir the worker's record lives in (internal).
+    #[arg(long, hide = true)]
+    pub record_in: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -422,6 +433,12 @@ pub enum DelegateAction {
     List,
     /// Show one delegation: record + bounded log tail.
     Status {
+        /// Delegation id (prefix allowed).
+        id: String,
+    },
+    /// Two-phase cancel: persist `cancelling`, stop the worker, then record
+    /// `salvaged` — partial work is kept, never silently discarded.
+    Cancel {
         /// Delegation id (prefix allowed).
         id: String,
     },
@@ -465,6 +482,10 @@ pub struct HandoffWriteArgs {
     /// Failed approach or bug (repeatable).
     #[arg(long, action = clap::ArgAction::Append)]
     pub failure: Vec<String>,
+    /// Bind the receiving agent to a directory (a fork worktree): the
+    /// digest tells them to work there.
+    #[arg(long)]
+    pub worktree: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]

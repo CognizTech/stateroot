@@ -5,6 +5,18 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- **Delegations get a lifecycle (WS5 batch C).**
+  `stateroot delegate --key <k>` makes the record id an idempotency key:
+  a replayed spawn re-attaches to a live worker or errors on a finished one
+  — never a blind double-spawn. `stateroot delegate cancel <id>` is a
+  persisted two-phase `cancelling → salvaged`: observers see the transient
+  phase immediately, the worker is stopped per-OS with a 5s confirm, and
+  partial work is kept and marked, never silently discarded. Records now
+  carry a bounded event history (64 events / 32 KiB with a dropped
+  counter). `delegate --worktree <path>` runs the subagent inside a fork
+  worktree while the record stays with the caller, and
+  `handoff write --worktree <path>` binds a handoff to a directory — the
+  receiver's digest opens with **Work in: \<path\>**.
 - **`stateroot merge` folds fork lineages back into the trunk (WS5 batch
   B).** `stateroot merge <fork>…` 3-way-merges each fork tip into an
   accumulated union (never against the stale trunk, so earlier forks' work

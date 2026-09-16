@@ -145,6 +145,7 @@ async fn main() -> anyhow::Result<()> {
                     next: &args.next,
                     decisions: &args.decision,
                     failures: &args.failure,
+                    worktree: args.worktree.as_deref(),
                 };
                 commands::handoff::write(
                     &ctx,
