@@ -1399,6 +1399,14 @@ pub struct MergedFork {
 
 /// `stateroot merge <fork>…` — fold fork tips into `refs/stateroot/latest`.
 /// Returns the merge root and the forks that contributed.
+///
+/// 6C contract: runs ONLY from the trunk checkout (a fork worktree fails
+/// closed with the exact recovery); the trunk ref transaction is CAS from
+/// base selection through publication (a moved trunk recomputes the fold);
+/// the merged tree is materialized into the trunk filesystem and verified
+/// BEFORE the ref advances (dirty workspaces refuse; a failed
+/// materialization restores the base); merged fork worktrees are cleaned up
+/// automatically, with cleanup failures left as visible retryable state.
 pub fn merge_forks(
     project_dir: &Path,
     forks: &[String],
@@ -1409,6 +1417,32 @@ pub fn merge_forks(
             "no forks named — pass at least one fork to merge".into(),
         ));
     }
+    if local_store::fork_context(project_dir).is_some() {
+        return Err(RootsError::Merge(
+            "merge must run from the trunk checkout (this directory is a fork worktree) — run it from the project trunk"
+                .into(),
+        ));
+    }
+    const CAS_RETRIES: usize = 3;
+    let mut attempt = 0;
+    loop {
+        match merge_forks_once(project_dir, forks, harness) {
+            Err(RootsError::RefCas(crate::safe_io::RefCasError::Moved { .. }))
+                if attempt < CAS_RETRIES =>
+            {
+                attempt += 1;
+                continue;
+            }
+            other => return other,
+        }
+    }
+}
+
+fn merge_forks_once(
+    project_dir: &Path,
+    forks: &[String],
+    harness: &str,
+) -> Result<(RootManifest, Transition, Vec<MergedFork>), RootsError> {
     let repo = ensure_repo(project_dir)?;
     let base_oid = repo
         .refname_to_id(LATEST_REF)
@@ -1474,6 +1508,110 @@ pub fn merge_forks(
         )));
     }
 
+    // Materialize BEFORE publication (6C): the merged tree must land on
+    // disk, verified, before the ref advances. The workspace protection is
+    // content-based and covers EVERY base-tracked path (a force checkout
+    // overwrites all of them, not just the merge's changed paths);
+    // untracked extras and store bookkeeping never block — the next
+    // checkpoint capturing them is honest new work, not a merge lie.
+    let base_tree = repo.find_commit(base_oid)?.tree()?;
+    let dirty = workspace_conflicts(&repo, project_dir, &base_tree, &current_tree)?;
+    if !dirty.is_empty() {
+        return Err(RootsError::Merge(format!(
+            "trunk workspace has uncommitted change(s) the merge would overwrite — refusing: snap, revert, or clean first. Paths: {}",
+            dirty.join(", ")
+        )));
+    }
+    let checkout = |tree: git2::Oid| -> Result<(), RootsError> {
+        let object = repo.find_object(tree, Some(git2::ObjectType::Tree))?;
+        repo.checkout_tree(&object, Some(git2::build::CheckoutBuilder::new().force()))?;
+        Ok(())
+    };
+    let base_tree_oid = base_tree.id();
+    let merge_tree_oid = current_tree.id();
+    checkout(merge_tree_oid)?;
+    let verified = build_tree(&repo, project_dir)
+        .map(|b| tree_matches_outside_bookkeeping(&repo, b.tree, merge_tree_oid))
+        .unwrap_or(false);
+    if !verified {
+        let _ = checkout(base_tree_oid);
+        return Err(RootsError::Merge(
+            "materialization verification failed — the workspace was restored to the pre-merge root; nothing was published"
+                .into(),
+        ));
+    }
+
+    /// Materialization verification: the merge tree's content must all be
+    /// present on disk (nothing falsified), while `.stateroot/` bookkeeping
+    /// and pure untracked additions are free to exist — "the next checkpoint
+    /// is a no-op UNLESS new edits exist", and untracked new work is exactly
+    /// that, not a merge lie.
+    fn tree_matches_outside_bookkeeping(repo: &Repository, a: git2::Oid, b: git2::Oid) -> bool {
+        if a == b {
+            return true;
+        }
+        let (Ok(a_tree), Ok(b_tree)) = (repo.find_tree(a), repo.find_tree(b)) else {
+            return false;
+        };
+        let Ok(diff) = repo.diff_tree_to_tree(Some(&a_tree), Some(&b_tree), None) else {
+            return false;
+        };
+        diff.deltas().all(|delta| {
+            // Pure additions on disk (untracked new work) are allowed.
+            if delta.old_file().id().is_zero() {
+                return true;
+            }
+            delta
+                .new_file()
+                .path()
+                .or_else(|| delta.old_file().path())
+                .map(|p| {
+                    p.to_string_lossy()
+                        .replace('\\', "/")
+                        .starts_with(".stateroot")
+                })
+                .unwrap_or(false)
+        })
+    }
+
+    /// Base-tracked paths whose on-disk content differs from the BASE blob —
+    /// uncommitted work a force checkout would silently overwrite. Content-
+    /// based and index-free; covers every path in the base tree (the checkout
+    /// overwrites all of them, not just the merge's changed paths). Ignored
+    /// and `.stateroot/` bookkeeping paths never block.
+    fn workspace_conflicts(
+        repo: &Repository,
+        project_dir: &Path,
+        base_tree: &git2::Tree,
+        _merge_tree: &git2::Tree,
+    ) -> Result<Vec<String>, RootsError> {
+        let ignore = crate::sync_engine::ignore::IgnoreRules::load(project_dir);
+        let mut conflicts = Vec::new();
+        base_tree
+            .walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
+                if entry.kind() != Some(git2::ObjectType::Blob) {
+                    return git2::TreeWalkResult::Ok;
+                }
+                let name = entry.name().unwrap_or("");
+                let rel = format!("{dir}{name}");
+                if rel.starts_with(".stateroot") || ignore.is_ignored(&rel, false) {
+                    return git2::TreeWalkResult::Ok;
+                }
+                let Ok(blob) = entry.to_object(repo).and_then(|o| o.peel_to_blob()) else {
+                    return git2::TreeWalkResult::Ok;
+                };
+                let disk_path = project_dir.join(&rel);
+                match std::fs::read(&disk_path) {
+                    Ok(bytes) if bytes == blob.content() => {}
+                    Ok(_) => conflicts.push(rel.clone()),
+                    Err(_) => conflicts.push(rel.clone()),
+                }
+                git2::TreeWalkResult::Ok
+            })
+            .expect("tree walk");
+        Ok(conflicts)
+    }
+
     let reason = format!(
         "merge {}{}",
         merged
@@ -1488,9 +1626,9 @@ pub fn merge_forks(
         }
     );
     let message = format!("{reason} (by {harness})");
-    let oid = commit_root(&repo, current_tree.id(), &parents, &message)?;
+    let oid = commit_root(&repo, merge_tree_oid, &parents, &message)?;
     let parent_hashes: Vec<String> = parents.iter().map(|o| o.to_string()).collect();
-    let (files_pinned, tree_bytes) = tree_stats(&repo, current_tree.id());
+    let (files_pinned, tree_bytes) = tree_stats(&repo, merge_tree_oid);
     let evidence = json!({
         "kind_detail": "fork merge",
         "merged_forks": merged.iter().map(|f| json!({"name": f.name, "tip": f.tip})).collect::<Vec<_>>(),
@@ -1510,6 +1648,33 @@ pub fn merge_forks(
         "merge",
         evidence,
     )?;
+
+    // Automatic cleanup (6C): merged fork worktrees go away; the fork ref
+    // and record stay as history. A cleanup failure becomes visible
+    // retryable state on the fork record, not a printed shell instruction.
+    for fork in &merged {
+        if let Some(path) = registered_worktree_path(project_dir, &fork.name) {
+            let cleanup = (|| -> Result<(), RootsError> {
+                std::fs::remove_dir_all(&path)?;
+                if let Ok(wt) = repo.find_worktree(&fork.name) {
+                    wt.prune(None)?;
+                }
+                unregister_worktree(project_dir, &fork.name)
+            })();
+            if let Err(err) = cleanup {
+                let record_path = local_store::root(project_dir)
+                    .join(FORKS_DIR)
+                    .join(format!("{}.json", fork.name));
+                if let Ok(text) = std::fs::read_to_string(&record_path) {
+                    if let Ok(mut record) = serde_json::from_str::<Value>(&text) {
+                        record["cleanup_pending"] = json!(format!("{err}"));
+                        let _ = write_json(&record_path, &record);
+                    }
+                }
+            }
+        }
+    }
+
     Ok((manifest, transition, merged))
 }
 
@@ -2634,7 +2799,6 @@ mod tests {
     // -- Repair-plan failing fixtures (Phase 0): red until their phase lands --
 
     #[test]
-    #[ignore = "repair fixture: red until Phase 6C (merge materialization)"]
     fn merge_materializes_the_trunk_working_tree() {
         // Audit F2: a successful merge must leave the trunk filesystem equal
         // to the merge root — advancing the ref alone is a false success.
@@ -2649,6 +2813,93 @@ mod tests {
         assert!(
             dir.join("src/lib_a.rs").is_file(),
             "merge advanced the ref but left the trunk working tree without the merged file"
+        );
+    }
+
+    #[test]
+    fn a_dirty_trunk_workspace_refuses_and_nothing_changes() {
+        // 6C: uncommitted trunk work is never overwritten by a merge.
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        let (_wt, _tip) =
+            fork_with_change(&dir, &first.id, "fork-a", "src/lib_a.rs", "pub fn a() {}\n");
+        write(&dir, "src/main.rs", "fn main() { println!(\"dirty\"); }\n");
+        let err = merge_forks(&dir, &["fork-a".to_string()], "kimi")
+            .expect_err("dirty workspace must refuse");
+        assert!(err.to_string().contains("uncommitted"), "{err}");
+        assert!(
+            !dir.join("src/lib_a.rs").exists(),
+            "the merged file must NOT appear after a refusal"
+        );
+        let repo = git2::Repository::open(&dir).expect("repo");
+        assert_eq!(
+            repo.refname_to_id(LATEST_REF).expect("latest").to_string(),
+            first.id
+        );
+    }
+
+    #[test]
+    fn next_checkpoint_after_a_merge_is_a_noop() {
+        // 6C exit invariant: the trunk filesystem equals the merge root, so
+        // the next automatic snap is Unchanged.
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        let (_wt, _tip) =
+            fork_with_change(&dir, &first.id, "fork-a", "src/lib_a.rs", "pub fn a() {}\n");
+        merge_forks(&dir, &["fork-a".to_string()], "kimi").expect("merge");
+        match snap_if_changed(&dir, "cli", "auto: checkpoint", None).expect("snap") {
+            SnapOutcome::Unchanged { .. } => {}
+            SnapOutcome::Created(m, _) => panic!("merge left a dirty workspace; new root {}", m.id),
+        }
+    }
+
+    #[test]
+    fn merge_fails_closed_from_a_fork_worktree() {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        let (_wt, _tip) =
+            fork_with_change(&dir, &first.id, "fork-a", "src/lib_a.rs", "pub fn a() {}\n");
+        let (_wt2, _tip2) =
+            fork_with_change(&dir, &first.id, "fork-b", "src/lib_b.rs", "pub fn b() {}\n");
+        // Run the merge FROM fork-a's worktree: must refuse with the exact
+        // recovery, never redirect the trunk merge into the fork ref.
+        let wt_path = registered_worktree_path(&dir, "fork-a").expect("registered");
+        let err = merge_forks(&wt_path, &["fork-b".to_string()], "kimi")
+            .expect_err("merge from a fork worktree must fail closed");
+        assert!(err.to_string().contains("trunk checkout"), "{err}");
+    }
+
+    #[test]
+    fn a_merged_fork_worktree_is_cleaned_up_but_history_stays() {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        let (_wt, _tip) =
+            fork_with_change(&dir, &first.id, "fork-a", "src/lib_a.rs", "pub fn a() {}\n");
+        let wt_path = registered_worktree_path(&dir, "fork-a").expect("registered");
+        merge_forks(&dir, &["fork-a".to_string()], "kimi").expect("merge");
+        assert!(
+            !wt_path.exists(),
+            "merged fork worktree must be removed: {}",
+            wt_path.display()
+        );
+        assert!(
+            registered_worktree_path(&dir, "fork-a").is_none(),
+            "registry entry must go"
+        );
+        // History stays: the fork ref and record survive the cleanup.
+        let repo = git2::Repository::open(&dir).expect("repo");
+        assert!(
+            repo.refname_to_id(&format!("{FORKS_REF_PREFIX}fork-a"))
+                .is_ok(),
+            "fork ref must stay as history"
+        );
+        assert!(
+            dir.join(".stateroot/forks/fork-a.json").is_file(),
+            "fork record must stay as history"
         );
     }
 
