@@ -298,12 +298,16 @@ pub fn render_handoff_digest_full(
     if !objective.is_empty() {
         out.push_str(&format!("## Objective\n\n{objective}\n\n"));
     }
-    // WS5: a worktree-bound handoff redirects WHERE the receiver works —
-    // print it before anything else work-related so it cannot be missed.
-    let worktree = get_str("worktree");
-    if !worktree.is_empty() {
+    // WS5/6D: a fork-bound handoff redirects WHERE the receiver works —
+    // print the fork id and its registry-resolved path (machine-local).
+    let fork_id = get_str("fork_id");
+    if !fork_id.is_empty() {
+        let resolved = project_dir
+            .and_then(|dir| stateroot_core::roots::registered_worktree_path(dir, fork_id))
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(worktree not registered on this machine)".to_string());
         out.push_str(&format!(
-            "**Work in: {worktree}** — this handoff is bound to a fork worktree; do NOT edit the caller's tree.\n\n"
+            "**Work in fork `{fork_id}`** ({resolved}) — this handoff is bound to that fork; do NOT edit the caller's tree.\n\n"
         ));
     }
     let lineage = project_dir
@@ -827,6 +831,30 @@ skipping duplicate. If this session has no digest in context, pass --force to re
     }
 
     let (handoff, _handoff_source) = fetch_handoff(&ctx.cwd);
+
+    // 6D fail closed on a fork-binding mismatch: a handoff bound to a fork
+    // must be consumed IN that fork's worktree. A harness opened anywhere
+    // else gets the exact recovery, never a digest that lets them work in
+    // the wrong tree. (--force intentionally does not override this.)
+    if let Some(fork_id) = handoff
+        .as_ref()
+        .and_then(|packet| packet.get("fork_id"))
+        .and_then(|v| v.as_str())
+    {
+        let current = stateroot_core::local_store::fork_context(&ctx.cwd);
+        let matches = current
+            .as_ref()
+            .map(|ctx_fork| ctx_fork.fork == fork_id)
+            .unwrap_or(false);
+        if !matches {
+            let resolved = stateroot_core::roots::registered_worktree_path(&ctx.cwd, fork_id)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(worktree not registered on this machine)".to_string());
+            anyhow::bail!(
+                "this handoff is bound to fork `{fork_id}` at {resolved} — this directory is not that fork's worktree. Recovery: open the harness in {resolved}, or run `stateroot delegate --worktree {resolved} --to <harness> --task …`."
+            );
+        }
+    }
 
     let root = local_store::root(&ctx.cwd);
     let memory_md = read_hot_apex(&root, local_store::MEMORY_CORE_PATH);

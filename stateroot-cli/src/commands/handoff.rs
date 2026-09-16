@@ -685,10 +685,27 @@ fn assemble_packet(
         }
     }
 
-    // WS5: a handoff can bind the receiving agent to a fork worktree —
-    // the digest then tells them to work THERE, not in the caller's tree.
+    // WS5/6D: a handoff can bind the receiving agent to a fork — validated
+    // as a REGISTERED worktree of this project, stored as the opaque fork
+    // id (absolute paths never enter shared packets; the machine-local
+    // registry resolves them).
     if let Some(worktree) = nonempty(input.worktree.take()) {
-        packet["worktree"] = json!(worktree);
+        let fork_ctx = stateroot_core::local_store::fork_context(Path::new(&worktree)).ok_or_else(|| {
+            anyhow::anyhow!(
+                "worktree {worktree} has no fork context — `handoff write --worktree` requires a fork materialized by this project"
+            )
+        })?;
+        let registered =
+            stateroot_core::roots::registered_worktree_path(context.project_dir, &fork_ctx.fork)
+                .map(|p| p == Path::new(&worktree))
+                .unwrap_or(false);
+        if !registered {
+            anyhow::bail!(
+                "worktree {worktree} is not a registered fork worktree of this project (fork `{}` — registry mismatch)",
+                fork_ctx.fork
+            );
+        }
+        packet["fork_id"] = json!(fork_ctx.fork);
     }
 
     if let Ok(Some(root)) = stateroot_core::roots::latest_root(context.project_dir) {
