@@ -699,8 +699,8 @@ pub struct RevertArgs {
 pub struct ForkArgs {
     /// Root hash to branch from.
     pub root: String,
-    /// Fork name (default: fork-<hash8>). With --worktree, a real
-    /// `refs/heads/<branch>` is also created and checked out there.
+    /// Fork name (default: an opaque f-<id8>). Never a user branch:
+    /// refs/heads entries are never created or moved by fork.
     #[arg(long)]
     pub branch: Option<String>,
     /// Materialize the fork as an isolated worktree at this path

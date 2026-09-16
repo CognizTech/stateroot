@@ -1144,7 +1144,7 @@ pub fn fork_root(
     let commit = commit_for(&repo, project_dir, hash_prefix)?;
     let name = branch
         .map(str::to_string)
-        .unwrap_or_else(|| format!("fork-{}", &commit.id().to_string()[..8]));
+        .unwrap_or_else(|| format!("f-{}", &uuid::Uuid::now_v7().to_string()[..8]));
     let refname = format!("{FORKS_REF_PREFIX}{name}");
     repo.reference(&refname, commit.id(), true, "fork root")?;
     let record = json!({
@@ -1164,81 +1164,216 @@ pub fn fork_root(
     Ok((name, refname))
 }
 
-/// Materialize a fork ref into a real worktree (WS5): the executor gets an
-/// isolated directory whose snaps chain on the fork ref, not on
-/// `refs/stateroot/latest`. The checkout contains the root's full tree —
-/// including `.stateroot/` (minus `local/`), so plans, handoffs, and memory
-/// physically travel with the fork.
+/// Materialize a fork ref into a real worktree (WS5 / repair Phase 6A):
+/// TRANSACTIONAL — destination validated before any mutation, rollback on
+/// every partial failure, and `--branch` is gone: no user branch is ever
+/// created, moved, or pointed at a synthetic root.
 ///
-/// HEAD shape: detached at the root commit by default, so plumbing ref
-/// writes never move a checked-out branch under the worktree (the user's
-/// branches stay clean). With `git_branch`, a real `refs/heads/<branch>` is
-/// created at the commit and checked out instead — PR-ready work on request.
+/// Validated up front: the fork exists, the destination does NOT exist and
+/// is NOT inside the project tree, and a claimed plan exists and is not
+/// already claimed by another fork.
 ///
-/// The worktree is stamped with a machine-local fork context
-/// (`.stateroot/local/fork-context.json`, never synced) so every snap and
-/// read path there chains on the fork.
+/// The checkout contains the root's full tree — including `.stateroot/`
+/// (minus `local/`), so plans, handoffs, and memory physically travel with
+/// the fork. HEAD is detached at the root commit so plumbing ref writes
+/// never move a checked-out branch under the worktree. Absolute paths live
+/// only in the machine-local registry (`.stateroot/local/`); shared state
+/// carries the opaque fork id.
 pub fn fork_materialize(
     project_dir: &Path,
     name: &str,
     worktree_path: &Path,
-    git_branch: Option<&str>,
     plan: Option<&str>,
 ) -> Result<(), RootsError> {
     let repo = ensure_repo(project_dir)?;
     let refname = format!("{FORKS_REF_PREFIX}{name}");
+
+    // -- Validation (before ANY mutation) ----------------------------------
     let tip = repo
         .refname_to_id(&refname)
         .map_err(|_| RootsError::NotFound(format!("no fork named {name}")))?;
-    let (checkout_ref, temp_branch) = match git_branch {
-        Some(branch) => {
-            let branch_ref = format!("refs/heads/{branch}");
-            repo.reference(&branch_ref, tip, true, "fork branch")?;
-            (branch_ref, None)
-        }
-        None => {
-            // libgit2's worktree-add accepts only branch refs — check out
-            // via a throwaway branch, then detach HEAD and delete it so no
-            // refs/heads entry survives by default.
-            let tmp = format!("refs/heads/stateroot-forktmp-{name}");
-            repo.reference(&tmp, tip, true, "fork tmp branch")?;
-            (tmp.clone(), Some(tmp))
-        }
-    };
-    {
-        let reference = repo.find_reference(&checkout_ref)?;
-        let mut opts = git2::WorktreeAddOptions::new();
-        opts.reference(Some(&reference));
-        repo.worktree(name, worktree_path, Some(&opts))?;
+    if worktree_path.exists() {
+        return Err(RootsError::Merge(format!(
+            "worktree destination {} already exists",
+            worktree_path.display()
+        )));
     }
-    if let Some(tmp) = temp_branch {
+    let project_canon = project_dir
+        .canonicalize()
+        .unwrap_or_else(|_| project_dir.to_path_buf());
+    let dest_canon = worktree_path
+        .parent()
+        .and_then(|p| p.canonicalize().ok())
+        .map(|p| p.join(worktree_path.file_name().unwrap_or_default()))
+        .unwrap_or_else(|| worktree_path.to_path_buf());
+    if dest_canon.starts_with(&project_canon) {
+        return Err(RootsError::Merge(format!(
+            "worktree destination {} is inside the project tree — use a sibling directory",
+            worktree_path.display()
+        )));
+    }
+    if let Some(plan_id) = plan {
+        crate::plans::load(project_dir, plan_id)
+            .ok_or_else(|| RootsError::NotFound(format!("no plan named {plan_id}")))?;
+        // Duplicate-claim rejection: another fork already holds this plan.
+        if let Some(holder) = fork_holding_plan(project_dir, plan_id) {
+            return Err(RootsError::Merge(format!(
+                "plan {plan_id} is already claimed by fork {holder}"
+            )));
+        }
+    }
+
+    // -- Execute with rollback ----------------------------------------------
+    let tmp_branch = format!("refs/heads/stateroot-forktmp-{name}");
+    // libgit2's worktree-add accepts only branch refs — check out via a
+    // throwaway branch, then detach HEAD and delete it so no refs/heads
+    // entry survives.
+    repo.reference(&tmp_branch, tip, true, "fork tmp branch")?;
+    let result = (|| -> Result<(), RootsError> {
+        {
+            let reference = repo.find_reference(&tmp_branch)?;
+            let mut opts = git2::WorktreeAddOptions::new();
+            opts.reference(Some(&reference));
+            repo.worktree(name, worktree_path, Some(&opts))?;
+        }
         let wt_repo = git2::Repository::open(worktree_path)?;
         wt_repo.set_head_detached(tip)?;
-        if let Ok(mut branch) = repo.find_branch(&tmp, git2::BranchType::Local) {
+        if let Ok(mut branch) = repo.find_branch(&tmp_branch, git2::BranchType::Local) {
             branch.delete()?;
         }
-    }
-    local_store::write_fork_context(
-        worktree_path,
-        &local_store::ForkContext {
-            schema: "stateroot.fork-context.v1".into(),
-            fork: name.to_string(),
-            parent_root: tip.to_string(),
-            plan: plan.map(str::to_string),
-        },
-    )?;
-    // Patch the fork record with the worktree path and claimed plan.
-    let record_path = local_store::root(project_dir)
-        .join(FORKS_DIR)
-        .join(format!("{name}.json"));
-    if let Ok(text) = std::fs::read_to_string(&record_path) {
-        if let Ok(mut record) = serde_json::from_str::<Value>(&text) {
-            record["worktree"] = json!(worktree_path.to_string_lossy());
-            if let Some(plan) = plan {
-                record["plan"] = json!(plan);
+        local_store::write_fork_context(
+            worktree_path,
+            &local_store::ForkContext {
+                schema: "stateroot.fork-context.v1".into(),
+                fork: name.to_string(),
+                parent_root: tip.to_string(),
+                plan: plan.map(str::to_string),
+            },
+        )?;
+        register_worktree(project_dir, name, worktree_path)?;
+        if let Some(plan_id) = plan {
+            claim_plan(project_dir, plan_id, name)?;
+            let record_path = local_store::root(project_dir)
+                .join(FORKS_DIR)
+                .join(format!("{name}.json"));
+            if let Ok(text) = std::fs::read_to_string(&record_path) {
+                if let Ok(mut record) = serde_json::from_str::<Value>(&text) {
+                    record["plan"] = json!(plan_id);
+                    write_json(&record_path, &record)?;
+                }
             }
-            write_json(&record_path, &record)?;
         }
+        Ok(())
+    })();
+    if result.is_err() {
+        // Rollback in reverse: registry entry, plan claim, worktree, branch.
+        let _ = unregister_worktree(project_dir, name);
+        if let Some(plan_id) = plan {
+            let _ = release_plan_claim(project_dir, plan_id, name);
+        }
+        let _ = std::fs::remove_dir_all(worktree_path);
+        if let Ok(mut branch) = repo.find_branch(&tmp_branch, git2::BranchType::Local) {
+            let _ = branch.delete();
+        }
+        if let Ok(wt) = repo.find_worktree(name) {
+            let _ = wt.prune(None);
+        }
+    }
+    result
+}
+
+fn fork_holding_plan(project_dir: &Path, plan_id: &str) -> Option<String> {
+    let dir = local_store::root(project_dir).join(FORKS_DIR);
+    std::fs::read_dir(dir).ok()?.flatten().find_map(|entry| {
+        let text = std::fs::read_to_string(entry.path()).ok()?;
+        let record: Value = serde_json::from_str(&text).ok()?;
+        (record.get("plan").and_then(|p| p.as_str()) == Some(plan_id)).then(|| {
+            record
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("?")
+                .to_string()
+        })
+    })
+}
+
+fn registry_path(project_dir: &Path) -> PathBuf {
+    local_store::root(project_dir).join("local/fork-worktrees.json")
+}
+
+fn read_registry(project_dir: &Path) -> Value {
+    std::fs::read_to_string(registry_path(project_dir))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_else(|| json!({"schema": "stateroot.fork-worktrees.v1", "entries": {}}))
+}
+
+fn write_registry(project_dir: &Path, registry: &Value) -> Result<(), RootsError> {
+    crate::safe_io::atomic_replace_json(&registry_path(project_dir), registry)?;
+    Ok(())
+}
+
+/// Machine-local fork id → absolute worktree path (shared state carries
+/// only the opaque fork id; paths never leave `local/`).
+pub fn registered_worktree_path(project_dir: &Path, name: &str) -> Option<PathBuf> {
+    let registry = read_registry(project_dir);
+    registry
+        .get("entries")
+        .and_then(|e| e.get(name))
+        .and_then(|v| v.get("path"))
+        .and_then(|p| p.as_str())
+        .map(PathBuf::from)
+}
+
+fn register_worktree(project_dir: &Path, name: &str, path: &Path) -> Result<(), RootsError> {
+    let mut registry = read_registry(project_dir);
+    registry["entries"][name] = json!({
+        "path": path.to_string_lossy(),
+        "created_at": now_rfc3339(),
+    });
+    write_registry(project_dir, &registry)
+}
+
+fn unregister_worktree(project_dir: &Path, name: &str) -> Result<(), RootsError> {
+    let mut registry = read_registry(project_dir);
+    if let Some(entries) = registry.get_mut("entries").and_then(|e| e.as_object_mut()) {
+        entries.remove(name);
+    }
+    write_registry(project_dir, &registry)
+}
+
+fn claim_plan(project_dir: &Path, plan_id: &str, fork: &str) -> Result<(), RootsError> {
+    let path = local_store::root(project_dir)
+        .join("plans")
+        .join(format!("{plan_id}.json"));
+    let text = std::fs::read_to_string(&path)
+        .map_err(|_| RootsError::NotFound(format!("no plan named {plan_id}")))?;
+    let mut meta: Value = serde_json::from_str(&text)?;
+    meta["claimed_by"] = json!({"fork": fork, "at": now_rfc3339()});
+    crate::safe_io::atomic_replace_json(&path, &meta)?;
+    local_store::report_written(project_dir, &format!("plans/{plan_id}.json"));
+    Ok(())
+}
+
+fn release_plan_claim(project_dir: &Path, plan_id: &str, fork: &str) -> Result<(), RootsError> {
+    let path = local_store::root(project_dir)
+        .join("plans")
+        .join(format!("{plan_id}.json"));
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let mut meta: Value = serde_json::from_str(&text)?;
+    let ours = meta
+        .get("claimed_by")
+        .and_then(|c| c.get("fork"))
+        .and_then(|f| f.as_str())
+        == Some(fork);
+    if ours {
+        if let Some(obj) = meta.as_object_mut() {
+            obj.remove("claimed_by");
+        }
+        crate::safe_io::atomic_replace_json(&path, &meta)?;
+        local_store::report_written(project_dir, &format!("plans/{plan_id}.json"));
     }
     Ok(())
 }
@@ -2226,23 +2361,29 @@ mod tests {
     // -- WS5: fork worktrees + per-fork lineage ------------------------------
 
     /// Materialize a fork with a claimed plan into a detached worktree.
-    fn forked_worktree(dir: &Path) -> (tempfile::TempDir, PathBuf, String, RootManifest) {
+    fn forked_worktree(dir: &Path) -> (tempfile::TempDir, PathBuf, String, RootManifest, String) {
         write(dir, "src/main.rs", "fn main() {}\n");
-        write(dir, ".stateroot/plans/plan-x.md", "# plan x\n");
+        let plan = crate::plans::record(dir, "plan x", "cli", None, "# plan x\n").expect("plan");
+        let plan_id = plan.id.clone();
         let (first, _) = create_root(dir, "cli", "first", None).expect("snap");
         let (name, _) = fork_root(dir, &first.id, Some("fork-x"), "cli").expect("fork");
         let wt_tmp = tempfile::tempdir().expect("wt tmp");
         let wt = wt_tmp.path().join("checkout");
-        fork_materialize(dir, &name, &wt, None, Some("plan-x")).expect("materialize");
-        (wt_tmp, wt, name, first)
+        fork_materialize(dir, &name, &wt, Some(&plan_id)).expect("materialize");
+        (wt_tmp, wt, name, first, plan_id)
     }
 
     #[test]
     fn fork_materialize_detaches_head_and_carries_the_plan() {
         let (_tmp, dir) = project();
-        let (_wt_tmp, wt, name, first) = forked_worktree(&dir);
+        let (_wt_tmp, wt, name, first, plan_id) = forked_worktree(&dir);
         // The worktree physically carries the snapshot's .stateroot state.
-        assert!(wt.join(".stateroot/plans/plan-x.md").is_file());
+        let carried = std::fs::read_dir(wt.join(".stateroot/plans"))
+            .expect("plans dir")
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "md"))
+            .count();
+        assert!(carried >= 1, "the claimed plan must travel with the fork");
         assert!(wt.join("src/main.rs").is_file());
         // HEAD detached at the fork root commit (user branches untouched).
         let wt_repo = git2::Repository::open(&wt).expect("wt repo");
@@ -2259,20 +2400,71 @@ mod tests {
         // Machine-local fork context stamped with the claimed plan.
         let ctx = local_store::fork_context(&wt).expect("fork context");
         assert_eq!(ctx.fork, name);
-        assert_eq!(ctx.plan.as_deref(), Some("plan-x"));
+        assert_eq!(ctx.plan.as_deref(), Some(plan_id.as_str()));
         assert_eq!(ctx.parent_root, first.id);
-        // The fork record gained the worktree path and the plan.
+        // The fork record carries the plan id (absolute paths stay in
+        // the machine-local registry, never in shared state).
         let record =
             std::fs::read_to_string(dir.join(".stateroot/forks").join(format!("{name}.json")))
                 .expect("fork record");
-        assert!(record.contains("\"worktree\""), "{record}");
-        assert!(record.contains("\"plan\": \"plan-x\""), "{record}");
+        assert!(record.contains(&plan_id), "{record}");
+        assert!(
+            !record.contains("\"worktree\""),
+            "paths stay local: {record}"
+        );
+        // The plan meta records the claim.
+        let meta_text =
+            std::fs::read_to_string(dir.join(".stateroot/plans").join(format!("{plan_id}.json")))
+                .expect("plan meta");
+        assert!(meta_text.contains("claimed_by"), "{meta_text}");
+        assert!(meta_text.contains(&name), "{meta_text}");
+    }
+
+    #[test]
+    fn fork_materialize_validates_before_mutating_and_rolls_back() {
+        let (_tmp, dir) = project();
+        let (_wt_tmp, _wt, name, first, plan_id) = forked_worktree(&dir);
+
+        // Existing destination: refused.
+        let occupied = tempfile::tempdir().expect("occupied");
+        let (name2, _) = fork_root(&dir, &first.id, Some("fork-y"), "cli").expect("fork2");
+        let err = fork_materialize(&dir, &name2, occupied.path(), None)
+            .expect_err("existing destination must refuse");
+        assert!(err.to_string().contains("already exists"), "{err}");
+
+        // Destination inside the project tree: refused.
+        let inside = dir.join("nested-checkout");
+        let err = fork_materialize(&dir, &name2, &inside, None)
+            .expect_err("nested destination must refuse");
+        assert!(err.to_string().contains("inside the project tree"), "{err}");
+
+        // A plan already claimed elsewhere: refused, and the claim stays.
+        let err = fork_materialize(&dir, &name2, &occupied.path().join("new"), Some(&plan_id))
+            .expect_err("duplicate claim must refuse");
+        assert!(err.to_string().contains("already claimed"), "{err}");
+        let meta_text =
+            std::fs::read_to_string(dir.join(".stateroot/plans").join(format!("{plan_id}.json")))
+                .expect("meta");
+        assert!(
+            meta_text.contains(&name),
+            "the original claim must survive the rejected attempt"
+        );
+
+        // A nonexistent plan: refused before any mutation.
+        let err = fork_materialize(
+            &dir,
+            &name2,
+            &occupied.path().join("new"),
+            Some("plan-ghost"),
+        )
+        .expect_err("ghost plan must refuse");
+        assert!(err.to_string().contains("no plan named"), "{err}");
     }
 
     #[test]
     fn fork_worktree_snaps_chain_on_the_fork_ref_not_latest() {
         let (_tmp, dir) = project();
-        let (_wt_tmp, wt, name, first) = forked_worktree(&dir);
+        let (_wt_tmp, wt, name, first, _plan) = forked_worktree(&dir);
         write(&wt, "src/lib.rs", "pub fn work() {}\n");
         let outcome = snap_if_changed(&wt, "codex", "auto: fork work", None).expect("fork snap");
         let SnapOutcome::Created(m, t) = outcome else {
@@ -2334,7 +2526,7 @@ mod tests {
         let (fork_name, _) = fork_root(dir, root_id, Some(name), "cli").expect("fork");
         let wt_tmp = tempfile::tempdir().expect("wt tmp");
         let wt = wt_tmp.path().join("checkout");
-        fork_materialize(dir, &fork_name, &wt, None, None).expect("materialize");
+        fork_materialize(dir, &fork_name, &wt, None).expect("materialize");
         write(&wt, file, content);
         let outcome = snap_if_changed(&wt, "codex", "auto: fork work", None).expect("fork snap");
         let SnapOutcome::Created(m, _) = outcome else {
@@ -2458,42 +2650,6 @@ mod tests {
             dir.join("src/lib_a.rs").is_file(),
             "merge advanced the ref but left the trunk working tree without the merged file"
         );
-    }
-
-    #[test]
-    #[ignore = "repair fixture: red until Phase 6A (branch clobber refusal)"]
-    fn fork_branch_never_resets_an_existing_user_branch() {
-        // Audit F5: materializing with a git branch name that already exists
-        // must REFUSE, never force-reset the user's branch to the fork root.
-        let (_tmp, dir) = project();
-        write(&dir, "a.txt", "one");
-        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
-        write(&dir, "b.txt", "two");
-        let (second, _) = create_root(&dir, "cli", "second", None).expect("snap2");
-        let repo = ensure_repo(&dir).expect("repo");
-        repo.reference(
-            "refs/heads/work",
-            first.id.parse().expect("oid"),
-            true,
-            "user branch",
-        )
-        .expect("branch");
-        let (name, _) = fork_root(&dir, &second.id, Some("fork-b"), "cli").expect("fork");
-        let wt_tmp = tempfile::tempdir().expect("wt");
-        let err = fork_materialize(
-            &dir,
-            &name,
-            &wt_tmp.path().join("checkout"),
-            Some("work"),
-            None,
-        )
-        .expect_err("must refuse to clobber an existing branch");
-        let _ = err;
-        let still = repo
-            .refname_to_id("refs/heads/work")
-            .expect("branch still exists")
-            .to_string();
-        assert_eq!(still, first.id, "user branch was force-reset");
     }
 
     #[test]

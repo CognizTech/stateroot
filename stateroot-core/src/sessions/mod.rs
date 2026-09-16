@@ -1100,8 +1100,7 @@ mod tests {
                 .expect("fork");
         let wt_tmp = tempfile::tempdir().expect("wt");
         let wt = wt_tmp.path().join("checkout");
-        crate::roots::fork_materialize(project.path(), &name, &wt, None, None)
-            .expect("materialize");
+        crate::roots::fork_materialize(project.path(), &name, &wt, None).expect("materialize");
 
         let shared = crate::tombstones::load(&wt, crate::tombstones::TombstonePolicy::FailOpen)
             .expect("tombstone load");

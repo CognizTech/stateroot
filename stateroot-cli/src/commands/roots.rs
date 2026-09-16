@@ -254,20 +254,10 @@ pub fn fork(
         engine::fork_root(&ctx.cwd, hash, branch, LOCAL_HARNESS).map_err(|e| anyhow::anyhow!(e))?;
     println!("fork {name} → {refname}");
     if let Some(path) = worktree {
-        // --branch upgrades the worktree to a real refs/heads checkout;
-        // without it the worktree HEAD is detached at the root commit.
-        let git_branch = branch;
-        engine::fork_materialize(&ctx.cwd, &name, Path::new(path), git_branch, plan)
+        engine::fork_materialize(&ctx.cwd, &name, Path::new(path), plan)
             .map_err(|e| anyhow::anyhow!(e))?;
         println!("worktree: {path} (fork context stamped; snaps there chain on {refname})");
-        if git_branch.is_some() {
-            println!(
-                "branch: refs/heads/{} checked out in the worktree",
-                branch.unwrap_or("")
-            );
-        } else {
-            println!("HEAD: detached at the fork root (user branches untouched)");
-        }
+        println!("HEAD: detached at the fork root (user branches untouched)");
         if let Some(plan) = plan {
             println!("plan claimed: {plan}");
         }
