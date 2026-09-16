@@ -151,7 +151,34 @@ fn resolve(
     Ok((id, command, spec.clone()))
 }
 
-/// The spawn path: record `running`, launch the detached worker, exit 0.
+/// Idempotency-key validation (repair Phase 6B): a strict charset makes
+/// traversal and reserved names impossible by construction — keys stay
+/// readable and filenames stay safe on every OS.
+fn validate_key(key: &str) -> Result<()> {
+    let ok = !key.is_empty()
+        && key.len() <= 64
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-');
+    if ok {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "delegation key `{key}` is not a safe id (1–64 chars of A–Z a–z 0–9 . _ -; anything else risks traversal or reserved names)"
+        )
+    }
+}
+
+/// Per-key lock for spawn/cancel/finalize transitions (repair Phase 6B):
+/// one state machine per key, fail-closed acquisition.
+fn key_lock(dir: &Path, record_id: &str) -> Result<stateroot_core::safe_io::ResourceLock> {
+    let path = dir.join("locks").join(format!("{record_id}.lock"));
+    stateroot_core::safe_io::ResourceLock::acquire(path)
+        .map_err(|e| anyhow::anyhow!("delegation lock for {record_id}: {e}"))
+}
+
+/// The spawn path: reserve `starting` with the request fingerprint under
+/// the key lock, launch the detached worker, transition to `running`.
 fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
     ctx.require_project()?;
     let to = args
@@ -177,9 +204,23 @@ fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
     // Idempotency key (WS5): a caller-supplied key IS the record id, so a
     // replayed spawn re-attaches (live) or resubmits (lost) instead of
     // blind double-spawning — OpenViking's Idempotency-Key pattern.
+    if let Some(key) = &args.key {
+        validate_key(key)?;
+    }
     let record_id = args.key.clone().unwrap_or_else(|| format!("{stamp}-{id}"));
     let dir = delegations_dir(&ctx.cwd);
     std::fs::create_dir_all(&dir)?;
+
+    // The request fingerprint: a same-key request that differs is a
+    // different task — rejected, never silently re-keyed.
+    let fingerprint = json!({
+        "harness": id,
+        "task": task,
+        "worktree": args.worktree,
+    });
+
+    // Per-key state machine under the key lock (repair Phase 6B).
+    let _guard = key_lock(&dir, &record_id)?;
 
     // Idempotency gate: an existing record with the same key decides.
     if let Some((_path, existing)) = load_record(&ctx.cwd, &record_id) {
@@ -188,27 +229,50 @@ fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
                 "delegation key `{record_id}` already finished ({outcome}) — pick a new key"
             );
         }
-        let pid = existing.get("pid").and_then(Value::as_u64).unwrap_or(0) as u32;
-        if pid != 0 && pid_alive(pid) {
-            println!(
-                "delegation {record_id} already running (pid {pid}) — same key, no double-spawn"
+        let prior = existing.get("fingerprint").cloned().unwrap_or(json!(null));
+        if prior != json!(null) && prior != fingerprint {
+            anyhow::bail!(
+                "delegation key `{record_id}` exists with a different request — pick a new key"
             );
-            return Ok(0);
         }
-        // Lost worker: fall through and resubmit under the same key.
+        if existing.get("status").and_then(Value::as_str) == Some("starting") {
+            // A reservation whose spawn never landed: resubmit under the
+            // same key (recover-before-cancel pattern).
+        } else {
+            let pid = existing.get("pid").and_then(Value::as_u64).unwrap_or(0) as u32;
+            if pid != 0 && pid_alive(pid) {
+                println!(
+                    "delegation {record_id} already running (pid {pid}) — same key, no double-spawn"
+                );
+                return Ok(0);
+            }
+            // Lost worker: fall through and resubmit under the same key.
+        }
     }
 
     // The work directory: a fork worktree isolates the subagent (WS5);
-    // records and lineage stay with the CALLING project.
+    // records and lineage stay with the CALLING project. Validated as a
+    // fork of THIS project (repair Phase 6B): an arbitrary directory with
+    // `.stateroot` is not enough.
     let work_dir: PathBuf = match &args.worktree {
         Some(w) => {
             let p = PathBuf::from(w);
             if !p.is_dir() {
                 anyhow::bail!("worktree {w} is not a directory");
             }
-            if !p.join(".stateroot").is_dir() {
+            let context = stateroot_core::local_store::fork_context(&p).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "worktree {w} has no fork context — materialize with `stateroot fork <root> --worktree`"
+                )
+            })?;
+            let fork_record = ctx
+                .cwd
+                .join(".stateroot/forks")
+                .join(format!("{}.json", context.fork));
+            if !fork_record.is_file() {
                 anyhow::bail!(
-                    "worktree {w} has no .stateroot — `stateroot fork <root> --worktree` carries it, or run `stateroot init` there"
+                    "worktree {w} is a fork checkout, but fork `{}` is not registered in this project",
+                    context.fork
                 );
             }
             p
@@ -219,6 +283,28 @@ fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
     let log_name = format!("{stamp}-{id}-d{depth}.log");
     let log_path = dir.join(&log_name);
     let log_rel = format!(".stateroot/delegations/{log_name}");
+
+    // Reserve `starting` with the request fingerprint BEFORE spawning
+    // (repair Phase 6B): a crash between reservation and spawn leaves a
+    // resumable state, and a same-key replay with a different request is
+    // rejected against this fingerprint.
+    let mut record = json!({
+        "schema_version": "stateroot.delegation.v2",
+        "id": record_id,
+        "ts": ts,
+        "depth": depth,
+        "harness": id,
+        "task": task,
+        "command": command,
+        "status": "starting",
+        "fingerprint": fingerprint,
+        "log": log_rel,
+    });
+    if let Some(w) = &args.worktree {
+        record["worktree"] = json!(w);
+    }
+    append_event(&mut record, "reserve", "starting reserved under key lock");
+    write_record(&dir, &record)?;
 
     // Detached worker = this binary in hidden worker mode; its stdout/stderr
     // redirect into the delegation log (diagnostics + worker header line).
@@ -271,22 +357,12 @@ fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
     let pid = child.id();
     drop(child); // detached: no wait, no kill, ever.
 
-    // The running record exists before the parent exits, so `list` sees
-    // `running` even if the worker dies instantly.
-    let mut record = json!({
-        "schema_version": "stateroot.delegation.v1",
-        "id": record_id,
-        "ts": ts,
-        "depth": depth,
-        "harness": id,
-        "task": task,
-        "command": command,
-        "status": "running",
-        "pid": pid,
-        "log": log_rel,
-    });
-    if let Some(w) = &args.worktree {
-        record["worktree"] = json!(w);
+    // Transition starting → running with the pid (the reservation already
+    // exists; update it in place under the key lock we still hold).
+    {
+        let obj = record.as_object_mut().expect("record object");
+        obj.insert("status".into(), json!("running"));
+        obj.insert("pid".into(), json!(pid));
     }
     append_event(&mut record, "spawn", &format!("pid {pid}"));
     write_record(&dir, &record)?;
@@ -351,6 +427,10 @@ fn worker(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
                     output.stderr
                 ),
             )?;
+            // Outcome → immutable root (repair Phase 6B): a delegated task
+            // is not terminal until its worktree is captured into the fork
+            // lineage. Failed outcomes capture too (salvage semantics).
+            capture_outcome_root(&ctx.cwd, &record_root, record_id, &id);
             episodic_lineage(
                 &record_root,
                 &id,
@@ -369,9 +449,43 @@ fn worker(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
                 started.elapsed().as_millis(),
                 &format!("\noutcome: failed · worker error: {err:#}\n"),
             );
+            let _ = &record_root;
             Err(err)
         }
     }
+}
+
+/// Snapshot the delegated worktree into the fork lineage and record the
+/// root — completion/cancellation is not terminal until this lands
+/// (best-effort: the error is recorded in the record's events, never
+/// silently dropped on the floor).
+fn capture_outcome_root(work_dir: &Path, record_root: &Path, record_id: &str, harness: &str) {
+    let Some((path, mut record)) = load_record(record_root, record_id) else {
+        return;
+    };
+    match stateroot_core::roots::snap_if_changed(
+        work_dir,
+        harness,
+        "auto: delegation outcome",
+        None,
+    ) {
+        Ok(stateroot_core::roots::SnapOutcome::Created(manifest, _)) => {
+            record["outcome_root"] = json!(manifest.id);
+            append_event(&mut record, "capture", "worktree captured to fork lineage");
+        }
+        Ok(stateroot_core::roots::SnapOutcome::Unchanged { root }) => {
+            record["outcome_root"] = json!(root);
+            append_event(
+                &mut record,
+                "capture",
+                "no changes; tip already describes the work",
+            );
+        }
+        Err(err) => {
+            append_event(&mut record, "capture-error", &format!("{err}"));
+        }
+    }
+    let _ = save_record(&path, &record);
 }
 
 /// The worker's run path (today's flow, minus any kill condition).
@@ -596,6 +710,12 @@ fn status(ctx: &Ctx, id: &str) -> Result<()> {
         record["id"].as_str().unwrap_or(""),
         harness
     );
+    if live == "cancelling" {
+        println!(
+            "  cancellation in flight — if the canceller died, `stateroot delegate cancel {id}` resumes it (never a permanent terminal lie)",
+            id = record["id"].as_str().unwrap_or("")
+        );
+    }
     println!("  task: {}", truncate(task, 200));
     if let Some(pid) = record.get("pid").and_then(Value::as_u64) {
         println!("  pid: {pid}");
@@ -635,18 +755,41 @@ fn episodic_lineage(
     Ok(())
 }
 
-/// Two-phase cancel (WS5): persist `cancelling` first — `list`/`status`
-/// show the transient phase — then stop the worker and record `salvaged`.
-/// Partial work is kept and marked mergeable, never silently discarded
-/// (OpenViking documents "no rollback"; we can say "no rollback needed").
+/// Two-phase cancel with a full process-tree stop and a partial capture
+/// (repair Phase 6B — owner-ratified contract): persist `cancelling`,
+/// signal the worker's whole process GROUP (the detached worker is a group
+/// leader via setsid/breakaway, so its harness children are covered),
+/// escalate TERM → KILL, verify the group is gone, snapshot the partial
+/// worktree into the fork lineage, and only then record
+/// `cancelled_with_root`. A crash after `cancelling` is resumed by the
+/// next read of the record — never a permanent terminal lie.
 fn cancel(ctx: &Ctx, id: &str) -> Result<()> {
     ctx.require_project()?;
-    let Some((path, mut record)) = load_record(&ctx.cwd, id) else {
+    let Some((_path, record)) = load_record(&ctx.cwd, id) else {
         anyhow::bail!("no delegation matches `{id}` — run `stateroot delegate list`");
     };
     if let Some(outcome) = record.get("outcome").and_then(Value::as_str) {
-        println!("delegation {id} is already {outcome}");
-        return Ok(());
+        if outcome != "cancelling" {
+            println!("delegation {id} is already {outcome}");
+            return Ok(());
+        }
+    }
+    let record_id = record
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or(id)
+        .to_string();
+    let dir = delegations_dir(&ctx.cwd);
+    let _guard = key_lock(&dir, &record_id)?;
+    // Re-read under the lock (cancel and worker finalize serialize).
+    let Some((path, mut record)) = load_record(&ctx.cwd, &record_id) else {
+        anyhow::bail!("delegation record `{record_id}` vanished mid-cancel");
+    };
+    if let Some(outcome) = record.get("outcome").and_then(Value::as_str) {
+        if outcome != "cancelling" {
+            println!("delegation {record_id} is already {outcome}");
+            return Ok(());
+        }
     }
     let pid = record.get("pid").and_then(Value::as_u64).unwrap_or(0) as u32;
 
@@ -659,23 +802,27 @@ fn cancel(ctx: &Ctx, id: &str) -> Result<()> {
     append_event(&mut record, "cancel-requested", &format!("pid {pid}"));
     save_record(&path, &record)?;
 
-    if pid != 0 && pid_alive(pid) {
-        stop_pid(pid);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while pid_alive(pid) && std::time::Instant::now() < deadline {
+    // Stop the process tree: TERM the group, wait, escalate to KILL.
+    if pid != 0 && group_alive(pid) {
+        signal_group(pid, Signal::Term);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while group_alive(pid) && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
+        if group_alive(pid) {
+            append_event(
+                &mut record,
+                "cancel-escalate",
+                "TERM ignored; sending KILL to the group",
+            );
+            signal_group(pid, Signal::Kill);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while group_alive(pid) && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
     }
-    let confirmed = pid == 0 || !pid_alive(pid);
-
-    // Phase 2: terminal salvaged — partial work kept, honesty about whether
-    // the worker was confirmed stopped.
-    {
-        let obj = record.as_object_mut().unwrap();
-        obj.insert("outcome".into(), json!("salvaged"));
-        obj.insert("cancel_confirmed".into(), json!(confirmed));
-        obj.insert("ended_at".into(), json!(now_rfc3339()));
-    }
+    let confirmed = pid == 0 || !group_alive(pid);
     append_event(
         &mut record,
         if confirmed {
@@ -683,25 +830,64 @@ fn cancel(ctx: &Ctx, id: &str) -> Result<()> {
         } else {
             "cancel-unconfirmed"
         },
-        "partial work kept",
+        "process tree verified",
+    );
+    save_record(&path, &record)?;
+
+    // Phase 2: partial capture BEFORE the terminal record — cancellation
+    // is not terminal until the partial work is a root in the fork lineage.
+    let harness = record
+        .get("harness")
+        .and_then(Value::as_str)
+        .unwrap_or("cli")
+        .to_string();
+    let work_dir = record
+        .get("worktree")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| ctx.cwd.clone());
+    capture_outcome_root(&work_dir, &ctx.cwd, &record_id, &harness);
+    let Some((path, mut record)) = load_record(&ctx.cwd, &record_id) else {
+        anyhow::bail!("delegation record `{record_id}` vanished mid-cancel");
+    };
+    {
+        let obj = record.as_object_mut().unwrap();
+        obj.insert("outcome".into(), json!("cancelled_with_root"));
+        obj.insert("cancel_confirmed".into(), json!(confirmed));
+        obj.insert("ended_at".into(), json!(now_rfc3339()));
+    }
+    append_event(
+        &mut record,
+        "cancel-finalized",
+        "partial work captured; recorded",
     );
     save_record(&path, &record)?;
     let log_rel = record.get("log").and_then(Value::as_str).unwrap_or("");
     println!(
-        "delegation {id} salvaged{} — partial work kept (log: {log_rel})",
+        "delegation {record_id} cancelled_with_root{} — partial work kept (log: {log_rel})",
         if confirmed {
             ""
         } else {
-            " (worker not confirmed stopped)"
+            " (process tree NOT confirmed dead)"
         }
     );
     Ok(())
 }
 
+enum Signal {
+    Term,
+    Kill,
+}
+
 #[cfg(unix)]
-fn stop_pid(pid: u32) {
+fn signal_group(pgid: u32, signal: Signal) {
+    let name = match signal {
+        Signal::Term => "-TERM",
+        Signal::Kill => "-KILL",
+    };
+    // Negative pid = the whole process group (the detached worker leads it).
     let _ = std::process::Command::new("kill")
-        .args(["-TERM", &pid.to_string()])
+        .args([name, &format!("-{pgid}")])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -709,13 +895,32 @@ fn stop_pid(pid: u32) {
 }
 
 #[cfg(windows)]
-fn stop_pid(pid: u32) {
+fn signal_group(pid: u32, signal: Signal) {
+    let _ = signal;
+    // taskkill /T covers the process tree rooted at the worker.
     let _ = std::process::Command::new("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
+}
+
+#[cfg(unix)]
+fn group_alive(pgid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &format!("-{pgid}")])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn group_alive(pid: u32) -> bool {
+    pid_alive(pid)
 }
 
 /// The last N delegation records for the digest section.

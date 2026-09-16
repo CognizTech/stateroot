@@ -481,7 +481,7 @@ fn same_key_never_double_spawns() {
 
 #[cfg(unix)]
 #[test]
-fn cancel_is_two_phase_and_salvages() {
+fn cancel_is_two_phase_and_records_cancelled_with_root() {
     let (config_home, user_home) = homes();
     let project = tempfile::tempdir().expect("project");
     init_project(config_home.path(), user_home.path(), project.path());
@@ -499,13 +499,20 @@ fn cancel_is_two_phase_and_salvages() {
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-    assert!(stdout.contains("salvaged"), "stdout: {stdout}");
+    assert!(stdout.contains("cancelled_with_root"), "stdout: {stdout}");
 
     let records = read_records(project.path());
     assert_eq!(records.len(), 1);
     let record = &records[0];
-    assert_eq!(record["outcome"], "salvaged");
+    assert_eq!(record["outcome"], "cancelled_with_root");
     assert_eq!(record["cancel_confirmed"], true);
+    assert!(
+        record
+            .get("outcome_root")
+            .and_then(|v| v.as_str())
+            .is_some(),
+        "partial capture must land before the terminal record: {record:?}"
+    );
     let events: Vec<&str> = record["events"]
         .as_array()
         .expect("events")
@@ -522,7 +529,10 @@ fn cancel_is_two_phase_and_salvages() {
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-    assert!(stdout.contains("already salvaged"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("already cancelled_with_root"),
+        "stdout: {stdout}"
+    );
     // Let the orphaned fake harness exit so the tempdir cleans up.
     std::fs::write(project.path().join(".stateroot-delegate-test-go"), b"go").expect("sentinel");
 }
@@ -533,9 +543,24 @@ fn worktree_runs_there_and_the_record_stays_with_the_caller() {
     let (config_home, user_home) = homes();
     let project = tempfile::tempdir().expect("project");
     init_project(config_home.path(), user_home.path(), project.path());
-    // A second initialized project plays the fork worktree (carries .stateroot).
-    let worktree = tempfile::tempdir().expect("worktree");
-    init_project(config_home.path(), user_home.path(), worktree.path());
+    // A REAL fork worktree (6B validation requires fork context + record).
+    std::fs::write(project.path().join("seed.txt"), "seed\n").expect("seed");
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .arg("snap")
+        .assert()
+        .success();
+    let root_line = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    let root_hash = root_line
+        .split_whitespace()
+        .find(|t| t.len() >= 12 && t.chars().all(|c| c.is_ascii_hexdigit()))
+        .expect("root hash in snap output")
+        .to_string();
+    let worktree = tempfile::tempdir().expect("worktree parent");
+    let wt_path = worktree.path().join("checkout");
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["fork", &root_hash, "--worktree", &wt_path.to_string_lossy()])
+        .assert()
+        .success();
     let (_bin, path) = fake_claude("#!/bin/sh\necho ran-in-$(pwd)\n");
 
     // A worktree without .stateroot is rejected up front.
@@ -563,7 +588,7 @@ fn worktree_runs_there_and_the_record_stays_with_the_caller() {
             "--task",
             "t",
             "--worktree",
-            &worktree.path().to_string_lossy(),
+            &wt_path.to_string_lossy(),
             "--key",
             "k3",
         ])
@@ -573,7 +598,7 @@ fn worktree_runs_there_and_the_record_stays_with_the_caller() {
     assert_eq!(record["outcome"], "completed");
     assert_eq!(
         record["worktree"].as_str().expect("worktree field"),
-        worktree.path().to_string_lossy().as_ref()
+        wt_path.to_string_lossy().as_ref()
     );
     // The worker ran IN the worktree: the fake harness's pwd is in the log.
     let log = std::fs::read_to_string(
@@ -583,12 +608,12 @@ fn worktree_runs_there_and_the_record_stays_with_the_caller() {
     )
     .expect("log");
     assert!(
-        log.contains(&format!("ran-in-{}", worktree.path().display())),
+        log.contains(&format!("ran-in-{}", wt_path.display())),
         "worker did not run in the worktree: {log}"
     );
     // The record lives with the CALLER, not the worktree.
     assert!(
-        read_records(worktree.path()).is_empty(),
+        read_records(&wt_path).is_empty(),
         "worktree must not own the delegation record"
     );
 }
@@ -607,7 +632,6 @@ fn pid_alive_unix(pid: u32) -> bool {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "repair fixture: red until Phase 6B (process-tree cancel)"]
 fn cancel_kills_the_harness_process_tree_not_just_the_worker() {
     // Repair-plan F1 fixture (audit): `delegate cancel` that stops only the
     // worker leaves the actual harness child running orphaned — a false
