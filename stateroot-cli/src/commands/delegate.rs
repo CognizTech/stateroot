@@ -203,7 +203,7 @@ fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
     let ts = now_rfc3339();
     let stamp = ts.replace([':', '.'], "-");
     // Idempotency key (WS5): a caller-supplied key IS the record id, so a
-    // replayed spawn re-attaches (live) or resubmits (lost) instead of
+    // replayed spawn re-attaches (live) or resubmits (failed/lost) instead of
     // blind double-spawning — OpenViking's Idempotency-Key pattern.
     if let Some(key) = &args.key {
         validate_key(key)?;
@@ -224,17 +224,40 @@ fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
     let _guard = key_lock(&dir, &record_id)?;
 
     // Idempotency gate: an existing record with the same key decides.
+    // Failed and lost workers are deliberately retryable under that same
+    // identity.  A corrected runner or a transient harness failure must not
+    // force a human to mint a new key, but terminal success/cancellation stay
+    // immutable.  Keep a compact attempt history on the replacement record.
+    let mut attempt = 1_u64;
+    let mut retries = Vec::new();
     if let Some((_path, existing)) = load_record(&ctx.cwd, &record_id) {
-        if let Some(outcome) = existing.get("outcome").and_then(Value::as_str) {
-            anyhow::bail!(
-                "delegation key `{record_id}` already finished ({outcome}) — pick a new key"
-            );
-        }
         let prior = existing.get("fingerprint").cloned().unwrap_or(json!(null));
         if prior != json!(null) && prior != fingerprint {
             anyhow::bail!(
                 "delegation key `{record_id}` exists with a different request — pick a new key"
             );
+        }
+        if let Some(outcome) = existing.get("outcome").and_then(Value::as_str) {
+            if !matches!(outcome, "failed" | "lost") {
+                anyhow::bail!(
+                    "delegation key `{record_id}` already finished ({outcome}) — pick a new key"
+                );
+            }
+            attempt = existing.get("attempt").and_then(Value::as_u64).unwrap_or(1) + 1;
+            retries = existing
+                .get("retries")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            retries.push(json!({
+                "attempt": attempt - 1,
+                "outcome": outcome,
+                "exit_code": existing.get("exit_code").cloned().unwrap_or(Value::Null),
+                "duration_ms": existing.get("duration_ms").cloned().unwrap_or(Value::Null),
+                "ended_at": existing.get("ended_at").cloned().unwrap_or(Value::Null),
+                "outcome_root": existing.get("outcome_root").cloned().unwrap_or(Value::Null),
+                "log": existing.get("log").cloned().unwrap_or(Value::Null),
+            }));
         }
         if existing.get("status").and_then(Value::as_str) == Some("starting") {
             // A reservation whose spawn never landed: resubmit under the
@@ -298,13 +321,24 @@ fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
         "task": task,
         "command": command,
         "status": "starting",
+        "attempt": attempt,
         "fingerprint": fingerprint,
         "log": log_rel,
     });
+    if !retries.is_empty() {
+        record["retries"] = Value::Array(retries);
+    }
     if let Some(w) = &args.worktree {
         record["worktree"] = json!(w);
     }
     append_event(&mut record, "reserve", "starting reserved under key lock");
+    if attempt > 1 {
+        append_event(
+            &mut record,
+            "retry",
+            &format!("retrying failed/lost delegation as attempt {attempt}"),
+        );
+    }
     write_record(&dir, &record)?;
 
     // Detached worker = this binary in hidden worker mode; its stdout/stderr

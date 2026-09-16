@@ -481,6 +481,43 @@ fn same_key_never_double_spawns() {
 
 #[cfg(unix)]
 #[test]
+fn failed_key_retries_with_same_identity_and_preserves_attempt_history() {
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    let (_bin, path) = fake_claude("#!/bin/sh\necho transient failure >&2\nexit 1\n");
+
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .env("PATH", &path)
+        .args([
+            "delegate", "--to", "claude", "--task", "t", "--key", "retry-k1",
+        ])
+        .assert()
+        .success();
+    let first = wait_for_outcome(project.path(), 60);
+    assert_eq!(first["outcome"], "failed");
+
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .env("PATH", &path)
+        .args([
+            "delegate", "--to", "claude", "--task", "t", "--key", "retry-k1",
+        ])
+        .assert()
+        .success();
+    let retried = wait_for_outcome(project.path(), 60);
+    assert_eq!(retried["outcome"], "failed");
+    assert_eq!(retried["attempt"], 2);
+    assert_eq!(retried["retries"][0]["attempt"], 1);
+    assert_eq!(retried["retries"][0]["outcome"], "failed");
+    assert_eq!(
+        read_records(project.path()).len(),
+        1,
+        "same key keeps one record"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn cancel_is_two_phase_and_records_cancelled_with_root() {
     let (config_home, user_home) = homes();
     let project = tempfile::tempdir().expect("project");
