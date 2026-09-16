@@ -404,8 +404,11 @@ pub fn write_fork_context(project_dir: &Path, ctx: &ForkContext) -> std::io::Res
 }
 
 /// `memories/x` → `.stateroot/memories/x` (the form git tree paths take).
-fn stateroot_rel(rel: &str) -> PathBuf {
-    Path::new(".stateroot").join(rel)
+/// Always forward slashes: this string is compared against git tree paths,
+/// which are platform-independent, so `Path::join` (backslash on Windows)
+/// would silently miss every lookup there.
+fn stateroot_rel(rel: &str) -> String {
+    format!(".stateroot/{}", rel.replace('\\', "/"))
 }
 
 /// FNV-1a 128-bit over the last 64 KiB of `bytes` (shared by the ledger
@@ -451,7 +454,7 @@ pub fn report_written(project_dir: &Path, root_rel: &str) {
         "{}\n",
         serde_json::json!({
             "ts": now_rfc3339(),
-            "path": stateroot_rel(root_rel).to_string_lossy(),
+            "path": stateroot_rel(root_rel),
             "identity": identity,
         })
     );

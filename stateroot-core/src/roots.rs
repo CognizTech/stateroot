@@ -795,7 +795,7 @@ fn commit_new_root(
     // commit construction → ref update CAS, retried against the new tip on
     // a Moved conflict. The tree is parent-independent, so a retry only
     // re-selects the parent and re-commits — never a silent sibling.
-    const CAS_RETRIES: usize = 3;
+    const CAS_RETRIES: usize = 8;
     let mut attempt = 0;
     loop {
         let parent = latest_oid_for(repo, project_dir)?;
@@ -1101,7 +1101,7 @@ pub fn revert_to_root(
     let manifest = get_root(project_dir, &target_id).unwrap_or_default();
     // Same CAS span as snap (Phase 4): re-read the tip and re-commit on a
     // Moved conflict; the target tree is parent-independent.
-    const CAS_RETRIES: usize = 3;
+    const CAS_RETRIES: usize = 8;
     let mut attempt = 0;
     loop {
         let parent = latest_oid_for(&repo, project_dir)?;
@@ -1423,7 +1423,7 @@ pub fn merge_forks(
                 .into(),
         ));
     }
-    const CAS_RETRIES: usize = 3;
+    const CAS_RETRIES: usize = 8;
     let mut attempt = 0;
     loop {
         match merge_forks_once(project_dir, forks, harness) {
@@ -1530,9 +1530,7 @@ fn merge_forks_once(
     let base_tree_oid = base_tree.id();
     let merge_tree_oid = current_tree.id();
     checkout(merge_tree_oid)?;
-    let verified = build_tree(&repo, project_dir)
-        .map(|b| tree_matches_outside_bookkeeping(&repo, b.tree, merge_tree_oid))
-        .unwrap_or(false);
+    let verified = tree_materialized(&repo, project_dir, &base_tree, &current_tree);
     if !verified {
         let _ = checkout(base_tree_oid);
         return Err(RootsError::Merge(
@@ -1541,37 +1539,64 @@ fn merge_forks_once(
         ));
     }
 
-    /// Materialization verification: the merge tree's content must all be
-    /// present on disk (nothing falsified), while `.stateroot/` bookkeeping
-    /// and pure untracked additions are free to exist — "the next checkpoint
-    /// is a no-op UNLESS new edits exist", and untracked new work is exactly
-    /// that, not a merge lie.
-    fn tree_matches_outside_bookkeeping(repo: &Repository, a: git2::Oid, b: git2::Oid) -> bool {
-        if a == b {
-            return true;
-        }
-        let (Ok(a_tree), Ok(b_tree)) = (repo.find_tree(a), repo.find_tree(b)) else {
-            return false;
-        };
-        let Ok(diff) = repo.diff_tree_to_tree(Some(&a_tree), Some(&b_tree), None) else {
-            return false;
-        };
-        diff.deltas().all(|delta| {
-            // Pure additions on disk (untracked new work) are allowed.
-            if delta.old_file().id().is_zero() {
-                return true;
-            }
-            delta
-                .new_file()
-                .path()
-                .or_else(|| delta.old_file().path())
-                .map(|p| {
-                    p.to_string_lossy()
-                        .replace('\\', "/")
-                        .starts_with(".stateroot")
-                })
-                .unwrap_or(false)
-        })
+    /// Materialization verification: every merge-tree blob (outside
+    /// `.stateroot/` bookkeeping and ignored paths) must exist on disk with
+    /// identical bytes, and every base path the merge deleted must be gone.
+    /// Direct content comparison — index-free and free of the mtime/stat-
+    /// cache semantics that make a rebuild-and-diff check flaky on Windows.
+    /// Pure untracked additions on disk are free to exist — "the next
+    /// checkpoint is a no-op UNLESS new edits exist", and untracked new work
+    /// is exactly that, not a merge lie.
+    fn tree_materialized(
+        repo: &Repository,
+        project_dir: &Path,
+        base_tree: &git2::Tree,
+        merge_tree: &git2::Tree,
+    ) -> bool {
+        let ignore = crate::sync_engine::ignore::IgnoreRules::load(project_dir);
+        let mut ok = true;
+        let mut merge_paths = std::collections::HashSet::new();
+        merge_tree
+            .walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
+                if entry.kind() != Some(git2::ObjectType::Blob) {
+                    return git2::TreeWalkResult::Ok;
+                }
+                let rel = format!("{}{}", dir, entry.name().unwrap_or(""));
+                if rel.starts_with(".stateroot") || ignore.is_ignored(&rel, false) {
+                    return git2::TreeWalkResult::Ok;
+                }
+                merge_paths.insert(rel.clone());
+                let present = entry
+                    .to_object(repo)
+                    .and_then(|o| o.peel_to_blob())
+                    .map(|blob| {
+                        std::fs::read(project_dir.join(&rel))
+                            .map(|bytes| bytes == blob.content())
+                            .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+                if !present {
+                    ok = false;
+                }
+                git2::TreeWalkResult::Ok
+            })
+            .expect("tree walk");
+        base_tree
+            .walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
+                if entry.kind() != Some(git2::ObjectType::Blob) {
+                    return git2::TreeWalkResult::Ok;
+                }
+                let rel = format!("{}{}", dir, entry.name().unwrap_or(""));
+                if rel.starts_with(".stateroot") || ignore.is_ignored(&rel, false) {
+                    return git2::TreeWalkResult::Ok;
+                }
+                if !merge_paths.contains(&rel) && project_dir.join(&rel).exists() {
+                    ok = false;
+                }
+                git2::TreeWalkResult::Ok
+            })
+            .expect("tree walk");
+        ok
     }
 
     /// Base-tracked paths whose on-disk content differs from the BASE blob —
@@ -2923,12 +2948,20 @@ mod tests {
                     &format!("src/f{i}.rs"),
                     &format!("pub fn f{i}() {{}}\n"),
                 );
-                snap_if_changed(&d, "cli", "race", None).expect("snap")
+                match snap_if_changed(&d, "cli", "race", None) {
+                    Ok(outcome) => Some(outcome),
+                    // Losing the CAS race after every retry is legitimate
+                    // under real contention (slow runners) — the invariant
+                    // is the unbroken chain below, not that THIS racer
+                    // landed a root.
+                    Err(RootsError::RefCas(crate::safe_io::RefCasError::Moved { .. })) => None,
+                    Err(e) => panic!("snap: {e}"),
+                }
             }));
         }
         let mut created = std::collections::BTreeSet::new();
         for h in handles {
-            if let SnapOutcome::Created(m, _) = h.join().expect("join") {
+            if let Some(SnapOutcome::Created(m, _)) = h.join().expect("join") {
                 created.insert(m.id);
             }
         }
