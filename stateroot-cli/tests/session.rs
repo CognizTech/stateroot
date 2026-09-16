@@ -510,7 +510,9 @@ fn session_purge_stops_sync_resurrection() {
         "purge: {stdout}"
     );
     assert!(
-        stdout.contains("Canonical file + derived index only"),
+        stdout.contains("removed: canonical file + derived index")
+            && stdout.contains("retained:")
+            && stdout.contains("episodic"),
         "doctrine: {stdout}"
     );
     let store = project.path().join(".stateroot/local/sessions");

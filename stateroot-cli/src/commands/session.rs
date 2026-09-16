@@ -225,13 +225,14 @@ pub fn purge(ctx: &Ctx, id: &str, harness: Option<&str>, yes: bool) -> anyhow::R
         }
     }
     let report = sessions::purge(&ctx.cwd, &session).map_err(anyhow::Error::msg)?;
-    if let Ok(home) = stateroot_core::harness_install::home_dir() {
-        let _ = stateroot_core::memory_index::rebuild(&ctx.cwd, &home);
-    }
     println!(
         "session purge: purged: {}, skipped_tombstoned: {} ({} {})",
         report.purged, report.skipped_tombstoned, report.harness, report.session_id
     );
-    println!("Canonical file + derived index only. Episodic, snapshots, and handoffs stay.");
+    if let Some(err) = &report.rebuild_error {
+        println!("warning: derived-index rebuild failed (retained honestly): {err}");
+    }
+    println!("removed: canonical file + derived index.");
+    println!("retained: {}", report.retained.join(" · "));
     Ok(())
 }

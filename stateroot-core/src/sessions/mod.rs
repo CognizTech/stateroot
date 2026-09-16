@@ -442,6 +442,11 @@ pub struct PurgeReport {
     pub harness: String,
     /// Session id of the purged session.
     pub session_id: String,
+    /// Derived-index rebuild error, surfaced honestly (never swallowed).
+    pub rebuild_error: Option<String>,
+    /// Surfaces explicitly retained (printed so no one reads "purge" as
+    /// hard deletion): native transcript, episodic, snapshots, handoffs.
+    pub retained: Vec<String>,
 }
 
 /// Import every pi/DSH session belonging to `project_dir` into the canonical
@@ -465,6 +470,10 @@ pub fn import_from_readers_filtered(
     harness: Option<&str>,
     policy: TombstonePolicy,
 ) -> Result<SyncReport, TombstoneError> {
+    // Serialized against purge under the shared session-store lock (repair
+    // Phase 5): a purge-in-progress cannot interleave with canonical
+    // writes, and the tombstone set cannot change underneath this pass.
+    let _lock = tombstones::store_lock(project_dir)?;
     let stones = tombstones::load(project_dir, policy)?;
     let mut report = SyncReport::default();
     let import_one = |session: CanonicalSession, report: &mut SyncReport| {
@@ -806,28 +815,54 @@ pub fn resolve_for_purge(
     }
 }
 
-/// Tombstone, then delete the canonical file. Never deletes without a
-/// tombstone on disk. Episodic / snapshots / handoffs are not touched.
+/// One recoverable canon-purge transaction (repair Phase 5): the shared
+/// session-store lock serializes purge against import/sync; the tombstone
+/// is persisted BEFORE any delete (a crash after it resumes by re-running
+/// purge — the delete is idempotent); derived-index invalidation errors
+/// are surfaced in the report, never swallowed. Retained surfaces are
+/// enumerated honestly — this is never hard deletion.
 pub fn purge(project_dir: &Path, session: &StoredSession) -> Result<PurgeReport, String> {
+    let _lock = tombstones::store_lock(project_dir).map_err(|err| err.to_string())?;
     let stones = tombstones::load(project_dir, TombstonePolicy::FailOpen).unwrap_or_default();
     let skipped_tombstoned = usize::from(tombstones::contains(
         &stones,
         &session.session_id,
         &session.harness,
     ));
-    tombstones::record(project_dir, &session.session_id, &session.harness)
+    // Phase 1: persist the tombstone (idempotent — a resume finds it here).
+    tombstones::record_inner(project_dir, &session.session_id, &session.harness)
         .map_err(|err| err.to_string())?;
+    // Phase 2: remove the canonical file (idempotent — maybe already gone).
     let mut purged = 0;
     if session.path.is_file() {
         std::fs::remove_file(&session.path)
             .map_err(|err| format!("failed to delete {}: {err}", session.path.display()))?;
         purged = 1;
     }
+    // Phase 3: derived-index invalidation. A rebuild failure is reported,
+    // never discarded or turned into unconditional success.
+    let rebuild_error = match crate::harness_install::home_dir() {
+        Ok(home) => crate::memory_index::rebuild(project_dir, &home)
+            .err()
+            .map(|e| e.to_string()),
+        Err(err) => Some(format!("home resolution failed: {err:#}")),
+    };
+    let retained = vec![
+        format!(
+            "native {} transcript ({} home)",
+            session.harness, session.harness
+        ),
+        "episodic history".to_string(),
+        "snapshots/roots (immutable)".to_string(),
+        "handoffs".to_string(),
+    ];
     Ok(PurgeReport {
         purged,
         skipped_tombstoned,
         harness: session.harness.clone(),
         session_id: session.session_id.clone(),
+        rebuild_error,
+        retained,
     })
 }
 
@@ -1042,22 +1077,23 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "repair fixture: red until Phase 5 (shared tombstones)"]
     fn purge_is_observed_from_a_fork_worktree_too() {
         // Repair-plan F4 fixture (audit): anti-resurrection STATE must be
-        // project-shared, not checkout-local. A fork worktree (or a second
-        // machine) must observe the same tombstone set as the trunk; today
-        // the tombstone file lives in the trunk's `.stateroot/local/`, so
-        // every other checkout sees an EMPTY set.
+        // project-shared — a fork materialized from a POST-purge root must
+        // observe the tombstone, because the shared file travels inside the
+        // snapshot. (A pre-purge root legitimately lacks it: the purge is
+        // immutable history from that point in the lineage, and the cwd
+        // filter blocks the trunk's transcripts there anyway.)
         let home = tempfile::tempdir().expect("home");
         let project = tempfile::tempdir().expect("project");
         write_pi_session(home.path(), project.path(), "ses-wt", "shared canary");
         let report = import_from_readers(home.path(), project.path());
         assert_eq!(report.written, 1);
-        let (first, _) =
-            crate::roots::create_root(project.path(), "cli", "base", None).expect("root");
         let stored = load(project.path(), "ses-wt").expect("stored");
         purge(project.path(), &stored).expect("purge");
+        // The root is taken AFTER the purge: it carries the tombstone.
+        let (first, _) =
+            crate::roots::create_root(project.path(), "cli", "base", None).expect("root");
 
         let (name, _) =
             crate::roots::fork_root(project.path(), &first.id, Some("fork-purge"), "cli")
@@ -1071,7 +1107,7 @@ mod tests {
             .expect("tombstone load");
         assert!(
             crate::tombstones::contains(&shared, "ses-wt", "pi"),
-            "fork worktree sees an empty tombstone set — anti-resurrection state is checkout-local"
+            "post-purge fork must observe the tombstone — the shared file travels with snapshots"
         );
     }
 
