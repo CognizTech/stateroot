@@ -1042,6 +1042,37 @@ mod tests {
     }
 
     #[test]
+    fn purge_is_observed_from_a_fork_worktree_too() {
+        // Repair-plan F4 fixture (audit): anti-resurrection STATE must be
+        // project-shared, not checkout-local. A fork worktree (or a second
+        // machine) must observe the same tombstone set as the trunk; today
+        // the tombstone file lives in the trunk's `.stateroot/local/`, so
+        // every other checkout sees an EMPTY set.
+        let home = tempfile::tempdir().expect("home");
+        let project = tempfile::tempdir().expect("project");
+        write_pi_session(home.path(), project.path(), "ses-wt", "shared canary");
+        let report = import_from_readers(home.path(), project.path());
+        assert_eq!(report.written, 1);
+        let (first, _) = crate::roots::create_root(project.path(), "cli", "base", None).expect("root");
+        let stored = load(project.path(), "ses-wt").expect("stored");
+        purge(project.path(), &stored).expect("purge");
+
+        let (name, _) = crate::roots::fork_root(project.path(), &first.id, Some("fork-purge"), "cli")
+            .expect("fork");
+        let wt_tmp = tempfile::tempdir().expect("wt");
+        let wt = wt_tmp.path().join("checkout");
+        crate::roots::fork_materialize(project.path(), &name, &wt, None, None)
+            .expect("materialize");
+
+        let shared = crate::tombstones::load(&wt, crate::tombstones::TombstonePolicy::FailOpen)
+            .expect("tombstone load");
+        assert!(
+            crate::tombstones::contains(&shared, "ses-wt", "pi"),
+            "fork worktree sees an empty tombstone set — anti-resurrection state is checkout-local"
+        );
+    }
+
+    #[test]
     fn tombstone_before_delete_survives_kill() {
         let home = tempfile::tempdir().expect("home");
         let project = tempfile::tempdir().expect("project");

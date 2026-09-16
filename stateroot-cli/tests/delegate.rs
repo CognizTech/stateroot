@@ -592,3 +592,64 @@ fn worktree_runs_there_and_the_record_stays_with_the_caller() {
         "worktree must not own the delegation record"
     );
 }
+
+#[cfg(unix)]
+fn pid_alive_unix(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[cfg(unix)]
+#[test]
+fn cancel_kills_the_harness_process_tree_not_just_the_worker() {
+    // Repair-plan F1 fixture (audit): `delegate cancel` that stops only the
+    // worker leaves the actual harness child running orphaned — a false
+    // cancellation. The whole process tree must be verified dead.
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    let (_bin, path) = fake_claude(
+        "#!/bin/sh\necho $$ > .stateroot-grandchild-pid\nwhile [ ! -f .stateroot-delegate-test-go ]; do sleep 0.2; done\necho done\n",
+    );
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .env("PATH", &path)
+        .args(["delegate", "--to", "claude", "--task", "t", "--key", "k-tree"])
+        .assert()
+        .success();
+
+    // Wait for the harness grandchild to write its pid.
+    let mut grandchild = 0u32;
+    for _ in 0..100 {
+        if let Ok(text) = std::fs::read_to_string(project.path().join(".stateroot-grandchild-pid")) {
+            if let Ok(pid) = text.trim().parse::<u32>() {
+                grandchild = pid;
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(grandchild != 0, "harness never wrote its pid");
+    assert!(pid_alive_unix(grandchild), "fixture sanity: child alive");
+
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["delegate", "cancel", "k-tree"])
+        .assert()
+        .success();
+
+    assert!(
+        !pid_alive_unix(grandchild),
+        "cancel reported success but harness child {grandchild} is still running"
+    );
+
+    // Cleanup in case the assertion above failed (leave no orphan behind).
+    let _ = std::process::Command::new("kill")
+        .args(["-9", &grandchild.to_string()])
+        .status();
+    std::fs::write(project.path().join(".stateroot-delegate-test-go"), b"go").expect("sentinel");
+}

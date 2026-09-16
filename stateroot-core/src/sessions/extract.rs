@@ -1312,4 +1312,39 @@ mod tests {
         assert_eq!(e[4].kind, "meta");
         assert!(e[4].content.as_deref().unwrap_or("").contains("nested"));
     }
+
+    #[test]
+    fn codex_text_block_output_arrays_become_tool_results() {
+        // Repair-plan F3 fixture (audit: 1,997 historical arrays): proven
+        // content-block arrays with text blocks carry the command's output
+        // — demoting them to meta makes completed calls look output-less.
+        let project = tempfile::tempdir().expect("project");
+        let cwd = crate::transcripts::path_for_json(project.path());
+        let meta = json!({"type":"session_meta","payload":{"id":"c-arr","cwd":cwd,"timestamp":"2026-07-01T10:00:00Z"}});
+        let events = vec![
+            json!({"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"ls -la\"}","call_id":"c1"},"timestamp":"2026-07-01T10:00:01Z"}),
+            json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":[{"type":"output_text","text":"total 42"},{"type":"output_text","text":"drwxr-xr-x src"}]},"timestamp":"2026-07-01T10:00:02Z"}),
+        ];
+        let session = canonical_from_codex(
+            &meta,
+            &events,
+            Path::new("/x/rollout-arr.jsonl"),
+            project.path(),
+        )
+        .expect("session");
+        let kinds: Vec<&str> = session.entries.iter().map(|e| e.kind.as_str()).collect();
+        assert!(
+            kinds.contains(&"tool_result"),
+            "text-block array demoted instead of producing a tool_result: {kinds:?}"
+        );
+        let result = session
+            .entries
+            .iter()
+            .find(|e| e.kind == "tool_result")
+            .expect("tool_result");
+        assert_eq!(result.parent_id.as_deref(), Some("c1"));
+        let content = result.content.as_deref().unwrap_or("");
+        assert!(content.contains("total 42"), "content: {content}");
+        assert!(content.contains("drwxr-xr-x src"), "content: {content}");
+    }
 }

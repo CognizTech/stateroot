@@ -1167,4 +1167,33 @@ mod tests {
         );
         let _ = WS1_CODEX_CANON_MARKER;
     }
+
+    #[test]
+    fn historical_shell_command_string_and_array_forms_keep_their_files() {
+        // Repair-plan F3 fixture (audit: 4,157 historical records): the
+        // historical `shell_command` shapes use `command` — as a plain
+        // string and as an argv array. Demoting them loses the files those
+        // calls wrote; proven historical shapes must extract like `cmd`.
+        let project = project();
+        let cwd = crate::transcripts::path_for_json(project.path());
+        let home = tempfile::tempdir().expect("home");
+        let rollout = write_rollout(
+            &home.path().join(".codex/sessions/2026/07/01"),
+            "rollout-historical-shell.jsonl",
+            &[
+                &meta(&cwd).replace("s-1", "s-hist"),
+                r#"{"timestamp":"2026-07-01T10:00:01Z","type":"response_item","payload":{"type":"function_call","name":"shell_command","arguments":"{\"command\":\"cat > hist-string.md <<'EOF'\\n\"}","call_id":"h1"}}"#,
+                r#"{"timestamp":"2026-07-01T10:00:02Z","type":"response_item","payload":{"type":"function_call","name":"shell_command","arguments":"{\"command\":[\"sh\",\"-c\",\"cat > hist-array.md <<'EOF'\"]}","call_id":"h2"}}"#,
+                r#"{"timestamp":"2026-07-01T10:00:03Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"command\":\"cat > hist-exec.md <<'EOF'\\n\"}","call_id":"h3"}}"#,
+            ],
+        );
+        let session = parse_rollout(&rollout, project.path()).expect("session");
+        for want in ["hist-string.md", "hist-array.md", "hist-exec.md"] {
+            assert!(
+                session.files_touched.iter().any(|f| f == want),
+                "historical shell shape lost {want}: {:?}",
+                session.files_touched
+            );
+        }
+    }
 }

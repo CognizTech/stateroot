@@ -2266,4 +2266,91 @@ mod tests {
             .expect_err("a fork that never moved contributes nothing");
         assert!(err.to_string().contains("nothing to merge"), "{err}");
     }
+
+    // -- Repair-plan failing fixtures (Phase 0): red until their phase lands --
+
+    #[test]
+    fn merge_materializes_the_trunk_working_tree() {
+        // Audit F2: a successful merge must leave the trunk filesystem equal
+        // to the merge root — advancing the ref alone is a false success.
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        let (_wt, _tip) = fork_with_change(&dir, &first.id, "fork-a", "src/lib_a.rs", "pub fn a() {}\n");
+        let (manifest, _t, _merged) =
+            merge_forks(&dir, &["fork-a".to_string()], "kimi").expect("merge");
+        let _ = manifest;
+        assert!(
+            dir.join("src/lib_a.rs").is_file(),
+            "merge advanced the ref but left the trunk working tree without the merged file"
+        );
+    }
+
+    #[test]
+    fn fork_branch_never_resets_an_existing_user_branch() {
+        // Audit F5: materializing with a git branch name that already exists
+        // must REFUSE, never force-reset the user's branch to the fork root.
+        let (_tmp, dir) = project();
+        write(&dir, "a.txt", "one");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        write(&dir, "b.txt", "two");
+        let (second, _) = create_root(&dir, "cli", "second", None).expect("snap2");
+        let repo = ensure_repo(&dir).expect("repo");
+        repo.reference("refs/heads/work", first.id.parse().expect("oid"), true, "user branch")
+            .expect("branch");
+        let (name, _) = fork_root(&dir, &second.id, Some("fork-b"), "cli").expect("fork");
+        let wt_tmp = tempfile::tempdir().expect("wt");
+        let err = fork_materialize(
+            &dir,
+            &name,
+            &wt_tmp.path().join("checkout"),
+            Some("work"),
+            None,
+        )
+        .expect_err("must refuse to clobber an existing branch");
+        let _ = err;
+        let still = repo
+            .refname_to_id("refs/heads/work")
+            .expect("branch still exists")
+            .to_string();
+        assert_eq!(still, first.id, "user branch was force-reset");
+    }
+
+    #[test]
+    fn concurrent_trunk_snaps_form_one_chain_not_orphaned_siblings() {
+        // Audit F6 (Phase 4): concurrent same-ref snaps must serialize into
+        // ONE causal chain — every created root reachable from latest.
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        create_root(&dir, "cli", "first", None).expect("snap");
+        let mut handles = Vec::new();
+        for i in 0..8 {
+            let d = dir.clone();
+            handles.push(std::thread::spawn(move || {
+                write(&d, &format!("src/f{i}.rs"), &format!("pub fn f{i}() {{}}\n"));
+                snap_if_changed(&d, "cli", "race", None).expect("snap")
+            }));
+        }
+        let mut created = std::collections::BTreeSet::new();
+        for h in handles {
+            if let SnapOutcome::Created(m, _) = h.join().expect("join") {
+                created.insert(m.id);
+            }
+        }
+        assert_eq!(created.len(), 8, "every racer must produce a root");
+        let repo = ensure_repo(&dir).expect("repo");
+        let mut reachable = std::collections::BTreeSet::new();
+        let mut current = repo.refname_to_id(LATEST_REF).ok();
+        while let Some(oid) = current {
+            reachable.insert(oid.to_string());
+            let commit = repo.find_commit(oid).expect("commit");
+            current = (0..commit.parent_count()).find_map(|i| commit.parent_id(i).ok());
+        }
+        let orphaned: Vec<_> = created.difference(&reachable).collect();
+        assert!(
+            orphaned.is_empty(),
+            "{} roots were created but are unreachable from latest — same-ref writes formed siblings, not a chain",
+            orphaned.len()
+        );
+    }
 }
