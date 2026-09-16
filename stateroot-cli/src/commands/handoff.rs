@@ -752,34 +752,7 @@ fn write_packet_durable(project_dir: &Path, packet: &Value) -> anyhow::Result<()
         .context("handoff current path has no parent")?;
     std::fs::create_dir_all(parent)?;
     let text = format!("{}\n", serde_json::to_string_pretty(packet)?);
-    let timestamp = packet
-        .get("created_at")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown")
-        .replace([':', '.'], "-");
-    let harness = packet
-        .get("created_by_harness")
-        .and_then(Value::as_str)
-        .unwrap_or("cli");
-    let history_dir = root.join(local_store::HANDOFF_HISTORY_DIR);
-    std::fs::create_dir_all(&history_dir)?;
-    let history = history_dir.join(format!(
-        "{timestamp}-{harness}-{}.json",
-        uuid::Uuid::now_v7()
-    ));
-    let mut history_file = std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&history)?;
-    let history_result = (|| -> anyhow::Result<()> {
-        history_file.write_all(text.as_bytes())?;
-        history_file.sync_all()?;
-        Ok(())
-    })();
-    if history_result.is_err() {
-        let _ = std::fs::remove_file(&history);
-    }
-    history_result?;
+    write_packet_history_durable(project_dir, packet, &text)?;
 
     #[cfg(windows)]
     {
@@ -811,6 +784,45 @@ fn write_packet_durable(project_dir: &Path, packet: &Value) -> anyhow::Result<()
         }
         current_result
     }
+}
+
+/// Append immutable handoff history without replacing this checkout's local
+/// current packet.  Bound handoffs use this in the caller then write their
+/// deliverable current packet only inside the receiving fork.
+fn write_packet_history_durable(
+    project_dir: &Path,
+    packet: &Value,
+    text: &str,
+) -> anyhow::Result<()> {
+    let root = local_store::root(project_dir);
+    let timestamp = packet
+        .get("created_at")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .replace([':', '.'], "-");
+    let harness = packet
+        .get("created_by_harness")
+        .and_then(Value::as_str)
+        .unwrap_or("cli");
+    let history_dir = root.join(local_store::HANDOFF_HISTORY_DIR);
+    std::fs::create_dir_all(&history_dir)?;
+    let history = history_dir.join(format!(
+        "{timestamp}-{harness}-{}.json",
+        uuid::Uuid::now_v7()
+    ));
+    let mut history_file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&history)?;
+    let history_result = (|| -> anyhow::Result<()> {
+        history_file.write_all(text.as_bytes())?;
+        history_file.sync_all()?;
+        Ok(())
+    })();
+    if history_result.is_err() {
+        let _ = std::fs::remove_file(&history);
+    }
+    history_result
 }
 
 /// `stateroot handoff write [--from H] [--to H] [--task …] [--next …] [--input PATH]`.
@@ -873,10 +885,11 @@ pub async fn write_with_origin(
     let input = apply_write_flags(read_input(input_path)?, write_flags);
     // Read directly so malformed state cannot silently reset the sequence.
     let current = local_store::read_handoff_local(&ctx.cwd)?;
-    let current_seq = current
-        .as_ref()
-        .and_then(|p| p.get("seq"))
-        .and_then(|v| v.as_i64())
+    let current_seq = std::iter::once(current)
+        .flatten()
+        .chain(local_store::list_handoffs_local(&ctx.cwd)?)
+        .filter_map(|packet| packet.get("seq").and_then(|value| value.as_i64()))
+        .max()
         .unwrap_or(0);
 
     // `project/state.json` holds the objective recorded at init; nothing
@@ -906,16 +919,31 @@ pub async fn write_with_origin(
         },
     )?;
 
-    write_packet_durable(&ctx.cwd, &packet)?;
+    let bound_worktree = packet
+        .get("fork_id")
+        .and_then(Value::as_str)
+        .and_then(|fork| stateroot_core::roots::registered_worktree_path(&ctx.cwd, fork));
+    let delivery_dir = if let Some(worktree) = bound_worktree {
+        // A fork-bound handoff is delivery to that fork, not a replacement of
+        // trunk's per-session current packet.  Keep an immutable sender-side
+        // audit record and give the receiver its own current packet.
+        let text = format!("{}\n", serde_json::to_string_pretty(&packet)?);
+        write_packet_history_durable(&ctx.cwd, &packet, &text)?;
+        write_packet_durable(&worktree, &packet)?;
+        worktree
+    } else {
+        write_packet_durable(&ctx.cwd, &packet)?;
+        ctx.cwd.clone()
+    };
     let seq = packet.get("seq").and_then(|v| v.as_i64()).unwrap_or(0);
     let written_at = packet
         .get("written_at")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    handoff_continuity::write_explicit_marker(&ctx.cwd, &source, seq, written_at)?;
+    handoff_continuity::write_explicit_marker(&delivery_dir, &source, seq, written_at)?;
     println!("handoff #{seq} written");
     // Compact digest footer (composed locally — no extra server calls).
-    if let Some(footer) = super::resume::digest_footer(&ctx.cwd) {
+    if let Some(footer) = super::resume::digest_footer(&delivery_dir) {
         println!("{footer}");
     }
     Ok(())

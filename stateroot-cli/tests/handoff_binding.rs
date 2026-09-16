@@ -125,8 +125,8 @@ fn bound_handoff_stores_fork_id_not_a_path() {
         .failure();
 
     write_bound_handoff(config_home.path(), user_home.path(), project.path(), &wt);
-    let current = std::fs::read_to_string(project.path().join(".stateroot/handoffs/current.json"))
-        .expect("current");
+    let current =
+        std::fs::read_to_string(wt.join(".stateroot/handoffs/current.json")).expect("current");
     let packet: serde_json::Value = serde_json::from_str(&current).expect("json");
     let fork_id = packet["fork_id"].as_str().expect("fork_id present");
     assert!(!fork_id.is_empty());
@@ -166,13 +166,13 @@ fn bound_handoff_uses_the_fork_active_plan_and_resolves_its_worktree() {
         .success();
 
     write_bound_handoff(config_home.path(), user_home.path(), project.path(), &wt);
-    let current = std::fs::read_to_string(project.path().join(".stateroot/handoffs/current.json"))
-        .expect("current");
+    let current =
+        std::fs::read_to_string(wt.join(".stateroot/handoffs/current.json")).expect("current");
     let packet: serde_json::Value = serde_json::from_str(&current).expect("json");
     assert_eq!(packet["plan_ref"]["id"].as_str(), Some(plan.as_str()));
     assert_eq!(packet["plan_ref"]["status"].as_str(), Some("active"));
 
-    let shown = stateroot(config_home.path(), user_home.path(), project.path())
+    let shown = stateroot(config_home.path(), user_home.path(), &wt)
         .args(["handoff", "show"])
         .assert()
         .success();
@@ -186,7 +186,7 @@ fn bound_handoff_uses_the_fork_active_plan_and_resolves_its_worktree() {
 }
 
 #[test]
-fn resume_in_the_wrong_directory_fails_closed_with_the_recovery() {
+fn bound_handoff_delivers_only_to_its_fork_worktree() {
     let (config_home, user_home) = homes();
     let project = tempfile::tempdir().expect("project");
     init_project(config_home.path(), user_home.path(), project.path());
@@ -202,24 +202,30 @@ fn resume_in_the_wrong_directory_fails_closed_with_the_recovery() {
     );
     write_bound_handoff(config_home.path(), user_home.path(), project.path(), &wt);
 
-    // Resume in the TRUNK (wrong tree for a bound handoff): hard refusal
-    // with the exact recovery command.
-    let out = stateroot(config_home.path(), user_home.path(), project.path())
-        .args(["resume", "--force"])
-        .assert()
-        .failure();
-    let stderr = String::from_utf8(out.get_output().stderr.clone()).expect("utf8");
-    assert!(stderr.contains("bound to fork"), "stderr: {stderr}");
-    assert!(stderr.contains("Recovery:"), "stderr: {stderr}");
+    // The parent retains no bound current packet: another fork can receive a
+    // different handoff without displacing this delivery.
     assert!(
-        stderr.contains(&wt.display().to_string()),
-        "stderr: {stderr}"
+        !project
+            .path()
+            .join(".stateroot/handoffs/current.json")
+            .exists(),
+        "bound delivery must not replace the parent's current handoff"
     );
 
-    // Resume INSIDE the fork worktree: allowed (the fork is registered in
-    // the worktree's own lineage).
-    stateroot(config_home.path(), user_home.path(), &wt)
+    // Resume in the parent remains usable and unbound.
+    stateroot(config_home.path(), user_home.path(), project.path())
         .args(["resume", "--force"])
         .assert()
         .success();
+
+    // Resume inside the fork receives the packet and resolves its own path.
+    let out = stateroot(config_home.path(), user_home.path(), &wt)
+        .args(["resume", "--force"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains(&wt.display().to_string()),
+        "stdout: {stdout}"
+    );
 }

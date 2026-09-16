@@ -305,7 +305,15 @@ pub fn render_handoff_digest_full(
     let fork_id = get_str("fork_id");
     if !fork_id.is_empty() {
         let resolved = project_dir
-            .and_then(|dir| stateroot_core::roots::registered_worktree_path(dir, fork_id))
+            .and_then(|dir| {
+                if stateroot_core::local_store::fork_context(dir)
+                    .is_some_and(|context| context.fork == fork_id)
+                {
+                    Some(dir.to_path_buf())
+                } else {
+                    stateroot_core::roots::registered_worktree_path(dir, fork_id)
+                }
+            })
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "(worktree not registered on this machine)".to_string());
         out.push_str(&format!(
