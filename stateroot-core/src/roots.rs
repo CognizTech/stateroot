@@ -608,25 +608,38 @@ pub fn snap_if_changed(
     snap_ctx: Option<&crate::snap_context::SnapContext>,
 ) -> Result<SnapOutcome, RootsError> {
     let repo = ensure_repo(project_dir)?;
-    let build = build_tree(&repo, project_dir)?;
-    if let Some(parent) = latest_oid_for(&repo, project_dir)? {
-        if !project_files_changed(&repo, parent, build.tree)? {
-            return Ok(SnapOutcome::Unchanged {
-                root: parent.to_string(),
-            });
+    // A racing snap can publish a tree built before another racer finished
+    // writing.  CAS makes the roots a chain, but does not by itself make the
+    // winning tree include that later filesystem state.  Re-read after each
+    // publish and append one reconciled root when real project files moved.
+    const RECONCILE_RETRIES: usize = 8;
+    for attempt in 0..=RECONCILE_RETRIES {
+        let build = build_tree(&repo, project_dir)?;
+        if let Some(parent) = latest_oid_for(&repo, project_dir)? {
+            if !project_files_changed(&repo, parent, build.tree)? {
+                return Ok(SnapOutcome::Unchanged {
+                    root: parent.to_string(),
+                });
+            }
         }
+        let (manifest, transition) = commit_new_root(
+            &repo,
+            project_dir,
+            build.tree,
+            build.pinned,
+            build.bytes,
+            harness,
+            reason,
+            snap_ctx,
+        )?;
+        let published = git2::Oid::from_str(&manifest.id)?;
+        let observed = build_tree(&repo, project_dir)?;
+        if attempt < RECONCILE_RETRIES && project_files_changed(&repo, published, observed.tree)? {
+            continue;
+        }
+        return Ok(SnapOutcome::Created(manifest, Box::new(transition)));
     }
-    let (manifest, transition) = commit_new_root(
-        &repo,
-        project_dir,
-        build.tree,
-        build.pinned,
-        build.bytes,
-        harness,
-        reason,
-        snap_ctx,
-    )?;
-    Ok(SnapOutcome::Created(manifest, Box::new(transition)))
+    unreachable!("bounded reconciliation loop always returns")
 }
 
 /// True when `new_tree` differs from `parent_root`'s tree anywhere outside
