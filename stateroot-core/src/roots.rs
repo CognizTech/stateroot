@@ -1524,7 +1524,20 @@ fn merge_forks_once(
     }
     let checkout = |tree: git2::Oid| -> Result<(), RootsError> {
         let object = repo.find_object(tree, Some(git2::ObjectType::Tree))?;
-        repo.checkout_tree(&object, Some(git2::build::CheckoutBuilder::new().force()))?;
+        // Filters disabled: roots are a content-addressed byte store —
+        // build_tree hashes raw disk bytes, so materialization must write
+        // raw blob bytes too. A smudge filter (core.autocrlf on Windows)
+        // would make every restored file differ from its blob and fail the
+        // verification below — and silently corrupt byte-exact restoration
+        // for real users.
+        repo.checkout_tree(
+            &object,
+            Some(
+                git2::build::CheckoutBuilder::new()
+                    .force()
+                    .disable_filters(true),
+            ),
+        )?;
         Ok(())
     };
     let base_tree_oid = base_tree.id();

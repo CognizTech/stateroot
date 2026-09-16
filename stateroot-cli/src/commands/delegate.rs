@@ -10,6 +10,7 @@
 //! subagent is labor.
 
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
 use std::process::Stdio;
 
 use anyhow::Result;
