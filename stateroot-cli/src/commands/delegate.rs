@@ -449,7 +449,6 @@ fn worker(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
                 started.elapsed().as_millis(),
                 &format!("\noutcome: failed · worker error: {err:#}\n"),
             );
-            let _ = &record_root;
             Err(err)
         }
     }

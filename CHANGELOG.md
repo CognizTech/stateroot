@@ -5,6 +5,52 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- **Session boundaries finalize through a durable journal.** Stop/session_end
+  enqueues one composite boundary job (`local/finalize-journal/`) that
+  commits in phases — snapshot first, then the handoff bound to that exact
+  root, then ingest — with checked persistence between phases, exponential
+  backoff with the last error retained, and `manual_attention` instead of
+  ever dropping a failed job. Every safe entrypoint (session start,
+  checkpoint, stop, doctor, status) resumes delivery; the first automatic
+  handoff is created when none exists. `stateroot doctor` reports journal
+  state with the retained error.
+- **Same-ref snapshots are compare-and-swap with retry.** Concurrent snaps
+  on one lineage ref form a single causal chain or get a retryable
+  conflict — never silent siblings; independent fork refs stay fully
+  concurrent. A worktree whose fork context or fork ref is broken fails
+  closed instead of falling back to the trunk. Blob reads validate file
+  metadata before and after. A tree containing an ignored path blocks ref
+  advancement with the exact paths named, and every parented root runs a
+  write audit (content-identity based) of `.stateroot/` writes into its
+  transition evidence.
+- **Canonical sessions can be purged — honestly scoped.** `stateroot
+  session purge <id> [--yes]` writes a project-shared tombstone
+  (`.stateroot/tombstones.jsonl`, union-mergeable, traveling with
+  snapshots to every worktree), deletes the canonical file, and rebuilds
+  the derived index with rebuild errors surfaced. `session sync` and FTS
+  cannot resurrect a tombstoned id from any checkout of the project.
+  Native transcripts, episodic history, snapshots, and handoffs are
+  retained and printed as such — full history redaction is a separate
+  future design.
+- **Parallel plan execution.** `stateroot fork <root> --worktree <path>
+  [--plan ID]` materializes an isolated checkout (validation + rollback;
+  user branches are never created or moved) whose snaps chain on the fork
+  ref. `stateroot delegate --to <h> --worktree <path> --key <k>` runs a
+  subagent inside a registered fork with per-key idempotency, and every
+  outcome — completion, failure, or cancellation — is captured as an
+  immutable root before the task is terminal; `delegate cancel <id>` stops
+  the whole process tree and records `cancelled_with_root`. `stateroot
+  merge <fork>…` 3-way-merges fork tips into one N-parent root (conflicts
+  reported per path, nothing half-applied), materializes the merged tree
+  into the trunk workspace with dirty-workspace protection, and cleans up
+  merged worktrees automatically. `handoff write --worktree` binds by
+  validated fork id; `resume` in the wrong directory fails closed with the
+  exact recovery.
+- **Codex capture restores historical shapes.** `shell_command`/`shell`
+  `command` (string or argv array) and content-block output arrays with
+  text blocks keep their semantics as real tool results — measured
+  historical transcripts no longer lose files or leave completed calls
+  looking interrupted after transfer.
 - **Extension updates now update the CLI too** (the agreed design, finally
   landed): when the extension version changes under a working CLI, the
   bundled installer re-runs and brings the CLI to latest stable. Missing-CLI
