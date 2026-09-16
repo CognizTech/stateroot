@@ -299,7 +299,8 @@ pub enum PlanAction {
         /// Plan id (prefix allowed).
         id: String,
     },
-    /// Activate an approved plan (the current active one demotes to approved).
+    /// Activate an approved plan in this checkout. Fork worktrees activate
+    /// independently; only another plan in the same checkout is demoted.
     Activate {
         /// Plan id (prefix allowed).
         id: String,

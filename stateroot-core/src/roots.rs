@@ -1174,11 +1174,12 @@ pub fn fork_root(
 /// already claimed by another fork.
 ///
 /// The checkout contains the root's full tree — including `.stateroot/`
-/// (minus `local/`), so plans, handoffs, and memory physically travel with
-/// the fork. HEAD is detached at the root commit so plumbing ref writes
-/// never move a checked-out branch under the worktree. Absolute paths live
-/// only in the machine-local registry (`.stateroot/local/`); shared state
-/// carries the opaque fork id.
+/// (minus `local/`). A plan can have been recorded after that root, so a
+/// claimed plan is copied into the new worktree before its fork context is
+/// stamped. HEAD is detached at the root commit so plumbing ref writes never
+/// move a checked-out branch under the worktree. Absolute paths live only in
+/// the machine-local registry (`.stateroot/local/`); shared state carries the
+/// opaque fork id.
 pub fn fork_materialize(
     project_dir: &Path,
     name: &str,
@@ -1241,6 +1242,9 @@ pub fn fork_materialize(
         if let Ok(mut branch) = repo.find_branch(&tmp_branch, git2::BranchType::Local) {
             branch.delete()?;
         }
+        if let Some(plan_id) = plan {
+            copy_plan_to_worktree(project_dir, worktree_path, plan_id)?;
+        }
         local_store::write_fork_context(
             worktree_path,
             &local_store::ForkContext {
@@ -1280,6 +1284,29 @@ pub fn fork_materialize(
         }
     }
     result
+}
+
+/// Copy the authoritative plan body and sidecar into a newly materialized
+/// fork. The root being forked may predate the plan, so relying on the Git
+/// snapshot alone leaves the executor with a fork context that names a plan
+/// it cannot read or activate.
+fn copy_plan_to_worktree(
+    project_dir: &Path,
+    worktree_path: &Path,
+    plan_id: &str,
+) -> Result<(), RootsError> {
+    let (_meta, body_path) = crate::plans::load(project_dir, plan_id)
+        .ok_or_else(|| RootsError::NotFound(format!("no plan named {plan_id}")))?;
+    let body = std::fs::read(&body_path)?;
+    let meta = std::fs::read(
+        local_store::root(project_dir)
+            .join("plans")
+            .join(format!("{plan_id}.json")),
+    )?;
+    let destination = local_store::root(worktree_path).join("plans");
+    crate::safe_io::atomic_replace(&destination.join(format!("{plan_id}.md")), &body)?;
+    crate::safe_io::atomic_replace(&destination.join(format!("{plan_id}.json")), &meta)?;
+    Ok(())
 }
 
 fn fork_holding_plan(project_dir: &Path, plan_id: &str) -> Option<String> {
@@ -2566,9 +2593,11 @@ mod tests {
     /// Materialize a fork with a claimed plan into a detached worktree.
     fn forked_worktree(dir: &Path) -> (tempfile::TempDir, PathBuf, String, RootManifest, String) {
         write(dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(dir, "cli", "first", None).expect("snap");
+        // Deliberately record after the root: this is the normal plan-first,
+        // parallel-execution flow that used to leave the new fork planless.
         let plan = crate::plans::record(dir, "plan x", "cli", None, "# plan x\n").expect("plan");
         let plan_id = plan.id.clone();
-        let (first, _) = create_root(dir, "cli", "first", None).expect("snap");
         let (name, _) = fork_root(dir, &first.id, Some("fork-x"), "cli").expect("fork");
         let wt_tmp = tempfile::tempdir().expect("wt tmp");
         let wt = wt_tmp.path().join("checkout");
@@ -2621,6 +2650,18 @@ mod tests {
                 .expect("plan meta");
         assert!(meta_text.contains("claimed_by"), "{meta_text}");
         assert!(meta_text.contains(&name), "{meta_text}");
+        // Regression: the plan can be recorded after the fork root. It must
+        // still be readable and independently activatable in the worktree.
+        let (carried_plan, carried_body) = crate::plans::load(&wt, &plan_id).expect("carried plan");
+        assert_eq!(carried_plan.status(), crate::plans::PlanStatus::Draft);
+        assert!(std::fs::read_to_string(carried_body)
+            .expect("carried body")
+            .contains("# plan x"));
+        crate::plans::transition(&wt, &plan_id, crate::plans::PlanStatus::Approved)
+            .expect("approve inside fork");
+        let (active, _) = crate::plans::transition(&wt, &plan_id, crate::plans::PlanStatus::Active)
+            .expect("activate inside fork");
+        assert_eq!(active.status(), crate::plans::PlanStatus::Active);
     }
 
     #[test]

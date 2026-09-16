@@ -7,10 +7,12 @@
 //! plus a directive, never the body (token razor).
 //!
 //! Lifecycle: `draft → approved → active → done`, `abandoned` from any
-//! non-terminal state. At most ONE plan is active: activating demotes the
-//! currently active plan to `approved` (recorded in its notes — never
-//! silent). Wrong-state transitions are clear errors. Transition writes bump
-//! `updated_at` and re-stamp `root_ref` from `refs/stateroot/latest`.
+//! non-terminal state. Each checkout has at most ONE active plan: activating
+//! another plan in that same checkout demotes the previous one to `approved`
+//! (recorded in its notes — never silent). Fork worktrees carry their own
+//! plan sidecars and therefore activate independently. Wrong-state
+//! transitions are clear errors. Transition writes bump `updated_at` and
+//! re-stamp `root_ref` from `refs/stateroot/latest`.
 
 use std::path::{Path, PathBuf};
 

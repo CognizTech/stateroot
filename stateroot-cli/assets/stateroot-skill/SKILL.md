@@ -80,7 +80,7 @@ When the user asks you to make a plan that another harness will implement — or
    - on harnesses with native plan mode: author in plan mode as usual, then record the same body into the store before exiting plan mode (`--file <path>` exists to ingest that existing plan-mode file)
    - never author a plan markdown inside the project repo just to hand it off — repo docs are project artifacts; the shared store carries the plan and the executor reads it with `stateroot plan show <id>`
 2. **Hand it off**: `stateroot handoff write --from <you> --to <target harness> --objective "…" --task "Execute recorded plan <id> (stateroot plan show <id>)" [...]` — the store auto-attaches the approved/active plan's `plan_ref` to the handoff
-3. The executor's digest then says **"execute this plan; do not re-plan or re-explore"** — approve with `stateroot plan approve <id>` when the user has reviewed, `activate <id>` to mark it the running plan
+3. The executor's digest then says **"execute this plan; do not re-plan or re-explore"** — approve with `stateroot plan approve <id>` when the user has reviewed. For parallel work, materialize one sibling fork per plan with `stateroot fork <root> --worktree <path> --plan <id>`, then activate that plan **inside its fork worktree**. Activation is one-per-checkout, not one-per-project: independent forks activate independently.
 4. Harness-native plans written in native plan mode DO federate in automatically at session boundaries (as drafts) — but the record-then-handoff path is immediate and deliberate; use it when the plan is meant for another harness NOW
 
 ### 2b) Work-state lineage -> automatic snap
