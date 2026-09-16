@@ -313,7 +313,7 @@ fn build_tree(repo: &Repository, dir: &Path) -> Result<TreeBuild, RootsError> {
                     }
                     None => {
                         *misses += 1;
-                        let bytes = crate::fs_lock::read_with_retry(&path)?;
+                        let bytes = read_validated(&path, len, mtime)?;
                         *total_bytes += bytes.len() as u64;
                         let oid = repo.blob(&bytes)?;
                         next_index
@@ -365,19 +365,78 @@ fn build_tree(repo: &Repository, dir: &Path) -> Result<TreeBuild, RootsError> {
     })
 }
 
+/// Read a file for a blob with metadata validation BEFORE and AFTER the
+/// read (repair Phase 4): a short/torn or mid-write read retries with
+/// backoff; a file that never stabilizes is an honest error, never a
+/// silently wrong blob.
+fn read_validated(
+    path: &Path,
+    expected_len: u64,
+    expected_mtime: (u64, u32),
+) -> std::io::Result<Vec<u8>> {
+    for attempt in 0..4 {
+        let bytes = crate::fs_lock::read_with_retry(path)?;
+        let after = std::fs::metadata(path)?;
+        let after_len = after.len();
+        let after_mtime = after
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| (d.as_secs(), d.subsec_nanos()))
+            .unwrap_or((0, 0));
+        if after_len == expected_len
+            && after_mtime == expected_mtime
+            && bytes.len() as u64 == expected_len
+        {
+            return Ok(bytes);
+        }
+        if attempt < 3 {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("file kept changing mid-read: {}", path.display()),
+    ))
+}
+
 /// The ref this checkout's lineage hangs on (WS5): the fork ref inside a
 /// fork worktree (machine-local fork-context.json), else
 /// `refs/stateroot/latest`. Worktrees share the git dir, so the fork ref is
 /// readable and writable from inside the worktree — but everything else on
 /// the trunk keeps following `latest`.
+///
+/// Fail closed (repair Phase 4): a worktree stamped as a fork checkout
+/// whose context is unreadable, or whose fork ref is missing, is an ERROR
+/// for lineage WRITES — never a silent fallback to the trunk.
 pub fn lineage_refname(project_dir: &Path) -> String {
-    local_store::fork_context(project_dir)
-        .map(|ctx| format!("{FORKS_REF_PREFIX}{}", ctx.fork))
-        .unwrap_or_else(|| LATEST_REF.to_string())
+    lineage_refname_checked(project_dir).unwrap_or_else(|_| LATEST_REF.to_string())
 }
 
-fn latest_oid_for(repo: &Repository, project_dir: &Path) -> Option<git2::Oid> {
-    repo.refname_to_id(&lineage_refname(project_dir)).ok()
+/// The checked form of [`lineage_refname`] for lineage writes.
+pub fn lineage_refname_checked(project_dir: &Path) -> Result<String, RootsError> {
+    let context_path = local_store::root(project_dir).join("local/fork-context.json");
+    if !context_path.is_file() {
+        return Ok(LATEST_REF.to_string());
+    }
+    let context = local_store::fork_context(project_dir).ok_or_else(|| {
+        RootsError::Merge(format!(
+            "fork context at {} is unreadable — refusing to fall back to the trunk",
+            context_path.display()
+        ))
+    })?;
+    Ok(format!("{FORKS_REF_PREFIX}{}", context.fork))
+}
+
+fn latest_oid_for(repo: &Repository, project_dir: &Path) -> Result<Option<git2::Oid>, RootsError> {
+    let refname = lineage_refname_checked(project_dir)?;
+    match repo.refname_to_id(&refname) {
+        Ok(oid) => Ok(Some(oid)),
+        Err(_) if refname == LATEST_REF => Ok(None),
+        Err(err) => Err(RootsError::Merge(format!(
+            "fork lineage ref {refname} is missing ({err}) — refusing to fall back to the trunk"
+        ))),
+    }
 }
 
 fn read_objective(project_dir: &Path) -> String {
@@ -432,26 +491,37 @@ fn persist_root(
     kind: &str,
     evidence: Value,
 ) -> Result<(RootManifest, Transition), RootsError> {
-    // The lineage tip update is a compare-and-swap under that ref's own
-    // resource lock: the caller's parent must still be the tip, and lock
-    // acquisition failure fails closed — nothing proceeds unlocked (repair
-    // Phase 1; the full tip-read→commit→write span lands in Phase 4).
+    // The lineage write span — per-hash ref, tip check, tip write — holds
+    // the ref's resource lock for the WHOLE span (repair Phase 4): two
+    // simultaneous identical commits can no longer collide on libgit2's
+    // per-ref lock file, and the caller's parent must still be the tip
+    // (CAS). Acquisition failure fails closed.
     let hash = oid.to_string();
-    repo.reference(&format!("{ROOTS_REF_PREFIX}{hash}"), oid, true, "root")?;
     let expected_parent: Option<git2::Oid> = parent_hashes
         .first()
         .and_then(|h| git2::Oid::from_str(h).ok());
     let lock_dir = local_store::root(project_dir).join("local/locks");
+    let lineage = lineage_refname(project_dir);
+    let _lock =
+        crate::safe_io::ResourceLock::acquire(crate::safe_io::ref_lock_path(&lock_dir, &lineage))
+            .map_err(crate::safe_io::RefCasError::from)?;
     // WS5: inside a fork worktree this advances the fork's tip ref, so the
     // trunk's `latest` is untouched by fork-side work (and vice versa).
-    crate::safe_io::update_ref_cas(
-        repo,
-        &lock_dir,
-        &lineage_refname(project_dir),
-        expected_parent,
-        oid,
-        "latest root",
-    )?;
+    repo.reference(&format!("{ROOTS_REF_PREFIX}{hash}"), oid, true, "root")?;
+    let current = repo.refname_to_id(&lineage).ok();
+    if current != expected_parent {
+        return Err(crate::safe_io::RefCasError::Moved {
+            refname: lineage,
+            expected: expected_parent
+                .map(|o| o.to_string())
+                .unwrap_or_else(|| "<none>".into()),
+            current: current
+                .map(|o| o.to_string())
+                .unwrap_or_else(|| "<none>".into()),
+        }
+        .into());
+    }
+    repo.reference(&lineage, oid, true, "latest root")?;
 
     let from = parent_hashes.first().cloned().unwrap_or_default();
     let transition = Transition {
@@ -466,12 +536,11 @@ fn persist_root(
         created_at: now_rfc3339(),
     };
     let root = local_store::root(project_dir);
-    write_json(
-        &root
-            .join(TRANSITIONS_DIR)
-            .join(format!("{}.json", transition.id)),
-        &transition,
-    )?;
+    let transition_rel = format!("{TRANSITIONS_DIR}/{}.json", transition.id);
+    write_json(&root.join(&transition_rel), &transition)?;
+    // Root-generated writes go through the same provenance funnel
+    // (Phase 4) — the next snap's audit must be empty for a clean flow.
+    local_store::report_written(project_dir, &transition_rel);
 
     let coverage = if files_pinned == 0 {
         "state_only"
@@ -489,10 +558,9 @@ fn persist_root(
         coverage: coverage.into(),
         tree_bytes,
     };
-    write_json(
-        &root.join(ROOTS_DIR).join(format!("{}.json", manifest.id)),
-        &manifest,
-    )?;
+    let manifest_rel = format!("{ROOTS_DIR}/{}.json", manifest.id);
+    write_json(&root.join(&manifest_rel), &manifest)?;
+    local_store::report_written(project_dir, &manifest_rel);
     Ok((manifest, transition))
 }
 
@@ -541,7 +609,7 @@ pub fn snap_if_changed(
 ) -> Result<SnapOutcome, RootsError> {
     let repo = ensure_repo(project_dir)?;
     let build = build_tree(&repo, project_dir)?;
-    if let Some(parent) = latest_oid_for(&repo, project_dir) {
+    if let Some(parent) = latest_oid_for(&repo, project_dir)? {
         if !project_files_changed(&repo, parent, build.tree)? {
             return Ok(SnapOutcome::Unchanged {
                 root: parent.to_string(),
@@ -613,22 +681,31 @@ fn audit_writes(
     parent: git2::Oid,
     new_tree: git2::Oid,
 ) -> WriteAudit {
-    // Changed `.stateroot/` paths since the parent (bookkeeping IS in the
-    // tree; the audit is exactly about who wrote it).
-    let mut changed: Vec<String> = Vec::new();
+    // Changed `.stateroot/` paths since the parent, with content identity
+    // (Phase 4): a path reported once can never mask a later direct
+    // rewrite — the tree's content must match the ledger's latest report.
+    let mut changed: Vec<(String, u64, String)> = Vec::new();
     if let (Ok(old), Ok(new)) = (
         repo.find_commit(parent).and_then(|c| c.tree()),
         repo.find_tree(new_tree),
     ) {
         if let Ok(diff) = repo.diff_tree_to_tree(Some(&old), Some(&new), None) {
             for delta in diff.deltas() {
-                let path = delta.new_file().path().or_else(|| delta.old_file().path());
-                if let Some(p) = path {
-                    let rel = p.to_string_lossy().replace('\\', "/");
-                    if rel.starts_with(".stateroot/") && !rel.starts_with(".stateroot/local/") {
-                        changed.push(rel);
-                    }
+                let path = delta.new_file().path();
+                let Some(p) = path else { continue };
+                let rel = p.to_string_lossy().replace('\\', "/");
+                if !(rel.starts_with(".stateroot/") && !rel.starts_with(".stateroot/local/")) {
+                    continue;
                 }
+                let blob_id = delta.new_file().id();
+                let identity = repo
+                    .find_blob(blob_id)
+                    .map(|blob| {
+                        let content = blob.content();
+                        (content.len() as u64, local_store::fnv128_tail(content))
+                    })
+                    .unwrap_or((0, String::new()));
+                changed.push((rel, identity.0, identity.1));
             }
         }
     }
@@ -641,13 +718,17 @@ fn audit_writes(
         .and_then(|c| chrono::DateTime::from_timestamp(c.time().seconds(), 0))
         .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
         .unwrap_or_default();
-    let reported: std::collections::HashSet<String> =
-        local_store::reported_writes_since(project_dir, &since)
-            .into_iter()
-            .collect();
+    let reported = local_store::reported_writes_since(project_dir, &since);
     let mut unreported: Vec<String> = changed
         .into_iter()
-        .filter(|p| !reported.contains(p))
+        .filter(|(path, len, id)| match reported.get(path) {
+            Some(reported_id) if !reported_id.is_null() => {
+                reported_id.get("id").and_then(|v| v.as_str()) != Some(id.as_str())
+                    || reported_id.get("len").and_then(|v| v.as_u64()) != Some(*len)
+            }
+            _ => true,
+        })
+        .map(|(path, _, _)| path)
         .collect();
     unreported.sort();
     unreported.dedup();
@@ -710,50 +791,75 @@ fn commit_new_root(
     reason: &str,
     snap_ctx: Option<&crate::snap_context::SnapContext>,
 ) -> Result<(RootManifest, Transition), RootsError> {
-    let parent = latest_oid_for(repo, project_dir);
-    let parents: Vec<git2::Oid> = parent.into_iter().collect();
-    let parent_hashes: Vec<String> = parents.iter().map(|o| o.to_string()).collect();
-    let from_root = parent_hashes.first().cloned().unwrap_or_default();
-    let message = match reason {
-        "" => format!("root by {harness}"),
-        r => format!("root: {r} (by {harness})"),
-    };
-    let oid = commit_root(repo, tree, &parents, &message)?;
-    let to_root = oid.to_string();
-    let mut evidence = crate::snap_context::build_snap_evidence(
-        project_dir,
-        harness,
-        reason,
-        &from_root,
-        &to_root,
-        snap_ctx,
-    );
-    // WS3.4 write audit: parented roots only — genesis has no baseline and
-    // its whole-tree diff would be pure noise.
-    if let Some(p) = parent {
-        let audit = audit_writes(repo, project_dir, p, tree);
-        if let Some(value) = audit_evidence(&audit) {
-            evidence["write_audit"] = value;
+    // Same-ref CAS span (repair Phase 4): tip read → parent selection →
+    // commit construction → ref update CAS, retried against the new tip on
+    // a Moved conflict. The tree is parent-independent, so a retry only
+    // re-selects the parent and re-commits — never a silent sibling.
+    const CAS_RETRIES: usize = 3;
+    let mut attempt = 0;
+    loop {
+        let parent = latest_oid_for(repo, project_dir)?;
+        let parents: Vec<git2::Oid> = parent.into_iter().collect();
+        let parent_hashes: Vec<String> = parents.iter().map(|o| o.to_string()).collect();
+        let from_root = parent_hashes.first().cloned().unwrap_or_default();
+        let message = match reason {
+            "" => format!("root by {harness}"),
+            r => format!("root: {r} (by {harness})"),
+        };
+        let oid = commit_root(repo, tree, &parents, &message)?;
+        let to_root = oid.to_string();
+        let mut evidence = crate::snap_context::build_snap_evidence(
+            project_dir,
+            harness,
+            reason,
+            &from_root,
+            &to_root,
+            snap_ctx,
+        );
+        // WS3.4 write audit: parented roots only — genesis has no baseline
+        // and its whole-tree diff would be pure noise.
+        if let Some(p) = parent {
+            let audit = audit_writes(repo, project_dir, p, tree);
+            // Privacy enforcement (Phase 4): a forbidden path BLOCKS the ref
+            // advance and surfaces the exact problem — never a hidden
+            // evidence note on a published root.
+            if audit.privacy_violations_total > 0 {
+                return Err(RootsError::Merge(format!(
+                    "privacy: forbidden path(s) in the new tree — ref not advanced: {}",
+                    audit.privacy_violations.join(", ")
+                )));
+            }
+            if let Some(value) = audit_evidence(&audit) {
+                evidence["write_audit"] = value;
+            }
+        }
+        match persist_root(
+            repo,
+            project_dir,
+            oid,
+            parent_hashes,
+            harness,
+            reason,
+            pinned,
+            tree_bytes,
+            "snapshot",
+            evidence,
+        ) {
+            Err(RootsError::RefCas(crate::safe_io::RefCasError::Moved { .. }))
+                if attempt < CAS_RETRIES =>
+            {
+                attempt += 1;
+                continue;
+            }
+            other => return other,
         }
     }
-    persist_root(
-        repo,
-        project_dir,
-        oid,
-        parent_hashes,
-        harness,
-        reason,
-        pinned,
-        tree_bytes,
-        "snapshot",
-        evidence,
-    )
 }
 
 /// The latest root hash, if any.
 pub fn latest_root(project_dir: &Path) -> Result<Option<String>, RootsError> {
     let repo = ensure_repo(project_dir)?;
-    Ok(latest_oid_for(&repo, project_dir).map(|oid| oid.to_string()))
+    Ok(latest_oid_for(&repo, project_dir)?.map(|oid| oid.to_string()))
 }
 
 /// Load a root manifest by hash (prefix match allowed, git-style).
@@ -824,7 +930,7 @@ pub fn lineage(project_dir: &Path) -> Result<Vec<LineageEntry>, RootsError> {
     let repo = ensure_repo(project_dir)?;
     let mut mainline: Vec<String> = Vec::new();
     let mut children: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    if let Some(tip) = latest_oid_for(&repo, project_dir) {
+    if let Some(tip) = latest_oid_for(&repo, project_dir)? {
         let mut current = Some(tip);
         while let Some(oid) = current {
             mainline.push(oid.to_string());
@@ -991,24 +1097,39 @@ pub fn revert_to_root(
     let repo = ensure_repo(project_dir)?;
     let target = commit_for(&repo, project_dir, hash_prefix)?;
     let target_id = target.id().to_string();
-    let parent = latest_oid_for(&repo, project_dir);
-    let parents: Vec<git2::Oid> = parent.into_iter().collect();
-    let parent_hashes: Vec<String> = parents.iter().map(|o| o.to_string()).collect();
-    let message = format!("revert to {} (by {harness})", &target_id[..12]);
-    let oid = commit_root(&repo, target.tree()?.id(), &parents, &message)?;
+    let target_tree = target.tree()?.id();
     let manifest = get_root(project_dir, &target_id).unwrap_or_default();
-    persist_root(
-        &repo,
-        project_dir,
-        oid,
-        parent_hashes,
-        harness,
-        &format!("revert to {}", &target_id[..12]),
-        manifest.files_pinned,
-        manifest.tree_bytes,
-        "revert",
-        json!({"revert_to": target_id}),
-    )
+    // Same CAS span as snap (Phase 4): re-read the tip and re-commit on a
+    // Moved conflict; the target tree is parent-independent.
+    const CAS_RETRIES: usize = 3;
+    let mut attempt = 0;
+    loop {
+        let parent = latest_oid_for(&repo, project_dir)?;
+        let parents: Vec<git2::Oid> = parent.into_iter().collect();
+        let parent_hashes: Vec<String> = parents.iter().map(|o| o.to_string()).collect();
+        let message = format!("revert to {} (by {harness})", &target_id[..12]);
+        let oid = commit_root(&repo, target_tree, &parents, &message)?;
+        match persist_root(
+            &repo,
+            project_dir,
+            oid,
+            parent_hashes,
+            harness,
+            &format!("revert to {}", &target_id[..12]),
+            manifest.files_pinned,
+            manifest.tree_bytes,
+            "revert",
+            json!({"revert_to": target_id}),
+        ) {
+            Err(RootsError::RefCas(crate::safe_io::RefCasError::Moved { .. }))
+                if attempt < CAS_RETRIES =>
+            {
+                attempt += 1;
+                continue;
+            }
+            other => return other,
+        }
+    }
 }
 
 /// `fork <hash> --branch <name>`: fork ref + record at the root commit.
@@ -2028,6 +2149,32 @@ mod tests {
     }
 
     #[test]
+    fn a_fully_routed_flow_audits_completely_clean() {
+        // Phase 4 clean-audit contract: episodic + handoff + plan + root
+        // manifest/transition all flow through the funnel, so the next
+        // snap's audit is entirely empty.
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        create_root(&dir, "cli", "first", None).expect("snap");
+        local_store::append_episodic(
+            &dir,
+            &serde_json::json!({"ts": local_store::now_rfc3339(), "harness": "cli", "note": "n", "files": []}),
+        )
+        .expect("episodic");
+        crate::plans::record(&dir, "demo plan", "cli", None, "# body\n").expect("plan");
+        write(&dir, "src/main.rs", "fn main() { println!(\"hi\"); }\n");
+        let outcome = snap_if_changed(&dir, "cli", "auto: checkpoint", None).expect("snap2");
+        let SnapOutcome::Created(_, transition) = outcome else {
+            panic!("expected a new root");
+        };
+        assert!(
+            transition.evidence.get("write_audit").is_none(),
+            "a fully routed flow must audit clean: {:?}",
+            transition.evidence["write_audit"]
+        );
+    }
+
+    #[test]
     fn tree_violations_flags_a_path_the_rules_forbid() {
         let (_tmp, dir) = project();
         let repo = ensure_repo(&dir).expect("repo");
@@ -2350,13 +2497,16 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "repair fixture: red until Phase 4 (same-ref CAS retry)"]
     fn concurrent_trunk_snaps_form_one_chain_not_orphaned_siblings() {
         // Audit F6 (Phase 4): concurrent same-ref snaps must serialize into
-        // ONE causal chain — every created root reachable from latest.
+        // ONE causal chain. Note the invariant is NOT "every racer produces
+        // a root" — a snap may legitimately capture several racers' files,
+        // leaving later racers Unchanged. The invariants are: every created
+        // root is reachable from latest, the chain is unbroken, and the
+        // final tree carries every racer's file.
         let (_tmp, dir) = project();
         write(&dir, "src/main.rs", "fn main() {}\n");
-        create_root(&dir, "cli", "first", None).expect("snap");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
         let mut handles = Vec::new();
         for i in 0..8 {
             let d = dir.clone();
@@ -2375,20 +2525,45 @@ mod tests {
                 created.insert(m.id);
             }
         }
-        assert_eq!(created.len(), 8, "every racer must produce a root");
+        assert!(!created.is_empty(), "at least one snap must land");
         let repo = ensure_repo(&dir).expect("repo");
-        let mut reachable = std::collections::BTreeSet::new();
+        let mut chain = Vec::new();
         let mut current = repo.refname_to_id(LATEST_REF).ok();
         while let Some(oid) = current {
-            reachable.insert(oid.to_string());
+            chain.push(oid.to_string());
             let commit = repo.find_commit(oid).expect("commit");
-            current = (0..commit.parent_count()).find_map(|i| commit.parent_id(i).ok());
+            // Single-parent line only: any merge-shaped commit here means a
+            // broken chain in this scenario.
+            assert!(
+                commit.parent_count() <= 1,
+                "chain broke into a merge shape: {oid}"
+            );
+            current = commit.parent_id(0).ok();
         }
+        assert_eq!(
+            chain.last().map(String::as_str),
+            Some(first.id.as_str()),
+            "the chain must reach back to the first root"
+        );
+        let reachable: std::collections::BTreeSet<_> = chain.iter().cloned().collect();
         let orphaned: Vec<_> = created.difference(&reachable).collect();
         assert!(
             orphaned.is_empty(),
             "{} roots were created but are unreachable from latest — same-ref writes formed siblings, not a chain",
             orphaned.len()
         );
+        let tip_tree = repo
+            .find_commit(repo.refname_to_id(LATEST_REF).expect("latest"))
+            .expect("commit")
+            .tree()
+            .expect("tree");
+        for i in 0..8 {
+            assert!(
+                tip_tree
+                    .get_path(Path::new(&format!("src/f{i}.rs")))
+                    .is_ok(),
+                "racer {i}'s file lost despite the chain"
+            );
+        }
     }
 }

@@ -209,6 +209,23 @@ pub enum RefCasError {
     Git(#[from] git2::Error),
 }
 
+/// The resource-lock path for a lineage ref (shared by every writer so a
+/// ref's whole write span — per-hash ref, tip check, tip write — serializes
+/// under ONE held lock, not just the final reference call).
+pub fn ref_lock_path(lock_dir: &Path, refname: &str) -> PathBuf {
+    let sanitized: String = refname
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    lock_dir.join(format!("root-ref-{sanitized}.lock"))
+}
+
 /// Compare-and-swap a ref under its own resource lock
 /// (`<lock_dir>/root-ref-<sanitized refname>.lock`): inside the lock, the
 /// current tip must equal `expected` (None = ref must be absent) or the
@@ -222,17 +239,7 @@ pub fn update_ref_cas(
     new_oid: git2::Oid,
     log_message: &str,
 ) -> Result<(), RefCasError> {
-    let sanitized: String = refname
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let _lock = ResourceLock::acquire(lock_dir.join(format!("root-ref-{sanitized}.lock")))?;
+    let _lock = ResourceLock::acquire(ref_lock_path(lock_dir, refname))?;
     let current = repo.refname_to_id(refname).ok();
     if current != expected {
         return Err(RefCasError::Moved {

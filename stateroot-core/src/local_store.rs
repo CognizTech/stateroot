@@ -408,12 +408,52 @@ fn stateroot_rel(rel: &str) -> PathBuf {
     Path::new(".stateroot").join(rel)
 }
 
+/// FNV-1a 128-bit over the last 64 KiB of `bytes` (shared by the ledger
+/// and the audit's tree-side recomputation).
+pub fn fnv128_tail(bytes: &[u8]) -> String {
+    const BASIS: u128 = 0x6c62272e07bb014262b821756295c58d;
+    const PRIME: u128 = 0x0000000001000000000000000000013B;
+    let tail = &bytes[bytes.len().saturating_sub(65536)..];
+    let mut hash: u128 = BASIS;
+    for byte in tail {
+        hash ^= u128::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    format!("fnv128:{hash:032x}")
+}
+
+/// FNV-1a 128-bit over the last 64 KiB + total length (repair Phase 4):
+/// non-cryptographic content identity for the write audit — cheap per
+/// write even for append-heavy files, strong enough that an earlier
+/// legitimate write cannot mask a later direct rewrite.
+pub fn content_identity(path: &Path) -> std::io::Result<(u64, String)> {
+    let meta = std::fs::metadata(path)?;
+    let len = meta.len();
+    let mut file = std::fs::File::open(path)?;
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let tail = len.min(65536);
+    if len > tail {
+        file.seek(SeekFrom::End(-(tail as i64)))?;
+    }
+    let mut buf = Vec::with_capacity(tail as usize);
+    file.read_to_end(&mut buf)?;
+    Ok((len, fnv128_tail(&buf)))
+}
+
 /// Record that `root_rel` (relative to the `.stateroot/` root) was written.
 pub fn report_written(project_dir: &Path, root_rel: &str) {
     let path = root(project_dir).join(WRITTEN_LOG_REL);
+    let target = root(project_dir).join(root_rel);
+    let identity = content_identity(&target)
+        .map(|(len, id)| serde_json::json!({"len": len, "id": id}))
+        .unwrap_or(serde_json::json!(null));
     let line = format!(
         "{}\n",
-        serde_json::json!({"ts": now_rfc3339(), "path": stateroot_rel(root_rel).to_string_lossy()})
+        serde_json::json!({
+            "ts": now_rfc3339(),
+            "path": stateroot_rel(root_rel).to_string_lossy(),
+            "identity": identity,
+        })
     );
     let _ = (|| -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
@@ -440,13 +480,19 @@ pub fn report_written(project_dir: &Path, root_rel: &str) {
     })();
 }
 
-/// Ledger paths with `ts >= since` (RFC3339; empty string matches all).
-pub fn reported_writes_since(project_dir: &Path, since: &str) -> Vec<String> {
+/// Latest reported content identity per path with `ts >= since` (RFC3339;
+/// empty string matches all). Later lines win — a rewrite updates identity.
+pub fn reported_writes_since(
+    project_dir: &Path,
+    since: &str,
+) -> std::collections::BTreeMap<String, serde_json::Value> {
     let path = root(project_dir).join(WRITTEN_LOG_REL);
     let Ok(text) = std::fs::read_to_string(&path) else {
-        return Vec::new();
+        return std::collections::BTreeMap::new();
     };
-    text.lines()
+    let mut map = std::collections::BTreeMap::new();
+    for record in text
+        .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter(|v| {
             v.get("ts")
@@ -454,8 +500,18 @@ pub fn reported_writes_since(project_dir: &Path, since: &str) -> Vec<String> {
                 .map(|t| t >= since)
                 .unwrap_or(false)
         })
-        .filter_map(|v| v.get("path").and_then(|p| p.as_str()).map(str::to_string))
-        .collect()
+    {
+        if let Some(path) = record.get("path").and_then(|p| p.as_str()) {
+            map.insert(
+                path.to_string(),
+                record
+                    .get("identity")
+                    .cloned()
+                    .unwrap_or(serde_json::json!(null)),
+            );
+        }
+    }
+    map
 }
 
 /// Read the last `limit` episodic records, oldest-of-kept first. Tolerant:

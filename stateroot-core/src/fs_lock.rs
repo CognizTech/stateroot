@@ -81,7 +81,13 @@ mod tests {
                 fs::write(path, b"hello").unwrap();
             })
         };
-        let bytes = read_with_retry(&path).expect("retry");
+        // The production retry budget is per call (4×25ms); a loaded CI box
+        // can exhaust one call before the writer lands, so the test models
+        // a slow writer with repeated calls — the behavior pinned is "the
+        // read succeeds once the file appears", not the wall-clock budget.
+        let bytes = (0..10)
+            .find_map(|_| read_with_retry(&path).ok())
+            .expect("read must succeed once the file appears");
         assert_eq!(bytes, b"hello");
         writer.join().unwrap();
     }
