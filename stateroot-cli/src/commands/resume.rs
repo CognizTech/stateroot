@@ -54,12 +54,14 @@ fn dedup_skills(
 /// summary → files touched. Rich pack fields (plan_state,
 /// progress_summaries, conversation_tail — additive HandoffV1 optionals)
 /// render as their own sections when present.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn render_handoff_digest(packet: &Value) -> String {
     render_handoff_digest_with(packet, false)
 }
 
 /// [`render_handoff_digest`] with a `deterministic` switch: when true, the
 /// LLM-synthesized sections are omitted (everything else identical).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn render_handoff_digest_with(packet: &Value, deterministic: bool) -> String {
     render_handoff_digest_full(packet, deterministic, &[], None, None)
 }
@@ -309,6 +311,27 @@ pub fn render_handoff_digest_full(
         out.push_str(&format!(
             "**Work in fork `{fork_id}`** ({resolved}) — this handoff is bound to that fork; do NOT edit the caller's tree.\n\n"
         ));
+    }
+    // A bound fork can have an independently active plan, so this must come
+    // from the packet rather than the checkout used to render the handoff.
+    if let Some(plan) = packet.get("plan_ref").and_then(|value| value.as_object()) {
+        let id = plan
+            .get("id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let title = plan
+            .get("title")
+            .and_then(|value| value.as_str())
+            .unwrap_or("assigned plan");
+        let status = plan
+            .get("status")
+            .and_then(|value| value.as_str())
+            .unwrap_or("approved");
+        if !id.is_empty() {
+            out.push_str(&format!(
+                "## Assigned Plan\n\n**{title}** ({status}) at `.stateroot/plans/{id}.md`. Execute it as written; do not re-plan or re-explore.\n\n"
+            ));
+        }
     }
     let lineage = project_dir
         .map(stateroot_core::roots::compose_digest_section)

@@ -74,6 +74,20 @@ fn write_bound_handoff(config_home: &Path, user_home: &Path, project: &Path, wt:
         .success();
 }
 
+fn record_plan(config_home: &Path, user_home: &Path, project: &Path) -> String {
+    let out = stateroot(config_home, user_home, project)
+        .args(["plan", "record", "--stdin", "--title", "Fork-bound plan"])
+        .write_stdin("# Fork-bound plan\n\nDo the fork work.\n")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    stdout
+        .split_whitespace()
+        .nth(2)
+        .expect("recorded plan id")
+        .to_string()
+}
+
 #[test]
 fn bound_handoff_stores_fork_id_not_a_path() {
     let (config_home, user_home) = homes();
@@ -120,6 +134,55 @@ fn bound_handoff_stores_fork_id_not_a_path() {
         packet.get("worktree").is_none(),
         "the raw path must NOT enter the shared packet: {packet:?}"
     );
+}
+
+#[test]
+fn bound_handoff_uses_the_fork_active_plan_and_resolves_its_worktree() {
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    let root = snap_root(config_home.path(), user_home.path(), project.path());
+    let plan = record_plan(config_home.path(), user_home.path(), project.path());
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["plan", "approve", &plan])
+        .assert()
+        .success();
+    let parent = tempfile::tempdir().expect("wt parent");
+    let wt = parent.path().join("checkout");
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args([
+            "fork",
+            &root,
+            "--worktree",
+            &wt.to_string_lossy(),
+            "--plan",
+            &plan,
+        ])
+        .assert()
+        .success();
+    stateroot(config_home.path(), user_home.path(), &wt)
+        .args(["plan", "activate", &plan])
+        .assert()
+        .success();
+
+    write_bound_handoff(config_home.path(), user_home.path(), project.path(), &wt);
+    let current = std::fs::read_to_string(project.path().join(".stateroot/handoffs/current.json"))
+        .expect("current");
+    let packet: serde_json::Value = serde_json::from_str(&current).expect("json");
+    assert_eq!(packet["plan_ref"]["id"].as_str(), Some(plan.as_str()));
+    assert_eq!(packet["plan_ref"]["status"].as_str(), Some("active"));
+
+    let shown = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["handoff", "show"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(shown.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains(&wt.display().to_string()),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains(&plan), "stdout: {stdout}");
+    assert!(stdout.contains("(active)"), "stdout: {stdout}");
 }
 
 #[test]

@@ -12,7 +12,7 @@ use stateroot_core::local_store::now_rfc3339;
 use stateroot_core::local_store::{self, SCHEMA_HANDOFF_V1};
 use stateroot_core::transcripts::TranscriptSession;
 
-use super::resume::{fetch_handoff, render_handoff_digest};
+use super::resume::{fetch_handoff, render_handoff_digest_full};
 use super::{note, truncate, Ctx};
 
 /// Origin of a handoff write request.
@@ -689,6 +689,11 @@ fn assemble_packet(
     // as a REGISTERED worktree of this project, stored as the opaque fork
     // id (absolute paths never enter shared packets; the machine-local
     // registry resolves them).
+    // A fork carries its own active-plan state.  Retain its directory only
+    // locally while constructing the packet so a bound handoff points at the
+    // plan actually claimed by that fork, rather than an unrelated approved
+    // plan in the caller's checkout.
+    let mut bound_plan = None;
     if let Some(worktree) = nonempty(input.worktree.take()) {
         let fork_ctx = stateroot_core::local_store::fork_context(Path::new(&worktree)).ok_or_else(|| {
             anyhow::anyhow!(
@@ -705,6 +710,7 @@ fn assemble_packet(
                 fork_ctx.fork
             );
         }
+        bound_plan = stateroot_core::plans::active(Path::new(&worktree));
         packet["fork_id"] = json!(fork_ctx.fork);
     }
 
@@ -714,9 +720,12 @@ fn assemble_packet(
         }
     }
 
-    // The central plan store is the authoritative plan tier: attach a
-    // pointer when an active/approved plan exists (additive packet field).
-    if let Some((plan, _)) = stateroot_core::plans::active_or_approved(context.project_dir) {
+    // The central plan store is authoritative for ordinary handoffs.  A
+    // fork-bound handoff instead names that fork's active plan, which is
+    // independently activated in its own checkout.
+    if let Some((plan, _)) =
+        bound_plan.or_else(|| stateroot_core::plans::active_or_approved(context.project_dir))
+    {
         packet["plan_ref"] = json!({
             "id": plan.id,
             "title": plan.title,
@@ -1088,7 +1097,10 @@ pub async fn show(ctx: &Ctx, seq: Option<i64>) -> anyhow::Result<()> {
             match packet {
                 Some(packet) => {
                     note!("(source: {source})");
-                    print!("{}", render_handoff_digest(&packet));
+                    print!(
+                        "{}",
+                        render_handoff_digest_full(&packet, false, &[], None, Some(&ctx.cwd))
+                    );
                     Ok(())
                 }
                 None => anyhow::bail!("no current handoff found"),
@@ -1100,7 +1112,10 @@ pub async fn show(ctx: &Ctx, seq: Option<i64>) -> anyhow::Result<()> {
             let history = local_store::list_handoffs_local(&ctx.cwd)?;
             for packet in history {
                 if packet.get("seq").and_then(|v| v.as_i64()) == Some(seq) {
-                    print!("{}", render_handoff_digest(&packet));
+                    print!(
+                        "{}",
+                        render_handoff_digest_full(&packet, false, &[], None, Some(&ctx.cwd))
+                    );
                     return Ok(());
                 }
             }
