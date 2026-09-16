@@ -914,16 +914,46 @@ fn resolve_handoff_source(ctx: &Ctx, from: Option<&str>) -> anyhow::Result<Strin
 pub fn try_auto_finalize(ctx: &Ctx, harness: &str) -> anyhow::Result<bool> {
     ctx.require_project()?;
     let current = local_store::read_handoff_local(&ctx.cwd)?;
-    let Some(handoff) = current.as_ref() else {
+    if current.is_none() {
         return Ok(false);
-    };
+    }
     let home = super::install::home_dir()?;
     if !handoff_continuity::should_finalize(&ctx.cwd, &home, harness, current.as_ref()) {
         return Ok(false);
-    }
+    };
+    finalize_current(ctx, harness, current.as_ref(), None).map(|_| true)
+}
+
+/// The finalize phase of the session-boundary journal (repair Phase 3).
+///
+/// Differences from `try_auto_finalize`, by contract:
+/// - The FIRST automatic handoff is created when none exists (an empty
+///   store must not turn finalization into a silent no-op).
+/// - The packet is bound to the boundary's exact root (`latest_root` =
+///   `boundary_root`) — the handoff for a session boundary references the
+///   root produced for THAT boundary.
+/// - A missing verified session is an ERROR (retryable), never a quiet
+///   success — the journal backs off and parks as manual_attention with
+///   the error retained if the transcript never appears.
+pub fn finalize_for_boundary(ctx: &Ctx, harness: &str, boundary_root: &str) -> anyhow::Result<i64> {
+    ctx.require_project()?;
+    let current = local_store::read_handoff_local(&ctx.cwd)?;
+    finalize_current(ctx, harness, current.as_ref(), Some(boundary_root))
+}
+
+fn finalize_current(
+    ctx: &Ctx,
+    harness: &str,
+    current: Option<&Value>,
+    boundary_root: Option<&str>,
+) -> anyhow::Result<i64> {
+    let home = super::install::home_dir()?;
     let session = handoff_continuity::latest_verified_session(&home, &ctx.cwd, harness)
-        .context("should_finalize implied a matching transcript session")?;
-    let current_seq = handoff.get("seq").and_then(|v| v.as_i64()).unwrap_or(0);
+        .ok_or_else(|| anyhow::anyhow!("no verified {harness} transcript to finalize"))?;
+    let current_seq = current
+        .and_then(|p| p.get("seq"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
     let (state_objective, phase) = local_state_fields(&ctx.cwd)?;
     let project = ctx.require_project()?;
     let mut packet = handoff_continuity::build_finalize_packet(
@@ -935,10 +965,16 @@ pub fn try_auto_finalize(ctx: &Ctx, harness: &str) -> anyhow::Result<bool> {
         &state_objective,
         &phase,
     );
+    if let Some(root) = boundary_root {
+        packet["latest_root"] = Value::String(root.to_string());
+    }
     packet = bound_packet(packet);
     validate_packet(&packet, false)?;
     write_packet_durable(&ctx.cwd, &packet)?;
-    Ok(true)
+    Ok(packet
+        .get("seq")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(current_seq + 1))
 }
 
 /// `stateroot handoff finalize [--from H]` — manual recovery when hooks missed.

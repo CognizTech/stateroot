@@ -45,5 +45,7 @@ pub fn run(ctx: &Ctx) -> anyhow::Result<()> {
     println!("checkpoints: {episodic}");
     println!("federated skills: {skills}");
     println!("persona cached: {}", if persona { "yes" } else { "no" });
+    // Safe entrypoint for the boundary journal (cheap due-scan kick).
+    super::drain_finalize::kick(&ctx.cwd);
     Ok(())
 }

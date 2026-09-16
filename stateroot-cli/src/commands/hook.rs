@@ -850,6 +850,9 @@ async fn resume_output(
             &ctx.config_dir,
             ctx.config.update.check_interval_hours,
         );
+        // Session-start is a safe entrypoint for the boundary journal: kick
+        // recovery for any job whose last drainer died (cheap due-scan only).
+        super::drain_finalize::kick(project_dir);
         // Dual-mode compiler: agentic when keyed/logged-in; never fails the hook.
         let hook_ctx = Ctx {
             cwd: project_dir.to_path_buf(),
@@ -1019,18 +1022,26 @@ async fn checkpoint_from_spool(
         }
     }
 
-    // stop/session_end: checkpoint already recorded above. Enqueue the
-    // heavy trio (transcript finalize, snap, wiki ingest) and return —
-    // the detached drainer runs outside the harness timeout window.
-    // session_end used to skip snap/ingest because Cursor closes the
-    // window; spool-first makes that skip unnecessary.
+    // stop/session_end: checkpoint already recorded above. Enqueue ONE
+    // composite boundary job (durable journal, repair Phase 3) and return
+    // inside the hook's latency budget — the detached drainer and every
+    // later safe entrypoint share recovery.
     if matches!(canonical, "stop" | "session_end") {
-        match local_store::enqueue_finalize_trio(project_dir, quirk.id) {
+        let session_id = stateroot_core::digest_delivery::session_id_from_payload(payload)
+            .unwrap_or_else(|| "unknown".to_string());
+        let lineage_ref = stateroot_core::roots::lineage_refname(project_dir);
+        match stateroot_core::finalize_journal::enqueue(
+            project_dir,
+            quirk.id,
+            &session_id,
+            None,
+            &lineage_ref,
+        ) {
             Ok(_) => {
-                hook_note(quirk, "finalize queued (spool-first)");
+                hook_note(quirk, "boundary job queued (durable journal)");
                 super::drain_finalize::kick(project_dir);
             }
-            Err(err) => note!("finalize enqueue skipped: {err}"),
+            Err(err) => note!("boundary enqueue skipped: {err}"),
         }
         let path = spool_path(project_dir);
         if path.exists() {
@@ -1305,12 +1316,22 @@ mod tests {
             "elapsed {:?}",
             start.elapsed()
         );
+        // Phase 3 contract: ONE durable boundary job in the journal — no
+        // outbox trio — enqueued inside the latency budget even though the
+        // snap is poisoned (the drainer carries the failure, not the hook).
         let pending = local_store::outbox_pending(project.path()).expect("pending");
-        assert_eq!(pending.len(), 3, "{pending:?}");
-        let kinds: Vec<&str> = pending
-            .iter()
-            .map(|v| v["kind"].as_str().unwrap_or(""))
+        assert!(pending.is_empty(), "outbox stays empty: {pending:?}");
+        let journal_dir = project.path().join(".stateroot/local/finalize-journal");
+        let jobs: Vec<_> = std::fs::read_dir(&journal_dir)
+            .expect("journal dir")
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
             .collect();
-        assert_eq!(kinds, ["finalize", "snap", "ingest"]);
+        assert_eq!(jobs.len(), 1, "one composite boundary job");
+        let job: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(jobs[0].path()).expect("job"))
+                .expect("json");
+        assert_eq!(job["phase"], "queued");
+        assert_eq!(job["state"], "active");
     }
 }

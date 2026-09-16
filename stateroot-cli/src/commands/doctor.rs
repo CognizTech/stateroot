@@ -546,6 +546,19 @@ fn continuity_chain_checks(home: &Path, project_dir: &Path) -> Vec<Check> {
         }
     }
 
+    // Session-boundary journal (repair Phase 3): state-grouped report with
+    // retained errors, and a recovery kick (doctor is a safe entrypoint).
+    super::drain_finalize::kick(project_dir);
+    let journal_lines = super::drain_finalize::report(project_dir);
+    if !journal_lines.iter().all(|l| l.contains("no boundary jobs")) {
+        checks.push(Check {
+            label: "boundary journal".into(),
+            ok: !journal_lines.iter().any(|l| l.contains("manual_attention")),
+            detail: journal_lines.join("\n"),
+            hard: false,
+        });
+    }
+
     // Collaboration boundary: machine-local / per-person paths must not be
     // git-tracked — they churn on every session and fight on every pull.
     if let Ok(output) = std::process::Command::new("git")

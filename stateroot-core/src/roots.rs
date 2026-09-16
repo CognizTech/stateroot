@@ -370,7 +370,7 @@ fn build_tree(repo: &Repository, dir: &Path) -> Result<TreeBuild, RootsError> {
 /// `refs/stateroot/latest`. Worktrees share the git dir, so the fork ref is
 /// readable and writable from inside the worktree — but everything else on
 /// the trunk keeps following `latest`.
-fn lineage_refname(project_dir: &Path) -> String {
+pub fn lineage_refname(project_dir: &Path) -> String {
     local_store::fork_context(project_dir)
         .map(|ctx| format!("{FORKS_REF_PREFIX}{}", ctx.fork))
         .unwrap_or_else(|| LATEST_REF.to_string())

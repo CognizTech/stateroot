@@ -52,14 +52,8 @@ pub const FINALIZE_CONSUMED_PATH: &str = "local/finalize-consumed.jsonl";
 pub const FINALIZE_LOCK_PATH: &str = "local/drain-finalize.lock";
 /// Capped log for the detached finalize drainer.
 pub const FINALIZE_LOG_PATH: &str = "local/drain-finalize.log";
-/// Drop/retry counters for the finalize queue.
-pub const FINALIZE_STATS_PATH: &str = "local/finalize-stats.json";
 /// Proven finalize kinds (unrecognized kinds stay in the outbox).
 pub const FINALIZE_KINDS: &[&str] = &["finalize", "snap", "ingest"];
-/// Max drain attempts before a finalize op is dropped.
-pub const FINALIZE_MAX_ATTEMPTS: u32 = 5;
-/// Ops older than this many days are dropped with a counter.
-pub const FINALIZE_MAX_AGE_DAYS: i64 = 7;
 /// First-run marker written by `init`; first harness session consumes it.
 pub const FIRST_RUN_PATH: &str = "first-run.json";
 /// Machine-local digest delivery ledger (never synced).
@@ -647,75 +641,6 @@ pub fn mint_ingest_key() -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
-/// Enqueue the session-end heavy trio (`finalize`, `snap`, `ingest`).
-/// Each op gets its own ingest_key. The hook returns after this append.
-pub fn enqueue_finalize_trio(
-    project_dir: &Path,
-    harness: &str,
-) -> Result<Vec<String>, LocalStoreError> {
-    let enqueued_at = now_rfc3339();
-    let mut keys = Vec::with_capacity(FINALIZE_KINDS.len());
-    for kind in FINALIZE_KINDS {
-        let ingest_key = mint_ingest_key();
-        outbox_append(
-            project_dir,
-            &serde_json::json!({
-                "kind": kind,
-                "ingest_key": ingest_key,
-                "harness": harness,
-                "enqueued_at": enqueued_at,
-                "attempts": 0,
-            }),
-        )?;
-        keys.push(ingest_key);
-    }
-    Ok(keys)
-}
-
-/// Rename `outbox.jsonl` aside and return its ops. Concurrent `outbox_append`
-/// after the rename creates a fresh file the next take will see.
-pub fn outbox_take_batch(project_dir: &Path) -> Result<Vec<Value>, LocalStoreError> {
-    let live = root(project_dir).join(OUTBOX_PATH);
-    let draining = root(project_dir).join(OUTBOX_DRAINING_PATH);
-    if draining.exists() {
-        let leftover = outbox_read_path(&draining)?;
-        let _ = std::fs::remove_file(&draining);
-        if live.exists() {
-            let mut extra = outbox_read_path(&live)?;
-            let _ = std::fs::remove_file(&live);
-            let mut all = leftover;
-            all.append(&mut extra);
-            return Ok(all);
-        }
-        return Ok(leftover);
-    }
-    if !live.exists() {
-        return Ok(Vec::new());
-    }
-    std::fs::rename(&live, &draining).map_err(io_err(&live))?;
-    let ops = outbox_read_path(&draining)?;
-    std::fs::remove_file(&draining).map_err(io_err(&draining))?;
-    Ok(ops)
-}
-
-fn outbox_read_path(path: &Path) -> Result<Vec<Value>, LocalStoreError> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => {
-            let mut ops = Vec::new();
-            for line in text.lines() {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                ops.push(serde_json::from_str(line).map_err(json_err(path))?);
-            }
-            Ok(ops)
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(err) => Err(io_err(path)(err)),
-    }
-}
-
 /// True when `ingest_key` is already in the consumed ledger.
 pub fn ingest_key_consumed(project_dir: &Path, key: &str) -> Result<bool, LocalStoreError> {
     Ok(consumed_key_set(project_dir)?.contains(key))
@@ -773,34 +698,6 @@ pub fn record_ingest_key_consumed(
         .map_err(io_err(&path))?;
     file.write_all(line.as_bytes()).map_err(io_err(&path))?;
     Ok(())
-}
-
-/// Increment a finalize-queue counter (`dropped_expired`, `dropped_malformed`, `retired_ok`).
-pub fn bump_finalize_stat(project_dir: &Path, field: &str) -> Result<(), LocalStoreError> {
-    let path = root(project_dir).join(FINALIZE_STATS_PATH);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(io_err(parent))?;
-    }
-    let mut stats = match std::fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str::<Value>(&text).unwrap_or(serde_json::json!({})),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
-        Err(err) => return Err(io_err(&path)(err)),
-    };
-    let next = stats.get(field).and_then(|v| v.as_u64()).unwrap_or(0) + 1;
-    if let Some(obj) = stats.as_object_mut() {
-        obj.insert(field.to_string(), serde_json::json!(next));
-    }
-    std::fs::write(&path, format!("{stats}\n")).map_err(io_err(&path))?;
-    Ok(())
-}
-
-/// True when `enqueued_at` is older than [`FINALIZE_MAX_AGE_DAYS`].
-pub fn finalize_op_expired(enqueued_at: &str) -> bool {
-    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(enqueued_at) else {
-        return false;
-    };
-    let age = chrono::Utc::now() - parsed.with_timezone(&chrono::Utc);
-    age.num_days() > FINALIZE_MAX_AGE_DAYS
 }
 
 /// Directory holding canonical skill copies inside `.stateroot/`.
@@ -1117,29 +1014,6 @@ mod tests {
         assert!(outbox_pending(tmp.path())
             .expect("pending after")
             .is_empty());
-    }
-
-    #[test]
-    fn enqueue_finalize_trio_and_take_batch_preserve_keys() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        init_skeleton(tmp.path(), "p", "n", "default").expect("init");
-        let keys = enqueue_finalize_trio(tmp.path(), "cursor").expect("enqueue");
-        assert_eq!(keys.len(), 3);
-        let pending = outbox_pending(tmp.path()).expect("pending");
-        assert_eq!(pending.len(), 3);
-        assert_eq!(
-            pending
-                .iter()
-                .map(|v| v["kind"].as_str().unwrap_or(""))
-                .collect::<Vec<_>>(),
-            ["finalize", "snap", "ingest"]
-        );
-        let taken = outbox_take_batch(tmp.path()).expect("take");
-        assert_eq!(taken.len(), 3);
-        assert!(outbox_pending(tmp.path()).expect("empty").is_empty());
-        record_ingest_key_consumed(tmp.path(), &keys[0], "finalize").expect("consume");
-        assert!(ingest_key_consumed(tmp.path(), &keys[0]).expect("yes"));
-        assert!(!ingest_key_consumed(tmp.path(), &keys[1]).expect("no"));
     }
 
     #[test]
