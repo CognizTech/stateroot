@@ -334,6 +334,8 @@
         "print_mode": false,
         "handoff_only": false,
         "argv": [
+          "--yolo",
+          "--prompt",
           "{prompt}"
         ]
       },

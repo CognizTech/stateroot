@@ -2428,6 +2428,19 @@ mod tests {
     }
 
     #[test]
+    fn kimi_delegation_argv_uses_noninteractive_prompt_mode() {
+        let reg = load_registry().expect("registry");
+        let entry = reg
+            .harnesses
+            .iter()
+            .find(|e| e.id == "kimi")
+            .expect("kimi row");
+        assert_eq!(entry.delegation.mode, "cli");
+        let argv = build_argv_from_spec(&entry.delegation, "do the thing").expect("argv");
+        assert_eq!(argv, vec!["kimi", "--yolo", "--prompt", "do the thing"]);
+    }
+
+    #[test]
     fn discovers_cursor_and_skips_projection_loop() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
