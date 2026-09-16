@@ -628,14 +628,8 @@ fn pid_alive(pid: u32) -> bool {
     if Path::new(&format!("/proc/{pid}")).exists() {
         return true;
     }
-    std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    // kill(2) signal 0 — no external binary needed.
+    unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 
 /// pid liveness on Windows: `tasklist` filter probe (no new deps).
@@ -880,17 +874,17 @@ enum Signal {
 
 #[cfg(unix)]
 fn signal_group(pgid: u32, signal: Signal) {
-    let name = match signal {
-        Signal::Term => "-TERM",
-        Signal::Kill => "-KILL",
+    let sig = match signal {
+        Signal::Term => libc::SIGTERM,
+        Signal::Kill => libc::SIGKILL,
     };
-    // Negative pid = the whole process group (the detached worker leads it).
-    let _ = std::process::Command::new("kill")
-        .args([name, &format!("-{pgid}")])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+    // kill(2) with a negative pid signals the whole process group — direct
+    // syscall, no /bin/kill arg-parsing variance across distros/procps
+    // versions (the CI ubuntu runner silently rejected the CLI form while
+    // WSL accepted it).
+    unsafe {
+        libc::kill(-(pgid as i32), sig);
+    }
 }
 
 #[cfg(windows)]
@@ -907,14 +901,8 @@ fn signal_group(pid: u32, signal: Signal) {
 
 #[cfg(unix)]
 fn group_alive(pgid: u32) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", &format!("-{pgid}")])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    // kill(2) with a negative pid and signal 0 probes the process group.
+    unsafe { libc::kill(-(pgid as i32), 0) == 0 }
 }
 
 #[cfg(windows)]
