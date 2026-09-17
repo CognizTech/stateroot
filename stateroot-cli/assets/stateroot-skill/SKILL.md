@@ -83,13 +83,24 @@ When the user asks you to make a plan that another harness will implement — or
 3. The executor's digest then says **"execute this plan; do not re-plan or re-explore"** — approve with `stateroot plan approve <id>` when the user has reviewed. For parallel work, materialize one sibling fork per plan with `stateroot fork <root> --worktree <path> --plan <id>`, then activate that plan **inside its fork worktree**. Activation is one-per-checkout, not one-per-project: independent forks activate independently.
 4. Harness-native plans written in native plan mode DO federate in automatically at session boundaries (as drafts) — but the record-then-handoff path is immediate and deliberate; use it when the plan is meant for another harness NOW
 
+### Integrating parallel forks (appointed coordinator)
+
+When fork lineages are ready to fold into the trunk and the user appoints you to coordinate the integration:
+
+1. `stateroot merge --prepare <fork>… --json` freezes the trunk tip and every fork tip and returns a durable attempt: `ready` when clean, `attention` with exact conflict paths/kinds when not. Preparing changes no refs or worktrees.
+2. `ready` → `stateroot merge --continue <attempt>` publishes one N+1-parent root (frozen refs are CAS-revalidated first).
+3. `attention` → the attempt record names a machine-local **reconciliation worktree**: the accumulated clean fold with every text conflict rendered with standard markers (`trunk (accumulated fold)` vs `fork <name>`). Edit and test **in that worktree**, then `stateroot merge --continue <attempt> --evidence "<tests you ran>"`. Continue refuses while markers remain and refuses stale frozen refs — prepare again after any source moved. Never resolve by silently picking a side; the reconciled worktree IS the resolution.
+4. `stateroot merge --status <attempt> --json` is read-only; `--abort <attempt>` removes only attempt-local state.
+5. Merged fork worktrees are marked `cleanup_pending` (the merge never waits on deletion); `stateroot merge --cleanup <fork>…` is bounded and idempotent.
+6. `stateroot merge <fork>…` without `--prepare` still runs the one-shot deterministic fold; conflicts report paths and create no root.
+
 ### 2b) Work-state lineage -> automatic snap
 
-Lineage does not depend on you remembering: `stateroot checkpoint` and the turn-end (`stop`) hook automatically snap the working tree whenever **project files** actually changed (`.stateroot/` bookkeeping alone never creates a root).
+Lineage does not depend on you remembering: `stateroot checkpoint` and the turn-end (`stop`) hook automatically snap the working tree whenever **project files** actually changed (`.stateroot/` bookkeeping alone never creates a root). Automatic snaps run with a bounded scan budget — a dependency-heavy tree skips the root but never the checkpoint; `stateroot doctor` names the heavy paths and the exact ignore lines, and an explicit `stateroot snap` always performs the deliberate full scan.
 1. explicit milestones: run `stateroot snap [--reason "..."]` to record a root on demand under `refs/stateroot`
 2. use `stateroot log` / `stateroot show <root>` to inspect lineage; `stateroot diff` / `stateroot compare` for deltas
 3. use `stateroot revert <root>` only for verified restoration (append-only — creates a new root)
-4. use `stateroot fork <root>` when divergent work should branch from an earlier root
+4. use `stateroot fork <root>` when divergent work should branch from an earlier root; integrate finished forks with `stateroot merge` (see Integrating parallel forks)
 5. handoff carries session continuity — it does **not** replace snap/revert/fork lineage
 
 ### 4) Session end / usage limit / harness switch -> handoff
@@ -123,7 +134,8 @@ The CLI is offline-safe: when the server is unreachable it queues operations in 
 | `stateroot checkpoint --note "..." [--files a,b]` | after any state-changing step | appends an episodic record and updates handoff state |
 | `stateroot handoff write --from CURRENT_HARNESS [--to H] [--task …] [--context-summary …] [--next …]` | session end / harness switch | prefer flags near limits; `--to` optional (routing only); `--input` for large payloads |
 | `stateroot handoff finalize [--from H]` | hook missed / quota exit | observed continuity from verified transcript; no routing |
-| `stateroot handoff list` / `stateroot handoff show` | inspect prior handoffs | read-only |
+| `stateroot handoff list` / `stateroot handoff show` | inspect prior handoffs | read-only; list is newest-first with the current packet pinned at top |
+| `stateroot handoff repair` | corrupt `current.json` | quarantines corrupt bytes (hash-stamped), restores the newest valid history packet, or says none exists — never fabricates |
 | `stateroot delegate --to H --task "…"` | detached subagent in another harness (async-only) | cli-mode harnesses only; spawn returns a `running` record immediately — observe via `stateroot delegate list` / `status <id>` and the `## Recent Delegations` digest section; nothing is ever killed or blocked; depth-capped — a subagent cannot delegate further |
 | `stateroot ext list` | extensions discovered on PATH | any `stateroot-<name>` executable on PATH runs as `stateroot <name>` — you can add commands yourself by writing one |
 | `stateroot projects` / `--json` / `--prune` | every initialized project on this machine | the discovery half of cross-project work: list projects here (name, path, phase, active plan), then work the one requested; same listing via the `projects_list` MCP tool |
@@ -137,6 +149,7 @@ The CLI is offline-safe: when the server is unreachable it queues operations in 
 | `stateroot diff` / `stateroot compare A B` | inspect tree deltas | verified git diff between roots |
 | `stateroot revert <root>` | verified restoration | append-only — creates a new root |
 | `stateroot fork <root>` | divergent work | branch lineage from an earlier root |
+| `stateroot merge <fork>…` / `--prepare` / `--continue` / `--status` / `--abort` / `--cleanup` | fold fork lineages into the trunk | one N+1-parent root; conflicts get a reconciliation worktree — see Integrating parallel forks |
 | `stateroot rules list` / `show` / `sync` | shared rules pool | product-intent always on; harness rules imported |
 | *(no stateroot pack command)* | — | resume already injects the observed context pack. Do not invent a truncated pack |
 | `stateroot learn record "…"` | durable project taste | judgment rule, not a fact — see Learnings below |
@@ -145,7 +158,8 @@ The CLI is offline-safe: when the server is unreachable it queues operations in 
 | `stateroot learn record --domain <slug> "…"` | domain taste | shared across repos bound to that domain slug |
 | `stateroot learnings list` / `--user` / `--workspace` / `--domain` | read before writing | update rather than duplicate |
 | `stateroot skill install [--harness H]` | install this skill into harness dirs | writes stubs from `assets/` |
-| `stateroot status` / `stateroot doctor` | diagnose auth, connectivity, project state | doctor checks outbox depth and sync health |
+| `stateroot status` / `stateroot doctor` | diagnose auth, connectivity, project state | doctor checks outbox depth and sync health, handoff corruption (`handoff repair` is the recovery), skipped automatic snapshots, large unignored generated dirs, and editor extension state |
+| `stateroot editor status` / `editor reconcile` | VS Code/Cursor extension state | status is read-only (installed vs release-declared version); reconcile installs/updates from the verified release VSIX, never downgrades |
 | `stateroot init` | one-time per project | creates `.stateroot/`, registers the workspace, installs harness integrations, seeds objective/memory/first handoff from repo docs (observed; `--synthesize` opts into unverified LLM enrichment) |
 
 ## Failure Modes

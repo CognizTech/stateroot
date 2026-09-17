@@ -22,10 +22,13 @@ metadata:
         description: Optional. Preferred key for the local context compiler (DeepSeek deepseek-v4-flash). Not required for install or setup.
       - name: OPENAI_API_KEY
         description: Optional. Used when DEEPSEEK_API_KEY is unset (OpenAI gpt-5.6-luna). Not required for install or setup.
+      - name: STATEROOT_NO_PING
+        description: Set to 1 to fully opt out of the release CLI's anonymous product telemetry. Not required for install or setup.
     required_binaries: []
     writes_to_disk: true
     network_access:
       - "github.com (official release assets and checksums during install/self-update only)"
+      - "stateroot.dev (anonymous product telemetry from release CLI builds only; off in dev/nightly builds; STATEROOT_NO_PING=1 opts out)"
     data_handling:
       uploads_to_external: false
       requires_user_confirmation: true
