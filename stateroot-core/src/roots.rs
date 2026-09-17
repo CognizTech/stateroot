@@ -1509,6 +1509,12 @@ pub fn fork_materialize(
         }
         let wt_repo = git2::Repository::open(worktree_path)?;
         wt_repo.set_head_detached(tip)?;
+        // `worktree add` honors the host's autocrlf (smudge filters), which
+        // would leave CRLF bytes on Windows and make every untouched file
+        // differ from its root blob at the next snap. Re-materialize the tip
+        // tree byte-exact, same contract as trunk merge checkouts.
+        let tip_tree = wt_repo.find_commit(tip)?.tree()?.id();
+        checkout_root_tree(&wt_repo, worktree_path, tip_tree)?;
         if let Ok(mut branch) = repo.find_branch(&tmp_branch, git2::BranchType::Local) {
             branch.delete()?;
         }
