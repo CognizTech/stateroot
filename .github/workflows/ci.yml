@@ -33,7 +33,7 @@ concurrency:
 
 jobs:
   test:
-    name: fmt + clippy + test (${{ matrix.os }})
+    name: fmt + clippy + test (${{ matrix.os }} / ${{ matrix.shard }})
     # PRs and ordinary main pushes only. Skip on v* tags (the tagged release
     # builds its own binaries) and when the commit message contains [skip tests].
     if: |
@@ -49,6 +49,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+        # Process-heavy CLI integration files run as their own legs so the
+        # full Linux+Windows gate stays mandatory without a serialized wait.
+        # cli-c is the enumerated remainder; the "unsharded test file" step
+        # fails the job if a new tests/*.rs lands in no shard.
+        shard: [core, cli-a, cli-b, cli-c]
     steps:
       - uses: actions/checkout@v7
 
@@ -64,19 +69,51 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ matrix.os }}-cargo-
+          key: ${{ matrix.os }}-${{ matrix.shard }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ matrix.os }}-${{ matrix.shard }}-cargo-
 
       # git2 is built with vendored libgit2 (workspace feature
       # `vendored-libgit2`), so no system libgit2 is needed on either OS.
       - name: fmt
+        if: matrix.shard == 'core'
         run: cargo fmt --all -- --check
 
       - name: clippy
+        if: matrix.shard == 'core'
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: test
-        run: cargo test --workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.shard }}" in
+            core)
+              cargo test --workspace --lib
+              cargo test -p stateroot-cli --bins
+              ;;
+            cli-a)
+              cargo test -p stateroot-cli --test roots --test delegate
+              ;;
+            cli-b)
+              cargo test -p stateroot-cli --test digest_delivery --test local --test session --test finalize_journal
+              ;;
+            cli-c)
+              cargo test -p stateroot-cli --test doctor_hooks --test editor_extensions --test ext --test handoff --test handoff_binding --test identity --test init_seed --test m3 --test m4 --test memory_federation --test persona_scheduler --test plan --test projects --test remove --test soul_sync --test telemetry --test uninstall --test update
+              ;;
+          esac
+
+      - name: every CLI integration file is sharded
+        shell: bash
+        run: |
+          set -euo pipefail
+          sharded=" roots delegate digest_delivery finalize_journal local session doctor_hooks editor_extensions ext handoff handoff_binding identity init_seed m3 m4 memory_federation persona_scheduler plan projects remove soul_sync telemetry uninstall update "
+          for f in stateroot-cli/tests/*.rs; do
+            name=$(basename "$f" .rs)
+            case "$sharded" in
+              *" $name "*) ;;
+              *) echo "unsharded test file: $f — add it to a shard in the test job"; exit 1;;
+            esac
+          done
 
   preview-version:
     name: calculate rolling preview version
@@ -212,7 +249,7 @@ jobs:
 
   rolling-prerelease:
     name: publish rolling prerelease
-    needs: [preview-version, build-preview]
+    needs: [preview-version, build-preview, build-extension]
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -256,6 +293,32 @@ jobs:
           files: dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-extension:
+    name: build verified VSIX
+    needs: test
+    if: |
+      always() &&
+      !cancelled() &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+      - name: Build and inspect the extension release artifact
+        run: ./packaging/extension/package-release.sh dist
+      - name: Upload verified VSIX
+        uses: actions/upload-artifact@v7
+        with:
+          name: stateroot-vsix
+          path: |
+            dist/stateroot-vscode-*.vsix
+            dist/stateroot-extension.json
 
   build-release:
     name: build ${{ matrix.artifact }}
@@ -433,14 +496,15 @@ jobs:
 
   release:
     name: publish release (binaries + checksums.txt)
-    needs: build-release
+    needs: [build-release, build-extension]
     # always() is required: on v* tags the test job is skipped, and GitHub
     # otherwise skips this job even when both build-release legs succeeded.
     if: |
       always() &&
       !cancelled() &&
       startsWith(github.ref, 'refs/tags/v') &&
-      needs.build-release.result == 'success'
+      needs.build-release.result == 'success' &&
+      needs.build-extension.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write

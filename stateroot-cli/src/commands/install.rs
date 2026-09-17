@@ -213,6 +213,8 @@ pub async fn install(ctx: &Ctx) -> Result<()> {
     // what keeps it current. Best-effort; honors every updater opt-out.
     super::update_schedule::ensure_registered(ctx);
 
+    super::editor_extensions::reconcile_after_install(ctx).await;
+
     // Record for `init`'s one-time global install + `uninstall`.
     let mut config = ctx.config.clone();
     config.installed_harnesses = installed.clone();

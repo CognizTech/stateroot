@@ -292,6 +292,9 @@ fn assets_from_body(body: &Value) -> Option<ReleaseInfo> {
     let assets = body.get("assets").and_then(|v| v.as_array())?;
     let mut asset_url = None;
     let mut checksums_url = None;
+    let mut extension_manifest_url = None;
+    let mut extension_vsix_url = None;
+    let mut extension_vsix_name = None;
     for asset in assets {
         let name = asset.get("name").and_then(|v| v.as_str()).unwrap_or("");
         // Prefer the API asset URL: downloads go through it with
@@ -308,6 +311,11 @@ fn assets_from_body(body: &Value) -> Option<ReleaseInfo> {
             asset_url = Some(url.to_string());
         } else if name == "checksums.txt" {
             checksums_url = Some(url.to_string());
+        } else if name == "stateroot-extension.json" {
+            extension_manifest_url = Some(url.to_string());
+        } else if name.starts_with("stateroot-vscode-") && name.ends_with(".vsix") {
+            extension_vsix_url = Some(url.to_string());
+            extension_vsix_name = Some(name.to_string());
         }
     }
     Some(ReleaseInfo {
@@ -319,6 +327,9 @@ fn assets_from_body(body: &Value) -> Option<ReleaseInfo> {
             .to_string(),
         asset_url: asset_url?,
         checksums_url: checksums_url?,
+        extension_manifest_url,
+        extension_vsix_url,
+        extension_vsix_name,
     })
 }
 
@@ -334,6 +345,65 @@ pub struct ReleaseInfo {
     pub asset_url: String,
     /// Download URL of `checksums.txt`.
     pub checksums_url: String,
+    /// Download URL of `stateroot-extension.json` when the release carries one.
+    pub extension_manifest_url: Option<String>,
+    /// Download URL of the verified VSIX when the release carries one.
+    pub extension_vsix_url: Option<String>,
+    /// Filename of the verified VSIX asset.
+    pub extension_vsix_name: Option<String>,
+}
+
+fn extension_from_cache(cached: &Value) -> (Option<String>, Option<String>, Option<String>) {
+    (
+        cached
+            .get("extension_manifest_url")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        cached
+            .get("extension_vsix_url")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        cached
+            .get("extension_vsix_name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+    )
+}
+
+fn cache_knows_extension(cached: &Value) -> bool {
+    cached.get("extension_manifest_url").is_some()
+        || cached
+            .get("extension_absent")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
+fn cache_json(info: &ReleaseInfo, extra: Value) -> Value {
+    let mut body = json!({
+        "latest_tag": info.tag,
+        "name": info.name,
+        "asset_url": info.asset_url,
+        "checksums_url": info.checksums_url,
+        "extension_absent": info.extension_manifest_url.is_none(),
+    });
+    if let Some(url) = &info.extension_manifest_url {
+        body["extension_manifest_url"] = json!(url);
+    }
+    if let Some(url) = &info.extension_vsix_url {
+        body["extension_vsix_url"] = json!(url);
+    }
+    if let Some(name) = &info.extension_vsix_name {
+        body["extension_vsix_name"] = json!(name);
+    }
+    if let Value::Object(map) = extra {
+        if let Value::Object(body_map) = &mut body {
+            body_map.extend(map);
+        }
+    }
+    body
 }
 
 /// Check for a newer release. Background checks honor the cache (at most one
@@ -357,15 +427,20 @@ pub async fn check_latest(ctx: &Ctx, force: bool) -> Option<ReleaseInfo> {
                         (chrono::Utc::now() - at.with_timezone(&chrono::Utc)).num_hours() < interval
                     })
                     .unwrap_or(false);
-                if fresh {
+                if fresh && cache_knows_extension(&cached) {
                     let tag = cached.get("latest_tag").and_then(|v| v.as_str())?;
                     let asset_url = cached.get("asset_url").and_then(|v| v.as_str())?;
                     let checksums_url = cached.get("checksums_url").and_then(|v| v.as_str())?;
+                    let (extension_manifest_url, extension_vsix_url, extension_vsix_name) =
+                        extension_from_cache(&cached);
                     return Some(ReleaseInfo {
                         tag: tag.into(),
                         name: String::new(),
                         asset_url: asset_url.into(),
                         checksums_url: checksums_url.into(),
+                        extension_manifest_url,
+                        extension_vsix_url,
+                        extension_vsix_name,
                     });
                 }
             }
@@ -396,12 +471,10 @@ pub async fn check_latest(ctx: &Ctx, force: bool) -> Option<ReleaseInfo> {
     let _ = std::fs::create_dir_all(&ctx.config_dir);
     let _ = std::fs::write(
         cache_path(ctx),
-        serde_json::to_string_pretty(&json!({
-            "checked_at": stateroot_core::local_store::now_rfc3339(),
-            "latest_tag": info.tag,
-            "asset_url": info.asset_url,
-            "checksums_url": info.checksums_url,
-        }))
+        serde_json::to_string_pretty(&cache_json(
+            &info,
+            json!({ "checked_at": stateroot_core::local_store::now_rfc3339() }),
+        ))
         .ok()?,
     );
     Some(info)
@@ -545,6 +618,16 @@ pub fn dev_update_order(current: &str, release_name: &str) -> Option<std::cmp::O
     Some(current.cmp(&nightly))
 }
 
+/// Look up a sha256sum-format entry (`<hash>  <filename>` or `hash *filename`).
+pub fn checksum_for(checksums_text: &str, filename: &str) -> Option<String> {
+    checksums_text.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        let hash = parts.next()?;
+        let name = parts.next()?.trim_start_matches('*');
+        (name == filename).then(|| hash.to_string())
+    })
+}
+
 /// Download the asset + checksums.txt and verify the sha256. Returns the
 /// verified temp file path; on failure nothing is written to the install
 /// path (callers keep the old binary).
@@ -553,6 +636,22 @@ pub async fn download_verified(
     asset_url: &str,
     checksums_url: &str,
 ) -> anyhow::Result<PathBuf> {
+    let tmp = ctx
+        .config_dir
+        .join(format!("update-download-{}", std::process::id()));
+    download_verified_asset(ctx, asset_url, checksums_url, asset_name(), &tmp).await?;
+    Ok(tmp)
+}
+
+/// Download one named release asset, verify it against `checksums.txt`, and
+/// write it to `dest`.
+pub async fn download_verified_asset(
+    ctx: &Ctx,
+    asset_url: &str,
+    checksums_url: &str,
+    filename: &str,
+    dest: &Path,
+) -> anyhow::Result<()> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()?;
@@ -587,26 +686,19 @@ pub async fn download_verified(
         );
     }
     let checksums_text = checksums.text().await?;
-    let expected = checksums_text
-        .lines()
-        .find(|line| line.contains(asset_name()))
-        .and_then(|line| line.split_whitespace().next())
-        .ok_or_else(|| anyhow!("checksums.txt has no entry for {}", asset_name()))?
-        .to_string();
+    let expected = checksum_for(&checksums_text, filename)
+        .ok_or_else(|| anyhow!("checksums.txt has no entry for {filename}"))?;
     use sha2::Digest as _;
     let actual = format!("{:x}", sha2::Sha256::digest(&bytes));
     anyhow::ensure!(
         actual == expected,
-        "checksum mismatch for {} (expected {}, got {})",
-        asset_name(),
-        expected,
-        actual
+        "checksum mismatch for {filename} (expected {expected}, got {actual})"
     );
-    let tmp = ctx
-        .config_dir
-        .join(format!("update-download-{}", std::process::id()));
-    std::fs::write(&tmp, &bytes)?;
-    Ok(tmp)
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(dest, &bytes)?;
+    Ok(())
 }
 
 /// Download the asset + checksums.txt, verify the sha256, and self-replace.
@@ -718,15 +810,20 @@ async fn check_nightly(ctx: &Ctx, force: bool) -> Option<ReleaseInfo> {
                         (chrono::Utc::now() - at.with_timezone(&chrono::Utc)).num_hours() < interval
                     })
                     .unwrap_or(false);
-                if fresh {
+                if fresh && cache_knows_extension(&cached) {
                     let name = cached.get("name").and_then(|v| v.as_str())?;
                     let asset_url = cached.get("asset_url").and_then(|v| v.as_str())?;
                     let checksums_url = cached.get("checksums_url").and_then(|v| v.as_str())?;
+                    let (extension_manifest_url, extension_vsix_url, extension_vsix_name) =
+                        extension_from_cache(&cached);
                     return Some(ReleaseInfo {
                         tag: "nightly".into(),
                         name: name.into(),
                         asset_url: asset_url.into(),
                         checksums_url: checksums_url.into(),
+                        extension_manifest_url,
+                        extension_vsix_url,
+                        extension_vsix_name,
                     });
                 }
             }
@@ -736,15 +833,23 @@ async fn check_nightly(ctx: &Ctx, force: bool) -> Option<ReleaseInfo> {
     let _ = std::fs::create_dir_all(&ctx.config_dir);
     let _ = std::fs::write(
         nightly_cache_path(ctx),
-        serde_json::to_string_pretty(&json!({
-            "checked_at": stateroot_core::local_store::now_rfc3339(),
-            "name": info.name,
-            "asset_url": info.asset_url,
-            "checksums_url": info.checksums_url,
-        }))
+        serde_json::to_string_pretty(&cache_json(
+            &info,
+            json!({ "checked_at": stateroot_core::local_store::now_rfc3339() }),
+        ))
         .ok()?,
     );
     Some(info)
+}
+
+/// Channel-strict release lookup used by editor reconciliation: a production
+/// build follows `/releases/latest`; a dev/nightly build follows `nightly`.
+pub async fn selected_channel_release(ctx: &Ctx, force: bool) -> Option<ReleaseInfo> {
+    if current_is_dev() {
+        check_nightly(ctx, force).await
+    } else {
+        check_latest(ctx, force).await
+    }
 }
 
 /// Background entry point (post-dispatch, whitelisted commands only):
@@ -758,27 +863,29 @@ pub async fn maybe_auto_update(ctx: &Ctx) {
     if disabled(ctx) {
         return;
     }
-    let attempt = async {
-        if current_is_dev() {
-            let info = check_nightly(ctx, false).await?;
-            match dev_update_order(&running_version(), &info.name) {
-                Some(std::cmp::Ordering::Less) => {
-                    download_and_install_quiet(ctx, &info, true).await.ok()
-                }
-                _ => None,
+    if current_is_dev() {
+        let Some(info) = check_nightly(ctx, false).await else {
+            return;
+        };
+        match dev_update_order(&running_version(), &info.name) {
+            Some(std::cmp::Ordering::Less) => {
+                let _ = download_and_install_quiet(ctx, &info, true).await;
             }
+            Some(_) => {
+                super::editor_extensions::reconcile_after_current_cli(ctx).await;
+            }
+            None => {}
+        }
+    } else {
+        let Some(info) = check_latest(ctx, false).await else {
+            return;
+        };
+        if is_newer(&info.tag) {
+            let _ = download_and_install_quiet(ctx, &info, true).await;
         } else {
-            let info = check_latest(ctx, false).await?;
-            if !is_newer(&info.tag) {
-                return None;
-            }
-            download_and_install_quiet(ctx, &info, true).await.ok()
+            super::editor_extensions::reconcile_after_current_cli(ctx).await;
         }
     }
-    .await;
-    // Deliberately discarded: silent background update — every failure is
-    // invisible to the user command that just ran.
-    let _ = attempt;
 }
 
 /// `stateroot self-update [--check] [--tag nightly|v0.1.2]`.
@@ -1426,6 +1533,20 @@ mod tests {
         let quoted = "github.com:\n  oauth_token: \"quoted-tok\"\n";
         assert_eq!(parse_gh_hosts_token(quoted).as_deref(), Some("quoted-tok"));
         assert_eq!(parse_gh_hosts_token("github.com:\n  user: octo\n"), None);
+    }
+
+    #[test]
+    fn checksum_for_matches_filename_not_substring() {
+        let text = "aaa  stateroot-linux-x64\nbbb  stateroot-vscode-0.2.19.vsix\nccc *stateroot-extension.json\n";
+        assert_eq!(
+            checksum_for(text, "stateroot-vscode-0.2.19.vsix").as_deref(),
+            Some("bbb")
+        );
+        assert_eq!(
+            checksum_for(text, "stateroot-extension.json").as_deref(),
+            Some("ccc")
+        );
+        assert_eq!(checksum_for(text, "stateroot"), None);
     }
 
     #[tokio::test]
