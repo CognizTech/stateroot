@@ -94,6 +94,11 @@ For an interactive harness session use `stateroot harness run` instead;
 ```bash
 stateroot fork <root> --worktree <path> [--plan ID]
 stateroot merge <fork> [<fork>…]
+stateroot merge --cleanup <fork> [<fork>…]
+stateroot merge --prepare <fork> [<fork>…] --json
+stateroot merge --status <attempt> --json
+stateroot merge --continue <attempt>
+stateroot merge --abort <attempt>
 ```
 
 `fork --worktree` materializes an isolated checkout of the fork root's
@@ -113,9 +118,29 @@ report and no merge root; contained forks are reported as
 nothing-to-merge. The merged tree is materialized into the trunk
 filesystem before the ref advances (uncommitted changes on paths the
 merge would overwrite refuse with the exact paths), verified on disk, and
-the merged fork worktrees are removed automatically — fork refs and
-records stay as history, cleanup failures become `cleanup_pending` on the
-fork record. Merge refuses to run from inside a fork worktree.
+the merged fork worktrees are retained. Fork refs and records stay as
+history; each registered worktree is marked `cleanup_pending` so merge
+returns without waiting on deletion. Retry with
+`stateroot merge --cleanup <fork>…` — missing paths count as already
+removed, success is bounded and idempotent, and a timeout or failure
+leaves retryable state intact. Merge refuses to run from inside a fork
+worktree.
+
+For an appointed agent coordinating an integration, `stateroot merge
+--prepare <fork>… --json` freezes the trunk and fork tips and reports either
+a `ready` attempt or structured `attention` conflicts (path, conflict kind,
+plus base/ours/theirs blob identities). It changes no refs or worktrees of
+the trunk. A conflicted attempt additionally materializes an isolated
+reconciliation worktree under machine-local state: the accumulated clean
+fold with each text conflict rendered with standard conflict markers. The
+appointed agent edits and tests in that worktree, then `--continue
+<attempt>` revalidates every frozen ref, refuses while conflict markers
+remain, folds any forks selected after the conflicted one, and publishes
+exactly the reconciled tree as one N+1-parent root — recording the attempt
+id, resolved conflicts, and any `--evidence "<tests run>"` strings in the
+transition. `--status` is read-only and `--abort` removes only the local
+attempt record and its worktree. StateRoot never chooses a model or
+silently chooses a source side.
 
 `stateroot handoff write --worktree <path>` binds a handoff to a
 registered fork: the packet carries the opaque `fork_id` (never the raw
@@ -367,3 +392,21 @@ checkpoints, hot-apex memory — capped ~4000 chars) into:
 Managed files are written only when absent or already carrying the marker; an
 unmarked pre-existing file is a conflict, reported and left untouched.
 `--dry-run` prints each target and the would-be size without writing.
+
+## `stateroot editor` — VS Code / Cursor extension reconciliation
+
+`stateroot editor status` is read-only: it reports each detected stable
+VS Code and Cursor launcher, the installed StateRoot extension version, and
+the release-declared desired version (production CLI → production release;
+nightly/dev CLI → rolling `nightly`).
+
+`stateroot editor reconcile` installs a missing extension or updates a
+stale one from the verified GitHub VSIX. Exact and newer installs are
+strict no-ops (never downgrade). One editor's failure does not undo the
+CLI or the other editor; retry with the same command.
+
+Automatic reconciliation also runs after `stateroot install` and after an
+already-current scheduled CLI update check. It honors `[update] enabled`
+and `STATEROOT_NO_AUTO_UPDATE` on the automatic path; the explicit
+`editor reconcile` command still runs when background auto-update is off.
+It does not run from hooks or every ordinary CLI command.

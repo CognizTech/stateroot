@@ -744,3 +744,82 @@ fn learning_recorded_in_cursor_appears_in_codex_hook_digest() {
         "codex envelope: {codex_out}"
     );
 }
+
+#[test]
+fn checkpoint_stays_bounded_on_dependency_heavy_trees() {
+    let config_home = tempfile::tempdir().expect("config home");
+    seed_config_home(config_home.path());
+    let user_home = tempfile::tempdir().expect("user home");
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+
+    // Disposable dependency-heavy fixture: generated trees a checkpoint must
+    // never scan end-to-end on the automatic path.
+    for dir in ["node_modules/pkg-a", ".venv/lib", "dist/assets"] {
+        for n in 0..100 {
+            std::fs::create_dir_all(project.path().join(dir)).expect("mkdir");
+            std::fs::write(
+                project.path().join(dir).join(format!("f{n}.js")),
+                "module.exports = 1;\n",
+            )
+            .expect("fixture file");
+        }
+    }
+    let roots_dir = project.path().join(".stateroot/roots");
+    let count_roots = || {
+        std::fs::read_dir(&roots_dir)
+            .map(|rd| rd.flatten().count())
+            .unwrap_or(0)
+    };
+    let roots_before = count_roots();
+
+    let started = std::time::Instant::now();
+    let skipped = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["checkpoint", "--note", "heavy tree"])
+        .env("STATEROOT_TEST_AUTO_SNAPSHOT_ENTRY_LIMIT", "200")
+        .assert()
+        .success();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(120),
+        "checkpoint hung on a dependency-heavy tree"
+    );
+    let stdout = String::from_utf8(skipped.get_output().stdout.clone()).expect("utf8");
+    let stderr = String::from_utf8(skipped.get_output().stderr.clone()).expect("utf8");
+    assert!(stdout.contains("checkpoint recorded"), "stdout: {stdout}");
+    assert!(
+        stderr.contains("auto-snap skipped") && stderr.contains("visited entries"),
+        "the skip must print the precise recovery message: {stderr}"
+    );
+    assert_eq!(
+        count_roots(),
+        roots_before,
+        "budget exhaustion skips only the automatic root"
+    );
+
+    // `doctor` surfaces the retained skip with the recovery hint.
+    let doctor = stateroot(config_home.path(), user_home.path(), project.path())
+        .arg("doctor")
+        .assert()
+        .success();
+    let doctor_out = String::from_utf8(doctor.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        doctor_out.contains("automatic snapshot"),
+        "doctor must surface the skipped automatic snapshot: {doctor_out}"
+    );
+
+    // Excluding the generated trees restores normal root creation.
+    std::fs::write(
+        project.path().join(".gitignore"),
+        "node_modules/\n.venv/\ndist/\n",
+    )
+    .expect("gitignore");
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["checkpoint", "--note", "ignores added"])
+        .env("STATEROOT_TEST_AUTO_SNAPSHOT_ENTRY_LIMIT", "200")
+        .assert()
+        .success();
+    assert!(
+        count_roots() > roots_before,
+        "adding ignore rules must restore automatic root creation"
+    );
+}

@@ -52,7 +52,11 @@ fn lock_path(project_dir: &Path) -> std::path::PathBuf {
 
 /// CLI entry: drain the current project's journal.
 pub async fn run(ctx: &Ctx) -> Result<()> {
-    run_drain(ctx).await
+    run_drain(ctx).await?;
+    // Post-output lifecycle path: flush any queued telemetry on the way out
+    // (detached, single-flight, never blocking this worker's budget).
+    crate::telemetry::kick_drain(ctx);
+    Ok(())
 }
 
 /// Drain loop: single-flight (stale-recovering), legacy migration, then
@@ -87,15 +91,24 @@ async fn advance_one(ctx: &Ctx, job: &mut BoundaryJob) -> Result<()> {
     match job.phase {
         Phase::Queued => {
             // 1. Snapshot FIRST — the boundary's handoff must reference the
-            //    root produced for this boundary.
+            //    root produced for this boundary. Budget exhaustion skips
+            //    only the automatic root (recorded by the engine and surfaced
+            //    by `doctor`): the boundary still finalizes against the
+            //    current tip instead of failing the whole finalize job.
             let root = match stateroot_core::roots::snap_if_changed(
                 &ctx.cwd,
                 &job.harness,
                 "auto: session boundary",
                 None,
-            )? {
-                stateroot_core::roots::SnapOutcome::Created(manifest, _) => manifest.id,
-                stateroot_core::roots::SnapOutcome::Unchanged { root } => root,
+            ) {
+                Ok(stateroot_core::roots::SnapOutcome::Created(manifest, _)) => manifest.id,
+                Ok(stateroot_core::roots::SnapOutcome::Unchanged { root }) => root,
+                Err(stateroot_core::roots::RootsError::SnapshotBudget(_)) => {
+                    job.last_error = Some("automatic snapshot skipped: scan budget".to_string());
+                    stateroot_core::roots::latest_root(&ctx.cwd)?
+                        .unwrap_or_else(|| "none".to_string())
+                }
+                Err(err) => return Err(err.into()),
             };
             journal::transition(&ctx.cwd, job, Phase::Snapped, Some(root), None)?;
         }

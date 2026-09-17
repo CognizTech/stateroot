@@ -61,7 +61,7 @@ pub enum Command {
     /// Create a root snapshot of the working state (git plumbing).
     Snap(SnapArgs),
     /// Root lineage with coverage lines and fork markers.
-    Log,
+    Log(LogArgs),
     /// Show one root by hash (prefix allowed).
     Show {
         /// Root hash or prefix.
@@ -102,6 +102,8 @@ pub enum Command {
     Hook(HookArgs),
     /// Install stateroot integration for detected harnesses (global).
     Install,
+    /// Discover and reconcile the VS Code / Cursor extensions.
+    Editor(EditorArgs),
     /// Run a harness through StateRoot's portable integration policy.
     Harness(HarnessArgs),
     /// Delegate a bounded task to another harness CLI as a subagent.
@@ -173,6 +175,9 @@ pub enum Command {
     /// Hidden: drain spool-first session-end finalize (snap/finalize/ingest).
     #[command(name = "_drain-finalize", hide = true)]
     DrainFinalize,
+    /// Hidden: detached single-flight telemetry spool drain.
+    #[command(name = "_drain-telemetry", hide = true)]
+    DrainTelemetry,
     /// External extension (any `stateroot-<name>` executable on PATH).
     #[command(external_subcommand)]
     External(Vec<String>),
@@ -390,7 +395,7 @@ pub enum HarnessAction {
     },
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 pub struct DelegateArgs {
     #[command(subcommand)]
     pub action: Option<DelegateAction>,
@@ -400,6 +405,9 @@ pub struct DelegateArgs {
     /// Bounded task for the subagent; the caller observes via list/status/digest.
     #[arg(long)]
     pub task: Option<String>,
+    /// Run an approved plan in a newly provisioned parallel fork worktree.
+    #[arg(long)]
+    pub plan: Option<String>,
     /// StateRoot skill slug to make available to the subagent (repeatable).
     #[arg(long = "skill")]
     pub skills: Vec<String>,
@@ -426,9 +434,12 @@ pub struct DelegateArgs {
     /// Hidden: the project dir the worker's record lives in (internal).
     #[arg(long, hide = true)]
     pub record_in: Option<String>,
+    /// Hidden: suppress the normal spawn report so a wrapper can render one envelope.
+    #[arg(long, hide = true)]
+    pub _quiet: bool,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Clone, Subcommand)]
 pub enum DelegateAction {
     /// List delegations with live status (running|completed|failed|lost).
     List,
@@ -512,6 +523,9 @@ pub enum HandoffAction {
         #[arg(long)]
         from: Option<String>,
     },
+    /// Recover a malformed current handoff from the newest valid history
+    /// packet, preserving the invalid bytes in local quarantine.
+    Repair,
 }
 
 #[derive(Debug, Args)]
@@ -677,6 +691,13 @@ pub struct CompareArgs {
 }
 
 #[derive(Debug, Args)]
+pub struct LogArgs {
+    /// Emit the stable `stateroot.lineage.v1` projection for integrations.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
 pub struct DiffArgs {
     /// Base root hash.
     pub from: String,
@@ -704,6 +725,9 @@ pub struct ForkArgs {
     /// refs/heads entries are never created or moved by fork.
     #[arg(long)]
     pub branch: Option<String>,
+    /// Opaque StateRoot fork name (preferred over the compatibility --branch alias).
+    #[arg(long, conflicts_with = "branch")]
+    pub name: Option<String>,
     /// Materialize the fork as an isolated worktree at this path
     /// (sibling directory recommended, never inside the project tree).
     #[arg(long)]
@@ -717,8 +741,37 @@ pub struct ForkArgs {
 #[derive(Debug, Args)]
 pub struct MergeArgs {
     /// Fork names to fold into the trunk (as shown by `stateroot fork`).
-    #[arg(required = true)]
+    #[arg(required_unless_present_any = ["continue_attempt", "status", "abort"])]
     pub forks: Vec<String>,
+    /// Freeze the selected refs and report a local merge attempt. A
+    /// coordinating agent uses `--continue` only after a clean preparation.
+    #[arg(long, conflicts_with_all = ["continue_attempt", "status", "abort", "cleanup", "resolve_ours"])]
+    pub prepare: bool,
+    /// Publish a previously prepared attempt if every frozen ref is
+    /// unchanged. Conflicted attempts publish the reconciled worktree.
+    #[arg(long = "continue", value_name = "ATTEMPT", conflicts_with_all = ["prepare", "status", "abort", "cleanup", "resolve_ours"])]
+    pub continue_attempt: Option<String>,
+    /// Show a prepared attempt and its conflicts without changing refs.
+    #[arg(long, value_name = "ATTEMPT", conflicts_with_all = ["prepare", "continue_attempt", "abort", "cleanup", "resolve_ours"])]
+    pub status: Option<String>,
+    /// Remove only a prepared attempt's local state.
+    #[arg(long, value_name = "ATTEMPT", conflicts_with_all = ["prepare", "continue_attempt", "status", "cleanup", "resolve_ours"])]
+    pub abort: Option<String>,
+    /// Record reconciliation evidence (tests run, review notes) into the
+    /// merge transition. Repeatable; meaningful only with `--continue`.
+    #[arg(long, value_name = "TEXT", requires = "continue_attempt")]
+    pub evidence: Vec<String>,
+    /// Keep the already-reconciled trunk version of one reported source
+    /// conflict. Repeat only after inspecting each conflict.
+    #[arg(long = "resolve-ours", value_name = "PATH")]
+    pub resolve_ours: Vec<String>,
+    /// Emit the stable merge-result projection for integrations.
+    #[arg(long)]
+    pub json: bool,
+    /// Retry deferred worktree cleanup for named merged forks.
+    /// A merge itself never waits on deletion.
+    #[arg(long, conflicts_with = "resolve_ours")]
+    pub cleanup: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1041,6 +1094,20 @@ pub enum WikiAction {
         #[arg(long)]
         force: bool,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct EditorArgs {
+    #[command(subcommand)]
+    pub action: EditorAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EditorAction {
+    /// Show detected editors and extension state (read-only).
+    Status,
+    /// Install or update missing/stale extensions from the verified release VSIX.
+    Reconcile,
 }
 
 #[derive(Debug, Args)]

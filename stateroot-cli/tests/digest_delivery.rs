@@ -10,6 +10,10 @@ fn stateroot(config_home: &Path, user_home: &Path, cwd: &Path) -> Command {
     cmd.env("STATEROOT_HOME", config_home)
         .env("STATEROOT_TEST_HOME", user_home)
         .env("STATEROOT_TEST_CMD_PROBES", "")
+        // Two sequential spawned commands can exceed the production 5s
+        // debounce on slow filesystems/CI; widen it so the suite measures
+        // the dedupe decision, not machine latency.
+        .env("STATEROOT_TEST_RETRY_DEBOUNCE_MS", "120000")
         .env_remove("DEEPSEEK_API_KEY")
         .env_remove("OPENAI_API_KEY")
         .env_remove("STATEROOT_SYNTHESIS_API_KEY")

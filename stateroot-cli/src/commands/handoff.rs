@@ -1050,6 +1050,31 @@ pub async fn finalize(ctx: &Ctx, from: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `stateroot handoff repair` — recover a malformed current packet without
+/// hand-editing `.stateroot/`.
+pub async fn repair(ctx: &Ctx) -> anyhow::Result<()> {
+    ctx.require_project()?;
+    let outcome = local_store::repair_handoff_current(&ctx.cwd)?;
+    match (outcome.quarantined, outcome.restored_from) {
+        (None, None) => println!("current handoff is valid (or absent); nothing to repair"),
+        (Some(quarantine), Some(history)) => {
+            println!(
+                "repaired current handoff from {}; corrupt bytes retained at {}",
+                history.display(),
+                quarantine.display()
+            );
+        }
+        (Some(quarantine), None) => {
+            println!(
+                "current handoff remains corrupt; no valid history exists. Corrupt bytes retained at {}",
+                quarantine.display()
+            );
+        }
+        (None, Some(_)) => unreachable!("restoration always quarantines corrupt bytes"),
+    }
+    Ok(())
+}
+
 /// Lifecycle/automatic exit: checkpoint observation only — never replace
 /// `handoffs/current.json` or finalize a separate handoff boundary.
 async fn automatic_checkpoint_only(ctx: &Ctx, note_text: Option<&str>) -> anyhow::Result<()> {

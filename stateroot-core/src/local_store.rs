@@ -19,6 +19,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+use sha2::Digest as _;
 use thiserror::Error;
 
 /// Name of the per-project marker directory.
@@ -96,6 +97,15 @@ pub enum LocalStoreError {
         /// Underlying error.
         source: serde_json::Error,
     },
+}
+
+/// Outcome of a supported recovery of a malformed current handoff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandoffRepair {
+    /// The invalid bytes were retained here, under machine-local state.
+    pub quarantined: Option<PathBuf>,
+    /// The newest valid immutable history packet restored to `current.json`.
+    pub restored_from: Option<PathBuf>,
 }
 
 fn io_err(path: &Path) -> impl Fn(std::io::Error) -> LocalStoreError + '_ {
@@ -538,6 +548,10 @@ pub fn recent_episodic(project_dir: &Path, limit: usize) -> Vec<Value> {
 /// formal handoff exists. Best-effort: never fails on IO.
 pub fn stamp_handoff_activity(project_dir: &Path, harness: &str, kind: &str) {
     let path = root(project_dir).join(HANDOFF_CURRENT_PATH);
+    let lock = root(project_dir).join("local/locks/handoff-current.lock");
+    let Ok(_lock) = crate::safe_io::ResourceLock::acquire(lock) else {
+        return;
+    };
     let Ok(text) = std::fs::read_to_string(&path) else {
         return;
     };
@@ -550,7 +564,7 @@ pub fn stamp_handoff_activity(project_dir: &Path, harness: &str, kind: &str) {
         "at": now_rfc3339(),
     });
     if let Ok(text) = serde_json::to_string_pretty(&packet) {
-        if std::fs::write(&path, format!("{text}\n")).is_ok() {
+        if crate::safe_io::atomic_replace(&path, format!("{text}\n").as_bytes()).is_ok() {
             report_written(project_dir, HANDOFF_CURRENT_PATH);
         }
     }
@@ -561,11 +575,13 @@ pub fn stamp_handoff_activity(project_dir: &Path, harness: &str, kind: &str) {
 pub fn write_handoff_local(project_dir: &Path, packet: &Value) -> Result<(), LocalStoreError> {
     let root = root(project_dir);
     let current = root.join(HANDOFF_CURRENT_PATH);
-    if let Some(parent) = current.parent() {
-        std::fs::create_dir_all(parent).map_err(io_err(parent))?;
-    }
+    let lock = root.join("local/locks/handoff-current.lock");
+    let _lock = crate::safe_io::ResourceLock::acquire(lock).map_err(|err| {
+        io_err(&current)(std::io::Error::new(std::io::ErrorKind::WouldBlock, err))
+    })?;
     let text = serde_json::to_string_pretty(packet).map_err(json_err(&current))?;
-    std::fs::write(&current, format!("{text}\n")).map_err(io_err(&current))?;
+    crate::safe_io::atomic_replace(&current, format!("{text}\n").as_bytes())
+        .map_err(io_err(&current))?;
 
     let ts = packet
         .get("created_at")
@@ -579,7 +595,8 @@ pub fn write_handoff_local(project_dir: &Path, packet: &Value) -> Result<(), Loc
     let history_dir = root.join(HANDOFF_HISTORY_DIR);
     std::fs::create_dir_all(&history_dir).map_err(io_err(&history_dir))?;
     let history = history_dir.join(format!("{ts}-{harness}.json"));
-    std::fs::write(&history, format!("{text}\n")).map_err(io_err(&history))?;
+    crate::safe_io::atomic_replace(&history, format!("{text}\n").as_bytes())
+        .map_err(io_err(&history))?;
     report_written(project_dir, HANDOFF_CURRENT_PATH);
     report_written(
         project_dir,
@@ -601,6 +618,80 @@ pub fn read_handoff_local(project_dir: &Path) -> Result<Option<Value>, LocalStor
     }
 }
 
+/// Repair a malformed `handoffs/current.json` without editing StateRoot files
+/// by hand. Invalid bytes are retained under `local/handoff-quarantine/`; the
+/// newest valid immutable history packet is restored when one exists.
+///
+/// A valid current handoff is a no-op. When no valid history exists, the
+/// corrupt current file remains in place and the caller receives the
+/// quarantine location so no continuity is fabricated.
+pub fn repair_handoff_current(project_dir: &Path) -> Result<HandoffRepair, LocalStoreError> {
+    let root = root(project_dir);
+    let current = root.join(HANDOFF_CURRENT_PATH);
+    let lock = root.join("local/locks/handoff-current.lock");
+    let _lock = crate::safe_io::ResourceLock::acquire(lock).map_err(|err| {
+        io_err(&current)(std::io::Error::new(std::io::ErrorKind::WouldBlock, err))
+    })?;
+    let raw = match std::fs::read(&current) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(HandoffRepair {
+                quarantined: None,
+                restored_from: None,
+            })
+        }
+        Err(err) => return Err(io_err(&current)(err)),
+    };
+    if serde_json::from_slice::<Value>(&raw).is_ok() {
+        return Ok(HandoffRepair {
+            quarantined: None,
+            restored_from: None,
+        });
+    }
+
+    let digest = format!("{:x}", sha2::Sha256::digest(&raw));
+    let quarantine = root.join("local/handoff-quarantine").join(format!(
+        "{}-{}.json",
+        now_rfc3339().replace([':', '-'], ""),
+        &digest[..16]
+    ));
+    crate::safe_io::atomic_replace(&quarantine, &raw).map_err(io_err(&quarantine))?;
+
+    let history_dir = root.join(HANDOFF_HISTORY_DIR);
+    let mut candidates: Vec<(String, PathBuf, Value)> = match std::fs::read_dir(&history_dir) {
+        Ok(entries) => entries
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                let text = std::fs::read_to_string(&path).ok()?;
+                let value = serde_json::from_str::<Value>(&text).ok()?;
+                let created = value
+                    .get("created_at")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                Some((created, path, value))
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    candidates.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    let Some((_created, restored_from, packet)) = candidates.pop() else {
+        return Ok(HandoffRepair {
+            quarantined: Some(quarantine),
+            restored_from: None,
+        });
+    };
+    let text = serde_json::to_string_pretty(&packet).map_err(json_err(&current))?;
+    crate::safe_io::atomic_replace(&current, format!("{text}\n").as_bytes())
+        .map_err(io_err(&current))?;
+    report_written(project_dir, HANDOFF_CURRENT_PATH);
+    Ok(HandoffRepair {
+        quarantined: Some(quarantine),
+        restored_from: Some(restored_from),
+    })
+}
+
 /// Rewrite `handoffs/current.json` in place via a mutation closure — used for
 /// in-place updates (acceptance marks) that must NOT create a history entry.
 /// Returns true when the closure changed the document.
@@ -608,15 +699,22 @@ pub fn update_handoff_current(
     project_dir: &Path,
     mutate: impl FnOnce(&mut Value) -> bool,
 ) -> Result<bool, LocalStoreError> {
-    let Some(mut packet) = read_handoff_local(project_dir)? else {
+    let path = root(project_dir).join(HANDOFF_CURRENT_PATH);
+    let lock = root(project_dir).join("local/locks/handoff-current.lock");
+    let _lock = crate::safe_io::ResourceLock::acquire(lock)
+        .map_err(|err| io_err(&path)(std::io::Error::new(std::io::ErrorKind::WouldBlock, err)))?;
+    let Some(mut packet) = (match std::fs::read_to_string(&path) {
+        Ok(text) => Some(serde_json::from_str(&text).map_err(json_err(&path))?),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => return Err(io_err(&path)(err)),
+    }) else {
         return Ok(false);
     };
     if !mutate(&mut packet) {
         return Ok(false);
     }
-    let path = root(project_dir).join(HANDOFF_CURRENT_PATH);
     let text = serde_json::to_string_pretty(&packet).map_err(json_err(&path))?;
-    std::fs::write(&path, format!("{text}\n")).map_err(io_err(&path))?;
+    crate::safe_io::atomic_replace(&path, format!("{text}\n").as_bytes()).map_err(io_err(&path))?;
     report_written(project_dir, HANDOFF_CURRENT_PATH);
     Ok(true)
 }
@@ -1053,6 +1151,74 @@ mod tests {
         assert_eq!(read["seq"], 1);
         let history = list_handoffs_local(tmp.path()).expect("history");
         assert_eq!(history.len(), 1);
+    }
+
+    #[test]
+    fn handoff_repair_quarantines_corruption_and_restores_newest_history() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        init_skeleton(tmp.path(), "p", "n", "default").expect("init");
+        let older = serde_json::json!({
+            "schema_version": SCHEMA_HANDOFF_V1,
+            "project_id": "p",
+            "seq": 1,
+            "created_at": "2026-07-18T12:00:00Z",
+            "created_by_harness": "statesmith",
+        });
+        let newer = serde_json::json!({
+            "schema_version": SCHEMA_HANDOFF_V1,
+            "project_id": "p",
+            "seq": 2,
+            "created_at": "2026-07-19T12:00:00Z",
+            "created_by_harness": "codex",
+        });
+        write_handoff_local(tmp.path(), &older).expect("older");
+        write_handoff_local(tmp.path(), &newer).expect("newer");
+        let current = root(tmp.path()).join(HANDOFF_CURRENT_PATH);
+        std::fs::write(&current, b"{\"seq\":2}\ntrailing corruption").expect("corrupt");
+
+        let repaired = repair_handoff_current(tmp.path()).expect("repair");
+        let quarantine = repaired.quarantined.expect("quarantine");
+        assert_eq!(
+            std::fs::read(&quarantine).expect("saved corrupt bytes"),
+            b"{\"seq\":2}\ntrailing corruption"
+        );
+        assert!(repaired.restored_from.is_some(), "history restored");
+        assert_eq!(
+            read_handoff_local(tmp.path())
+                .expect("read")
+                .expect("packet")["seq"],
+            2
+        );
+    }
+
+    #[test]
+    fn concurrent_activity_stamps_never_leave_torn_handoff_json() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        init_skeleton(tmp.path(), "p", "n", "default").expect("init");
+        let packet = serde_json::json!({
+            "schema_version": SCHEMA_HANDOFF_V1,
+            "project_id": "p",
+            "seq": 1,
+            "created_at": "2026-07-18T12:00:00Z",
+            "created_by_harness": "statesmith",
+        });
+        write_handoff_local(tmp.path(), &packet).expect("write");
+        let mut writers = Vec::new();
+        for n in 0..8 {
+            let project = tmp.path().to_path_buf();
+            writers.push(std::thread::spawn(move || {
+                stamp_handoff_activity(&project, &format!("h{n}"), "checkpoint");
+            }));
+        }
+        for writer in writers {
+            writer.join().expect("stamp thread");
+        }
+        let current = root(tmp.path()).join(HANDOFF_CURRENT_PATH);
+        let text = std::fs::read_to_string(current).expect("read");
+        assert!(
+            serde_json::from_str::<Value>(&text).is_ok(),
+            "torn JSON: {text}"
+        );
     }
 
     #[test]

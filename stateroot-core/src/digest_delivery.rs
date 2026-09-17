@@ -20,8 +20,27 @@ use crate::skill_federation::normalize_harness;
 pub const SCHEMA_VERSION: &str = "stateroot.digest_delivery.v1";
 /// Near-simultaneous hook retries without a session id are collapsed.
 pub const RETRY_DEBOUNCE_MS: i64 = 5_000;
+/// Test-only override for the debounce window: integration tests on slow
+/// filesystems/CI can take longer than 5s between two spawned commands, and
+/// must not turn that machine latency into a red suite. Never set in
+/// production.
+const RETRY_DEBOUNCE_ENV: &str = "STATEROOT_TEST_RETRY_DEBOUNCE_MS";
 /// Ring-buffer cap.
 pub const MAX_ENTRIES: usize = 64;
+
+fn retry_debounce_ms() -> i64 {
+    std::env::var(RETRY_DEBOUNCE_ENV)
+        .ok()
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .filter(|ms| *ms > 0)
+        .unwrap_or(RETRY_DEBOUNCE_MS)
+}
+
+/// Millisecond-precision delivery stamps: second-truncated stamps add ±1s of
+/// quantization noise to debounce math, which flips borderline decisions.
+fn now_stamp() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
 
 /// Why a digest is being considered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,7 +217,7 @@ pub fn should_deliver(
         session_id.as_deref(),
         content_fp,
         channel,
-        &local_store::now_rfc3339(),
+        &now_stamp(),
     )
 }
 
@@ -224,7 +243,7 @@ pub fn mark_delivered(
         intent,
         channel,
         event: event.to_string(),
-        delivered_at: local_store::now_rfc3339(),
+        delivered_at: now_stamp(),
     });
     if ledger.entries.len() > MAX_ENTRIES {
         let drop = ledger.entries.len() - MAX_ENTRIES;
@@ -302,7 +321,7 @@ fn within_debounce(delivered_at: &str, now: &str) -> bool {
     let Ok(now) = chrono::DateTime::parse_from_rfc3339(now) else {
         return false;
     };
-    (now.timestamp_millis() - then.timestamp_millis()).abs() <= RETRY_DEBOUNCE_MS
+    (now.timestamp_millis() - then.timestamp_millis()).abs() <= retry_debounce_ms()
 }
 
 fn ledger_path(project_dir: &Path) -> std::path::PathBuf {

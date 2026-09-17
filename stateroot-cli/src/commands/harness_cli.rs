@@ -6,8 +6,10 @@
 //! synthesis and `stateroot delegate` both build on it; pty-marked rows may
 //! misbehave when piped — callers note and fall through honestly.
 
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -51,6 +53,33 @@ pub fn run_capture(
     policy: &LaunchPolicy,
     timeout: Option<Duration>,
 ) -> Result<HarnessOutput> {
+    run_capture_inner(dir, id, spec, prompt, policy, timeout, false)
+}
+
+/// As [`run_capture`], but tee each harness stream to this process while it
+/// runs. Delegation workers have stdout/stderr redirected to their durable
+/// log, so this makes live agent work observable without giving up the final
+/// captured result used for outcome records.
+pub fn run_capture_streaming(
+    dir: &Path,
+    id: &str,
+    spec: &DelegationSpec,
+    prompt: &str,
+    policy: &LaunchPolicy,
+    timeout: Option<Duration>,
+) -> Result<HarnessOutput> {
+    run_capture_inner(dir, id, spec, prompt, policy, timeout, true)
+}
+
+fn run_capture_inner(
+    dir: &Path,
+    id: &str,
+    spec: &DelegationSpec,
+    prompt: &str,
+    policy: &LaunchPolicy,
+    timeout: Option<Duration>,
+    stream_live: bool,
+) -> Result<HarnessOutput> {
     let argv = build_launch_argv_from_spec(
         spec,
         Some(prompt),
@@ -71,6 +100,33 @@ pub fn run_capture(
         .stderr(Stdio::piped())
         .spawn()?;
     let deadline = timeout.map(|cap| started + cap);
+    if stream_live {
+        // Start draining immediately. Waiting for `try_wait` first would
+        // recreate the invisible-buffering failure this mode exists to fix.
+        let out_reader = tee_reader(child.stdout.take().expect("stdout piped"), false);
+        let err_reader = tee_reader(child.stderr.take().expect("stderr piped"), true);
+        let timed_out = wait_for_child(&mut child, deadline)?;
+        let status = child.wait()?;
+        let stdout = out_reader.join().unwrap_or_default();
+        let stderr = err_reader.join().unwrap_or_default();
+        return Ok(HarnessOutput {
+            stdout: String::from_utf8_lossy(&stdout).trim().to_string(),
+            stderr: String::from_utf8_lossy(&stderr).trim().to_string(),
+            status,
+            timed_out,
+        });
+    }
+    let timed_out = wait_for_child(&mut child, deadline)?;
+    let output = child.wait_with_output()?;
+    Ok(HarnessOutput {
+        stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        status: output.status,
+        timed_out,
+    })
+}
+
+fn wait_for_child(child: &mut std::process::Child, deadline: Option<Instant>) -> Result<bool> {
     let timed_out = loop {
         if child.try_wait()?.is_some() {
             break false;
@@ -83,11 +139,34 @@ pub fn run_capture(
         }
         std::thread::sleep(Duration::from_millis(100));
     };
-    let output = child.wait_with_output()?;
-    Ok(HarnessOutput {
-        stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        status: output.status,
-        timed_out,
+    Ok(timed_out)
+}
+
+/// Drain one child stream so a chatty harness cannot block on a full pipe,
+/// while also forwarding bytes to the delegated worker's redirected stream.
+fn tee_reader<R: Read + Send + 'static>(
+    mut reader: R,
+    is_stderr: bool,
+) -> thread::JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut captured = Vec::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            captured.extend_from_slice(&buf[..n]);
+            if is_stderr {
+                let mut sink = std::io::stderr();
+                let _ = sink.write_all(&buf[..n]);
+                let _ = sink.flush();
+            } else {
+                let mut sink = std::io::stdout();
+                let _ = sink.write_all(&buf[..n]);
+                let _ = sink.flush();
+            }
+        }
+        captured
     })
 }

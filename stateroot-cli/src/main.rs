@@ -12,9 +12,9 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 use cli::{
-    Command, ExtAction, HandoffAction, HarnessAction, LearnAction, LearningsAction, McpAction,
-    MemoryAction, ObservationsAction, PlanAction, ProposalsAction, RulesAction, SessionAction,
-    SkillAction, SoulAction, TodoAction, WikiAction,
+    Command, EditorAction, ExtAction, HandoffAction, HarnessAction, LearnAction, LearningsAction,
+    McpAction, MemoryAction, ObservationsAction, PlanAction, ProposalsAction, RulesAction,
+    SessionAction, SkillAction, SoulAction, TodoAction, WikiAction,
 };
 use commands::Ctx;
 
@@ -37,16 +37,16 @@ async fn main() -> anyhow::Result<()> {
         Err(err) => {
             // `--version` / `--help` short-circuit here before any command
             // dispatch — and for a fresh manual install `--version` is often
-            // the first (and only) command run, so the first-run ping must
-            // fire on this path too or those installs never count.
+            // the first (and only) command run, so the install acquisition
+            // event must be spooled on this path too or those installs never
+            // count. The detached drain delivers it (durable, retried).
             if matches!(
                 err.kind(),
                 clap::error::ErrorKind::DisplayVersion | clap::error::ErrorKind::DisplayHelp
             ) {
                 if let Ok(ctx) = Ctx::load() {
-                    if let Some(ping) = telemetry::maybe_ping(&ctx.config_dir, cli::BUILD_VERSION) {
-                        let _ = ping.await;
-                    }
+                    telemetry::observe_install(&ctx.config_dir, cli::BUILD_VERSION);
+                    telemetry::kick_drain(&ctx);
                 }
             }
             err.exit();
@@ -54,11 +54,11 @@ async fn main() -> anyhow::Result<()> {
     };
     let ctx = Ctx::load()?;
 
-    // Anonymous first-run telemetry: one ping per version change per machine
-    // — spawned now (cheap), awaited after the command completes so a fast
-    // `--version` cannot exit before the ping lands. 3s cap, every error
-    // swallowed, never on dev builds or with STATEROOT_NO_PING=1 set.
-    let ping = telemetry::maybe_ping(&ctx.config_dir, cli::BUILD_VERSION);
+    // Anonymous acquisition telemetry: one `install_observed` spooled per
+    // version change per machine — local-only append, detached drain kicks
+    // after the command completes (never on hooks). Opt out with
+    // STATEROOT_NO_PING=1; dev builds never emit.
+    telemetry::observe_install(&ctx.config_dir, cli::BUILD_VERSION);
 
     // The updater runs only on user-facing entrypoints — never on hook or
     // mcp-stdio (harness event flows must stay fast) and never on
@@ -69,8 +69,10 @@ async fn main() -> anyhow::Result<()> {
             | cli::Command::McpStdio
             | cli::Command::SelfUpdate { .. }
             | cli::Command::Uninstall { .. }
+            | cli::Command::Editor(_)
             | cli::Command::External(_)
             | cli::Command::DrainFinalize
+            | cli::Command::DrainTelemetry
     );
 
     match cli.command {
@@ -163,11 +165,12 @@ async fn main() -> anyhow::Result<()> {
             HandoffAction::Finalize { from } => {
                 commands::handoff::finalize(&ctx, from.as_deref()).await?
             }
+            HandoffAction::Repair => commands::handoff::repair(&ctx).await?,
         },
         Command::Snap(args) => {
             commands::roots::snap(&ctx, args.reason.as_deref(), args.harness.as_deref())?
         }
-        Command::Log => commands::roots::log(&ctx)?,
+        Command::Log(args) => commands::roots::log(&ctx, args.json)?,
         Command::Show { hash } => commands::roots::show(&ctx, &hash)?,
         Command::Diff(args) => commands::roots::diff(&ctx, &args.from, &args.to, args.content)?,
         Command::Compare(args) => commands::roots::compare(&ctx, &args.a, &args.b)?,
@@ -175,11 +178,22 @@ async fn main() -> anyhow::Result<()> {
         Command::Fork(args) => commands::roots::fork(
             &ctx,
             &args.root,
-            args.branch.as_deref(),
+            args.name.as_deref().or(args.branch.as_deref()),
             args.worktree.as_deref(),
             args.plan.as_deref(),
         )?,
-        Command::Merge(args) => commands::roots::merge(&ctx, &args.forks)?,
+        Command::Merge(args) => commands::roots::merge(
+            &ctx,
+            &args.forks,
+            args.json,
+            &args.resolve_ours,
+            args.cleanup,
+            args.prepare,
+            args.continue_attempt.as_deref(),
+            args.status.as_deref(),
+            args.abort.as_deref(),
+            &args.evidence,
+        )?,
         Command::Receipt { id } => commands::roots::receipt(&ctx, &id)?,
         Command::Status => commands::status::run(&ctx)?,
         Command::Projects { json, prune } => commands::projects::run(&ctx, json, prune)?,
@@ -196,6 +210,15 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Command::Install => commands::install::install(&ctx).await?,
+        Command::Editor(args) => match args.action {
+            EditorAction::Status => commands::editor_extensions::status(&ctx).await?,
+            EditorAction::Reconcile => {
+                let code = commands::editor_extensions::reconcile(&ctx).await?;
+                if code != 0 {
+                    std::process::exit(code);
+                }
+            }
+        },
         Command::Harness(args) => match args.action {
             HarnessAction::Run {
                 harness,
@@ -430,6 +453,7 @@ async fn main() -> anyhow::Result<()> {
             ExtAction::List => commands::ext::list()?,
         },
         Command::DrainFinalize => commands::drain_finalize::run(&ctx).await?,
+        Command::DrainTelemetry => commands::telemetry_drain::run(&ctx).await?,
         Command::External(argv) => {
             let code = commands::ext::run_external(&ctx, &argv)?;
             std::process::exit(code);
@@ -448,12 +472,10 @@ async fn main() -> anyhow::Result<()> {
     }
     if update_allowed {
         commands::update::maybe_auto_update(&ctx).await;
-    }
-    // The telemetry ping, if any fired this run, completes here (bounded by
-    // the client's 3s timeout). Awaiting it is what makes `--version`-fast
-    // commands countable at all.
-    if let Some(ping) = ping {
-        let _ = ping.await;
+        // Telemetry: hooks append to the spool only; user-facing entrypoints
+        // kick the detached single-flight drain (never blocks, never fails
+        // the command).
+        telemetry::kick_drain(&ctx);
     }
     Ok(())
 }

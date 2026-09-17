@@ -15,6 +15,7 @@ use std::process::Stdio;
 
 use anyhow::Result;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use stateroot_core::local_store::{self, now_rfc3339};
 use stateroot_core::skill_federation::{binary_probe, load_registry, normalize_harness};
 
@@ -108,8 +109,104 @@ pub fn run(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
             Ok(0)
         }
         None if args._worker => worker(ctx, args),
+        None if args.plan.is_some() => spawn_plan(ctx, args),
         None => spawn(ctx, args),
     }
+}
+
+/// Provision one isolated lineage for an approved plan, then reuse the normal
+/// idempotent detached-worker path.  The plan is activated only in its fork
+/// checkout, so simultaneous plans never demote each other on the trunk.
+fn spawn_plan(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
+    ctx.require_project()?;
+    if args.task.is_some() || args.worktree.is_some() {
+        anyhow::bail!(
+            "--plan owns the task and worktree; do not combine it with --task or --worktree"
+        );
+    }
+    let plan_id = args.plan.as_deref().expect("guarded");
+    let (plan, _) = stateroot_core::plans::load(&ctx.cwd, plan_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown plan `{plan_id}` — run `stateroot plan list`"))?;
+    if plan.status != "approved" {
+        anyhow::bail!(
+            "plan {} is {} — approve it before running in parallel",
+            plan.id,
+            plan.status
+        );
+    }
+    let to = args
+        .to
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("delegate --plan requires --to <harness>"))?;
+    resolve(to)?;
+    let digest = Sha256::digest(plan.id.as_bytes());
+    let key = format!(
+        "plan-{}",
+        digest[..12]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    if let Some((_path, existing)) = load_record(&ctx.cwd, &key) {
+        let mut retry = args.clone();
+        retry.plan = None;
+        retry.key = Some(key.clone());
+        retry.task = existing
+            .get("task")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        retry.worktree = existing
+            .get("worktree")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if retry.task.is_none() || retry.worktree.is_none() {
+            anyhow::bail!(
+                "parallel delegation {key} is incomplete — inspect its record before retrying"
+            );
+        }
+        return spawn(ctx, &retry);
+    }
+    let base = stateroot_core::roots::latest_root(&ctx.cwd)?.ok_or_else(|| {
+        anyhow::anyhow!("no trunk root yet — run `stateroot snap` before parallel work")
+    })?;
+    let (fork_id, _) = stateroot_core::roots::fork_root(&ctx.cwd, &base, None, "cli")?;
+    let worktree = ctx
+        .cwd
+        .parent()
+        .unwrap_or(&ctx.cwd)
+        .join(format!(".stateroot-work-{fork_id}"));
+    stateroot_core::roots::fork_materialize(&ctx.cwd, &fork_id, &worktree, Some(&plan.id))?;
+    stateroot_core::plans::transition(
+        &worktree,
+        &plan.id,
+        stateroot_core::plans::PlanStatus::Active,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+    let mut launch = args.clone();
+    launch.plan = None;
+    launch.key = Some(key);
+    launch.worktree = Some(worktree.to_string_lossy().to_string());
+    launch.task = Some(format!(
+        "Execute the plan at .stateroot/plans/{}.md. Read it first. Do not re-plan.",
+        plan.id
+    ));
+    // `spawn` normally prints the record before this wrapper can attach the
+    // fork metadata. Render the completed envelope ourselves instead.
+    launch.json = false;
+    launch._quiet = true;
+    let result = spawn(ctx, &launch);
+    if result.is_ok() {
+        if let Some((path, mut record)) = load_record(&ctx.cwd, launch.key.as_deref().expect("set"))
+        {
+            record["fork_id"] = json!(fork_id);
+            record["plan_id"] = json!(plan.id);
+            save_record(&path, &record)?;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&record)?);
+            }
+        }
+    }
+    result
 }
 
 /// Resolve the named harness to (id, command, delegation spec) or a loud
@@ -401,9 +498,9 @@ fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
     }
     append_event(&mut record, "spawn", &format!("pid {pid}"));
     write_record(&dir, &record)?;
-    if args.json {
+    if !args._quiet && args.json {
         println!("{}", serde_json::to_string_pretty(&record)?);
-    } else {
+    } else if !args._quiet {
         println!(
             "delegated to {id} · delegation {} · running in background (pid {pid})",
             record["id"].as_str().unwrap_or("")
@@ -473,6 +570,11 @@ fn worker(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
                 outcome,
                 started.elapsed().as_secs(),
             )?;
+            // Telemetry: a completed delegated-task lifecycle transition is
+            // qualifying daily activity; failures never count.
+            if output.status.success() {
+                crate::telemetry::activity(&ctx.config_dir, &record_root, None);
+            }
             Ok(output.status.code().unwrap_or(1))
         }
         Err(err) => {
@@ -560,7 +662,7 @@ fn worker_run(
     };
     // NO cap: the harness runs to its natural end. Its own internal limits
     // belong to the harness, not to us.
-    let output = harness_cli::run_capture(&ctx.cwd, &id, &spec, &prompt, &policy, None)?;
+    let output = harness_cli::run_capture_streaming(&ctx.cwd, &id, &spec, &prompt, &policy, None)?;
     Ok((id, output))
 }
 

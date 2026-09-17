@@ -190,6 +190,47 @@ fn spawn_returns_immediately_and_worker_completes() {
 
 #[cfg(unix)]
 #[test]
+fn live_harness_output_is_written_before_delegation_finishes() {
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    let (_bin, path) = fake_claude(
+        "#!/bin/sh\necho 'live: agent started'\necho 'live: diagnostic' >&2\nwhile [ ! -f .stateroot-delegate-test-go ]; do sleep 0.1; done\necho finished\n",
+    );
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .env("PATH", &path)
+        .args(["delegate", "--to", "claude", "--task", "stream"])
+        .assert()
+        .success();
+    let record = read_records(project.path())
+        .into_iter()
+        .next()
+        .expect("record");
+    let log = project.path().join(record["log"].as_str().expect("log"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .contains("live: agent started")
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "live output never reached log"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        record.get("outcome").is_none(),
+        "worker must still be running"
+    );
+    std::fs::write(project.path().join(".stateroot-delegate-test-go"), b"go").expect("release");
+    assert_eq!(wait_for_outcome(project.path(), 20)["outcome"], "completed");
+}
+
+#[cfg(unix)]
+#[test]
 fn status_shows_a_bounded_log_tail() {
     let (config_home, user_home) = homes();
     let project = tempfile::tempdir().expect("project");
@@ -717,4 +758,76 @@ fn cancel_kills_the_harness_process_tree_not_just_the_worker() {
         .args(["-9", &grandchild.to_string()])
         .status();
     std::fs::write(project.path().join(".stateroot-delegate-test-go"), b"go").expect("sentinel");
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_delegation_provisions_one_claimed_fork_worktree() {
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    std::fs::write(project.path().join("work.txt"), "base\n").expect("work");
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["snap", "--reason", "base"])
+        .assert()
+        .success();
+    let plan_file = project.path().join("parallel.md");
+    std::fs::write(&plan_file, "# Parallel work\n\nDo the work.\n").expect("plan");
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["plan", "record", "--file", &plan_file.to_string_lossy()])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    let plan_id = stdout
+        .split_whitespace()
+        .nth(2)
+        .expect("plan id")
+        .to_string();
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["plan", "approve", &plan_id])
+        .assert()
+        .success();
+    let (_bin, path) = fake_claude("#!/bin/sh\nwhile [ ! -f .go ]; do sleep 0.2; done\n");
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .env("PATH", &path)
+        .args(["delegate", "--plan", &plan_id, "--to", "claude", "--json"])
+        .assert()
+        .success();
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("delegate envelope");
+    let record = read_records(project.path())
+        .into_iter()
+        .next()
+        .expect("record");
+    assert_eq!(record["plan_id"], plan_id);
+    let fork_id = record["fork_id"].as_str().expect("fork id");
+    assert_eq!(envelope["fork_id"], fork_id);
+    assert_eq!(envelope["plan_id"], plan_id);
+    let worktree = record["worktree"].as_str().expect("worktree");
+    assert!(
+        std::path::Path::new(worktree).is_dir(),
+        "worktree provisioned"
+    );
+    let fork: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            project
+                .path()
+                .join(".stateroot/forks")
+                .join(format!("{fork_id}.json")),
+        )
+        .expect("fork record"),
+    )
+    .expect("fork json");
+    assert_eq!(fork["plan"], plan_id);
+    let active: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            std::path::Path::new(worktree)
+                .join(".stateroot/plans")
+                .join(format!("{plan_id}.json")),
+        )
+        .expect("fork plan"),
+    )
+    .expect("plan json");
+    assert_eq!(active["status"], "active");
+    std::fs::write(std::path::Path::new(worktree).join(".go"), b"go").expect("release");
 }

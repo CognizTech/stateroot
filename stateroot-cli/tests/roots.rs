@@ -224,3 +224,284 @@ fn diff_content_revert_and_fork() {
         "compare: {stdout}"
     );
 }
+
+#[test]
+fn log_json_projects_parallel_lineage_from_refs_and_records() {
+    let config_home = tempfile::tempdir().expect("config home");
+    let user_home = tempfile::tempdir().expect("user home");
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+
+    write(project.path(), "work.txt", "base\n");
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["snap", "--reason", "base"])
+        .assert()
+        .success();
+    let root = root_hash(&String::from_utf8(out.get_output().stdout.clone()).expect("utf8"));
+
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["fork", &root, "--branch", "parallel-ui"])
+        .assert()
+        .success();
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["log", "--json"])
+        .assert()
+        .success();
+    let projection: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("lineage json");
+    assert_eq!(
+        projection["schema_version"].as_str(),
+        Some("stateroot.lineage.v1")
+    );
+    assert_eq!(projection["trunk"]["tip"].as_str(), Some(root.as_str()));
+    let fork = projection["forks"]
+        .as_array()
+        .and_then(|forks| forks.iter().find(|fork| fork["name"] == "parallel-ui"))
+        .expect("fork projection");
+    assert_eq!(
+        fork["ref"].as_str(),
+        Some("refs/stateroot/forks/parallel-ui")
+    );
+    assert_eq!(fork["tip"].as_str(), Some(root.as_str()));
+    assert_eq!(fork["base_root"].as_str(), Some(root.as_str()));
+    assert_eq!(fork["contained"].as_bool(), Some(true));
+    let root_entry = projection["roots"]
+        .as_array()
+        .and_then(|roots| roots.iter().find(|entry| entry["id"] == root))
+        .expect("root projection");
+    assert_eq!(root_entry["parents"].as_array().map(Vec::len), Some(0));
+}
+
+#[test]
+fn merge_cleanup_json_and_human_contracts() {
+    let config_home = tempfile::tempdir().expect("config home");
+    let user_home = tempfile::tempdir().expect("user home");
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+
+    write(project.path(), "src/main.rs", "fn main() {}\n");
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["snap", "--reason", "base"])
+        .assert()
+        .success();
+    let root = root_hash(&String::from_utf8(out.get_output().stdout.clone()).expect("utf8"));
+
+    let worktree_tmp = tempfile::tempdir().expect("worktree tmp");
+    let worktree = worktree_tmp.path().join("checkout");
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args([
+            "fork",
+            &root,
+            "--name",
+            "fork-a",
+            "--worktree",
+            &worktree.to_string_lossy(),
+        ])
+        .assert()
+        .success();
+    write(&worktree, "src/lib.rs", "pub fn merged() {}\n");
+    stateroot(config_home.path(), user_home.path(), &worktree)
+        .args(["snap", "--reason", "fork work"])
+        .assert()
+        .success();
+
+    let merge_out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["merge", "fork-a"])
+        .assert()
+        .success();
+    let merge_stdout = String::from_utf8(merge_out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        merge_stdout.contains("stateroot merge --cleanup fork-a"),
+        "human merge names the cleanup command: {merge_stdout}"
+    );
+    assert!(
+        worktree.exists(),
+        "merge must return without deleting the worktree"
+    );
+
+    let json_out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["merge", "--cleanup", "fork-a", "--json"])
+        .assert()
+        .success();
+    let payload: serde_json::Value =
+        serde_json::from_slice(&json_out.get_output().stdout).expect("cleanup json");
+    assert_eq!(
+        payload["schema_version"].as_str(),
+        Some("stateroot.merge.cleanup.v1")
+    );
+    assert_eq!(payload["forks"][0]["name"].as_str(), Some("fork-a"));
+    assert_eq!(payload["forks"][0]["cleaned"].as_bool(), Some(true));
+    assert!(
+        !worktree.exists(),
+        "explicit cleanup removes the deferred worktree"
+    );
+}
+
+#[test]
+fn merge_prepare_status_continue_and_abort_contracts() {
+    let config_home = tempfile::tempdir().expect("config home");
+    let user_home = tempfile::tempdir().expect("user home");
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    write(project.path(), "src/main.rs", "fn main() {}\n");
+    let root = root_hash(
+        &String::from_utf8(
+            stateroot(config_home.path(), user_home.path(), project.path())
+                .args(["snap", "--reason", "base"])
+                .assert()
+                .success()
+                .get_output()
+                .stdout
+                .clone(),
+        )
+        .expect("utf8"),
+    );
+    let temp = tempfile::tempdir().expect("worktree temp");
+    let worktree = temp.path().join("fork");
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args([
+            "fork",
+            &root,
+            "--name",
+            "fork-a",
+            "--worktree",
+            &worktree.to_string_lossy(),
+        ])
+        .assert()
+        .success();
+    write(&worktree, "src/lib.rs", "pub fn merged() {}\n");
+    stateroot(config_home.path(), user_home.path(), &worktree)
+        .args(["snap", "--reason", "fork work"])
+        .assert()
+        .success();
+
+    let prepared = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["merge", "--prepare", "fork-a", "--json"])
+        .assert()
+        .success();
+    let attempt: serde_json::Value =
+        serde_json::from_slice(&prepared.get_output().stdout).expect("attempt json");
+    assert_eq!(
+        attempt["schema_version"].as_str(),
+        Some("stateroot.merge-attempt.v1")
+    );
+    assert_eq!(attempt["state"].as_str(), Some("ready"));
+    let id = attempt["id"].as_str().expect("attempt id");
+
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["merge", "--status", id, "--json"])
+        .assert()
+        .success();
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["merge", "--continue", id, "--json"])
+        .assert()
+        .success();
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["merge", "--status", id])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn merge_conflicted_attempt_reconciles_through_worktree() {
+    let config_home = tempfile::tempdir().expect("config home");
+    let user_home = tempfile::tempdir().expect("user home");
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    write(project.path(), "src/main.rs", "fn main() {}\n");
+    let root = root_hash(
+        &String::from_utf8(
+            stateroot(config_home.path(), user_home.path(), project.path())
+                .args(["snap", "--reason", "base"])
+                .assert()
+                .success()
+                .get_output()
+                .stdout
+                .clone(),
+        )
+        .expect("utf8"),
+    );
+    let temp = tempfile::tempdir().expect("worktree temp");
+    for (name, body) in [
+        ("left", "fn main() { left(); }\n"),
+        ("right", "fn main() { right(); }\n"),
+    ] {
+        let worktree = temp.path().join(name);
+        stateroot(config_home.path(), user_home.path(), project.path())
+            .args([
+                "fork",
+                &root,
+                "--name",
+                name,
+                "--worktree",
+                &worktree.to_string_lossy(),
+            ])
+            .assert()
+            .success();
+        write(&worktree, "src/main.rs", body);
+        stateroot(config_home.path(), user_home.path(), &worktree)
+            .args(["snap", "--reason", "fork work"])
+            .assert()
+            .success();
+    }
+
+    let prepared = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["merge", "--prepare", "left", "right", "--json"])
+        .assert()
+        .success();
+    let attempt: serde_json::Value =
+        serde_json::from_slice(&prepared.get_output().stdout).expect("attempt json");
+    assert_eq!(attempt["state"].as_str(), Some("attention"));
+    assert_eq!(
+        attempt["conflicts"][0]["kind"].as_str(),
+        Some("both_modified")
+    );
+    assert_eq!(attempt["pending_forks"][0]["name"].as_str(), Some("right"));
+    let id = attempt["id"].as_str().expect("attempt id").to_string();
+    let worktree = attempt["worktree"].as_str().expect("worktree path");
+    let rendered = std::fs::read_to_string(Path::new(worktree).join("src/main.rs"))
+        .expect("rendered conflict");
+    assert!(rendered.contains("<<<<<<<"), "markers: {rendered}");
+
+    // Continuing with markers still in place fails closed.
+    let blocked = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["merge", "--continue", &id])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(blocked.get_output().stderr.clone()).expect("utf8");
+    assert!(
+        stderr.contains("conflict markers remain"),
+        "marker gate: {stderr}"
+    );
+
+    // The appointed agent resolves in the worktree and continues with
+    // evidence; the published trunk carries the reconciled bytes.
+    write(
+        Path::new(worktree),
+        "src/main.rs",
+        "fn main() { left(); right(); }\n",
+    );
+    let done = stateroot(config_home.path(), user_home.path(), project.path())
+        .args([
+            "merge",
+            "--continue",
+            &id,
+            "--evidence",
+            "cargo test",
+            "--json",
+        ])
+        .assert()
+        .success();
+    let payload: serde_json::Value =
+        serde_json::from_slice(&done.get_output().stdout).expect("continue json");
+    assert_eq!(payload["merged_forks"][0]["name"].as_str(), Some("left"));
+    assert_eq!(payload["merged_forks"][1]["name"].as_str(), Some("right"));
+    let trunk = std::fs::read_to_string(project.path().join("src/main.rs")).expect("trunk");
+    assert_eq!(trunk, "fn main() { left(); right(); }\n");
+    assert!(!Path::new(worktree).exists(), "worktree consumed");
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["merge", "--status", &id])
+        .assert()
+        .failure();
+}

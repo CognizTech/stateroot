@@ -61,8 +61,15 @@ pub fn snap(ctx: &Ctx, reason: Option<&str>, harness: Option<&str>) -> anyhow::R
 
 /// `stateroot log` — root lineage with coverage lines and fork markers,
 /// then the local checkpoint/handoff tails.
-pub fn log(ctx: &Ctx) -> anyhow::Result<()> {
+pub fn log(ctx: &Ctx, json_output: bool) -> anyhow::Result<()> {
     ctx.require_project()?;
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&engine::lineage_projection(&ctx.cwd)?)?
+        );
+        return Ok(());
+    }
     let entries = engine::lineage(&ctx.cwd)?;
     if entries.is_empty() {
         println!("no roots yet — run `stateroot snap` to create one");
@@ -269,10 +276,157 @@ pub fn fork(
 
 /// `stateroot merge <fork>…` — fold fork lineages into the trunk (3-way
 /// merge → one N-parent root; conflicts report paths, never half-apply).
-pub fn merge(ctx: &Ctx, forks: &[String]) -> anyhow::Result<()> {
+#[allow(clippy::too_many_arguments)]
+pub fn merge(
+    ctx: &Ctx,
+    forks: &[String],
+    json_output: bool,
+    resolve_ours: &[String],
+    cleanup: bool,
+    prepare: bool,
+    continue_attempt: Option<&str>,
+    status: Option<&str>,
+    abort: Option<&str>,
+    evidence: &[String],
+) -> anyhow::Result<()> {
     ctx.require_project()?;
+    let print_attempt = |attempt: &engine::MergeAttempt| -> anyhow::Result<()> {
+        if json_output {
+            println!("{}", serde_json::to_string_pretty(attempt)?);
+        } else {
+            println!("merge attempt {}: {}", attempt.id, attempt.state);
+            println!("trunk: {}", attempt.trunk_tip);
+            for fork in &attempt.forks {
+                println!("fork {}: {}", fork.name, fork.tip);
+            }
+            if attempt.conflicts.is_empty() {
+                println!(
+                    "clean — publish with: stateroot merge --continue {}",
+                    attempt.id
+                );
+            } else {
+                println!("agent reconciliation required:");
+                for conflict in &attempt.conflicts {
+                    let kind = conflict.kind.as_deref().unwrap_or("other");
+                    println!("  {} ({}, {})", conflict.path, conflict.fork, kind);
+                }
+                if let Some(worktree) = &attempt.worktree {
+                    println!("reconciliation worktree: {worktree}");
+                    println!(
+                        "edit and test there, then: stateroot merge --continue {} --evidence \"<tests run>\"",
+                        attempt.id
+                    );
+                }
+            }
+        }
+        Ok(())
+    };
+    if let Some(id) = status {
+        return print_attempt(&engine::merge_attempt(&ctx.cwd, id)?);
+    }
+    if let Some(id) = abort {
+        let attempt = engine::abort_merge_attempt(&ctx.cwd, id)?;
+        if json_output {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "schema_version": "stateroot.merge-attempt.abort.v1",
+                    "id": attempt.id,
+                    "aborted": true,
+                }))?
+            );
+        } else {
+            println!("aborted merge attempt {}", attempt.id);
+        }
+        return Ok(());
+    }
+    if prepare {
+        return print_attempt(&engine::prepare_merge_attempt(
+            &ctx.cwd,
+            forks,
+            LOCAL_HARNESS,
+        )?);
+    }
+    if let Some(id) = continue_attempt {
+        let (manifest, transition, merged) = engine::continue_merge_attempt(&ctx.cwd, id, evidence)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        if json_output {
+            let payload = serde_json::json!({
+                "schema_version": "stateroot.merge.continue.v1",
+                "attempt": id,
+                "trunk_root": manifest.id,
+                "merged_forks": merged.iter().map(|fork| serde_json::json!({"name": fork.name, "tip": fork.tip})).collect::<Vec<_>>(),
+                "transition": transition.id,
+                "phases": transition.evidence["phases"].clone(),
+            });
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        } else {
+            println!(
+                "merged {} → root {}",
+                merged
+                    .iter()
+                    .map(|fork| fork.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                short(&manifest.id)
+            );
+        }
+        return Ok(());
+    }
+    if cleanup {
+        let results =
+            engine::cleanup_merged_forks(&ctx.cwd, forks).map_err(|e| anyhow::anyhow!(e))?;
+        if json_output {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "schema_version": "stateroot.merge.cleanup.v1",
+                    "forks": results,
+                }))?
+            );
+            return Ok(());
+        }
+        for result in results {
+            if result.cleaned {
+                println!("cleaned {}", result.name);
+            } else {
+                println!(
+                    "cleanup pending {}: {}",
+                    result.name,
+                    result.pending.as_deref().unwrap_or("retry later")
+                );
+            }
+        }
+        return Ok(());
+    }
     let (manifest, transition, merged) =
-        engine::merge_forks(&ctx.cwd, forks, LOCAL_HARNESS).map_err(|e| anyhow::anyhow!(e))?;
+        engine::merge_forks_resolving(&ctx.cwd, forks, LOCAL_HARNESS, resolve_ours)
+            .map_err(|e| anyhow::anyhow!(e))?;
+    if json_output {
+        let projection = engine::lineage_projection(&ctx.cwd)?;
+        let cleanup = projection["forks"]
+            .as_array()
+            .map(|all| {
+                all.iter()
+                    .filter(|fork| merged.iter().any(|m| fork["name"] == m.name))
+                    .map(|fork| fork["cleanup"].clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": "stateroot.merge.v1",
+                "trunk_root": manifest.id,
+                "merged_forks": merged.iter().map(|fork| serde_json::json!({"name": fork.name, "tip": fork.tip})).collect::<Vec<_>>(),
+                "skipped_contained": transition.evidence["skipped_contained"].clone(),
+                "materialized": true,
+                "cleanup": cleanup,
+                "phases": transition.evidence["phases"].clone(),
+            }))?
+        );
+        return Ok(());
+    }
     println!(
         "merged {} → root {} ({} parents)",
         merged
@@ -284,7 +438,15 @@ pub fn merge(ctx: &Ctx, forks: &[String]) -> anyhow::Result<()> {
         manifest.parents.len()
     );
     println!("transition {}", short(&transition.id));
-    println!("the fork refs stay as history; remove worktrees with: git worktree remove <path>");
+    println!("the fork refs stay as history");
+    println!(
+        "worktree cleanup is deferred — run: stateroot merge --cleanup {}",
+        merged
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     Ok(())
 }
 

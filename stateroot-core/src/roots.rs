@@ -18,7 +18,9 @@
 //! history *up to its predecessor* (a root cannot contain its own hash —
 //! the egg comes after the chicken by construction).
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -42,6 +44,21 @@ pub const ROOTS_DIR: &str = "roots";
 pub const TRANSITIONS_DIR: &str = "transitions";
 /// `.stateroot/forks/<name>.json`.
 pub const FORKS_DIR: &str = "forks";
+/// Default wall-clock budget for an explicit merged-worktree cleanup retry.
+pub const MERGE_CLEANUP_BUDGET: Duration = Duration::from_secs(5);
+/// Automatic checkpoint snapshots must return promptly even in a dependency
+/// tree accidentally left outside the project's ignore rules.
+pub const AUTO_SNAPSHOT_TIME_BUDGET: Duration = Duration::from_secs(10);
+pub const AUTO_SNAPSHOT_ENTRY_LIMIT: u64 = 100_000;
+pub const AUTO_SNAPSHOT_BYTE_LIMIT: u64 = 512 * 1024 * 1024;
+
+#[cfg(test)]
+thread_local! {
+    /// Per-test override for the automatic-snapshot entry limit. A thread
+    /// local, not a static: a parallel test must never see another test's
+    /// injected budget.
+    static TEST_AUTO_SNAPSHOT_ENTRY_LIMIT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 /// Root manifest schema.
 pub const ROOT_SCHEMA: &str = "stateroot.root.local.v1";
 /// Transition schema (same shape family as the server variant).
@@ -68,6 +85,10 @@ pub enum RootsError {
     /// A merge cannot complete cleanly (conflicts or nothing to fold).
     #[error("{0}")]
     Merge(String),
+    /// An automatic snapshot reached its bounded scan budget. The checkpoint
+    /// itself remains durable; only its optional root is skipped.
+    #[error("automatic snapshot skipped: {0}")]
+    SnapshotBudget(String),
     /// Ref CAS / mandatory-lock failure.
     #[error(transparent)]
     RefCas(#[from] crate::safe_io::RefCasError),
@@ -213,9 +234,114 @@ fn now_stamp() -> (u64, u32) {
         .unwrap_or((0, 0))
 }
 
+struct ScanBudget {
+    started: Instant,
+    entries: u64,
+    bytes: u64,
+    top_level: BTreeSet<String>,
+}
+
+impl ScanBudget {
+    fn automatic() -> Self {
+        Self {
+            started: Instant::now(),
+            entries: 0,
+            bytes: 0,
+            top_level: BTreeSet::new(),
+        }
+    }
+
+    fn observe_entry(&mut self, rel: &str) -> Result<(), RootsError> {
+        self.entries += 1;
+        if let Some(top) = rel.split('/').next().filter(|part| !part.is_empty()) {
+            self.top_level.insert(top.to_string());
+        }
+        self.check()
+    }
+
+    fn observe_bytes(&mut self, bytes: u64) -> Result<(), RootsError> {
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.check()
+    }
+
+    fn check(&self) -> Result<(), RootsError> {
+        let elapsed = self.started.elapsed();
+        if elapsed <= AUTO_SNAPSHOT_TIME_BUDGET
+            && self.entries <= automatic_snapshot_entry_limit()
+            && self.bytes <= AUTO_SNAPSHOT_BYTE_LIMIT
+        {
+            return Ok(());
+        }
+        let reason = if elapsed > AUTO_SNAPSHOT_TIME_BUDGET {
+            format!("{}ms time budget", elapsed.as_millis())
+        } else if self.entries > automatic_snapshot_entry_limit() {
+            format!("{} visited entries", self.entries)
+        } else {
+            format!("{} scanned bytes", self.bytes)
+        };
+        let top_level = self
+            .top_level
+            .iter()
+            .take(8)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(RootsError::SnapshotBudget(format!(
+            "{reason}; review root .gitignore or .staterootignore (top-level paths seen: {top_level})"
+        )))
+    }
+}
+
+fn automatic_snapshot_entry_limit() -> u64 {
+    #[cfg(test)]
+    {
+        let limit = TEST_AUTO_SNAPSHOT_ENTRY_LIMIT.with(std::cell::Cell::get);
+        if limit > 0 {
+            return limit;
+        }
+    }
+    // Test-only override for CLI integration fixtures (the spawned binary
+    // has no access to test thread-locals). Never set in production.
+    if let Some(limit) = std::env::var("STATEROOT_TEST_AUTO_SNAPSHOT_ENTRY_LIMIT")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+    {
+        if limit > 0 {
+            return limit;
+        }
+    }
+    AUTO_SNAPSHOT_ENTRY_LIMIT
+}
+
+/// Build the working tree without limits for an explicit user-requested
+/// snapshot. Automatic checkpoints use [`build_tree_automatic`] instead.
+fn build_tree(repo: &Repository, dir: &Path) -> Result<TreeBuild, RootsError> {
+    build_tree_with_budget(repo, dir, None)
+}
+
+/// Build the working tree for checkpoint/finalization paths. It is allowed to
+/// skip the root but never to make a user-facing operation hang indefinitely.
+fn build_tree_automatic(repo: &Repository, dir: &Path) -> Result<TreeBuild, RootsError> {
+    build_tree_with_budget(repo, dir, Some(&mut ScanBudget::automatic()))
+}
+
+fn record_automatic_snapshot_skip(project_dir: &Path, detail: &str) {
+    let path = local_store::root(project_dir).join("local/automatic-snapshot-skip.json");
+    let value = json!({
+        "schema_version": "stateroot.automatic-snapshot-skip.v1",
+        "at": now_rfc3339(),
+        "detail": detail,
+    });
+    let _ = crate::safe_io::atomic_replace_json(&path, &value);
+}
+
 /// Build the working tree; returns the tree, pin count, bytes, and index
 /// hit/miss counters (proof of the stat-cache contract in tests).
-fn build_tree(repo: &Repository, dir: &Path) -> Result<TreeBuild, RootsError> {
+fn build_tree_with_budget(
+    repo: &Repository,
+    dir: &Path,
+    mut budget: Option<&mut ScanBudget>,
+) -> Result<TreeBuild, RootsError> {
     let rules = IgnoreRules::load(dir);
     let index_written_at = now_stamp();
     let index = load_blob_index(dir);
@@ -233,6 +359,7 @@ fn build_tree(repo: &Repository, dir: &Path) -> Result<TreeBuild, RootsError> {
         rules: &IgnoreRules,
         index: &BlobIndex,
         next_index: &mut BlobIndex,
+        budget: &mut Option<&mut ScanBudget>,
         hits: &mut u64,
         misses: &mut u64,
         pinned: &mut i64,
@@ -254,6 +381,9 @@ fn build_tree(repo: &Repository, dir: &Path) -> Result<TreeBuild, RootsError> {
                 .strip_prefix(root)
                 .map(|r| r.to_string_lossy().replace('\\', "/"))
                 .unwrap_or_default();
+            if let Some(budget) = budget.as_deref_mut() {
+                budget.observe_entry(&rel)?;
+            }
             if path.is_dir() {
                 // `.stateroot/local/` is the quarantine lane (sync state,
                 // machine-local notes) — it NEVER enters roots, and thus
@@ -271,6 +401,7 @@ fn build_tree(repo: &Repository, dir: &Path) -> Result<TreeBuild, RootsError> {
                     rules,
                     index,
                     next_index,
+                    budget,
                     hits,
                     misses,
                     pinned,
@@ -288,6 +419,9 @@ fn build_tree(repo: &Repository, dir: &Path) -> Result<TreeBuild, RootsError> {
                 }
                 let meta = std::fs::metadata(&path)?;
                 let len = meta.len();
+                if let Some(budget) = budget.as_deref_mut() {
+                    budget.observe_bytes(len)?;
+                }
                 let mtime = meta
                     .modified()
                     .ok()
@@ -345,6 +479,7 @@ fn build_tree(repo: &Repository, dir: &Path) -> Result<TreeBuild, RootsError> {
         &rules,
         &index,
         &mut next_index,
+        &mut budget,
         &mut hits,
         &mut misses,
         &mut pinned,
@@ -586,6 +721,7 @@ pub fn create_root(
 }
 
 /// Outcome of an automatic snap attempt (`snap_if_changed`).
+#[derive(Debug)]
 pub enum SnapOutcome {
     /// The project tree moved since the last root — a new root was created.
     /// Transition is boxed to keep the enum small next to `Unchanged`.
@@ -614,7 +750,13 @@ pub fn snap_if_changed(
     // publish and append one reconciled root when real project files moved.
     const RECONCILE_RETRIES: usize = 8;
     for attempt in 0..=RECONCILE_RETRIES {
-        let build = build_tree(&repo, project_dir)?;
+        let build = match build_tree_automatic(&repo, project_dir) {
+            Err(RootsError::SnapshotBudget(detail)) => {
+                record_automatic_snapshot_skip(project_dir, &detail);
+                return Err(RootsError::SnapshotBudget(detail));
+            }
+            other => other?,
+        };
         if let Some(parent) = latest_oid_for(&repo, project_dir)? {
             if !project_files_changed(&repo, parent, build.tree)? {
                 return Ok(SnapOutcome::Unchanged {
@@ -633,7 +775,13 @@ pub fn snap_if_changed(
             snap_ctx,
         )?;
         let published = git2::Oid::from_str(&manifest.id)?;
-        let observed = build_tree(&repo, project_dir)?;
+        let observed = match build_tree_automatic(&repo, project_dir) {
+            Err(RootsError::SnapshotBudget(detail)) => {
+                record_automatic_snapshot_skip(project_dir, &detail);
+                return Err(RootsError::SnapshotBudget(detail));
+            }
+            other => other?,
+        };
         if attempt < RECONCILE_RETRIES && project_files_changed(&repo, published, observed.tree)? {
             continue;
         }
@@ -1001,6 +1149,115 @@ pub fn lineage(project_dir: &Path) -> Result<Vec<LineageEntry>, RootsError> {
         });
     }
     Ok(out)
+}
+
+/// Stable, side-effect-free lineage projection for integrations.  It derives
+/// topology from the authoritative plumbing refs and enriches it only with
+/// persisted fork records and the machine-local worktree registry.
+pub fn lineage_projection(project_dir: &Path) -> Result<Value, RootsError> {
+    let repo = ensure_repo(project_dir)?;
+    let trunk_tip = latest_oid_for(&repo, project_dir)?.map(|oid| oid.to_string());
+    let entries = lineage(project_dir)?;
+    let roots = entries
+        .into_iter()
+        .map(|entry| {
+            let manifest = entry.manifest;
+            json!({
+                "id": manifest.id,
+                "ref": format!("{ROOTS_REF_PREFIX}{}", manifest.id),
+                "parents": manifest.parents,
+                "created_at": manifest.created_at,
+                "created_by_harness": manifest.created_by_harness,
+                "created_reason": manifest.created_reason,
+                "coverage": manifest.coverage,
+                "files_pinned": manifest.files_pinned,
+                "mainline": entry.mainline,
+                "fork_point": entry.fork_point,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let records_dir = local_store::root(project_dir).join(FORKS_DIR);
+    let mut records = std::collections::BTreeMap::<String, Value>::new();
+    if let Ok(entries) = std::fs::read_dir(records_dir) {
+        for entry in entries.flatten() {
+            let filename = entry.file_name();
+            let Some(name) = filename
+                .to_str()
+                .and_then(|name| name.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            if let Ok(text) = std::fs::read_to_string(entry.path()) {
+                if let Ok(record) = serde_json::from_str::<Value>(&text) {
+                    records.insert(name.to_string(), record);
+                }
+            }
+        }
+    }
+    for reference in repo
+        .references_glob(&format!("{FORKS_REF_PREFIX}*"))?
+        .flatten()
+    {
+        if let Some(name) = reference
+            .name()
+            .and_then(|name| name.strip_prefix(FORKS_REF_PREFIX))
+        {
+            records
+                .entry(name.to_string())
+                .or_insert_with(|| json!({"name": name}));
+        }
+    }
+
+    let forks = records
+        .into_iter()
+        .map(|(name, record)| {
+            let reference = format!("{FORKS_REF_PREFIX}{name}");
+            let tip = repo.refname_to_id(&reference).ok().map(|oid| oid.to_string());
+            let contained = match (trunk_tip.as_deref(), tip.as_deref()) {
+                (Some(trunk), Some(fork_tip)) if trunk == fork_tip => true,
+                (Some(trunk), Some(fork_tip)) => {
+                    let trunk = git2::Oid::from_str(trunk).ok();
+                    let fork_tip = git2::Oid::from_str(fork_tip).ok();
+                    match (trunk, fork_tip) {
+                        (Some(trunk), Some(fork_tip)) => repo.graph_descendant_of(trunk, fork_tip).unwrap_or(false),
+                        _ => false,
+                    }
+                }
+                _ => false,
+            };
+            let worktree = registered_worktree_path(project_dir, &name).map(|path| {
+                json!({"registered": true, "path": path.to_string_lossy()})
+            });
+            let cleanup_pending = record.get("cleanup_pending").cloned();
+            let cleanup_state = if cleanup_pending.is_some() {
+                "pending"
+            } else if worktree.is_some() {
+                "active"
+            } else {
+                "not_materialized_or_cleaned"
+            };
+            json!({
+                "name": name,
+                "ref": reference,
+                "tip": tip,
+                "base_root": record.get("root").cloned().unwrap_or(Value::Null),
+                "plan": record.get("plan").cloned().unwrap_or(Value::Null),
+                "created_at": record.get("created_at").cloned().unwrap_or(Value::Null),
+                "created_by_harness": record.get("created_by_harness").cloned().unwrap_or(Value::Null),
+                "contained": contained,
+                "worktree": worktree.unwrap_or(Value::Null),
+                "cleanup": {"state": cleanup_state, "pending": cleanup_pending},
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(json!({
+        "schema_version": "stateroot.lineage.v1",
+        "trunk": {"ref": LATEST_REF, "tip": trunk_tip},
+        "forks": forks,
+        "roots": roots,
+    }))
 }
 
 /// A file delta entry for `diff` (name + status).
@@ -1437,6 +1694,702 @@ pub struct MergedFork {
     pub tip: String,
 }
 
+/// Result of an explicit merged-worktree cleanup retry.
+#[derive(Debug, Clone, Serialize)]
+pub struct ForkCleanup {
+    /// Fork name.
+    pub name: String,
+    /// True when the worktree is gone and registry/pending state was cleared.
+    pub cleaned: bool,
+    /// Retryable error when the worktree could not be removed this attempt.
+    pub pending: Option<String>,
+}
+
+/// A frozen, local-only merge attempt prepared for a coordinating agent.
+///
+/// Preparing an attempt never moves the trunk, changes its worktree, or
+/// deletes a fork worktree. It captures the exact refs used for conflict
+/// analysis so a later `continue` can refuse a stale integration rather than
+/// silently merging newer work.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeAttempt {
+    pub schema_version: String,
+    pub id: String,
+    pub created_at: String,
+    pub harness: String,
+    pub trunk_tip: String,
+    pub forks: Vec<MergeAttemptFork>,
+    pub state: String,
+    #[serde(default)]
+    pub conflicts: Vec<MergeAttemptConflict>,
+    /// Forks that folded cleanly before the first conflict, in fold order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folded_forks: Vec<MergeAttemptFork>,
+    /// Forks not folded yet: the conflicted fork first, then every later
+    /// selection in caller order. `continue` folds these after the agent's
+    /// reconciliation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_forks: Vec<MergeAttemptFork>,
+    /// Machine-local reconciliation workspace (absolute path). Present only
+    /// while state is `attention`. Never copied into shared records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeAttemptFork {
+    pub name: String,
+    pub tip: String,
+}
+
+/// One unresolved path, including the fold at which it first appeared.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeAttemptConflict {
+    pub fork: String,
+    pub path: String,
+    /// Conflict shape: both_modified, added_both, deleted_by_trunk,
+    /// deleted_by_fork, or directory_file. Marker-based reconciliation is
+    /// only possible for the first two; delete/file-shape conflicts are
+    /// resolved by editing the worktree directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ancestor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ours: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theirs: Option<String>,
+}
+
+const MERGE_ATTEMPTS_DIR: &str = "local/merge-attempts";
+const MERGE_ATTEMPT_SCHEMA: &str = "stateroot.merge-attempt.v1";
+
+fn merge_attempt_dir(project_dir: &Path) -> PathBuf {
+    local_store::root(project_dir).join(MERGE_ATTEMPTS_DIR)
+}
+
+fn merge_attempt_path(project_dir: &Path, id: &str) -> PathBuf {
+    merge_attempt_dir(project_dir).join(format!("{id}.json"))
+}
+
+/// Prepare a merge for an agent chosen by the user.
+///
+/// The merge calculation is performed against frozen refs and persisted in
+/// machine-local state. A clean attempt continues immediately. A conflicted
+/// attempt additionally materializes an isolated reconciliation worktree:
+/// the accumulated clean fold plus the conflicted fork rendered with
+/// conflict markers. The appointed agent edits and tests there, then
+/// `continue` publishes exactly the reconciled tree — StateRoot never
+/// chooses a resolver or silently picks a source-file side.
+pub fn prepare_merge_attempt(
+    project_dir: &Path,
+    forks: &[String],
+    harness: &str,
+) -> Result<MergeAttempt, RootsError> {
+    if forks.is_empty() {
+        return Err(RootsError::Merge(
+            "no forks named — pass at least one fork to merge".into(),
+        ));
+    }
+    if local_store::fork_context(project_dir).is_some() {
+        return Err(RootsError::Merge(
+            "merge must run from the trunk checkout (this directory is a fork worktree) — run it from the project trunk"
+                .into(),
+        ));
+    }
+    let repo = ensure_repo(project_dir)?;
+    let trunk_tip = repo
+        .refname_to_id(LATEST_REF)
+        .map_err(|_| RootsError::NotFound("no roots yet — nothing to merge into".into()))?;
+    let mut seen_names = BTreeSet::new();
+    let mut seen_tips = BTreeSet::new();
+    let mut frozen = Vec::with_capacity(forks.len());
+    for name in forks {
+        if !seen_names.insert(name.clone()) {
+            return Err(RootsError::Merge(format!(
+                "fork `{name}` was named more than once"
+            )));
+        }
+        let tip = repo
+            .refname_to_id(&format!("{FORKS_REF_PREFIX}{name}"))
+            .map_err(|_| RootsError::NotFound(format!("no fork named {name}")))?;
+        if !seen_tips.insert(tip) {
+            return Err(RootsError::Merge(format!(
+                "fork `{name}` duplicates another selected fork tip"
+            )));
+        }
+        frozen.push(MergeAttemptFork {
+            name: name.clone(),
+            tip: tip.to_string(),
+        });
+    }
+
+    let id = format!("ma-{}", &uuid::Uuid::now_v7().to_string()[..12]);
+    let analysis = analyze_merge_attempt(project_dir, &id, &repo, trunk_tip, &frozen)?;
+    let attempt = MergeAttempt {
+        schema_version: MERGE_ATTEMPT_SCHEMA.into(),
+        id,
+        created_at: now_rfc3339(),
+        harness: harness.into(),
+        trunk_tip: trunk_tip.to_string(),
+        forks: frozen,
+        state: if analysis.conflicts.is_empty() {
+            "ready".into()
+        } else {
+            "attention".into()
+        },
+        conflicts: analysis.conflicts,
+        folded_forks: analysis.folded,
+        pending_forks: analysis.pending,
+        worktree: analysis.worktree,
+    };
+    crate::safe_io::atomic_replace_json(
+        &merge_attempt_path(project_dir, &attempt.id),
+        &serde_json::to_value(&attempt)?,
+    )?;
+    Ok(attempt)
+}
+
+struct AttemptAnalysis {
+    conflicts: Vec<MergeAttemptConflict>,
+    folded: Vec<MergeAttemptFork>,
+    pending: Vec<MergeAttemptFork>,
+    worktree: Option<String>,
+}
+
+/// Fold forks in caller order against the accumulated line, exactly as the
+/// publisher does. The first conflict stops the fold: every earlier fork is
+/// recorded as folded, the conflicted fork and every later selection become
+/// pending, and the conflicted index is rendered into a reconciliation
+/// worktree.
+fn analyze_merge_attempt(
+    project_dir: &Path,
+    attempt_id: &str,
+    repo: &Repository,
+    trunk_tip: git2::Oid,
+    forks: &[MergeAttemptFork],
+) -> Result<AttemptAnalysis, RootsError> {
+    let mut head_oid = trunk_tip;
+    let mut current_tree = repo.find_commit(trunk_tip)?.tree()?;
+    let mut folded = Vec::new();
+    for (position, fork) in forks.iter().enumerate() {
+        let tip = git2::Oid::from_str(&fork.tip)?;
+        let ancestor_oid = repo.merge_base(head_oid, tip)?;
+        if ancestor_oid == tip {
+            continue;
+        }
+        let ancestor_tree = repo.find_commit(ancestor_oid)?.tree()?;
+        let mut index = repo.merge_trees(
+            &ancestor_tree,
+            &current_tree,
+            &repo.find_commit(tip)?.tree()?,
+            None,
+        )?;
+        resolve_control_plane_conflicts(repo, &mut index)?;
+        if index.has_conflicts() {
+            let conflicts = collect_attempt_conflicts(&index, fork)?;
+            let tree = render_resolution_tree(repo, &index, fork, &conflicts)?;
+            let worktree = materialize_resolution_worktree(project_dir, attempt_id, repo, tree)?;
+            return Ok(AttemptAnalysis {
+                conflicts,
+                folded,
+                pending: forks[position..].to_vec(),
+                worktree: Some(worktree),
+            });
+        }
+        current_tree = repo.find_tree(index.write_tree_to(repo)?)?;
+        head_oid = tip;
+        folded.push(fork.clone());
+    }
+    Ok(AttemptAnalysis {
+        conflicts: Vec::new(),
+        folded,
+        pending: Vec::new(),
+        worktree: None,
+    })
+}
+
+fn collect_attempt_conflicts(
+    index: &git2::Index,
+    fork: &MergeAttemptFork,
+) -> Result<Vec<MergeAttemptConflict>, RootsError> {
+    let mut conflicts = Vec::new();
+    for conflict in index.conflicts()? {
+        let conflict = conflict?;
+        let path = conflict
+            .their
+            .as_ref()
+            .or(conflict.our.as_ref())
+            .or(conflict.ancestor.as_ref())
+            .and_then(|entry| String::from_utf8(entry.path.clone()).ok())
+            .unwrap_or_else(|| "<unknown>".into());
+        let kind = match (
+            conflict.ancestor.is_some(),
+            conflict.our.is_some(),
+            conflict.their.is_some(),
+        ) {
+            (true, true, true) => "both_modified",
+            (false, true, true) => "added_both",
+            (true, false, true) => "deleted_by_trunk",
+            (true, true, false) => "deleted_by_fork",
+            _ => "other",
+        };
+        conflicts.push(MergeAttemptConflict {
+            fork: fork.name.clone(),
+            path,
+            kind: Some(kind.into()),
+            ancestor: conflict.ancestor.map(|entry| entry.id.to_string()),
+            ours: conflict.our.map(|entry| entry.id.to_string()),
+            theirs: conflict.their.map(|entry| entry.id.to_string()),
+        });
+    }
+    conflicts.sort_by(|a, b| a.fork.cmp(&b.fork).then(a.path.cmp(&b.path)));
+    conflicts.dedup_by(|a, b| a.fork == b.fork && a.path == b.path);
+    Ok(conflicts)
+}
+
+/// Conflict kinds rendered with marker files in the reconciliation
+/// worktree. `continue` refuses while markers remain in these paths.
+fn marker_gated(kind: Option<&str>) -> bool {
+    matches!(kind, Some("both_modified") | Some("added_both"))
+}
+
+/// Build the tree the reconciliation worktree starts from: every cleanly
+/// merged entry plus each conflicted path rendered for agent resolution.
+/// Text conflicts get standard conflict markers (`merge_file`); binary and
+/// delete/shape conflicts keep the surviving side's content — their JSON
+/// stage identities tell the agent exactly what to compare.
+fn render_resolution_tree(
+    repo: &Repository,
+    index: &git2::Index,
+    fork: &MergeAttemptFork,
+    conflicts: &[MergeAttemptConflict],
+) -> Result<git2::Oid, RootsError> {
+    let mut out = git2::Index::new()?;
+    for entry in index.iter() {
+        // Conflict entries occupy stages 1-3 (flags bits 12-13); clean
+        // entries are stage 0 and pass through unchanged.
+        if (entry.flags & 0x3000) == 0 {
+            out.add(&entry)?;
+        }
+    }
+    for conflict in conflicts {
+        if conflict.fork != fork.name {
+            continue;
+        }
+        let ours = conflict
+            .ours
+            .as_deref()
+            .and_then(|id| git2::Oid::from_str(id).ok());
+        let theirs = conflict
+            .theirs
+            .as_deref()
+            .and_then(|id| git2::Oid::from_str(id).ok());
+        let path_bytes = conflict.path.as_bytes().to_vec();
+        let (blob, mode) = if marker_gated(conflict.kind.as_deref()) {
+            let content = render_marker_file(repo, conflict, &fork.name)?;
+            (repo.blob(&content)?, 0o100644)
+        } else {
+            // Delete/shape conflicts: the surviving side stays on disk so
+            // the agent sees real content; deleting the file in the
+            // worktree is how the other side wins.
+            let surviving = ours.or(theirs).ok_or_else(|| {
+                RootsError::Merge(format!(
+                    "conflict `{}` has no surviving content to render",
+                    conflict.path
+                ))
+            })?;
+            (surviving, 0o100644)
+        };
+        out.add(&git2::IndexEntry {
+            ctime: git2::IndexTime::new(0, 0),
+            mtime: git2::IndexTime::new(0, 0),
+            dev: 0,
+            ino: 0,
+            mode,
+            uid: 0,
+            gid: 0,
+            file_size: 0,
+            id: blob,
+            flags: 0,
+            flags_extended: 0,
+            path: path_bytes,
+        })?;
+    }
+    Ok(out.write_tree_to(repo)?)
+}
+
+/// Render one text conflict with standard markers. The labels name the
+/// accumulated trunk line and the fork being folded so the agent never has
+/// to guess which side is which. `merge_file_from_index` needs entries for
+/// all three sides; an add/add conflict gets an empty fabricated ancestor.
+fn render_marker_file(
+    repo: &Repository,
+    conflict: &MergeAttemptConflict,
+    fork_name: &str,
+) -> Result<Vec<u8>, RootsError> {
+    let entry = |id: &Option<String>| -> Result<Option<git2::IndexEntry>, RootsError> {
+        id.as_deref()
+            .map(|id| {
+                Ok(git2::IndexEntry {
+                    ctime: git2::IndexTime::new(0, 0),
+                    mtime: git2::IndexTime::new(0, 0),
+                    dev: 0,
+                    ino: 0,
+                    mode: 0o100644,
+                    uid: 0,
+                    gid: 0,
+                    file_size: 0,
+                    id: git2::Oid::from_str(id)?,
+                    flags: 0,
+                    flags_extended: 0,
+                    path: conflict.path.as_bytes().to_vec(),
+                })
+            })
+            .transpose()
+    };
+    let fabricated_ancestor;
+    let ancestor = match entry(&conflict.ancestor)? {
+        Some(entry) => entry,
+        None => {
+            fabricated_ancestor = git2::IndexEntry {
+                id: repo.blob(b"")?,
+                ..entry(&conflict.ours)?.expect("marker render requires ours")
+            };
+            fabricated_ancestor
+        }
+    };
+    let ours = entry(&conflict.ours)?.ok_or_else(|| {
+        RootsError::Merge(format!("conflict `{}` lost its trunk stage", conflict.path))
+    })?;
+    let theirs = entry(&conflict.theirs)?.ok_or_else(|| {
+        RootsError::Merge(format!("conflict `{}` lost its fork stage", conflict.path))
+    })?;
+    let mut options = git2::MergeFileOptions::new();
+    options
+        .ancestor_label("base")
+        .our_label("trunk (accumulated fold)")
+        .their_label(format!("fork {fork_name}"));
+    let rendered = repo.merge_file_from_index(&ancestor, &ours, &theirs, Some(&mut options));
+    match rendered {
+        Ok(result) if !result.content().is_empty() => Ok(result.content().to_vec()),
+        // Binary or otherwise unrenderable content: keep the trunk bytes so
+        // the agent compares real content, not an empty file.
+        _ => {
+            let blob = repo.find_blob(ours.id)?;
+            Ok(blob.content().to_vec())
+        }
+    }
+}
+
+/// Materialize the resolution tree into the attempt's machine-local
+/// workspace. The directory lives under `.stateroot/local/`, so it never
+/// enters roots, sync, or shared records.
+fn materialize_resolution_worktree(
+    project_dir: &Path,
+    attempt_id: &str,
+    repo: &Repository,
+    tree: git2::Oid,
+) -> Result<String, RootsError> {
+    let dir = merge_attempt_dir(project_dir)
+        .join(attempt_id)
+        .join("worktree");
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)?;
+    }
+    std::fs::create_dir_all(&dir)?;
+    let object = repo.find_object(tree, Some(git2::ObjectType::Tree))?;
+    let mut builder = git2::build::CheckoutBuilder::new();
+    builder
+        .force()
+        .recreate_missing(true)
+        .disable_filters(true)
+        .update_index(false)
+        .remove_untracked(true)
+        .target_dir(&dir);
+    repo.checkout_tree(&object, Some(&mut builder))?;
+    Ok(dir.to_string_lossy().into_owned())
+}
+
+/// Read a prepared merge attempt by complete id or unique prefix.
+pub fn merge_attempt(project_dir: &Path, id_prefix: &str) -> Result<MergeAttempt, RootsError> {
+    let entries = std::fs::read_dir(merge_attempt_dir(project_dir))
+        .map_err(|_| RootsError::NotFound(format!("no merge attempt matching `{id_prefix}`")))?
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .filter_map(|name| name.strip_suffix(".json").map(str::to_owned))
+        .filter(|id| id.starts_with(id_prefix))
+        .collect::<Vec<_>>();
+    match entries.as_slice() {
+        [] => Err(RootsError::NotFound(format!(
+            "no merge attempt matching `{id_prefix}`"
+        ))),
+        [id] => {
+            let text = std::fs::read_to_string(merge_attempt_path(project_dir, id))?;
+            Ok(serde_json::from_str(&text)?)
+        }
+        _ => Err(RootsError::Merge(format!(
+            "merge attempt prefix `{id_prefix}` is ambiguous"
+        ))),
+    }
+}
+
+/// Drop attempt-local state only; roots, refs, and worktrees remain intact.
+pub fn abort_merge_attempt(
+    project_dir: &Path,
+    id_prefix: &str,
+) -> Result<MergeAttempt, RootsError> {
+    let attempt = merge_attempt(project_dir, id_prefix)?;
+    let dir = merge_attempt_dir(project_dir).join(&attempt.id);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)?;
+    }
+    std::fs::remove_file(merge_attempt_path(project_dir, &attempt.id))?;
+    Ok(attempt)
+}
+
+/// Publish a prepared attempt only while every frozen input still matches.
+/// A clean (`ready`) attempt re-runs the deterministic fold. An `attention`
+/// attempt publishes the agent-reconciled reconciliation worktree instead:
+/// marker-gated paths must be free of conflict markers, and any forks after
+/// the conflicted one are folded onto the reconciled tree. Nothing is
+/// published while a frozen ref has moved — prepare again instead.
+pub fn continue_merge_attempt(
+    project_dir: &Path,
+    id_prefix: &str,
+    evidence: &[String],
+) -> Result<(RootManifest, Transition, Vec<MergedFork>), RootsError> {
+    let attempt = merge_attempt(project_dir, id_prefix)?;
+    let repo = ensure_repo(project_dir)?;
+    let actual_trunk = repo
+        .refname_to_id(LATEST_REF)
+        .map_err(|_| RootsError::NotFound("no roots yet — nothing to merge into".into()))?;
+    if actual_trunk.to_string() != attempt.trunk_tip {
+        return Err(RootsError::Merge(format!(
+            "merge attempt {} is stale: trunk moved from {} to {}; prepare again",
+            attempt.id, attempt.trunk_tip, actual_trunk
+        )));
+    }
+    for fork in &attempt.forks {
+        let actual = repo
+            .refname_to_id(&format!("{FORKS_REF_PREFIX}{}", fork.name))
+            .map_err(|_| RootsError::NotFound(format!("fork `{}` no longer exists", fork.name)))?;
+        if actual.to_string() != fork.tip {
+            return Err(RootsError::Merge(format!(
+                "merge attempt {} is stale: fork `{}` moved from {} to {}; prepare again",
+                attempt.id, fork.name, fork.tip, actual
+            )));
+        }
+    }
+    match attempt.state.as_str() {
+        "ready" => {
+            let names = attempt
+                .forks
+                .iter()
+                .map(|fork| fork.name.clone())
+                .collect::<Vec<_>>();
+            let result = merge_forks(project_dir, &names, &attempt.harness)?;
+            remove_merge_attempt_state(project_dir, &attempt.id)?;
+            Ok(result)
+        }
+        "attention" => continue_attention_attempt(project_dir, &repo, &attempt, evidence),
+        other => Err(RootsError::Merge(format!(
+            "merge attempt {} has unknown state `{other}`",
+            attempt.id
+        ))),
+    }
+}
+
+fn remove_merge_attempt_state(project_dir: &Path, id: &str) -> Result<(), RootsError> {
+    let dir = merge_attempt_dir(project_dir).join(id);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)?;
+    }
+    std::fs::remove_file(merge_attempt_path(project_dir, id))?;
+    Ok(())
+}
+
+/// A line is a leftover conflict marker when it opens a conflict block,
+/// closes one, or is the exact separator/base marker.
+fn is_conflict_marker_line(line: &[u8]) -> bool {
+    line.starts_with(b"<<<<<<<")
+        || line.starts_with(b">>>>>>>")
+        || line.starts_with(b"|||||||")
+        || line == b"======="
+}
+
+/// Publish the agent-reconciled worktree of an `attention` attempt.
+fn continue_attention_attempt(
+    project_dir: &Path,
+    repo: &Repository,
+    attempt: &MergeAttempt,
+    evidence: &[String],
+) -> Result<(RootManifest, Transition, Vec<MergedFork>), RootsError> {
+    let worktree = attempt.worktree.clone().ok_or_else(|| {
+        RootsError::Merge(format!(
+            "merge attempt {} records no reconciliation worktree; abort and prepare again",
+            attempt.id
+        ))
+    })?;
+    let worktree_dir = PathBuf::from(&worktree);
+    if !worktree_dir.is_dir() {
+        return Err(RootsError::Merge(format!(
+            "reconciliation worktree for merge attempt {} is gone — abort {} and prepare again",
+            attempt.id, attempt.id
+        )));
+    }
+    let mut unresolved = Vec::new();
+    for conflict in &attempt.conflicts {
+        if !marker_gated(conflict.kind.as_deref()) {
+            continue;
+        }
+        let file = worktree_dir.join(&conflict.path);
+        // Deleting the file is a legitimate resolution.
+        let Ok(bytes) = std::fs::read(&file) else {
+            continue;
+        };
+        if bytes.split(|b| *b == b'\n').any(is_conflict_marker_line) {
+            unresolved.push(conflict.path.clone());
+        }
+    }
+    if !unresolved.is_empty() {
+        unresolved.sort();
+        return Err(RootsError::Merge(format!(
+            "merge attempt {} is not fully resolved — conflict markers remain in: {}",
+            attempt.id,
+            unresolved.join(", ")
+        )));
+    }
+
+    // The reconciled tree is captured exactly like a snapshot: same ignore
+    // rules, same exclusions, no budget — this is a deliberate agent act.
+    let built = build_tree(repo, &worktree_dir)?;
+    let mut current_tree = repo.find_tree(built.tree)?;
+    let trunk_oid = git2::Oid::from_str(&attempt.trunk_tip)?;
+    let mut parents: Vec<git2::Oid> = vec![trunk_oid];
+    let mut merged: Vec<MergedFork> = Vec::new();
+    for fork in &attempt.folded_forks {
+        parents.push(git2::Oid::from_str(&fork.tip)?);
+        merged.push(MergedFork {
+            name: fork.name.clone(),
+            tip: fork.tip.clone(),
+        });
+    }
+    // The conflicted fork heads the pending list; the agent's reconciliation
+    // IS its fold.
+    let conflicted = attempt.pending_forks.first().ok_or_else(|| {
+        RootsError::Merge(format!(
+            "merge attempt {} is attention without a pending fork",
+            attempt.id
+        ))
+    })?;
+    let mut head_oid = git2::Oid::from_str(&conflicted.tip)?;
+    parents.push(head_oid);
+    merged.push(MergedFork {
+        name: conflicted.name.clone(),
+        tip: conflicted.tip.clone(),
+    });
+    // Forks contained before the conflict were skipped silently at prepare;
+    // name them in the evidence now.
+    let mut skipped: Vec<String> = attempt
+        .forks
+        .iter()
+        .filter(|fork| {
+            !attempt.folded_forks.iter().any(|f| f.name == fork.name)
+                && !attempt.pending_forks.iter().any(|f| f.name == fork.name)
+        })
+        .map(|fork| fork.name.clone())
+        .collect();
+    let fold_start = Instant::now();
+    for fork in &attempt.pending_forks[1..] {
+        let tip = git2::Oid::from_str(&fork.tip)?;
+        let ancestor_oid = repo.merge_base(head_oid, tip)?;
+        if ancestor_oid == tip {
+            skipped.push(fork.name.clone());
+            continue;
+        }
+        let ancestor_tree = repo.find_commit(ancestor_oid)?.tree()?;
+        let mut index = repo.merge_trees(
+            &ancestor_tree,
+            &current_tree,
+            &repo.find_commit(tip)?.tree()?,
+            None,
+        )?;
+        resolve_control_plane_conflicts(repo, &mut index)?;
+        if index.has_conflicts() {
+            let mut paths: Vec<String> = index
+                .conflicts()?
+                .filter_map(|c| {
+                    let c = c.ok()?;
+                    c.their
+                        .or(c.our)
+                        .or(c.ancestor)
+                        .and_then(|f| String::from_utf8(f.path).ok())
+                })
+                .collect();
+            paths.sort();
+            paths.dedup();
+            return Err(RootsError::Merge(format!(
+                "fork `{}` conflicts with the reconciled tree — nothing published; adjust the worktree and `merge --continue {}` again, or abort and prepare again. Paths: {}",
+                fork.name,
+                attempt.id,
+                paths.join(", ")
+            )));
+        }
+        current_tree = repo.find_tree(index.write_tree_to(repo)?)?;
+        head_oid = tip;
+        parents.push(tip);
+        merged.push(MergedFork {
+            name: fork.name.clone(),
+            tip: fork.tip.clone(),
+        });
+    }
+
+    let evidence_json = json!({
+        "kind_detail": "fork merge (agent-reconciled)",
+        "attempt": attempt.id,
+        "resolved_conflicts": attempt
+            .conflicts
+            .iter()
+            .map(|conflict| json!({
+                "fork": conflict.fork,
+                "path": conflict.path,
+                "kind": conflict.kind,
+            }))
+            .collect::<Vec<_>>(),
+        "agent_evidence": evidence,
+    });
+    let reconcile_ms = chrono::DateTime::parse_from_rfc3339(&attempt.created_at)
+        .map(|prepared| {
+            chrono::Utc::now()
+                .signed_duration_since(prepared.with_timezone(&chrono::Utc))
+                .num_milliseconds()
+        })
+        .unwrap_or(0)
+        .max(0) as u128;
+    let mut phases = vec![
+        ("agent_reconciliation".to_string(), reconcile_ms),
+        (
+            "fold_remaining".to_string(),
+            fold_start.elapsed().as_millis(),
+        ),
+    ];
+    let result = publish_merge(
+        repo,
+        project_dir,
+        trunk_oid,
+        current_tree.id(),
+        parents,
+        merged,
+        skipped,
+        &attempt.harness,
+        Some(evidence_json),
+        &mut phases,
+    )?;
+    remove_merge_attempt_state(project_dir, &attempt.id)?;
+    Ok(result)
+}
+
 /// `stateroot merge <fork>…` — fold fork tips into `refs/stateroot/latest`.
 /// Returns the merge root and the forks that contributed.
 ///
@@ -1452,6 +2405,19 @@ pub fn merge_forks(
     forks: &[String],
     harness: &str,
 ) -> Result<(RootManifest, Transition, Vec<MergedFork>), RootsError> {
+    merge_forks_resolving(project_dir, forks, harness, &[])
+}
+
+/// Fold forks while explicitly retaining the trunk version of named
+/// source-file conflicts. This is intentionally opt-in: callers must inspect
+/// a failed merge, reconcile the trunk file, then name each path. It never
+/// turns normal source conflicts into an implicit strategy.
+pub fn merge_forks_resolving(
+    project_dir: &Path,
+    forks: &[String],
+    harness: &str,
+    keep_trunk_paths: &[String],
+) -> Result<(RootManifest, Transition, Vec<MergedFork>), RootsError> {
     if forks.is_empty() {
         return Err(RootsError::Merge(
             "no forks named — pass at least one fork to merge".into(),
@@ -1466,7 +2432,7 @@ pub fn merge_forks(
     const CAS_RETRIES: usize = 8;
     let mut attempt = 0;
     loop {
-        match merge_forks_once(project_dir, forks, harness) {
+        match merge_forks_once(project_dir, forks, harness, keep_trunk_paths) {
             Err(RootsError::RefCas(crate::safe_io::RefCasError::Moved { .. }))
                 if attempt < CAS_RETRIES =>
             {
@@ -1482,11 +2448,13 @@ fn merge_forks_once(
     project_dir: &Path,
     forks: &[String],
     harness: &str,
+    keep_trunk_paths: &[String],
 ) -> Result<(RootManifest, Transition, Vec<MergedFork>), RootsError> {
     let repo = ensure_repo(project_dir)?;
     let base_oid = repo
         .refname_to_id(LATEST_REF)
         .map_err(|_| RootsError::NotFound("no roots yet — nothing to merge into".into()))?;
+    let analysis_start = Instant::now();
     // The accumulated fold: `current_tree` is the union so far, `head_oid`
     // is the line's head for the NEXT merge_base. After folding fork A the
     // union contains A's work, so B must merge against (A's tip) as the
@@ -1497,6 +2465,7 @@ fn merge_forks_once(
     let mut parents: Vec<git2::Oid> = vec![base_oid];
     let mut merged: Vec<MergedFork> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
+    let mut unresolved_trunk_paths: BTreeSet<String> = keep_trunk_paths.iter().cloned().collect();
 
     for name in forks {
         let refname = format!("{FORKS_REF_PREFIX}{name}");
@@ -1513,6 +2482,8 @@ fn merge_forks_once(
         let ancestor_tree = repo.find_commit(ancestor_oid)?.tree()?;
         let mut index =
             repo.merge_trees(&ancestor_tree, &current_tree, &fork_commit.tree()?, None)?;
+        resolve_control_plane_conflicts(&repo, &mut index)?;
+        resolve_explicit_trunk_conflicts(&mut index, &mut unresolved_trunk_paths)?;
         if index.has_conflicts() {
             let mut paths: Vec<String> = index
                 .conflicts()?
@@ -1547,7 +2518,52 @@ fn merge_forks_once(
             skipped.join(", ")
         )));
     }
+    if !unresolved_trunk_paths.is_empty() {
+        return Err(RootsError::Merge(format!(
+            "cannot keep trunk version of {}: not a merge conflict",
+            unresolved_trunk_paths
+                .iter()
+                .map(|path| format!("`{path}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
 
+    let mut phases = vec![("analysis".to_string(), analysis_start.elapsed().as_millis())];
+    publish_merge(
+        &repo,
+        project_dir,
+        base_oid,
+        current_tree.id(),
+        parents,
+        merged,
+        skipped,
+        harness,
+        None,
+        &mut phases,
+    )
+}
+
+/// Materialize the merged tree into the trunk, verify it byte-for-byte, and
+/// only then publish the N+1-parent merge root. A checkout failure or a
+/// verification mismatch restores the pre-merge tree and publishes nothing.
+/// Merged fork worktrees are marked `cleanup_pending` after publication —
+/// deletion never delays or invalidates the merge. `phases` collects
+/// structured per-phase timings into the transition evidence; only merge
+/// internals are measured, never caller or build time.
+#[allow(clippy::too_many_arguments)]
+fn publish_merge(
+    repo: &Repository,
+    project_dir: &Path,
+    base_oid: git2::Oid,
+    merge_tree_oid: git2::Oid,
+    parents: Vec<git2::Oid>,
+    merged: Vec<MergedFork>,
+    skipped: Vec<String>,
+    harness: &str,
+    evidence_extra: Option<Value>,
+    phases: &mut Vec<(String, u128)>,
+) -> Result<(RootManifest, Transition, Vec<MergedFork>), RootsError> {
     // Materialize BEFORE publication (6C): the merged tree must land on
     // disk, verified, before the ref advances. The workspace protection is
     // content-based and covers EVERY base-tracked path (a force checkout
@@ -1555,35 +2571,29 @@ fn merge_forks_once(
     // untracked extras and store bookkeeping never block — the next
     // checkpoint capturing them is honest new work, not a merge lie.
     let base_tree = repo.find_commit(base_oid)?.tree()?;
-    let dirty = workspace_conflicts(&repo, project_dir, &base_tree, &current_tree)?;
+    let current_tree = repo.find_tree(merge_tree_oid)?;
+    let dirty = workspace_conflicts(repo, project_dir, &base_tree, &current_tree)?;
     if !dirty.is_empty() {
         return Err(RootsError::Merge(format!(
             "trunk workspace has uncommitted change(s) the merge would overwrite — refusing: snap, revert, or clean first. Paths: {}",
             dirty.join(", ")
         )));
     }
-    let checkout = |tree: git2::Oid| -> Result<(), RootsError> {
-        let object = repo.find_object(tree, Some(git2::ObjectType::Tree))?;
-        // Filters disabled: roots are a content-addressed byte store —
-        // build_tree hashes raw disk bytes, so materialization must write
-        // raw blob bytes too. A smudge filter (core.autocrlf on Windows)
-        // would make every restored file differ from its blob and fail the
-        // verification below — and silently corrupt byte-exact restoration
-        // for real users.
-        repo.checkout_tree(
-            &object,
-            Some(
-                git2::build::CheckoutBuilder::new()
-                    .force()
-                    .disable_filters(true),
-            ),
-        )?;
-        Ok(())
-    };
+    let checkout =
+        |tree: git2::Oid| -> Result<(), RootsError> { checkout_root_tree(repo, project_dir, tree) };
     let base_tree_oid = base_tree.id();
-    let merge_tree_oid = current_tree.id();
-    checkout(merge_tree_oid)?;
-    let verified = tree_materialized(&repo, project_dir, &base_tree, &current_tree);
+    let phase_start = Instant::now();
+    if let Err(err) = checkout(merge_tree_oid) {
+        // libgit2 may have applied a subset of paths before discovering an
+        // OS-level checkout failure. The published lineage must therefore
+        // never depend on an assumed all-or-nothing checkout.
+        let _ = checkout(base_tree_oid);
+        return Err(err);
+    }
+    phases.push(("materialize".into(), phase_start.elapsed().as_millis()));
+    let phase_start = Instant::now();
+    let verified = tree_materialized(repo, project_dir, &base_tree, &current_tree);
+    phases.push(("verify".into(), phase_start.elapsed().as_millis()));
     if !verified {
         let _ = checkout(base_tree_oid);
         return Err(RootsError::Merge(
@@ -1704,18 +2714,31 @@ fn merge_forks_once(
         }
     );
     let message = format!("{reason} (by {harness})");
-    let oid = commit_root(&repo, merge_tree_oid, &parents, &message)?;
+    let phase_start = Instant::now();
+    let oid = commit_root(repo, merge_tree_oid, &parents, &message)?;
     let parent_hashes: Vec<String> = parents.iter().map(|o| o.to_string()).collect();
-    let (files_pinned, tree_bytes) = tree_stats(&repo, merge_tree_oid);
-    let evidence = json!({
+    let (files_pinned, tree_bytes) = tree_stats(repo, merge_tree_oid);
+    phases.push(("publish".into(), phase_start.elapsed().as_millis()));
+    let mut evidence = json!({
         "kind_detail": "fork merge",
         "merged_forks": merged.iter().map(|f| json!({"name": f.name, "tip": f.tip})).collect::<Vec<_>>(),
         "skipped_contained": skipped,
         "base": base_oid.to_string(),
         "harness": harness,
+        "phases": phases
+            .iter()
+            .map(|(name, ms)| json!({"phase": name, "ms": ms}))
+            .collect::<Vec<_>>(),
     });
+    if let (Some(extra), Some(base)) = (evidence_extra, evidence.as_object_mut()) {
+        if let Some(extra) = extra.as_object() {
+            for (key, value) in extra {
+                base.insert(key.clone(), value.clone());
+            }
+        }
+    }
     let (manifest, transition) = persist_root(
-        &repo,
+        repo,
         project_dir,
         oid,
         parent_hashes,
@@ -1727,33 +2750,519 @@ fn merge_forks_once(
         evidence,
     )?;
 
-    // Automatic cleanup (6C): merged fork worktrees go away; the fork ref
-    // and record stay as history. A cleanup failure becomes visible
-    // retryable state on the fork record, not a printed shell instruction.
+    // Cleanup is deferred (6C): publishing the merge root must not wait on
+    // worktree deletion. A registered worktree is retained and marked
+    // `cleanup_pending` so `stateroot merge --cleanup` can retry later.
     for fork in &merged {
-        if let Some(path) = registered_worktree_path(project_dir, &fork.name) {
-            let cleanup = (|| -> Result<(), RootsError> {
-                std::fs::remove_dir_all(&path)?;
-                if let Ok(wt) = repo.find_worktree(&fork.name) {
-                    wt.prune(None)?;
-                }
-                unregister_worktree(project_dir, &fork.name)
-            })();
-            if let Err(err) = cleanup {
-                let record_path = local_store::root(project_dir)
-                    .join(FORKS_DIR)
-                    .join(format!("{}.json", fork.name));
-                if let Ok(text) = std::fs::read_to_string(&record_path) {
-                    if let Ok(mut record) = serde_json::from_str::<Value>(&text) {
-                        record["cleanup_pending"] = json!(format!("{err}"));
-                        let _ = write_json(&record_path, &record);
-                    }
-                }
-            }
+        if registered_worktree_path(project_dir, &fork.name).is_some() {
+            let _ = record_cleanup_pending(
+                project_dir,
+                &fork.name,
+                &cleanup_pending_message(&fork.name),
+            );
         }
     }
 
     Ok((manifest, transition, merged))
+}
+
+/// Retry deferred worktree cleanup for named merged forks.
+///
+/// Missing paths count as already removed. Success prunes Git worktree
+/// metadata, unregisters the path, and clears `cleanup_pending`. Failure
+/// or timeout leaves retry state intact. The merge root is never moved.
+pub fn cleanup_merged_forks(
+    project_dir: &Path,
+    forks: &[String],
+) -> Result<Vec<ForkCleanup>, RootsError> {
+    if forks.is_empty() {
+        return Err(RootsError::Merge(
+            "no forks named — pass at least one fork to clean up".into(),
+        ));
+    }
+    let repo = ensure_repo(project_dir)?;
+    let mut results = Vec::new();
+    for name in forks {
+        let refname = format!("{FORKS_REF_PREFIX}{name}");
+        if repo.refname_to_id(&refname).is_err() && !fork_record_path(project_dir, name).exists() {
+            return Err(RootsError::NotFound(format!("no fork named {name}")));
+        }
+        results.push(cleanup_merged_fork_worktree(&repo, project_dir, name)?);
+    }
+    Ok(results)
+}
+
+fn fork_record_path(project_dir: &Path, name: &str) -> PathBuf {
+    local_store::root(project_dir)
+        .join(FORKS_DIR)
+        .join(format!("{name}.json"))
+}
+
+fn cleanup_pending_message(name: &str) -> String {
+    format!("worktree retained after merge — run `stateroot merge --cleanup {name}`")
+}
+
+fn record_cleanup_pending(project_dir: &Path, name: &str, message: &str) -> Result<(), RootsError> {
+    update_fork_record(project_dir, name, |record| {
+        record["cleanup_pending"] = json!(message);
+    })
+}
+
+fn clear_cleanup_pending(project_dir: &Path, name: &str) -> Result<(), RootsError> {
+    update_fork_record(project_dir, name, |record| {
+        if let Some(obj) = record.as_object_mut() {
+            obj.remove("cleanup_pending");
+        }
+    })
+}
+
+fn update_fork_record(
+    project_dir: &Path,
+    name: &str,
+    edit: impl FnOnce(&mut Value),
+) -> Result<(), RootsError> {
+    let path = fork_record_path(project_dir, name);
+    let mut record = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_else(|| json!({"name": name}));
+    edit(&mut record);
+    write_json(&path, &record)
+}
+
+fn merge_cleanup_budget() -> Duration {
+    #[cfg(test)]
+    {
+        let ms = TEST_CLEANUP_BUDGET_MS.with(std::cell::Cell::get);
+        if ms > 0 {
+            return Duration::from_millis(ms);
+        }
+    }
+    MERGE_CLEANUP_BUDGET
+}
+
+fn cleanup_merged_fork_worktree(
+    repo: &Repository,
+    project_dir: &Path,
+    name: &str,
+) -> Result<ForkCleanup, RootsError> {
+    let Some(path) = registered_worktree_path(project_dir, name) else {
+        let _ = clear_cleanup_pending(project_dir, name);
+        return Ok(ForkCleanup {
+            name: name.to_string(),
+            cleaned: true,
+            pending: None,
+        });
+    };
+    if let Err(err) = remove_worktree_bounded(&path) {
+        let message = format!("{err}");
+        let _ = record_cleanup_pending(project_dir, name, &message);
+        return Ok(ForkCleanup {
+            name: name.to_string(),
+            cleaned: false,
+            pending: Some(message),
+        });
+    }
+    if let Ok(wt) = repo.find_worktree(name) {
+        if let Err(err) = wt.prune(None) {
+            let message = format!("{err}");
+            let _ = record_cleanup_pending(project_dir, name, &message);
+            return Ok(ForkCleanup {
+                name: name.to_string(),
+                cleaned: false,
+                pending: Some(message),
+            });
+        }
+    }
+    if let Err(err) = unregister_worktree(project_dir, name) {
+        let message = format!("{err}");
+        let _ = record_cleanup_pending(project_dir, name, &message);
+        return Ok(ForkCleanup {
+            name: name.to_string(),
+            cleaned: false,
+            pending: Some(message),
+        });
+    }
+    let _ = clear_cleanup_pending(project_dir, name);
+    Ok(ForkCleanup {
+        name: name.to_string(),
+        cleaned: true,
+        pending: None,
+    })
+}
+
+fn remove_worktree_bounded(path: &Path) -> Result<(), RootsError> {
+    #[cfg(test)]
+    if TEST_CLEANUP_FORCE_ERR.with(std::cell::Cell::get) {
+        return Err(RootsError::Merge("injected cleanup failure".into()));
+    }
+    #[cfg(test)]
+    let extra_sleep_ms = TEST_CLEANUP_SLEEP_MS.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    let extra_sleep_ms = 0u64;
+
+    if extra_sleep_ms == 0 && !path.exists() {
+        return Ok(());
+    }
+    let path = path.to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        if extra_sleep_ms > 0 {
+            std::thread::sleep(Duration::from_millis(extra_sleep_ms));
+        }
+        let result = if path.exists() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            Ok(())
+        };
+        let _ = tx.send(result);
+    });
+    match rx.recv_timeout(merge_cleanup_budget()) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => Err(err.into()),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(RootsError::Merge(format!(
+            "cleanup timed out after {}ms",
+            merge_cleanup_budget().as_millis()
+        ))),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(RootsError::Merge(
+            "cleanup worker exited without a result".into(),
+        )),
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CLEANUP_BUDGET_MS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static TEST_CLEANUP_SLEEP_MS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static TEST_CLEANUP_FORCE_ERR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Abort a checkout after this many file updates (0 = never). Consumed
+    /// on firing so rollback checkouts run clean.
+    static TEST_CHECKOUT_ABORT_AFTER_UPDATES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Checkout a root tree into the trunk working directory without rewriting
+/// the user's Git index. Git-tracked paths excluded from roots are staged
+/// on disk (not in RAM) and restored after both forward and rollback
+/// checkouts.
+fn checkout_root_tree(
+    repo: &Repository,
+    project_dir: &Path,
+    tree: git2::Oid,
+) -> Result<(), RootsError> {
+    let target = repo.find_tree(tree)?;
+    let staged = stage_tracked_excluded(repo, project_dir, &target)?;
+    let object = repo.find_object(tree, Some(git2::ObjectType::Tree))?;
+    let conflicts = std::cell::RefCell::new(Vec::new());
+    let mut builder = git2::build::CheckoutBuilder::new();
+    // Test hook: abort the checkout mid-write after N file updates. The hook
+    // is consumed on firing so the rollback checkout always runs clean.
+    #[cfg(test)]
+    let abort_after = std::cell::Cell::new(TEST_CHECKOUT_ABORT_AFTER_UPDATES.with(|c| c.get()));
+    #[cfg(not(test))]
+    let abort_after = std::cell::Cell::new(0u64);
+    let abort_armed = abort_after.get() > 0;
+    // Filters disabled: roots are a content-addressed byte store —
+    // build_tree hashes raw disk bytes, so materialization must write
+    // raw blob bytes too. A smudge filter (core.autocrlf on Windows)
+    // would make every restored file differ from its blob and fail the
+    // verification below — and silently corrupt byte-exact restoration
+    // for real users.
+    //
+    // `force()` clears the low strategy bits, including RECREATE_MISSING.
+    // Re-enable it afterwards: libgit2 still conflicts on index entries
+    // whose workdir file is gone unless that bit is set.
+    builder
+        .force()
+        .recreate_missing(true)
+        .overwrite_ignored(true)
+        .disable_filters(true)
+        // Roots are plumbing state. Materializing one must never
+        // rewrite the user's Git index or stage StateRoot files.
+        .update_index(false)
+        // Root trees include `.stateroot/` files that are typically
+        // gitignored; refusing to overwrite them turns those writes
+        // into checkout conflicts. Tracked excluded files are restored
+        // from the staging dir.
+        .remove_ignored(false)
+        .remove_untracked(false)
+        .notify_on(
+            git2::CheckoutNotificationType::CONFLICT | git2::CheckoutNotificationType::UPDATED,
+        )
+        .notify(|kind, path, _baseline, _target, _workdir| {
+            if kind == git2::CheckoutNotificationType::CONFLICT {
+                if let Some(path) = path {
+                    conflicts
+                        .borrow_mut()
+                        .push(path.to_string_lossy().replace('\\', "/"));
+                }
+            }
+            if abort_armed && kind == git2::CheckoutNotificationType::UPDATED {
+                let remaining = abort_after.get();
+                if remaining > 0 {
+                    abort_after.set(remaining - 1);
+                    if remaining == 1 {
+                        #[cfg(test)]
+                        TEST_CHECKOUT_ABORT_AFTER_UPDATES.with(|c| c.set(0));
+                        return false;
+                    }
+                }
+            }
+            true
+        });
+    let result = repo.checkout_tree(&object, Some(&mut builder));
+    let mut paths = conflicts.borrow().clone();
+    drop(builder);
+    if let Err(err) = result {
+        let _ = restore_tracked_excluded(project_dir, &staged);
+        paths.sort();
+        paths.dedup();
+        if err.code() == git2::ErrorCode::Conflict && !paths.is_empty() {
+            return Err(RootsError::Merge(format!(
+                "checkout conflict while materializing merge — refusing: {}",
+                paths.join(", ")
+            )));
+        }
+        return Err(err.into());
+    }
+    restore_tracked_excluded(project_dir, &staged)
+}
+
+struct StagedExcluded {
+    _dir: tempfile::TempDir,
+    entries: Vec<StagedExcludedEntry>,
+}
+
+enum StagedExcludedEntry {
+    File {
+        relative: PathBuf,
+        staged: PathBuf,
+        permissions: std::fs::Permissions,
+    },
+    Link {
+        relative: PathBuf,
+        target: PathBuf,
+    },
+}
+
+fn tracked_excluded_disk_paths(
+    repo: &Repository,
+    project_dir: &Path,
+    target_tree: Option<&git2::Tree>,
+) -> Result<Vec<PathBuf>, RootsError> {
+    let rules = IgnoreRules::load(project_dir);
+    let index = repo.index()?;
+    let mut paths = Vec::new();
+    for i in 0..index.len() {
+        let Some(entry) = index.get(i) else {
+            continue;
+        };
+        let rel = String::from_utf8_lossy(&entry.path).replace('\\', "/");
+        if rel.is_empty() || !rules.is_ignored(&rel, false) {
+            continue;
+        }
+        if let Some(tree) = target_tree {
+            if tree.get_path(Path::new(&rel)).is_ok() {
+                continue;
+            }
+        }
+        let disk = project_dir.join(Path::new(&rel));
+        let Ok(meta) = disk.symlink_metadata() else {
+            continue;
+        };
+        if meta.file_type().is_file() || meta.file_type().is_symlink() {
+            paths.push(PathBuf::from(&rel));
+        }
+    }
+    Ok(paths)
+}
+
+fn stage_tracked_excluded(
+    repo: &Repository,
+    project_dir: &Path,
+    target_tree: &git2::Tree,
+) -> Result<StagedExcluded, RootsError> {
+    let staging = tempfile::tempdir()?;
+    let mut entries = Vec::new();
+    for relative in tracked_excluded_disk_paths(repo, project_dir, Some(target_tree))? {
+        let src = project_dir.join(&relative);
+        let meta = src.symlink_metadata()?;
+        if meta.file_type().is_symlink() {
+            entries.push(StagedExcludedEntry::Link {
+                relative,
+                target: std::fs::read_link(&src)?,
+            });
+            continue;
+        }
+        let staged = staging.path().join(format!("{:06}", entries.len()));
+        std::fs::copy(&src, &staged)?;
+        entries.push(StagedExcludedEntry::File {
+            relative,
+            staged,
+            permissions: meta.permissions(),
+        });
+    }
+    Ok(StagedExcluded {
+        _dir: staging,
+        entries,
+    })
+}
+
+fn restore_tracked_excluded(project_dir: &Path, staged: &StagedExcluded) -> Result<(), RootsError> {
+    for entry in &staged.entries {
+        match entry {
+            StagedExcludedEntry::File {
+                relative,
+                staged,
+                permissions,
+            } => {
+                let dest = project_dir.join(relative);
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::copy(staged, &dest)?;
+                std::fs::set_permissions(&dest, permissions.clone())?;
+            }
+            StagedExcludedEntry::Link { relative, target } => {
+                let dest = project_dir.join(relative);
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                restore_symlink(&dest, target)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn restore_symlink(path: &Path, target: &Path) -> Result<(), RootsError> {
+    match path.symlink_metadata() {
+        Ok(meta) if meta.file_type().is_dir() && !meta.file_type().is_symlink() => {
+            std::fs::remove_dir_all(path)?;
+        }
+        Ok(_) => {
+            std::fs::remove_file(path)?;
+        }
+        Err(_) => {}
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, path)?;
+    }
+    #[cfg(windows)]
+    {
+        if target.is_dir() {
+            std::os::windows::fs::symlink_dir(target, path)?;
+        } else {
+            std::os::windows::fs::symlink_file(target, path)?;
+        }
+    }
+    Ok(())
+}
+
+fn resolve_explicit_trunk_conflicts(
+    index: &mut git2::Index,
+    unresolved_paths: &mut BTreeSet<String>,
+) -> Result<(), RootsError> {
+    let requested: Vec<String> = unresolved_paths.iter().cloned().collect();
+    for requested in requested {
+        let path = Path::new(&requested);
+        let conflict = match index.conflict_get(path) {
+            Ok(conflict) => conflict,
+            // A conflict can arise only after an earlier fork was folded.
+            // Leave this requested path pending for a later fold.
+            Err(_) => continue,
+        };
+        let Some(mut entry) = conflict.our else {
+            return Err(RootsError::Merge(format!(
+                "cannot keep trunk version of `{requested}`: trunk deleted that path"
+            )));
+        };
+        index.conflict_remove(path)?;
+        entry.flags &= !0x3000;
+        index.add(&entry)?;
+        unresolved_paths.remove(&requested);
+    }
+    Ok(())
+}
+
+/// Resolve the two coordination records which necessarily diverge while a
+/// fork is being executed. They are control-plane state, not competing work:
+/// the trunk owns its current handoff and a plan sidecar is a monotonic
+/// lifecycle record, so its most recently updated version wins. Everything
+/// else remains a normal, fail-closed three-way merge.
+fn resolve_control_plane_conflicts(
+    repo: &git2::Repository,
+    index: &mut git2::Index,
+) -> Result<(), RootsError> {
+    let paths: Vec<PathBuf> = index
+        .conflicts()?
+        .filter_map(|conflict| {
+            let conflict = conflict.ok()?;
+            conflict
+                .their
+                .as_ref()
+                .or(conflict.our.as_ref())
+                .or(conflict.ancestor.as_ref())
+                .and_then(|entry| String::from_utf8(entry.path.clone()).ok())
+                .map(PathBuf::from)
+        })
+        .collect();
+
+    for path in paths {
+        let path_text = path.to_string_lossy();
+        let conflict = index.conflict_get(&path)?;
+        let selected = if path_text == ".stateroot/handoffs/current.json" {
+            // A fork's current handoff describes work inside that fork. It
+            // must never displace the trunk's continuity packet on merge.
+            conflict.our
+        } else if path_text.starts_with(".stateroot/plans/") && path_text.ends_with(".json") {
+            newest_plan_entry(repo, conflict.our, conflict.their)?
+        } else {
+            continue;
+        };
+
+        index.conflict_remove(&path)?;
+        if let Some(mut entry) = selected {
+            // Conflict entries carry a non-zero stage. Adding a normal index
+            // entry after removing the conflict produces the resolved stage.
+            entry.flags &= !0x3000;
+            index.add(&entry)?;
+        }
+    }
+    Ok(())
+}
+
+fn newest_plan_entry(
+    repo: &git2::Repository,
+    ours: Option<git2::IndexEntry>,
+    theirs: Option<git2::IndexEntry>,
+) -> Result<Option<git2::IndexEntry>, RootsError> {
+    let updated_at = |entry: &git2::IndexEntry| -> Result<Option<String>, RootsError> {
+        let blob = repo.find_blob(entry.id)?;
+        let value: Value = match serde_json::from_slice(blob.content()) {
+            Ok(value) => value,
+            Err(_) => return Ok(None),
+        };
+        Ok(value
+            .get("updated_at")
+            .and_then(Value::as_str)
+            .filter(|timestamp| !timestamp.is_empty())
+            .map(str::to_owned))
+    };
+
+    match (&ours, &theirs) {
+        (Some(our), Some(their)) => match (updated_at(our)?, updated_at(their)?) {
+            // Equal timestamps deliberately retain the trunk record: this is
+            // deterministic and never lets a fork replace trunk authority
+            // without a causally later lifecycle transition.
+            (Some(our_at), Some(their_at)) if their_at > our_at => Ok(theirs),
+            (Some(_), Some(_)) => Ok(ours),
+            _ => Ok(None),
+        },
+        // Deletion is trunk authority; a fork-only plan record is preserved.
+        (None, Some(_)) => Ok(theirs),
+        (Some(_), None) | (None, None) => Ok(ours),
+    }
 }
 
 /// Blob count + total bytes of a tree (metadata-only walk).
@@ -2307,6 +3816,25 @@ mod tests {
     }
 
     #[test]
+    fn automatic_snap_stops_at_the_entry_budget_but_explicit_snap_remains_available() {
+        let _limits = TestCleanupHooks;
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        create_root(&dir, "cli", "base", None).expect("base root");
+        write(&dir, "generated/one.txt", "one\n");
+        write(&dir, "generated/two.txt", "two\n");
+        TEST_AUTO_SNAPSHOT_ENTRY_LIMIT.with(|c| c.set(2));
+        let err = snap_if_changed(&dir, "cli", "automatic", None).expect_err("budget");
+        assert!(
+            err.to_string().contains("automatic snapshot skipped"),
+            "{err}"
+        );
+        assert!(err.to_string().contains("visited entries"), "{err}");
+        // An explicit user request remains intentionally unbounded.
+        create_root(&dir, "cli", "explicit", None).expect("explicit snap");
+    }
+
+    #[test]
     fn stat_index_reuses_unchanged_blobs_and_rehashes_on_change() {
         let (_tmp, dir) = project();
         write(&dir, "a.txt", "alpha");
@@ -2772,6 +4300,53 @@ mod tests {
 
     // -- WS5 batch B: merge -------------------------------------------------
 
+    fn git_force_track(dir: &Path, rel: &str) {
+        let repo = git2::Repository::open(dir).expect("repo");
+        let mut index = repo.index().expect("index");
+        index
+            .add_path(Path::new(rel))
+            .unwrap_or_else(|err| panic!("stage {}: {err}", rel));
+        index.write().expect("write index");
+    }
+
+    fn index_entries(dir: &Path) -> Vec<(String, git2::Oid, u16)> {
+        let repo = git2::Repository::open(dir).expect("repo");
+        let index = repo.index().expect("index");
+        (0..index.len())
+            .filter_map(|i| {
+                let entry = index.get(i)?;
+                Some((
+                    String::from_utf8_lossy(&entry.path).into_owned(),
+                    entry.id,
+                    entry.flags,
+                ))
+            })
+            .collect()
+    }
+
+    fn fork_cleanup_pending(dir: &Path, name: &str) -> Option<String> {
+        let text = std::fs::read_to_string(fork_record_path(dir, name)).ok()?;
+        let value: Value = serde_json::from_str(&text).ok()?;
+        value
+            .get("cleanup_pending")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    }
+
+    /// Resets this test thread's injected cleanup/snapshot hooks on drop.
+    /// The hooks are thread-locals precisely so parallel tests can never
+    /// observe each other's injected budgets or failures.
+    struct TestCleanupHooks;
+    impl Drop for TestCleanupHooks {
+        fn drop(&mut self) {
+            TEST_CLEANUP_BUDGET_MS.with(|c| c.set(0));
+            TEST_CLEANUP_SLEEP_MS.with(|c| c.set(0));
+            TEST_CLEANUP_FORCE_ERR.with(|c| c.set(false));
+            TEST_AUTO_SNAPSHOT_ENTRY_LIMIT.with(|c| c.set(0));
+            TEST_CHECKOUT_ABORT_AFTER_UPDATES.with(|c| c.set(0));
+        }
+    }
+
     /// Fork from `root_id`, materialize, write `file`, snap, return the fork tip.
     fn fork_with_change(
         dir: &Path,
@@ -2842,6 +4417,623 @@ mod tests {
     }
 
     #[test]
+    fn merge_attempt_freezes_clean_inputs_then_continues() {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        let (_wt, tip) =
+            fork_with_change(&dir, &first.id, "fork-a", "src/lib.rs", "pub fn a() {}\n");
+
+        let attempt =
+            prepare_merge_attempt(&dir, &["fork-a".to_string()], "coordinator").expect("prepare");
+        assert_eq!(attempt.schema_version, MERGE_ATTEMPT_SCHEMA);
+        assert_eq!(attempt.state, "ready");
+        assert!(attempt.conflicts.is_empty());
+        assert_eq!(
+            merge_attempt(&dir, &attempt.id).expect("status").trunk_tip,
+            first.id
+        );
+
+        let (merged, _transition, forks) =
+            continue_merge_attempt(&dir, &attempt.id, &[]).expect("continue");
+        assert_eq!(forks.len(), 1);
+        assert_eq!(forks[0].tip, tip);
+        assert_eq!(
+            ensure_repo(&dir)
+                .expect("repo")
+                .refname_to_id(LATEST_REF)
+                .expect("latest")
+                .to_string(),
+            merged.id
+        );
+        assert!(
+            merge_attempt(&dir, &attempt.id).is_err(),
+            "attempt consumed"
+        );
+    }
+
+    #[test]
+    fn merge_attempt_conflict_materializes_reconciliation_worktree() {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        let (_left, left_tip) = fork_with_change(
+            &dir,
+            &first.id,
+            "left",
+            "src/main.rs",
+            "fn main() { left(); }\n",
+        );
+        let (_right, right_tip) = fork_with_change(
+            &dir,
+            &first.id,
+            "right",
+            "src/main.rs",
+            "fn main() { right(); }\n",
+        );
+
+        let attempt = prepare_merge_attempt(
+            &dir,
+            &["left".to_string(), "right".to_string()],
+            "coordinator",
+        )
+        .expect("prepare");
+        assert_eq!(attempt.state, "attention");
+        assert_eq!(attempt.conflicts.len(), 1);
+        assert_eq!(attempt.conflicts[0].fork, "right");
+        assert_eq!(attempt.conflicts[0].path, "src/main.rs");
+        assert_eq!(attempt.conflicts[0].kind.as_deref(), Some("both_modified"));
+        // `left` folded cleanly before the conflict; `right` heads pending.
+        assert_eq!(attempt.folded_forks.len(), 1);
+        assert_eq!(attempt.folded_forks[0].name, "left");
+        assert_eq!(attempt.pending_forks.len(), 1);
+        assert_eq!(attempt.pending_forks[0].name, "right");
+        assert_eq!(
+            ensure_repo(&dir)
+                .expect("repo")
+                .refname_to_id(LATEST_REF)
+                .expect("latest")
+                .to_string(),
+            first.id,
+            "prepare never advances trunk"
+        );
+
+        // The worktree holds the accumulated fold with marker-rendered
+        // conflicts, inside machine-local state.
+        let worktree = attempt.worktree.clone().expect("reconciliation worktree");
+        let worktree_dir = PathBuf::from(&worktree);
+        assert!(worktree_dir.is_dir(), "worktree materialized");
+        assert!(
+            worktree.contains(".stateroot"),
+            "worktree lives under machine-local state: {worktree}"
+        );
+        let rendered = std::fs::read_to_string(worktree_dir.join("src/main.rs")).expect("file");
+        assert!(rendered.contains("<<<<<<<"), "markers rendered: {rendered}");
+        assert!(rendered.contains("left();"), "trunk side present");
+        assert!(rendered.contains("right();"), "fork side present");
+
+        // Continue refuses while markers remain; nothing is published and
+        // the attempt survives for the agent.
+        let error = continue_merge_attempt(&dir, &attempt.id, &[]).expect_err("markers must gate");
+        assert!(
+            error.to_string().contains("conflict markers remain"),
+            "{error}"
+        );
+        assert!(merge_attempt(&dir, &attempt.id).is_ok(), "attempt retained");
+        assert_eq!(
+            ensure_repo(&dir)
+                .expect("repo")
+                .refname_to_id(LATEST_REF)
+                .expect("latest")
+                .to_string(),
+            first.id,
+            "refused continue never advances trunk"
+        );
+
+        // The agent resolves the file in the worktree and continues with
+        // evidence; the reconciled tree is published as one N+1-parent root.
+        write(
+            &worktree_dir,
+            "src/main.rs",
+            "fn main() { left(); right(); }\n",
+        );
+        let (manifest, transition, merged) =
+            continue_merge_attempt(&dir, &attempt.id, &["cargo test -p app".to_string()])
+                .expect("reconciled continue");
+        assert_eq!(merged.len(), 2);
+        assert_eq!(
+            manifest.parents,
+            vec![first.id.clone(), left_tip, right_tip],
+            "trunk + folded + reconciled fork tips"
+        );
+        assert_eq!(
+            transition.evidence["attempt"].as_str().expect("attempt id"),
+            attempt.id
+        );
+        assert_eq!(
+            transition.evidence["agent_evidence"][0].as_str().unwrap(),
+            "cargo test -p app"
+        );
+        let merged_src = std::fs::read_to_string(dir.join("src/main.rs")).expect("trunk file");
+        assert_eq!(merged_src, "fn main() { left(); right(); }\n");
+        assert!(
+            merge_attempt(&dir, &attempt.id).is_err(),
+            "attempt consumed"
+        );
+        assert!(!worktree_dir.exists(), "worktree removed after publication");
+    }
+
+    #[test]
+    fn merge_attempt_abort_removes_only_attempt_state() {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        let (_left, _) = fork_with_change(
+            &dir,
+            &first.id,
+            "left",
+            "src/main.rs",
+            "fn main() { left(); }\n",
+        );
+        let (_right, _) = fork_with_change(
+            &dir,
+            &first.id,
+            "right",
+            "src/main.rs",
+            "fn main() { right(); }\n",
+        );
+        let attempt = prepare_merge_attempt(
+            &dir,
+            &["left".to_string(), "right".to_string()],
+            "coordinator",
+        )
+        .expect("prepare");
+        let worktree = PathBuf::from(attempt.worktree.clone().expect("worktree"));
+        abort_merge_attempt(&dir, &attempt.id).expect("abort");
+        assert!(merge_attempt(&dir, &attempt.id).is_err(), "attempt removed");
+        assert!(!worktree.exists(), "worktree removed on abort");
+        assert_eq!(
+            ensure_repo(&dir)
+                .expect("repo")
+                .refname_to_id(LATEST_REF)
+                .expect("latest")
+                .to_string(),
+            first.id,
+            "abort never touches the trunk"
+        );
+        // Both fork refs survive an abort.
+        let repo = ensure_repo(&dir).expect("repo");
+        assert!(repo
+            .refname_to_id(&format!("{FORKS_REF_PREFIX}left"))
+            .is_ok());
+        assert!(repo
+            .refname_to_id(&format!("{FORKS_REF_PREFIX}right"))
+            .is_ok());
+    }
+
+    /// Fold N independent forks and assert the N+1-parent root and full
+    /// materialization. The arbitrary-N contract (1, 3, 32 here; 2 and 8
+    /// have dedicated tests).
+    fn merge_independent_forks(n: usize) {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        let mut names = Vec::new();
+        for i in 0..n {
+            let name = format!("fork-{i}");
+            let file = format!("src/mod_{i}.rs");
+            let body = format!("pub const M: usize = {i};\n");
+            let (_wt, _) = fork_with_change(&dir, &first.id, &name, &file, &body);
+            names.push(name);
+        }
+        let (manifest, _, merged) = merge_forks(&dir, &names, "kimi").expect("merge");
+        assert_eq!(merged.len(), n);
+        assert_eq!(manifest.parents.len(), n + 1, "trunk plus every fork tip");
+        for i in 0..n {
+            let file = format!("src/mod_{i}.rs");
+            assert!(
+                dir.join(&file).is_file(),
+                "fork-{i} work not materialized: {file}"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_folds_one_fork() {
+        merge_independent_forks(1);
+    }
+
+    #[test]
+    fn merge_folds_three_forks() {
+        merge_independent_forks(3);
+    }
+
+    #[test]
+    fn merge_folds_thirty_two_forks() {
+        merge_independent_forks(32);
+    }
+
+    #[test]
+    fn merge_forks_from_different_trunk_generations() {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        let (_wa, tip_a) =
+            fork_with_change(&dir, &first.id, "fork-a", "src/a.rs", "pub fn a() {}\n");
+        // The trunk advances before fork-b branches off the newer root.
+        write(&dir, "src/main.rs", "fn main() { trunk(); }\n");
+        let (second, _) = create_root(&dir, "cli", "second", None).expect("snap 2");
+        let (_wb, tip_b) =
+            fork_with_change(&dir, &second.id, "fork-b", "src/b.rs", "pub fn b() {}\n");
+
+        let (manifest, _, merged) =
+            merge_forks(&dir, &["fork-a".to_string(), "fork-b".to_string()], "kimi")
+                .expect("cross-generation merge");
+        assert_eq!(merged.len(), 2);
+        assert_eq!(manifest.parents, vec![second.id, tip_a, tip_b]);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("src/main.rs")).expect("main"),
+            "fn main() { trunk(); }\n",
+            "the newer trunk generation must survive the fold"
+        );
+        assert!(dir.join("src/a.rs").is_file());
+        assert!(dir.join("src/b.rs").is_file());
+    }
+
+    #[test]
+    fn merge_dependency_chain_folds_regardless_of_selection_order() {
+        // fork-b's tip descends from fork-a's tip (dependent work); caller
+        // order must not change the outcome.
+        for order in ["forward", "reverse"] {
+            let (_tmp, dir) = project();
+            write(&dir, "src/main.rs", "fn main() {}\n");
+            let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+            let wt_tmp = tempfile::tempdir().expect("wt");
+            let (fork_a, _) = fork_root(&dir, &first.id, Some("fork-a"), "cli").expect("fork");
+            let wt = wt_tmp.path().join("checkout");
+            fork_materialize(&dir, &fork_a, &wt, None).expect("materialize");
+            write(&wt, "src/a.rs", "pub fn a() {}\n");
+            let SnapOutcome::Created(tip_a, _) =
+                snap_if_changed(&wt, "codex", "stage a", None).expect("snap a")
+            else {
+                panic!("fork-a snap");
+            };
+            // Dependent stage: b.rs lands on top of fork-a's tip.
+            write(&wt, "src/b.rs", "pub fn b() {}\n");
+            let SnapOutcome::Created(tip_b, _) =
+                snap_if_changed(&wt, "codex", "stage b", None).expect("snap b")
+            else {
+                panic!("fork-b snap");
+            };
+            // Re-pin the refs: fork-a stays at its own stage; the dependent
+            // line becomes fork-b.
+            let repo = ensure_repo(&dir).expect("repo");
+            repo.reference(
+                &format!("{FORKS_REF_PREFIX}fork-a"),
+                tip_a.id.parse().expect("oid"),
+                true,
+                "fork-a tip",
+            )
+            .expect("pin fork-a");
+            repo.reference(
+                &format!("{FORKS_REF_PREFIX}fork-b"),
+                tip_b.id.parse().expect("oid"),
+                true,
+                "fork-b tip",
+            )
+            .expect("pin fork-b");
+
+            let names = if order == "forward" {
+                vec!["fork-a".to_string(), "fork-b".to_string()]
+            } else {
+                vec!["fork-b".to_string(), "fork-a".to_string()]
+            };
+            let (manifest, _, merged) = merge_forks(&dir, &names, "kimi").expect("chain merge");
+            assert!(
+                dir.join("src/a.rs").is_file() && dir.join("src/b.rs").is_file(),
+                "{order}: both chain stages materialize"
+            );
+            if order == "forward" {
+                assert_eq!(manifest.parents, vec![first.id.clone(), tip_a.id, tip_b.id]);
+                assert_eq!(merged.len(), 2);
+            } else {
+                // Reverse order: folding fork-b first already contains fork-a.
+                assert_eq!(manifest.parents, vec![first.id.clone(), tip_b.id]);
+                assert_eq!(merged.len(), 1);
+                assert_eq!(merged[0].name, "fork-b");
+            }
+        }
+    }
+
+    #[test]
+    fn merge_prepare_rejects_duplicate_selections() {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        let (_wt, _) = fork_with_change(&dir, &first.id, "fork-a", "src/a.rs", "pub fn a() {}\n");
+        let dup = prepare_merge_attempt(
+            &dir,
+            &["fork-a".to_string(), "fork-a".to_string()],
+            "coordinator",
+        )
+        .expect_err("duplicate name must refuse");
+        assert!(dup.to_string().contains("more than once"), "{dup}");
+
+        // Two fork names pinned at the same tip are one input twice.
+        fork_root(&dir, &first.id, Some("twin-a"), "cli").expect("twin-a");
+        fork_root(&dir, &first.id, Some("twin-b"), "cli").expect("twin-b");
+        let dup_tip = prepare_merge_attempt(
+            &dir,
+            &["twin-a".to_string(), "twin-b".to_string()],
+            "coordinator",
+        )
+        .expect_err("duplicate tip must refuse");
+        assert!(
+            dup_tip.to_string().contains("duplicates another"),
+            "{dup_tip}"
+        );
+    }
+
+    #[test]
+    fn merge_attempt_reports_conflict_at_every_fold_position() {
+        for position in 0..3usize {
+            let (_tmp, dir) = project();
+            write(&dir, "src/main.rs", "fn main() {}\n");
+            let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+            // All three forks branch from the same base. Exactly one edits
+            // src/main.rs: the one meant to conflict at `position`.
+            let files = ["src/p0.rs", "src/p1.rs", "src/main.rs"];
+            for (i, file) in files.iter().enumerate() {
+                let name = format!("fork-{i}");
+                let target = if i == position { "src/main.rs" } else { *file };
+                let body = format!("pub const P: usize = {i};\n");
+                let (_wt, _) = fork_with_change(&dir, &first.id, &name, target, &body);
+            }
+            // The trunk moves src/main.rs after the forks branched, so the
+            // fork that edited it conflicts at its fold position.
+            write(&dir, "src/main.rs", "fn main() { trunk(); }\n");
+            create_root(&dir, "cli", "trunk moved", None).expect("snap 2");
+
+            let names: Vec<String> = (0..3).map(|i| format!("fork-{i}")).collect();
+            let attempt = prepare_merge_attempt(&dir, &names, "coordinator").expect("prepare");
+            assert_eq!(attempt.state, "attention", "position {position}");
+            assert_eq!(
+                attempt.conflicts[0].fork,
+                format!("fork-{position}"),
+                "conflict must surface at fold position {position}"
+            );
+            let folded: Vec<&str> = attempt
+                .folded_forks
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect();
+            assert_eq!(folded, names[..position].to_vec(), "position {position}");
+            let pending: Vec<&str> = attempt
+                .pending_forks
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect();
+            assert_eq!(pending, names[position..].to_vec(), "position {position}");
+            abort_merge_attempt(&dir, &attempt.id).expect("abort");
+        }
+    }
+
+    #[test]
+    fn continue_refuses_stale_trunk_and_moved_fork() {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        let (wt, _) = fork_with_change(&dir, &first.id, "fork-a", "src/a.rs", "pub fn a() {}\n");
+        let fork_wt = wt.path().join("checkout");
+
+        let attempt =
+            prepare_merge_attempt(&dir, &["fork-a".to_string()], "coordinator").expect("prepare");
+        // Trunk moves after prepare.
+        write(&dir, "src/trunk.rs", "pub fn t() {}\n");
+        create_root(&dir, "cli", "trunk moved", None).expect("snap 2");
+        let stale = continue_merge_attempt(&dir, &attempt.id, &[]).expect_err("stale trunk");
+        assert!(stale.to_string().contains("stale: trunk moved"), "{stale}");
+        abort_merge_attempt(&dir, &attempt.id).expect("abort stale");
+
+        // Re-prepare against the new trunk, then move the fork ref.
+        let attempt = prepare_merge_attempt(&dir, &["fork-a".to_string()], "coordinator")
+            .expect("re-prepare");
+        write(&fork_wt, "src/a2.rs", "pub fn a2() {}\n");
+        let moved = snap_if_changed(&fork_wt, "codex", "more fork work", None).expect("fork snap");
+        assert!(matches!(moved, SnapOutcome::Created(..)));
+        let stale = continue_merge_attempt(&dir, &attempt.id, &[]).expect_err("stale fork");
+        assert!(
+            stale.to_string().contains("stale: fork `fork-a` moved"),
+            "{stale}"
+        );
+        abort_merge_attempt(&dir, &attempt.id).expect("abort");
+    }
+
+    #[test]
+    fn checkout_abort_restores_pre_merge_tree() {
+        let _hooks = TestCleanupHooks;
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        write(&dir, "staged.txt", "keep-me-staged\n");
+        git_force_track(&dir, "staged.txt");
+        let index_before = index_entries(&dir);
+        // The fork adds two files; the checkout dies after the first write.
+        let wt_tmp = tempfile::tempdir().expect("wt");
+        let (fork_name, _) = fork_root(&dir, &first.id, Some("fork-a"), "cli").expect("fork");
+        let wt = wt_tmp.path().join("checkout");
+        fork_materialize(&dir, &fork_name, &wt, None).expect("materialize");
+        write(&wt, "src/a.rs", "pub fn a() {}\n");
+        write(&wt, "src/z.rs", "pub fn z() {}\n");
+        let snap = snap_if_changed(&wt, "codex", "fork work", None).expect("fork snap");
+        assert!(matches!(snap, SnapOutcome::Created(..)));
+
+        TEST_CHECKOUT_ABORT_AFTER_UPDATES.with(|c| c.set(1));
+        let err = merge_forks(&dir, &["fork-a".to_string()], "kimi")
+            .expect_err("aborted checkout must fail the merge");
+        let text = err.to_string();
+        assert!(!text.is_empty());
+        let repo = ensure_repo(&dir).expect("repo");
+        assert_eq!(
+            repo.refname_to_id(LATEST_REF).expect("latest").to_string(),
+            first.id,
+            "a checkout failure must never advance the trunk"
+        );
+        assert!(
+            !dir.join("src/a.rs").exists() && !dir.join("src/z.rs").exists(),
+            "rollback must remove the partially materialized merge"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("src/main.rs")).expect("main"),
+            "fn main() {}\n",
+            "base file restored byte-for-byte"
+        );
+        assert_eq!(index_entries(&dir), index_before, "git index untouched");
+        // The hook consumed itself, so a retry merges cleanly.
+        merge_forks(&dir, &["fork-a".to_string()], "kimi").expect("retry after rollback");
+        assert!(dir.join("src/a.rs").is_file());
+    }
+
+    #[test]
+    fn merge_attempt_flow_preserves_git_index() {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        write(&dir, "staged.txt", "keep-me-staged\n");
+        git_force_track(&dir, "staged.txt");
+        let before = index_entries(&dir);
+        let (_l, _) = fork_with_change(
+            &dir,
+            &first.id,
+            "left",
+            "src/main.rs",
+            "fn main() { left(); }\n",
+        );
+        let (_r, _) = fork_with_change(
+            &dir,
+            &first.id,
+            "right",
+            "src/main.rs",
+            "fn main() { right(); }\n",
+        );
+        let attempt = prepare_merge_attempt(
+            &dir,
+            &["left".to_string(), "right".to_string()],
+            "coordinator",
+        )
+        .expect("prepare");
+        assert_eq!(
+            index_entries(&dir),
+            before,
+            "prepare must not touch the index"
+        );
+        let worktree = PathBuf::from(attempt.worktree.clone().expect("worktree"));
+        write(&worktree, "src/main.rs", "fn main() { left(); right(); }\n");
+        continue_merge_attempt(&dir, &attempt.id, &[]).expect("continue");
+        assert_eq!(
+            index_entries(&dir),
+            before,
+            "agent-reconciled continue must not touch the index"
+        );
+
+        // Abort path: a fresh conflicted pair, prepared then aborted.
+        let (_c, _) = fork_with_change(&dir, &first.id, "c", "src/main.rs", "fn c() {}\n");
+        let (_d, _) = fork_with_change(&dir, &first.id, "d", "src/main.rs", "fn d() {}\n");
+        let attempt =
+            prepare_merge_attempt(&dir, &["c".to_string(), "d".to_string()], "coordinator")
+                .expect("prepare 2");
+        abort_merge_attempt(&dir, &attempt.id).expect("abort");
+        assert_eq!(
+            index_entries(&dir),
+            before,
+            "abort must not touch the index"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_preserves_tracked_excluded_executable_bit() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_tmp, dir) = project();
+        write(&dir, ".gitignore", "tool.sh\n");
+        write(&dir, "tool.sh", "#!/bin/sh\necho ok\n");
+        std::fs::set_permissions(dir.join("tool.sh"), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        git_force_track(&dir, "tool.sh");
+        let (_wt, _) = fork_with_change(&dir, &first.id, "fork-a", "src/lib.rs", "pub fn a() {}\n");
+        merge_forks(&dir, &["fork-a".to_string()], "kimi").expect("merge");
+        let mode = std::fs::metadata(dir.join("tool.sh"))
+            .expect("meta")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0o111, "executable bit survives: {mode:o}");
+    }
+
+    #[test]
+    fn merge_cleanup_bounded_and_idempotent_for_three_forks() {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        let mut names = Vec::new();
+        for i in 0..3 {
+            let name = format!("fork-{i}");
+            let file = format!("src/f{i}.rs");
+            let (_wt, _) = fork_with_change(&dir, &first.id, &name, &file, "pub fn f() {}\n");
+            names.push(name);
+        }
+        merge_forks(&dir, &names, "kimi").expect("merge");
+        for name in &names {
+            assert!(
+                fork_cleanup_pending(&dir, name).is_some(),
+                "{name} marked cleanup_pending"
+            );
+        }
+        let first = cleanup_merged_forks(&dir, &names).expect("cleanup");
+        assert!(
+            first.iter().all(|r| r.cleaned),
+            "all three cleaned: {first:?}"
+        );
+        let again = cleanup_merged_forks(&dir, &names).expect("idempotent");
+        assert!(again.iter().all(|r| r.cleaned));
+        for name in &names {
+            assert!(fork_cleanup_pending(&dir, name).is_none());
+        }
+    }
+
+    #[test]
+    fn merge_preparation_handles_eight_independent_forks() {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        let mut names = Vec::new();
+        for n in 0..8 {
+            let name = format!("fork-{n}");
+            let file = format!("src/fork_{n}.rs");
+            let body = format!("pub const N: usize = {n};\n");
+            let (_worktree, _) = fork_with_change(&dir, &first.id, &name, &file, &body);
+            names.push(name);
+        }
+        let attempt = prepare_merge_attempt(&dir, &names, "coordinator").expect("prepare");
+        assert_eq!(attempt.state, "ready");
+        let (manifest, _, merged) =
+            continue_merge_attempt(&dir, &attempt.id, &[]).expect("continue eight forks");
+        assert_eq!(merged.len(), 8);
+        assert_eq!(manifest.parents.len(), 9, "trunk plus every fork tip");
+        let repo = ensure_repo(&dir).expect("repo");
+        let tree = repo
+            .find_commit(manifest.id.parse().expect("oid"))
+            .expect("commit")
+            .tree()
+            .expect("tree");
+        for n in 0..8 {
+            assert!(tree
+                .get_path(Path::new(&format!("src/fork_{n}.rs")))
+                .is_ok());
+        }
+    }
+
+    #[test]
     fn merge_conflict_reports_paths_and_creates_no_root() {
         let (_tmp, dir) = project();
         write(&dir, "src/main.rs", "fn main() {}\n");
@@ -2861,6 +5053,9 @@ mod tests {
             "fn main() { println!(\"b\"); }\n",
         );
 
+        write(&dir, "staged.txt", "keep-me-staged\n");
+        git_force_track(&dir, "staged.txt");
+        let index_before = index_entries(&dir);
         let err = merge_forks(&dir, &["fork-a".to_string(), "fork-b".to_string()], "kimi")
             .expect_err("conflicting forks must not merge");
         let text = err.to_string();
@@ -2869,12 +5064,131 @@ mod tests {
             "conflict path not reported: {text}"
         );
         assert!(text.contains("no merge root created"), "{text}");
+        assert_eq!(
+            index_entries(&dir),
+            index_before,
+            "a conflicted merge must leave the git index untouched"
+        );
         let repo = git2::Repository::open(&dir).expect("repo");
         assert_eq!(
             repo.refname_to_id(LATEST_REF).expect("latest").to_string(),
             first.id,
             "trunk moved despite the conflict"
         );
+    }
+
+    #[test]
+    fn merge_keeps_an_explicitly_reconciled_trunk_source_path() {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        let (_wa, _ta) = fork_with_change(
+            &dir,
+            &first.id,
+            "fork-a",
+            "src/main.rs",
+            "fn main() { println!(\"a\"); }\n",
+        );
+        let (_wb, _tb) = fork_with_change(
+            &dir,
+            &first.id,
+            "fork-b",
+            "src/main.rs",
+            "fn main() { println!(\"b\"); }\n",
+        );
+
+        let (manifest, _, _) = merge_forks_resolving(
+            &dir,
+            &["fork-a".to_string(), "fork-b".to_string()],
+            "kimi",
+            &["src/main.rs".to_string()],
+        )
+        .expect("explicit resolution merge");
+        let repo = git2::Repository::open(&dir).expect("repo");
+        let tree = repo
+            .find_commit(manifest.id.parse().expect("oid"))
+            .expect("commit")
+            .tree()
+            .expect("tree");
+        let source = tree
+            .get_path(Path::new("src/main.rs"))
+            .expect("source")
+            .to_object(&repo)
+            .expect("object")
+            .peel_to_blob()
+            .expect("blob");
+        assert_eq!(source.content(), b"fn main() { println!(\"a\"); }\n");
+    }
+
+    #[test]
+    fn merge_resolves_fork_control_plane_records_without_masking_work_conflicts() {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let plan = ".stateroot/plans/plan-parallel.json";
+        let handoff = ".stateroot/handoffs/current.json";
+        write(
+            &dir,
+            plan,
+            &json!({"id":"plan-parallel","status":"approved","updated_at":"2026-09-17T10:00:00Z"})
+                .to_string(),
+        );
+        write(&dir, handoff, &json!({"task":"trunk base"}).to_string());
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+
+        let (fork_name, _) = fork_root(&dir, &first.id, Some("fork-control"), "cli").expect("fork");
+        let wt_tmp = tempfile::tempdir().expect("wt tmp");
+        let wt = wt_tmp.path().join("checkout");
+        fork_materialize(&dir, &fork_name, &wt, None).expect("materialize");
+        write(
+            &wt,
+            plan,
+            &json!({"id":"plan-parallel","status":"done","updated_at":"2026-09-17T11:00:00Z"})
+                .to_string(),
+        );
+        write(&wt, handoff, &json!({"task":"fork execution"}).to_string());
+        write(&wt, "src/fork.rs", "pub fn fork_work() {}\n");
+        snap_if_changed(&wt, "cursor", "fork completed", None).expect("fork snap");
+
+        write(
+            &dir,
+            plan,
+            &json!({"id":"plan-parallel","status":"active","updated_at":"2026-09-17T10:30:00Z"})
+                .to_string(),
+        );
+        write(
+            &dir,
+            handoff,
+            &json!({"task":"trunk continuity"}).to_string(),
+        );
+        write(&dir, "src/trunk.rs", "pub fn trunk_work() {}\n");
+        snap_if_changed(&dir, "codex", "trunk continued", None).expect("trunk snap");
+
+        let (manifest, _, _) = merge_forks(&dir, &[fork_name], "codex").expect("merge");
+        let repo = git2::Repository::open(&dir).expect("repo");
+        let tree = repo
+            .find_commit(manifest.id.parse().expect("oid"))
+            .expect("commit")
+            .tree()
+            .expect("tree");
+        let plan_blob = tree
+            .get_path(Path::new(plan))
+            .expect("plan")
+            .to_object(&repo)
+            .expect("object")
+            .peel_to_blob()
+            .expect("blob");
+        let merged_plan: Value = serde_json::from_slice(plan_blob.content()).expect("plan json");
+        assert_eq!(merged_plan["status"], "done");
+        let handoff_blob = tree
+            .get_path(Path::new(handoff))
+            .expect("handoff")
+            .to_object(&repo)
+            .expect("object")
+            .peel_to_blob()
+            .expect("blob");
+        let merged_handoff: Value =
+            serde_json::from_slice(handoff_blob.content()).expect("handoff json");
+        assert_eq!(merged_handoff["task"], "trunk continuity");
     }
 
     #[test]
@@ -2889,6 +5203,32 @@ mod tests {
     }
 
     // -- Repair-plan failing fixtures (Phase 0): red until their phase lands --
+
+    #[test]
+    fn merge_materializes_after_init_skeleton_and_convenience_files() {
+        // CLI `stateroot init` writes the skeleton + convenience layer before
+        // the first snap. Those files are gitignored in nested rules and
+        // must not turn merge checkout into a conflict.
+        let (_tmp, dir) = project();
+        crate::local_store::init_skeleton(&dir, "ws-merge", "merge", "local").expect("skeleton");
+        write(&dir, "AGENTS.md", "# agents\n");
+        write(&dir, ".claude/commands/stateroot.md", "# cmd\n");
+        write(&dir, ".cursor/rules/stateroot.mdc", "# rule\n");
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        let (_wt, _) = fork_with_change(
+            &dir,
+            &first.id,
+            "fork-a",
+            "src/lib.rs",
+            "pub fn merged() {}\n",
+        );
+        merge_forks(&dir, &["fork-a".to_string()], "kimi").expect("merge");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("src/lib.rs")).expect("merged file"),
+            "pub fn merged() {}\n"
+        );
+    }
 
     #[test]
     fn merge_materializes_the_trunk_working_tree() {
@@ -2906,6 +5246,180 @@ mod tests {
             dir.join("src/lib_a.rs").is_file(),
             "merge advanced the ref but left the trunk working tree without the merged file"
         );
+        let repo = git2::Repository::open(&dir).expect("repo");
+        let statuses = repo.statuses(None).expect("statuses");
+        assert!(
+            statuses.iter().all(|entry| !entry.status().intersects(
+                git2::Status::INDEX_NEW
+                    | git2::Status::INDEX_MODIFIED
+                    | git2::Status::INDEX_DELETED
+                    | git2::Status::INDEX_RENAMED
+                    | git2::Status::INDEX_TYPECHANGE
+            )),
+            "root materialization must not change Git staging state"
+        );
+    }
+
+    #[test]
+    fn merge_preserves_git_tracked_files_excluded_from_roots() {
+        let (_tmp, dir) = project();
+        write(&dir, ".gitignore", ".github/\n");
+        write(&dir, ".github/workflows/ci.yml", "name: CI\n");
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        let repo = git2::Repository::open(&dir).expect("repo");
+        let mut index = repo.index().expect("index");
+        index
+            .add_path(Path::new(".github/workflows/ci.yml"))
+            .expect("stage ignored tracked path");
+        index.write().expect("write index");
+        let tree_id = index.write_tree().expect("tree id");
+        let tree = repo.find_tree(tree_id).expect("git tree");
+        let signature = git2::Signature::now("test", "test@example.com").expect("signature");
+        repo.commit(Some("HEAD"), &signature, &signature, "track CI", &tree, &[])
+            .expect("commit tracked CI");
+        assert!(
+            repo.find_commit(first.id.parse().expect("oid"))
+                .expect("root")
+                .tree()
+                .expect("tree")
+                .get_path(Path::new(".github/workflows/ci.yml"))
+                .is_err(),
+            "ignored paths must stay outside the root tree"
+        );
+        let (_wt, _) = fork_with_change(
+            &dir,
+            &first.id,
+            "fork-a",
+            "src/lib.rs",
+            "pub fn merged() {}\n",
+        );
+
+        merge_forks(&dir, &["fork-a".to_string()], "kimi").expect("merge");
+        assert_eq!(
+            std::fs::read_to_string(dir.join(".github/workflows/ci.yml")).expect("ci file"),
+            "name: CI\n",
+            "a root merge must not delete a Git-tracked path excluded by privacy rules"
+        );
+    }
+
+    #[test]
+    fn merge_preserves_staterootignore_tracked_files() {
+        let (_tmp, dir) = project();
+        write(&dir, ".staterootignore", "assets/keep.bin\n");
+        write(&dir, "assets/keep.bin", "private-bytes");
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        git_force_track(&dir, "assets/keep.bin");
+        assert!(
+            git2::Repository::open(&dir)
+                .expect("repo")
+                .find_commit(first.id.parse().expect("oid"))
+                .expect("root")
+                .tree()
+                .expect("tree")
+                .get_path(Path::new("assets/keep.bin"))
+                .is_err(),
+            "staterootignore paths must stay outside the root tree"
+        );
+        let (_wt, _) = fork_with_change(
+            &dir,
+            &first.id,
+            "fork-a",
+            "src/lib.rs",
+            "pub fn merged() {}\n",
+        );
+        merge_forks(&dir, &["fork-a".to_string()], "kimi").expect("merge");
+        assert_eq!(
+            std::fs::read(dir.join("assets/keep.bin")).expect("kept"),
+            b"private-bytes"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_preserves_ignored_tracked_symlinks() {
+        let (_tmp, dir) = project();
+        write(&dir, ".gitignore", "link-dir/\n");
+        write(&dir, "link-dir/target.txt", "hello\n");
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        std::os::unix::fs::symlink("target.txt", dir.join("link-dir/the-link")).expect("symlink");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        git_force_track(&dir, "link-dir/the-link");
+        let (_wt, _) = fork_with_change(
+            &dir,
+            &first.id,
+            "fork-a",
+            "src/lib.rs",
+            "pub fn merged() {}\n",
+        );
+        merge_forks(&dir, &["fork-a".to_string()], "kimi").expect("merge");
+        let link = dir.join("link-dir/the-link");
+        let meta = std::fs::symlink_metadata(&link).expect("link meta");
+        assert!(
+            meta.file_type().is_symlink(),
+            "ignored symlink must survive"
+        );
+        assert_eq!(
+            std::fs::read_link(&link).expect("read link"),
+            Path::new("target.txt")
+        );
+    }
+
+    #[test]
+    fn merge_backup_skips_untracked_ignored_caches() {
+        let (_tmp, dir) = project();
+        write(&dir, ".gitignore", "target/\n");
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        write(&dir, "target/debug/huge.bin", &"x".repeat(1024 * 1024));
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        let repo = git2::Repository::open(&dir).expect("repo");
+        let tracked = tracked_excluded_disk_paths(&repo, &dir, None).expect("paths");
+        assert!(
+            tracked
+                .iter()
+                .all(|path| !path.components().any(|c| c.as_os_str() == "target")),
+            "untracked ignored caches must not enter the backup set: {tracked:?}"
+        );
+        let (_wt, _) = fork_with_change(
+            &dir,
+            &first.id,
+            "fork-a",
+            "src/lib.rs",
+            "pub fn merged() {}\n",
+        );
+        merge_forks(&dir, &["fork-a".to_string()], "kimi").expect("merge");
+        assert_eq!(
+            std::fs::read(dir.join("target/debug/huge.bin"))
+                .expect("cache")
+                .len(),
+            1024 * 1024
+        );
+    }
+
+    #[test]
+    fn merge_leaves_preexisting_git_index_untouched() {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        write(&dir, "staged.txt", "keep-me-staged\n");
+        git_force_track(&dir, "staged.txt");
+        let (_wt, _) = fork_with_change(
+            &dir,
+            &first.id,
+            "fork-a",
+            "src/lib.rs",
+            "pub fn merged() {}\n",
+        );
+        let before = index_entries(&dir);
+        assert!(
+            before
+                .iter()
+                .any(|(path, _, _)| Path::new(path) == Path::new("staged.txt")),
+            "precondition: staged.txt is in the Git index"
+        );
+        merge_forks(&dir, &["fork-a".to_string()], "kimi").expect("merge");
+        assert_eq!(index_entries(&dir), before);
     }
 
     #[test]
@@ -2974,6 +5488,21 @@ mod tests {
         let wt_path = registered_worktree_path(&dir, "fork-a").expect("registered");
         merge_forks(&dir, &["fork-a".to_string()], "kimi").expect("merge");
         assert!(
+            wt_path.exists(),
+            "merge must retain the worktree until explicit cleanup"
+        );
+        assert!(
+            registered_worktree_path(&dir, "fork-a").is_some(),
+            "registry entry stays until cleanup"
+        );
+        assert!(
+            fork_cleanup_pending(&dir, "fork-a").is_some(),
+            "merge records cleanup_pending instead of blocking on deletion"
+        );
+        let results = cleanup_merged_forks(&dir, &["fork-a".to_string()]).expect("cleanup");
+        assert_eq!(results.len(), 1);
+        assert!(results[0].cleaned, "explicit cleanup should succeed");
+        assert!(
             !wt_path.exists(),
             "merged fork worktree must be removed: {}",
             wt_path.display()
@@ -2981,6 +5510,10 @@ mod tests {
         assert!(
             registered_worktree_path(&dir, "fork-a").is_none(),
             "registry entry must go"
+        );
+        assert!(
+            fork_cleanup_pending(&dir, "fork-a").is_none(),
+            "successful cleanup clears pending"
         );
         // History stays: the fork ref and record survive the cleanup.
         let repo = git2::Repository::open(&dir).expect("repo");
@@ -2993,6 +5526,94 @@ mod tests {
             dir.join(".stateroot/forks/fork-a.json").is_file(),
             "fork record must stay as history"
         );
+    }
+
+    #[test]
+    fn merge_returns_with_pending_cleanup_and_published_root() {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        let (_wt, _tip) =
+            fork_with_change(&dir, &first.id, "fork-a", "src/lib_a.rs", "pub fn a() {}\n");
+        let start = std::time::Instant::now();
+        let (manifest, _, merged) =
+            merge_forks(&dir, &["fork-a".to_string()], "kimi").expect("merge");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "merge must not wait on worktree deletion"
+        );
+        assert_eq!(merged[0].name, "fork-a");
+        let repo = git2::Repository::open(&dir).expect("repo");
+        assert_eq!(
+            repo.refname_to_id(LATEST_REF).expect("latest").to_string(),
+            manifest.id
+        );
+        assert!(fork_cleanup_pending(&dir, "fork-a")
+            .expect("pending")
+            .contains("stateroot merge --cleanup fork-a"));
+    }
+
+    #[test]
+    fn merge_cleanup_timeout_stays_retryable_then_succeeds_idempotently() {
+        let _hooks = TestCleanupHooks;
+        TEST_CLEANUP_BUDGET_MS.with(|c| c.set(80));
+        TEST_CLEANUP_SLEEP_MS.with(|c| c.set(800));
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        let (_wt, _tip) =
+            fork_with_change(&dir, &first.id, "fork-a", "src/lib_a.rs", "pub fn a() {}\n");
+        merge_forks(&dir, &["fork-a".to_string()], "kimi").expect("merge");
+        let wt_path = registered_worktree_path(&dir, "fork-a").expect("registered");
+        let start = std::time::Instant::now();
+        let first_try =
+            cleanup_merged_forks(&dir, &["fork-a".to_string()]).expect("timeout result");
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(400),
+            "cleanup retry must return within the budget"
+        );
+        assert!(!first_try[0].cleaned);
+        assert!(
+            first_try[0]
+                .pending
+                .as_deref()
+                .unwrap_or("")
+                .contains("timed out"),
+            "timeout is recorded as pending: {:?}",
+            first_try[0].pending
+        );
+        assert!(wt_path.exists(), "timeout must leave the worktree in place");
+
+        TEST_CLEANUP_SLEEP_MS.with(|c| c.set(0));
+        TEST_CLEANUP_BUDGET_MS.with(|c| c.set(0));
+        let second = cleanup_merged_forks(&dir, &["fork-a".to_string()]).expect("retry");
+        assert!(second[0].cleaned);
+        assert!(!wt_path.exists());
+        let third = cleanup_merged_forks(&dir, &["fork-a".to_string()]).expect("idempotent");
+        assert!(third[0].cleaned, "missing path counts as already removed");
+        assert!(fork_cleanup_pending(&dir, "fork-a").is_none());
+    }
+
+    #[test]
+    fn merge_cleanup_failure_stays_retryable() {
+        let _hooks = TestCleanupHooks;
+        TEST_CLEANUP_FORCE_ERR.with(|c| c.set(true));
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        let (_wt, _tip) =
+            fork_with_change(&dir, &first.id, "fork-a", "src/lib_a.rs", "pub fn a() {}\n");
+        merge_forks(&dir, &["fork-a".to_string()], "kimi").expect("merge");
+        let failed = cleanup_merged_forks(&dir, &["fork-a".to_string()]).expect("forced fail");
+        assert!(!failed[0].cleaned);
+        assert!(failed[0]
+            .pending
+            .as_deref()
+            .unwrap_or("")
+            .contains("injected cleanup failure"));
+        TEST_CLEANUP_FORCE_ERR.with(|c| c.set(false));
+        let recovered = cleanup_merged_forks(&dir, &["fork-a".to_string()]).expect("recover");
+        assert!(recovered[0].cleaned);
     }
 
     #[test]

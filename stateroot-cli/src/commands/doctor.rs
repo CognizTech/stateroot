@@ -57,17 +57,102 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
             detail: root.display().to_string(),
             hard: true,
         });
-        let handoff = root.join(local_store::HANDOFF_CURRENT_PATH).is_file();
+        let handoff_path = root.join(local_store::HANDOFF_CURRENT_PATH);
+        let handoff = handoff_path.is_file();
+        let handoff_valid = !handoff || local_store::read_handoff_local(&ctx.cwd).is_ok();
         checks.push(Check {
             label: "current handoff".into(),
-            ok: true,
+            ok: handoff_valid,
             detail: if handoff {
-                "present".into()
+                if handoff_valid {
+                    "present".into()
+                } else {
+                    "unreadable — run `stateroot handoff repair`".into()
+                }
             } else {
                 "none yet".into()
             },
             hard: false,
         });
+        let auto_skip = root.join("local/automatic-snapshot-skip.json");
+        if let Ok(text) = std::fs::read_to_string(&auto_skip) {
+            if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                checks.push(Check {
+                    label: "automatic snapshot".into(),
+                    ok: false,
+                    detail: value
+                        .get("detail")
+                        .and_then(Value::as_str)
+                        .unwrap_or("last automatic snapshot exceeded its scan budget")
+                        .to_string(),
+                    hard: false,
+                });
+            }
+        }
+        // Common generated directories that are large and NOT excluded are
+        // the usual cause of a blown automatic-snapshot budget. The count is
+        // hard-capped so doctor itself stays fast on huge trees.
+        let rules = stateroot_core::sync_engine::ignore::IgnoreRules::load(&ctx.cwd);
+        for name in [
+            "node_modules",
+            ".venv",
+            "dist",
+            "target",
+            "build",
+            "__pycache__",
+        ] {
+            let dir = ctx.cwd.join(name);
+            if !dir.is_dir() || rules.is_ignored(name, true) {
+                continue;
+            }
+            let mut entries = 0u64;
+            let mut stack = vec![dir];
+            let capped = 'scan: loop {
+                let Some(dir) = stack.pop() else { break false };
+                let Ok(rd) = std::fs::read_dir(&dir) else {
+                    continue;
+                };
+                for entry in rd.flatten() {
+                    entries += 1;
+                    if entries >= 2_000 {
+                        break 'scan true;
+                    }
+                    if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        stack.push(entry.path());
+                    }
+                }
+            };
+            if entries >= 500 {
+                checks.push(Check {
+                    label: "generated directory".into(),
+                    ok: false,
+                    detail: format!(
+                        "{name}/ holds {} entries and is not ignored — add `{name}/` to the root .gitignore or .staterootignore so automatic snapshots stay bounded",
+                        if capped { "2000+".into() } else { entries.to_string() }
+                    ),
+                    hard: false,
+                });
+            }
+        }
+        // DrvFs-mounted working copies (WSL `/mnt/<drive>`) have coarse stat
+        // semantics: scans cost more and mtime races are likelier.
+        if cfg!(target_os = "linux") {
+            let on_mount = ctx
+                .cwd
+                .components()
+                .take(2)
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                == ["/", "mnt"];
+            if on_mount && std::env::var_os("WSL_DISTRO_NAME").is_some() {
+                checks.push(Check {
+                    label: "filesystem".into(),
+                    ok: true,
+                    detail: "WSL-mounted working copy — automatic snapshots run with bounded scans; keep generated trees ignored".into(),
+                    hard: false,
+                });
+            }
+        }
     } else {
         checks.push(Check {
             label: "project".into(),
@@ -210,6 +295,15 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
         // — duplicate managed blocks, last captured checkpoint per harness,
         // and the legacy outbox pile.
         checks.extend(continuity_chain_checks(&home, &ctx.cwd));
+    }
+
+    for (label, ok, detail) in super::editor_extensions::doctor_checks(ctx).await {
+        checks.push(Check {
+            label,
+            ok,
+            detail,
+            hard: false,
+        });
     }
 
     let mut hard_failures = 0;
