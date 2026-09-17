@@ -6,6 +6,12 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 ext="$root/editors/vscode"
 dist="${1:-"$root/dist"}"
+# Normalize to absolute before cd: vsce resolves --out against the extension
+# directory and does not create missing parents.
+case "$dist" in
+  /*) ;;
+  *) dist="$root/$dist" ;;
+esac
 mkdir -p "$dist"
 
 version="$(node -p "require('$ext/package.json').version")"
