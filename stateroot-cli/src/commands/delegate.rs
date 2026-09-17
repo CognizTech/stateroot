@@ -537,6 +537,14 @@ fn worker(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
         .map(PathBuf::from)
         .unwrap_or_else(|| ctx.cwd.clone());
     let started = std::time::Instant::now();
+    // The attempt this worker is serving, read from the reservation that
+    // spawned it. A same-key retry re-reserves the record with a higher
+    // attempt while a slow capture from an earlier attempt may still be
+    // in flight — the guard below stops that late write from clobbering
+    // the newer reservation.
+    let my_attempt = load_record(&record_root, record_id)
+        .and_then(|(_, record)| record.get("attempt").and_then(Value::as_u64))
+        .unwrap_or(1);
     let result = worker_run(ctx, args, to, task);
     match result {
         Ok((id, output)) => {
@@ -548,6 +556,7 @@ fn worker(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
             finalize(
                 &record_root,
                 record_id,
+                my_attempt,
                 outcome,
                 output.status.code(),
                 started.elapsed().as_millis(),
@@ -562,7 +571,7 @@ fn worker(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
             // Outcome → immutable root (repair Phase 6B): a delegated task
             // is not terminal until its worktree is captured into the fork
             // lineage. Failed outcomes capture too (salvage semantics).
-            capture_outcome_root(&ctx.cwd, &record_root, record_id, &id);
+            capture_outcome_root(&ctx.cwd, &record_root, record_id, &id, my_attempt);
             episodic_lineage(
                 &record_root,
                 &id,
@@ -581,6 +590,7 @@ fn worker(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
             let _ = finalize(
                 &record_root,
                 record_id,
+                my_attempt,
                 "failed",
                 None,
                 started.elapsed().as_millis(),
@@ -595,10 +605,21 @@ fn worker(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
 /// root — completion/cancellation is not terminal until this lands
 /// (best-effort: the error is recorded in the record's events, never
 /// silently dropped on the floor).
-fn capture_outcome_root(work_dir: &Path, record_root: &Path, record_id: &str, harness: &str) {
+fn capture_outcome_root(
+    work_dir: &Path,
+    record_root: &Path,
+    record_id: &str,
+    harness: &str,
+    attempt: u64,
+) {
     let Some((path, mut record)) = load_record(record_root, record_id) else {
         return;
     };
+    // Attempt guard (see finalize): a re-reserved record belongs to a newer
+    // attempt; the older attempt's root pointer must not clobber it.
+    if record.get("attempt").and_then(Value::as_u64) != Some(attempt) {
+        return;
+    }
     match stateroot_core::roots::snap_if_changed(
         work_dir,
         harness,
@@ -670,6 +691,7 @@ fn worker_run(
 fn finalize(
     record_root: &Path,
     record_id: &str,
+    attempt: u64,
     outcome: &str,
     exit_code: Option<i32>,
     duration_ms: u128,
@@ -678,6 +700,12 @@ fn finalize(
     let Some((path, mut record)) = load_record(record_root, record_id) else {
         anyhow::bail!("worker record `{record_id}` is gone — cannot finalize");
     };
+    // Attempt guard: a same-key retry may have re-reserved the record while
+    // this worker was finishing. A late write from the older attempt must
+    // never overwrite the newer reservation.
+    if record.get("attempt").and_then(Value::as_u64) != Some(attempt) {
+        return Ok(());
+    }
     if let Some(log_rel) = record.get("log").and_then(Value::as_str) {
         let log_path = record_root.join(log_rel);
         use std::io::Write as _;
@@ -976,7 +1004,8 @@ fn cancel(ctx: &Ctx, id: &str) -> Result<()> {
         .and_then(Value::as_str)
         .map(PathBuf::from)
         .unwrap_or_else(|| ctx.cwd.clone());
-    capture_outcome_root(&work_dir, &ctx.cwd, &record_id, &harness);
+    let cancel_attempt = record.get("attempt").and_then(Value::as_u64).unwrap_or(1);
+    capture_outcome_root(&work_dir, &ctx.cwd, &record_id, &harness, cancel_attempt);
     let Some((path, mut record)) = load_record(&ctx.cwd, &record_id) else {
         anyhow::bail!("delegation record `{record_id}` vanished mid-cancel");
     };
