@@ -828,11 +828,6 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let project = ctx.require_project()?;
 
-    // Dual-mode compiler: try agentic merge before rendering (non-fatal).
-    if !deterministic {
-        let _ = super::compiler::try_agentic(ctx, false).await;
-    }
-
     // An explicit resume harness is direct local evidence. Persist it before
     // duplicate-delivery suppression so even an early return refreshes the
     // active actor marker.
@@ -859,6 +854,13 @@ skipping duplicate. If this session has no digest in context, pass --force to re
             );
             return Ok(());
         }
+    }
+
+    // Only a delivery that will actually render should spend time attempting
+    // the optional agentic merge.  Running it first can exceed the retry
+    // debounce and turn an immediate duplicate resume into a second digest.
+    if !deterministic {
+        let _ = super::compiler::try_agentic(ctx, false).await;
     }
 
     let (handoff, _handoff_source) = fetch_handoff(&ctx.cwd);

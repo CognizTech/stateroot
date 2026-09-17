@@ -2437,7 +2437,7 @@ mod tests {
             .expect("kimi row");
         assert_eq!(entry.delegation.mode, "cli");
         let argv = build_argv_from_spec(&entry.delegation, "do the thing").expect("argv");
-        assert_eq!(argv, vec!["kimi", "--yolo", "--prompt", "do the thing"]);
+        assert_eq!(argv, vec!["kimi", "--prompt", "do the thing"]);
     }
 
     #[test]
