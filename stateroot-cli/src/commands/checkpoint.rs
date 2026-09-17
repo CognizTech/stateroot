@@ -21,6 +21,8 @@ pub fn run(ctx: &Ctx, note_text: &str, files: &[String]) -> anyhow::Result<()> {
     // The next harness should see who worked last even when no formal
     // handoff exists — stamp the current packet (additive, in place).
     local_store::stamp_handoff_activity(&ctx.cwd, LOCAL_HARNESS, "checkpoint");
+    // Telemetry: a successful checkpoint is qualifying daily activity.
+    crate::telemetry::activity(&ctx.config_dir, &ctx.cwd, None);
     // Lineage is automatic, not agent-remembered: real work that moved the
     // project tree becomes a root here, carrying this note as its reason.
     // `.stateroot/` bookkeeping never creates one.
@@ -63,5 +65,7 @@ pub(crate) async fn record_checkpoint(
     });
     local_store::append_episodic(&ctx.cwd, &record)?;
     local_store::stamp_handoff_activity(&ctx.cwd, harness, "checkpoint");
+    // Telemetry: a successful checkpoint is qualifying daily activity.
+    crate::telemetry::activity(&ctx.config_dir, &ctx.cwd, Some(harness));
     Ok(true)
 }

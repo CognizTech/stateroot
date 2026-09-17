@@ -268,6 +268,13 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
                         },
                     ) {
                         print_hook_injection(quirk, canonical, &digest);
+                        // Compact-boundary digest delivery counts as
+                        // continuity delivery (deduped per day/install).
+                        crate::telemetry::continuity_delivered(
+                            &ctx.config_dir,
+                            project_dir,
+                            quirk.id,
+                        );
                     }
                 }
                 Ok(code)
@@ -791,6 +798,11 @@ async fn resume_output(
         return Ok(0);
     };
     print_hook_injection(quirk, canonical, &digest);
+    // Telemetry: a non-empty continuity digest was just emitted in a
+    // recognized harness attached to an initialized project. Local append
+    // only — hooks never wait on the network. Dedup makes compaction
+    // re-injection and duplicate hook events idempotent.
+    crate::telemetry::continuity_delivered(&ctx.config_dir, project_dir, quirk.id);
     let content_fp = digest_delivery::content_fingerprint(project_dir);
     if identity_event_marks(quirk, canonical) {
         digest_delivery::mark_delivered(
@@ -1019,6 +1031,8 @@ async fn checkpoint_from_spool(
         }
         if let Some(digest) = hook_digest(&hook_ctx.config_dir, project_dir, quirk.id) {
             print_hook_injection(quirk, canonical, &digest);
+            // Post-compaction re-injection delivered a non-empty digest.
+            crate::telemetry::continuity_delivered(&hook_ctx.config_dir, project_dir, quirk.id);
         }
     }
 

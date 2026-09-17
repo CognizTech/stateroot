@@ -44,6 +44,7 @@ pub mod snap_context;
 pub mod soul;
 pub mod soul_sync;
 pub mod sync_engine;
+pub mod telemetry;
 pub mod todo_federation;
 pub mod tombstones;
 pub mod transcripts;

@@ -1,76 +1,72 @@
-//! First-run install/update telemetry: one anonymous GET when the binary's
-//! version differs from the last seen one. This is the channel-agnostic floor
-//! — installers, extension flows, direct binary copies, and manual updates all
-//! end with someone *running* the CLI, so the CLI itself is the only place
-//! that counts every path.
+//! CLI glue for the core telemetry pipeline (see `stateroot_core::telemetry`
+//! for the metric definitions and privacy contract).
 //!
-//! Contract: detached (never blocks the command), 3s cap, every error
-//! swallowed, `STATEROOT_NO_PING=1` opts out, and development builds
-//! (`-dev.*`) never ping. One attempt per version change per machine: the
-//! marker is written before firing, so an offline machine is not retried —
-//! the floor is installs that happened and could reach us, never an exact
-//! census.
+//! Everything here is fail-silent: telemetry never fails, delays, or alters a
+//! StateRoot operation. Acquisition (`install_observed`) is spooled on version
+//! change; every later safe entrypoint kicks the detached single-flight drain.
+//! Hook paths append locally only — they never touch the network.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-/// Default ping endpoint (override in tests via STATEROOT_PING_URL).
-const PING_URL: &str = "https://stateroot.dev/api/install-ping";
-const MARKER_NAME: &str = "last_seen_version";
+use stateroot_core::telemetry as core;
 
-fn marker_path(config_dir: &Path) -> PathBuf {
-    config_dir.join("local").join(MARKER_NAME)
+use super::cli::BUILD_VERSION;
+use super::commands::{detached, Ctx};
+
+/// Default ingestion endpoint (tests override via STATEROOT_TELEMETRY_URL).
+pub const TELEMETRY_URL: &str = "https://stateroot.dev/api/telemetry/v1/event";
+
+/// Endpoint resolution (env override is the test seam).
+pub fn endpoint() -> String {
+    std::env::var("STATEROOT_TELEMETRY_URL").unwrap_or_else(|_| TELEMETRY_URL.to_string())
 }
 
-fn os_target() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "windows-x64"
-    } else if cfg!(target_os = "macos") {
-        "macos-aarch64"
-    } else {
-        "linux-x64"
-    }
+/// Spool the install/update acquisition event when the version changed.
+/// Replaces the legacy one-shot GET ping: the marker lives in the versioned
+/// telemetry state now, so offline installs are durably queued instead of
+/// permanently lost. Local-only; never blocks.
+pub fn observe_install(config_dir: &Path, version: &str) {
+    let _ = core::observe_install(config_dir, version, "cli");
 }
 
-fn ping_url(version: &str, kind: &str, from: &str) -> String {
-    let base = std::env::var("STATEROOT_PING_URL").unwrap_or_else(|_| PING_URL.to_string());
-    let mut url = format!("{base}?os={}&v={version}&via=cli&kind={kind}", os_target());
-    if !from.is_empty() {
-        url.push_str(&format!("&from={from}"));
+/// Kick the detached single-flight drain when queued work is due. Cheap: one
+/// directory scan plus a state read; a fresh lock or active backoff never
+/// spawns. Spawn failure is recorded in the telemetry dir (never silent).
+pub fn kick_drain(ctx: &Ctx) {
+    if cfg!(test) || std::env::var_os("STATEROOT_TEST_CMD_PROBES").is_some() {
+        return;
     }
-    url
-}
-
-/// Fire one fail-silent ping when `version` differs from the marker.
-/// The returned task must be awaited (bounded by the client's 3s timeout) —
-/// otherwise a fast command like `--version` would exit before the ping
-/// lands, and it is the most common first command after a manual install.
-pub fn maybe_ping(config_dir: &Path, version: &str) -> Option<tokio::task::JoinHandle<()>> {
-    if std::env::var_os("STATEROOT_NO_PING").is_some() || version.contains("-dev.") {
-        return None;
+    if !core::allowed(BUILD_VERSION) || !core::kick_needed(&ctx.config_dir) {
+        return;
     }
-    let marker = marker_path(config_dir);
-    let last = std::fs::read_to_string(&marker)
-        .ok()
-        .map(|s| s.trim().to_string());
-    if last.as_deref() == Some(version) {
-        return None;
-    }
-    let kind = if last.is_none() { "install" } else { "update" };
-    let from = last.unwrap_or_default();
-    // Record before firing: one attempt per version change, even offline.
-    if let Some(parent) = marker.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(&marker, format!("{version}\n"));
-    let url = ping_url(version, kind, &from);
-    Some(tokio::spawn(async move {
-        if let Ok(client) = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(3))
-            .build()
+    core::clear_stale_drain_lock(&ctx.config_dir);
+    let log = core::state_dir(&ctx.config_dir).join("drain-spawn.log");
+    if let Err(err) = detached::spawn_self(&["_drain-telemetry".to_string()], &ctx.cwd, &log) {
+        let line = serde_json::json!({
+            "ts": stateroot_core::local_store::now_rfc3339(),
+            "error": format!("{err:#}"),
+        });
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
         {
-            let _ = client.get(url).send().await;
+            use std::io::Write as _;
+            let _ = file.write_all(format!("{line}\n").as_bytes());
         }
-    }))
+    }
+}
+
+/// Continuity digest actually delivered in `harness` (hook injection printed
+/// / explicit resume delivered). Local append only — safe on hook latency.
+pub fn continuity_delivered(config_dir: &Path, project_dir: &Path, harness: &str) {
+    let _ = core::continuity_delivered(config_dir, project_dir, harness, BUILD_VERSION);
+}
+
+/// Qualifying daily activity (checkpoint/root boundary, handoff write/accept,
+/// completed delegation). Never activates, never transitions.
+pub fn activity(config_dir: &Path, project_dir: &Path, harness: Option<&str>) {
+    let _ = core::record_activity(config_dir, project_dir, harness, BUILD_VERSION);
 }
 
 #[cfg(test)]
@@ -100,121 +96,23 @@ mod tests {
         }
     }
 
-    /// One-shot HTTP sink: accepts a single request and yields its target
-    /// (`/path?query`). No framework, no async, no real network.
-    fn one_shot_server() -> (String, std::sync::mpsc::Receiver<String>) {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        let addr = format!("http://{}", listener.local_addr().unwrap());
-        std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                use std::io::Read as _;
-                let mut buf = [0u8; 4096];
-                let n = stream.read(&mut buf).unwrap_or(0);
-                let request = String::from_utf8_lossy(&buf[..n]);
-                let target = request
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .split_whitespace()
-                    .nth(1)
-                    .unwrap_or("")
-                    .to_string();
-                use std::io::Write as _;
-                let _ = stream.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
-                let _ = tx.send(target);
-            }
-        });
-        (addr, rx)
-    }
-
-    #[tokio::test]
-    async fn install_pings_once_with_install_kind_and_records_marker() {
-        let (url, rx) = one_shot_server();
-        let dir = tempfile::tempdir().unwrap();
-        // The ping URL is captured synchronously inside maybe_ping, so the
-        // guards only need to live for the call — never across the await.
-        let handle = {
-            let _lock = ENV_LOCK.lock().unwrap();
-            let _url = EnvGuard::set("STATEROOT_PING_URL", &url);
-            maybe_ping(dir.path(), "9.9.9")
-        };
-        handle.expect("install pings").await.unwrap();
-        let target = rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("one request");
-        assert!(target.contains("v=9.9.9"), "{target}");
-        assert!(target.contains("via=cli"), "{target}");
-        assert!(target.contains("kind=install"), "{target}");
-        assert!(target.contains(&format!("os={}", os_target())), "{target}");
-        assert_eq!(
-            std::fs::read_to_string(marker_path(dir.path()))
-                .unwrap()
-                .trim(),
-            "9.9.9"
-        );
-
-        // Same version again: silent.
-        assert!(maybe_ping(dir.path(), "9.9.9").is_none());
-        assert!(rx
-            .recv_timeout(std::time::Duration::from_millis(300))
-            .is_err());
-    }
-
-    #[tokio::test]
-    async fn update_pings_with_update_kind_and_from() {
-        let (url, rx) = one_shot_server();
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("local")).unwrap();
-        std::fs::write(marker_path(dir.path()), "0.1.0\n").unwrap();
-        let handle = {
-            let _lock = ENV_LOCK.lock().unwrap();
-            let _url = EnvGuard::set("STATEROOT_PING_URL", &url);
-            maybe_ping(dir.path(), "0.2.0")
-        };
-        handle.expect("update pings").await.unwrap();
-        let target = rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("one request");
-        assert!(target.contains("kind=update"), "{target}");
-        assert!(target.contains("from=0.1.0"), "{target}");
-        assert!(target.contains("v=0.2.0"), "{target}");
+    #[test]
+    fn endpoint_defaults_and_overrides() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        assert_eq!(endpoint(), TELEMETRY_URL);
+        let _guard = EnvGuard::set("STATEROOT_TELEMETRY_URL", "http://127.0.0.1:9/event");
+        assert_eq!(endpoint(), "http://127.0.0.1:9/event");
     }
 
     #[test]
-    fn opt_out_and_dev_builds_never_ping() {
+    fn observe_install_is_fail_silent_and_local() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let (url, rx) = one_shot_server();
-        let _url = EnvGuard::set("STATEROOT_PING_URL", &url);
+        let _force = EnvGuard::set(core::FORCE_ENV, "1");
         let dir = tempfile::tempdir().unwrap();
-
-        let no_ping = EnvGuard::set("STATEROOT_NO_PING", "1");
-        assert!(maybe_ping(dir.path(), "9.9.9").is_none());
-        drop(no_ping);
-        assert!(maybe_ping(dir.path(), "9.9.9-dev.local").is_none());
-        assert!(maybe_ping(dir.path(), "9.9.9-dev.171").is_none());
-        assert!(rx
-            .recv_timeout(std::time::Duration::from_millis(300))
-            .is_err());
-    }
-
-    #[tokio::test]
-    async fn marker_is_recorded_even_when_the_endpoint_fails() {
-        let dir = tempfile::tempdir().unwrap();
-        // Nothing listens here — the ping fails, the marker still lands.
-        let handle = {
-            let _lock = ENV_LOCK.lock().unwrap();
-            let _url = EnvGuard::set("STATEROOT_PING_URL", "http://127.0.0.1:9");
-            maybe_ping(dir.path(), "9.9.9")
-        };
-        if let Some(handle) = handle {
-            handle.await.unwrap();
-        }
-        assert_eq!(
-            std::fs::read_to_string(marker_path(dir.path()))
-                .unwrap()
-                .trim(),
-            "9.9.9"
-        );
+        observe_install(dir.path(), "9.9.9");
+        // One queued event, version marker moved into the telemetry state.
+        assert_eq!(core::pending_batch(dir.path(), 10).len(), 1);
+        observe_install(dir.path(), "9.9.9");
+        assert_eq!(core::pending_batch(dir.path(), 10).len(), 1);
     }
 }
