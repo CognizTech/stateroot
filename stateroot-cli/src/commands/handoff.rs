@@ -1108,10 +1108,25 @@ pub async fn accept(ctx: &Ctx, by: &str) -> anyhow::Result<()> {
 /// `stateroot handoff list`.
 pub async fn list(ctx: &Ctx) -> anyhow::Result<()> {
     ctx.require_project()?;
-    let packets = local_store::list_handoffs_local(&ctx.cwd)?;
+    let mut packets = local_store::list_handoffs_local(&ctx.cwd)?;
     if packets.is_empty() {
         println!("no handoffs recorded yet (local)");
         return Ok(());
+    }
+    // The current packet stays pinned to the top even when a repair restored
+    // an older history entry — it is the handoff `show` renders by default.
+    let current_seq = local_store::read_handoff_local(&ctx.cwd)
+        .ok()
+        .flatten()
+        .and_then(|packet| packet.get("seq")?.as_i64());
+    if let Some(seq) = current_seq {
+        if let Some(position) = packets
+            .iter()
+            .position(|packet| packet.get("seq").and_then(|v| v.as_i64()) == Some(seq))
+        {
+            let packet = packets.remove(position);
+            packets.insert(0, packet);
+        }
     }
     println!(
         "{:<6} {:<22} {:<12} {:<12} PHASE",
@@ -1136,7 +1151,12 @@ pub async fn list(ctx: &Ctx) -> anyhow::Result<()> {
             .get("current_phase")
             .and_then(|v| v.as_str())
             .unwrap_or("-");
-        println!("{seq:<6} {created:<22} {from:<12} {to:<12} {phase}");
+        let marker = if Some(seq) == current_seq {
+            " ← current"
+        } else {
+            ""
+        };
+        println!("{seq:<6} {created:<22} {from:<12} {to:<12} {phase}{marker}");
     }
     Ok(())
 }

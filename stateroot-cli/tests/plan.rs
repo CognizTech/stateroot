@@ -396,3 +396,64 @@ fn plan_record_from_stdin_and_title_from_heading() {
         .assert()
         .failure();
 }
+
+#[test]
+fn plan_list_is_newest_first_with_active_pinned() {
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+
+    let first = record_plan(
+        config_home.path(),
+        user_home.path(),
+        project.path(),
+        "aaa-first",
+        "# aaa-first\n\nDo the first thing.\n",
+    );
+    let second = record_plan(
+        config_home.path(),
+        user_home.path(),
+        project.path(),
+        "zzz-second",
+        "# zzz-second\n\nDo the second thing.\n",
+    );
+    // Activate the OLDER plan: the pin must outrank pure recency.
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["plan", "approve", &first])
+        .assert()
+        .success();
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["plan", "activate", &first])
+        .assert()
+        .success();
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["plan", "list"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "list: {stdout}");
+    assert!(
+        lines[0].contains(&first) && lines[0].contains("active"),
+        "active plan pinned on top: {stdout}"
+    );
+    assert!(lines[1].contains(&second), "newest draft next: {stdout}");
+
+    // Done with the active plan: the remaining list is strictly newest-first.
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["plan", "done", &first])
+        .assert()
+        .success();
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["plan", "list"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(
+        lines[0].contains(&second),
+        "after done, newest first: {stdout}"
+    );
+    assert!(lines[1].contains(&first), "oldest last: {stdout}");
+}

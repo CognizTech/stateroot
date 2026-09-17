@@ -92,10 +92,18 @@ pub fn record(
 /// Run `stateroot plan list`.
 pub fn list(ctx: &Ctx) -> anyhow::Result<()> {
     ctx.require_project()?;
-    let all = plans::list(&ctx.cwd);
+    let mut all = plans::list(&ctx.cwd);
     if all.is_empty() {
         println!("no plans recorded — `stateroot plan record --file <path>`");
         return Ok(());
+    }
+    // The active plan stays pinned to the top even when it is not the
+    // newest — "what am I executing?" outranks "what is latest?".
+    if let Some((active_meta, _)) = plans::active(&ctx.cwd) {
+        if let Some(position) = all.iter().position(|m| m.id == active_meta.id) {
+            let meta = all.remove(position);
+            all.insert(0, meta);
+        }
     }
     for meta in &all {
         let todos = stateroot_core::todo_federation::plan_todo_progress(&ctx.cwd, &meta.id)

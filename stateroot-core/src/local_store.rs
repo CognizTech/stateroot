@@ -719,7 +719,7 @@ pub fn update_handoff_current(
     Ok(true)
 }
 
-/// List local handoff history packets, oldest first.
+/// List local handoff history packets, newest first.
 pub fn list_handoffs_local(project_dir: &Path) -> Result<Vec<Value>, LocalStoreError> {
     let dir = root(project_dir).join(HANDOFF_HISTORY_DIR);
     let mut packets = Vec::new();
@@ -737,6 +737,9 @@ pub fn list_handoffs_local(project_dir: &Path) -> Result<Vec<Value>, LocalStoreE
         }
     }
     names.sort();
+    // History lists newest first: the "what is latest?" question is the
+    // common case; filename timestamps make lexicographic == chronological.
+    names.reverse();
     for path in names {
         let text = std::fs::read_to_string(&path).map_err(io_err(&path))?;
         let value = serde_json::from_str(&text).map_err(json_err(&path))?;
@@ -1151,6 +1154,21 @@ mod tests {
         assert_eq!(read["seq"], 1);
         let history = list_handoffs_local(tmp.path()).expect("history");
         assert_eq!(history.len(), 1);
+
+        // History lists newest first. Harness names are chosen so the
+        // filename tiebreak agrees with the timestamp order.
+        let second = serde_json::json!({
+            "schema_version": SCHEMA_HANDOFF_V1,
+            "project_id": "p",
+            "seq": 2,
+            "created_at": "2026-07-18T12:05:00Z",
+            "created_by_harness": "zzz-harness",
+        });
+        write_handoff_local(tmp.path(), &second).expect("write 2");
+        let history = list_handoffs_local(tmp.path()).expect("history 2");
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0]["seq"], 2, "newest first");
+        assert_eq!(history[1]["seq"], 1);
     }
 
     #[test]

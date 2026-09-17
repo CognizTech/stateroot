@@ -211,7 +211,7 @@ pub fn record(
     Ok(meta)
 }
 
-/// Every plan sidecar, oldest first.
+/// Every plan sidecar, newest first.
 pub fn list(project_dir: &Path) -> Vec<PlanMeta> {
     let Ok(entries) = std::fs::read_dir(plans_dir(project_dir)) else {
         return Vec::new();
@@ -222,7 +222,7 @@ pub fn list(project_dir: &Path) -> Vec<PlanMeta> {
         .filter_map(|e| serde_json::from_str(&std::fs::read_to_string(e.path()).ok()?).ok())
         .filter(|m: &PlanMeta| m.schema_version == SCHEMA_PLAN_V1)
         .collect();
-    out.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+    out.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
     out
 }
 
@@ -486,5 +486,18 @@ mod tests {
         let dir = tempfile::tempdir().expect("dir");
         assert!(record(dir.path(), "T", "cli", None, "  \n").is_err());
         assert!(record(dir.path(), "  ", "cli", None, "# T\n").is_err());
+    }
+
+    #[test]
+    fn list_is_newest_first() {
+        let dir = tempfile::tempdir().expect("dir");
+        let first = record_plan(dir.path(), "aaa-first");
+        let second = record_plan(dir.path(), "zzz-second");
+        let all = list(dir.path());
+        assert_eq!(all.len(), 2);
+        // Distinct timestamps: newest first. Same-second tie: id desc puts
+        // the zzz slug first. Both branches agree for these titles.
+        assert_eq!(all[0].id, second.id);
+        assert_eq!(all[1].id, first.id);
     }
 }

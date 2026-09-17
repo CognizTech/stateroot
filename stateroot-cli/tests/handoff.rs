@@ -995,3 +995,39 @@ fn input_unknown_key_error_names_key_and_allowed_fields() {
         .join(".stateroot/handoffs/current.json")
         .exists());
 }
+
+#[test]
+fn handoff_list_is_newest_first_with_current_marked() {
+    let (config, home, project) = project();
+    for (name, task) in [("first.json", "first task"), ("second.json", "second task")] {
+        let input = write_json(
+            project.path(),
+            name,
+            &json!({
+                "objective":"durable goal",
+                "task":task,
+                "context_summary":format!("Verified context for {task}."),
+                "failures":[]
+            }),
+        );
+        stateroot(config.path(), home.path(), project.path())
+            .args([
+                "handoff", "write", "--from", "codex", "--to", "codex", "--input", &input,
+            ])
+            .assert()
+            .success();
+    }
+
+    let out = stateroot(config.path(), home.path(), project.path())
+        .args(["handoff", "list"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 3, "header + 2 rows: {stdout}");
+    assert!(
+        lines[1].starts_with('2') && lines[1].contains("current"),
+        "newest (current) first: {stdout}"
+    );
+    assert!(lines[2].starts_with('1'), "oldest last: {stdout}");
+}
