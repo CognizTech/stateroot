@@ -1511,10 +1511,9 @@ pub fn fork_materialize(
         wt_repo.set_head_detached(tip)?;
         // `worktree add` honors the host's autocrlf (smudge filters), which
         // would leave CRLF bytes on Windows and make every untouched file
-        // differ from its root blob at the next snap. Re-materialize the tip
-        // tree byte-exact, same contract as trunk merge checkouts.
-        let tip_tree = wt_repo.find_commit(tip)?.tree()?.id();
-        checkout_root_tree(&wt_repo, worktree_path, tip_tree)?;
+        // differ from its root blob at the next snap. Rewrite the tip tree
+        // byte-exact, same contract as trunk merge checkouts.
+        rewrite_workdir_byte_exact(&wt_repo, tip, worktree_path)?;
         if let Ok(mut branch) = repo.find_branch(&tmp_branch, git2::BranchType::Local) {
             branch.delete()?;
         }
@@ -2944,6 +2943,40 @@ thread_local! {
     /// Abort a checkout after this many file updates (0 = never). Consumed
     /// on firing so rollback checkouts run clean.
     static TEST_CHECKOUT_ABORT_AFTER_UPDATES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Write every blob of `tree` into `dir` as raw bytes — no filters, no
+/// stat-cache shortcuts, no baseline semantics. Root trees never contain
+/// symlinks (`build_tree` skips them), so every entry is a regular file.
+/// Existing files are rewritten in place, preserving their permissions.
+fn rewrite_workdir_byte_exact(
+    repo: &Repository,
+    tree_commit: git2::Oid,
+    dir: &Path,
+) -> Result<(), RootsError> {
+    let tree = repo.find_commit(tree_commit)?.tree()?;
+    let mut entries: Vec<(String, git2::Oid)> = Vec::new();
+    tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
+        if entry.kind() == Some(git2::ObjectType::Blob) {
+            let rel = format!("{}{}", root, entry.name().unwrap_or(""));
+            entries.push((rel, entry.id()));
+        }
+        git2::TreeWalkResult::Ok
+    })?;
+    for (rel, oid) in entries {
+        let blob = repo.find_blob(oid)?;
+        let path = dir.join(&rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let needs_write = std::fs::read(&path)
+            .map(|bytes| bytes != blob.content())
+            .unwrap_or(true);
+        if needs_write {
+            std::fs::write(&path, blob.content())?;
+        }
+    }
+    Ok(())
 }
 
 /// Checkout a root tree into the trunk working directory without rewriting
@@ -4684,6 +4717,42 @@ mod tests {
         );
         assert!(dir.join("src/a.rs").is_file());
         assert!(dir.join("src/b.rs").is_file());
+    }
+
+    #[test]
+    fn merge_is_byte_exact_under_autocrlf() {
+        // A Windows host commonly runs with core.autocrlf=true. Roots are a
+        // content-addressed byte store: fork materialization and merge
+        // materialization must write raw blob bytes, never smudged ones.
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        {
+            let repo = ensure_repo(&dir).expect("repo");
+            let mut config = repo.config().expect("config");
+            config.set_str("core.autocrlf", "true").expect("autocrlf");
+        }
+        let (wt_a, _tip_a) =
+            fork_with_change(&dir, &first.id, "fork-a", "src/a.rs", "pub fn a() {}\n");
+        // The untouched file in the fork worktree must be byte-identical to
+        // the base blob — CRLF smudge here is the regression.
+        let forked_main = std::fs::read(wt_a.path().join("checkout/src/main.rs")).expect("main");
+        assert_eq!(
+            forked_main, b"fn main() {}\n",
+            "fork materialization smudged line endings"
+        );
+        write(&dir, "src/main.rs", "fn main() { trunk(); }\n");
+        let (second, _) = create_root(&dir, "cli", "second", None).expect("snap 2");
+        let (_wb, _tip_b) =
+            fork_with_change(&dir, &second.id, "fork-b", "src/b.rs", "pub fn b() {}\n");
+
+        merge_forks(&dir, &["fork-a".to_string(), "fork-b".to_string()], "kimi")
+            .expect("merge under autocrlf must not phantom-conflict");
+        assert_eq!(
+            std::fs::read(dir.join("src/main.rs")).expect("main"),
+            b"fn main() { trunk(); }\n",
+            "merge materialization must stay byte-exact under autocrlf"
+        );
     }
 
     #[test]
