@@ -15,3 +15,6 @@ editors/vscode/LICENSE
 
 .env
 .github/
+
+# Local VSIX release staging (packaging/extension/package-release.sh)
+dist/
