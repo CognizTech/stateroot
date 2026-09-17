@@ -311,7 +311,7 @@ jobs:
           cache: npm
           cache-dependency-path: editors/vscode/package-lock.json
       - name: Build and inspect the extension release artifact
-        run: ./packaging/extension/package-release.sh dist
+        run: bash packaging/extension/package-release.sh dist
       - name: Upload verified VSIX
         uses: actions/upload-artifact@v7
         with:
