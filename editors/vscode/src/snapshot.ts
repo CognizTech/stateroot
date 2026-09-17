@@ -30,6 +30,8 @@ import {
 } from "./store";
 import { assembleInbox, delegationTargetsClosedPlan, type InboxItem } from "./inbox";
 import { handoffBoundary, handoffIsStale, staleHandoffNote } from "./freshness";
+import { deriveParallelWork, type LineageProjection, type ParallelWorkCard } from "./parallelWork";
+import type { MergeAttempt } from "./mergeAttempt";
 
 export interface Snapshot {
   initialized: boolean;
@@ -55,6 +57,13 @@ export interface Snapshot {
   selectedHarness?: string;
   delegations: Array<DelegationRecord & { status: string; closedPlan?: boolean }>;
   roots: RootManifest[];
+  lineage?: LineageProjection;
+  work: ParallelWorkCard[];
+  selectedForks: string[];
+  /** Last prepared merge attempt for this project, if one was stored. */
+  attempt?: MergeAttempt;
+  /** True when the installed CLI predates the integration contracts. */
+  integrationStale?: boolean;
   rootA?: string;
   rootB?: string;
   compareText?: string;
@@ -73,11 +82,15 @@ export function snapshot(opts?: {
   rootB?: string;
   compareText?: string;
   liveDelegations?: Array<{ id: string; harness: string; status: string; task: string }>;
+  lineage?: LineageProjection;
   tab?: string;
   dismissedInbox?: string[];
   thisHarness?: string;
   selectedLearningId?: string;
   selectedMemoryIndex?: number;
+  selectedForks?: string[];
+  attempt?: MergeAttempt;
+  integrationStale?: boolean;
 }): Snapshot | { initialized: false } {
   const root = projectRoot();
   if (!root) {
@@ -117,6 +130,7 @@ export function snapshot(opts?: {
     }
   }
   const roots = listRoots(root);
+  const lineageWork = deriveParallelWork(opts?.lineage, delegations);
   const learnings = listLearnings(root);
   const memory = listMemory(root);
   const wikiPages = listWikiPages(root);
@@ -164,7 +178,11 @@ export function snapshot(opts?: {
     now,
     emptyProject: !handoff && roots.length === 0 && !latestActivity,
     inbox,
-    latestRoot: roots[0] ? shortHash(roots[0].id) : "",
+    latestRoot: opts?.lineage?.trunk.tip
+      ? shortHash(opts.lineage.trunk.tip)
+      : roots[0]
+        ? shortHash(roots[0].id)
+        : "",
     plans,
     selectedPlanId,
     planExcerpt: selectedPlanId ? planExcerpt(root, selectedPlanId) : "",
@@ -174,6 +192,11 @@ export function snapshot(opts?: {
     selectedHarness: opts?.selectedHarness,
     delegations,
     roots,
+    lineage: opts?.lineage,
+    work: lineageWork,
+    selectedForks: opts?.selectedForks || [],
+    attempt: opts?.attempt,
+    integrationStale: opts?.integrationStale,
     rootA: opts?.rootA,
     rootB: opts?.rootB,
     compareText: opts?.compareText,

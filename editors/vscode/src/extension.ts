@@ -20,6 +20,7 @@ import {
 import {
   CLI_MODE_HARNESSES,
   learningFilePath,
+  liveStatus,
   listDelegations,
   listLearnings,
   listMemory,
@@ -34,6 +35,8 @@ import {
   planExcerpt,
 } from "./store";
 import { snapshot, type Snapshot } from "./snapshot";
+import { readParallelWork, type LineageProjection } from "./parallelWork";
+import { isStaleIntegrationCli, parseMergeAttempt, type MergeAttempt } from "./mergeAttempt";
 import { WorkbenchPanel } from "./workbench";
 import { terminalPathUpdater } from "./terminalPath";
 import { maybePing } from "./installPing";
@@ -56,6 +59,9 @@ export function activate(context: vscode.ExtensionContext) {
   let rootB: string | undefined;
   let compareText: string | undefined;
   let liveDelegations: Array<{ id: string; harness: string; status: string; task: string }> | undefined;
+  let lineage: LineageProjection | undefined;
+  let integrationStale = false;
+  const selectedForks = new Set<string>();
   let poll: NodeJS.Timeout | undefined;
   let storePoll: NodeJS.Timeout | undefined;
   let cliAvailable = true;
@@ -65,24 +71,32 @@ export function activate(context: vscode.ExtensionContext) {
   const dismissedKey = (root: string) => `stateroot.inbox.dismissed:${root}`;
   const dismissedFor = (root?: string): string[] =>
     root ? context.globalState.get<string[]>(dismissedKey(root), []) : [];
+  /** Last prepared merge attempt per project, so the Work view reopens with it. */
+  const attemptKey = (root: string) => `stateroot.mergeAttempt:${root}`;
 
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 10);
   status.command = "stateroot.openWorkbench";
 
-  const currentSnapshot = (): Snapshot | { initialized: false } =>
-    snapshot({
+  const currentSnapshot = (): Snapshot | { initialized: false } => {
+    const root = projectRoot();
+    return snapshot({
       selectedPlanId,
       selectedHarness,
       rootA,
       rootB,
       compareText,
       liveDelegations,
+      lineage,
+      selectedForks: [...selectedForks],
+      attempt: root ? context.globalState.get<MergeAttempt>(attemptKey(root)) : undefined,
+      integrationStale,
       tab: selectedTab,
-      dismissedInbox: dismissedFor(projectRoot()),
+      dismissedInbox: dismissedFor(root),
       thisHarness: THIS_HARNESS,
       selectedLearningId,
       selectedMemoryIndex,
     });
+  };
 
   const push = () => {
     const probed = isCliProbeAvailable();
@@ -147,6 +161,7 @@ export function activate(context: vscode.ExtensionContext) {
       allowInstall: false,
     });
     liveDelegations = text ? parseDelegateList(text) : undefined;
+    lineage = await readParallelWork(root, output);
     push();
   };
 
@@ -223,6 +238,11 @@ export function activate(context: vscode.ExtensionContext) {
       void vscode.window.showInformationMessage("Prompt copied — paste it into your agent chat.");
       return;
     }
+    if (type === "copyCmd" && typeof msg.text === "string") {
+      // Display-only handoff: copy the command; the panel never runs it.
+      await vscode.env.clipboard.writeText(String(msg.text));
+      return;
+    }
     if (type === "demo") {
       await vscode.env.openExternal(vscode.Uri.parse("https://stateroot.dev"));
       return;
@@ -286,6 +306,25 @@ export function activate(context: vscode.ExtensionContext) {
       await reassign(String(msg.id));
       return;
     }
+    if (type === "toggleFork" && typeof msg.id === "string") {
+      const id = String(msg.id);
+      if (selectedForks.has(id)) selectedForks.delete(id);
+      else selectedForks.add(id);
+      push();
+      return;
+    }
+    if (type === "prepareMerge") {
+      await prepareMerge();
+      return;
+    }
+    if (type === "cancelFork" && typeof msg.id === "string") {
+      await cancelFork(String(msg.id));
+      return;
+    }
+    if (type === "openWorktree" && typeof msg.path === "string") {
+      await vscode.commands.executeCommand("vscode.openFolder", vscode.Uri.file(String(msg.path)), true);
+      return;
+    }
     if (type === "log" && typeof msg.id === "string") {
       await withProject(async (root) => {
         await runCliReport(["delegate", "status", String(msg.id)], root, output);
@@ -319,8 +358,10 @@ export function activate(context: vscode.ExtensionContext) {
       await revertRoot();
       return;
     }
-    if (type === "fork") {
-      await forkRoot();
+    if (type === "startParallel") {
+      selectedTab = "plans";
+      workbench.reveal("plans");
+      push();
       return;
     }
     if (type === "selectLearning" && typeof msg.id === "string") {
@@ -412,8 +453,14 @@ export function activate(context: vscode.ExtensionContext) {
           return;
         }
       }
-      const task = `Execute the plan at .stateroot/plans/${planId}.md. Read it first. Do not re-plan.`;
-      await runCliReport(["delegate", "--to", to, "--task", task, "--json"], root, output);
+      const launched = await runCliReport(
+        ["delegate", "--plan", planId, "--to", to, "--json"],
+        root,
+        output
+      );
+      if (launched !== undefined) {
+        selectedTab = "work";
+      }
       await refreshLive();
     });
   };
@@ -432,6 +479,47 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
       await runCliReport(["delegate", "--to", to, "--task", rec.task, "--json"], root, output);
+      await refreshLive();
+    });
+  };
+
+  const cancelFork = async (forkId: string) => {
+    await withProject(async (root) => {
+      const rec = listDelegations(root).find((row) => row.fork_id === forkId && liveStatus(row) === "running");
+      if (!rec) return;
+      await runCliReport(["delegate", "cancel", rec.id], root, output);
+      await refreshLive();
+    });
+  };
+
+  const prepareMerge = async () => {
+    await withProject(async (root) => {
+      const forks = [...selectedForks];
+      if (!forks.length) return;
+      // The extension never makes semantic merge decisions. Preparing the
+      // attempt freezes the inputs and gives the user-appointed coordinating
+      // agent structured conflict evidence or a safe continue command.
+      output.appendLine(`$ stateroot merge --prepare ${forks.join(" ")} --json`);
+      try {
+        const text = await runCli(["merge", "--prepare", ...forks, "--json"], root, 120_000, cliPath());
+        if (text.trim()) {
+          output.appendLine(text.trimEnd());
+        }
+        const attempt = parseMergeAttempt(text);
+        await context.globalState.update(attemptKey(root), attempt);
+        selectedForks.clear();
+        integrationStale = false;
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        output.appendLine(message);
+        if (isStaleIntegrationCli(err)) {
+          // The Work view owns this failure mode with one compatibility
+          // notice; it is not also surfaced as a generic command error.
+          integrationStale = true;
+        } else {
+          vscode.window.showErrorMessage(`stateroot merge failed: ${message}`);
+        }
+      }
       await refreshLive();
     });
   };
@@ -507,25 +595,6 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
       await runCliReport(["revert", hash, "--yes"], root, output, 120_000);
-      push();
-    });
-  };
-
-  const forkRoot = async () => {
-    await withProject(async (root) => {
-      const hash = rootA;
-      if (!hash) {
-        vscode.window.showInformationMessage("Select a root to fork.");
-        return;
-      }
-      const name = await vscode.window.showInputBox({
-        prompt: "Fork branch name",
-        value: `fork-${shortHash(hash)}`,
-      });
-      if (!name?.trim()) {
-        return;
-      }
-      await runCliReport(["fork", hash, "--branch", name.trim()], root, output);
       push();
     });
   };

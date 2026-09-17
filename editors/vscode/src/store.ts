@@ -45,6 +45,10 @@ export interface DelegationRecord {
   pid?: number;
   log?: string;
   ts?: string;
+  fork_id?: string;
+  plan_id?: string;
+  outcome_root?: string;
+  events?: Array<{ event?: string; detail?: string; ts?: string }>;
 }
 
 export interface RootManifest {

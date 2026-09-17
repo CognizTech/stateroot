@@ -1,4 +1,92 @@
 import { SWITCH_PROMPTS } from "./setup";
+import type { MergeAttempt } from "./mergeAttempt";
+
+const ESCAPES: Record<string, string> = {
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  '"': "&quot;",
+  "'": "&#39;",
+};
+
+function esc(value: unknown): string {
+  return String(value ?? "").replace(/[&<>"']/g, (c) => ESCAPES[c]);
+}
+
+/** Verbatim compatibility notice for a pre-contract CLI. Kept module-private:
+ * an exported binding compiles to `exports.*` inside the functions below,
+ * which are injected into the workbench script by source (see workbenchHtml)
+ * and must reference only esc and STALE_INTEGRATION_CLI_MESSAGE. */
+const STALE_INTEGRATION_CLI_MESSAGE =
+  "This StateRoot CLI predates the integration contracts — update the CLI to use coordinated integration here.";
+
+/** One compatibility notice for a CLI that predates the integration contracts.
+ * Injected into the workbench script (see workbenchHtml), so it must stay
+ * self-contained: only esc and STALE_INTEGRATION_CLI_MESSAGE are in scope. */
+export function renderIntegrationCompat(stale: boolean): string {
+  if (!stale) {
+    return "";
+  }
+  return `<div class="card fail"><div>${esc(STALE_INTEGRATION_CLI_MESSAGE)}</div></div>`;
+}
+
+/** Evidence block for the last prepared merge attempt. Display-only: every
+ * command is handed to the coordinating agent, never run from a button.
+ * Injected into the workbench script (see workbenchHtml), so it must stay
+ * self-contained: only esc is in scope. */
+export function renderAttemptBlock(attempt?: MergeAttempt): string {
+  if (!attempt) {
+    return "";
+  }
+  const state = attempt.state === "attention" ? "attention" : "ready";
+  const commandRow = (command: string) =>
+    `<div class="row cmd-row"><code class="cmd">${esc(command)}</code><button class="secondary" data-act="copyCmd" data-cmd="${esc(command)}">Copy</button></div>`;
+  const forks = (attempt.forks || []).map((fork) => fork.name);
+  const meta = [
+    esc(attempt.id),
+    forks.length ? `${forks.length} fork${forks.length === 1 ? "" : "s"}: ${esc(forks.join(", "))}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const folded = (attempt.folded_forks || []).map((fork) => esc(fork.name)).join(", ");
+  const pending = (attempt.pending_forks || []).map((fork) => esc(fork.name)).join(", ");
+  const conflicts = attempt.conflicts || [];
+  const conflictsBlock = conflicts.length
+    ? `<div class="kicker">Conflicts (${conflicts.length})</div>` +
+      conflicts
+        .map(
+          (conflict) =>
+            `<div class="conflict-row"><code>${esc(conflict.path)}</code> <span class="muted">${esc(conflict.fork)} · ${esc(conflict.kind || "other")}</span></div>`
+        )
+        .join("")
+    : "";
+  let handoff = "";
+  if (state === "attention") {
+    const worktree = attempt.worktree
+      ? `<div class="muted">Conflicts are materialized in the reconciliation worktree:</div>${commandRow(attempt.worktree)}`
+      : "";
+    handoff =
+      `<div class="kicker">Reconciliation handoff</div>` +
+      worktree +
+      commandRow(`stateroot merge --status ${attempt.id} --json`) +
+      commandRow(`stateroot merge --continue ${attempt.id} --evidence "<tests run>"`) +
+      commandRow(`stateroot merge --abort ${attempt.id}`) +
+      `<div class="muted">Hand these to the coordinating agent — this panel never runs them and never chooses resolutions.</div>`;
+  } else {
+    handoff =
+      `<div class="kicker">Publish</div>` +
+      commandRow(`stateroot merge --continue ${attempt.id}`) +
+      `<div class="muted">No conflicts — the coordinating agent publishes with this command; this panel never runs it.</div>`;
+  }
+  return (
+    `<div class="card attempt"><div class="row"><span class="badge ${state}">${esc(state)}</span><span class="muted">${meta}</span></div>` +
+    (folded ? `<div class="muted">folded: ${folded}</div>` : "") +
+    (pending ? `<div class="muted">pending: ${pending}</div>` : "") +
+    conflictsBlock +
+    handoff +
+    `</div>`
+  );
+}
 
 export function nonce(): string {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -134,6 +222,31 @@ button.dismiss {
   padding: 2px 8px;
   align-self: flex-start;
 }
+.badge {
+  display: inline-block;
+  padding: 0 6px;
+  border: 1px solid var(--vscode-widget-border);
+  border-radius: 3px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.badge.attention {
+  color: var(--vscode-editorWarning-foreground);
+  border-color: var(--vscode-editorWarning-foreground);
+}
+.badge.ready {
+  color: var(--vscode-testing-iconPassed);
+  border-color: var(--vscode-testing-iconPassed);
+}
+.cmd {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 12px;
+  word-break: break-all;
+}
+.cmd-row { align-items: center; margin: 4px 0; }
+.conflict-row { margin: 2px 0; }
+.attempt .kicker { margin-top: 8px; }
 `;
 
 function shell(nonceVal: string, body: string, script: string): string {
@@ -173,6 +286,8 @@ export function glanceHtml(nonceVal: string): string {
   <div id="now">No project</div>
   <div class="kicker">Needs you <span class="count" id="need-count">0</span></div>
   <div id="needs"></div>
+  <div class="kicker">Active work <span class="count" id="work-count">0</span></div>
+  <div id="work" class="muted">—</div>
   <div class="kicker">Todos <span class="count" id="todo-count">0</span></div>
   <div id="todos"></div>
   <div class="kicker">Learnings <span class="count" id="learn-count">0</span></div>
@@ -261,6 +376,8 @@ function render(state) {
     document.getElementById('now').textContent = 'No StateRoot project in this workspace.';
     document.getElementById('needs').innerHTML = '';
     document.getElementById('need-count').textContent = '0';
+    document.getElementById('work').textContent = '—';
+    document.getElementById('work-count').textContent = '0';
     document.getElementById('todos').innerHTML = '';
     document.getElementById('todo-count').textContent = '0';
     document.getElementById('learnings').innerHTML = '';
@@ -274,6 +391,16 @@ function render(state) {
     return;
   }
   document.getElementById('empty').innerHTML = '';
+  const workRows = (state.work || []).filter(card => card.phase !== 'merged');
+  const running = workRows.filter(card => card.phase === 'running').length;
+  const ready = workRows.filter(card => card.phase === 'ready').length;
+  document.getElementById('work-count').textContent = String(workRows.length);
+  document.getElementById('work').innerHTML = workRows.length
+    ? '<div class="muted">' + workRows.length + ' lineages · ' + running + ' running · ' + ready + ' ready</div>' + workRows.map(card =>
+      '<button class="item" data-fork="' + esc(card.fork.name) + '"><div><code>' + esc(card.fork.name) + '</code> · ' + esc(card.phase) + '</div><div class="muted">' + esc(card.fork.plan || '') + '</div></button>'
+    ).join('')
+    : '<div class="muted">No active parallel work.</div>';
+  document.querySelectorAll('[data-fork]').forEach(button => button.onclick = () => vscode.postMessage({ type: 'openWorkbench', tab: 'work' }));
   const now = state.now || {};
   const nowButton = document.createElement('button');
   nowButton.className = 'item';
@@ -456,7 +583,7 @@ export function workbenchHtml(nonceVal: string): string {
     <button class="tab" data-tab="control">Control</button>
     <button class="tab" data-tab="plans">Plans</button>
     <button class="tab" data-tab="todos">Todos</button>
-    <button class="tab" data-tab="crew">Crew</button>
+    <button class="tab" data-tab="work">Work</button>
     <button class="tab" data-tab="learnings">Learnings</button>
     <button class="tab" data-tab="memory">Memory</button>
     <button class="tab" data-tab="lineage">Lineage</button>
@@ -509,13 +636,18 @@ document.getElementById('panel').addEventListener('click', (event) => {
   else if (act === 'delegate') vscode.postMessage({ type: 'delegatePlan', id, harness: state.selectedHarness });
   else if (act === 'openPlan') vscode.postMessage({ type: 'openPlan', id });
   else if (act === 'reassign') vscode.postMessage({ type: 'reassign', id });
+  else if (act === 'toggleFork') vscode.postMessage({ type: 'toggleFork', id });
+  else if (act === 'prepareMerge') vscode.postMessage({ type: 'prepareMerge' });
+  else if (act === 'cancelFork') vscode.postMessage({ type: 'cancelFork', id });
+  else if (act === 'openWorktree') vscode.postMessage({ type: 'openWorktree', path: btn.getAttribute('data-path') });
+  else if (act === 'copyCmd') vscode.postMessage({ type: 'copyCmd', text: btn.getAttribute('data-cmd') });
   else if (act === 'dismiss') vscode.postMessage({ type: 'dismiss', id });
   else if (act === 'log') vscode.postMessage({ type: 'log', id });
   else if (act === 'selectRoot') vscode.postMessage({ type: 'selectRoot', id });
   else if (act === 'compare') vscode.postMessage({ type: 'compare' });
   else if (act === 'diff') vscode.postMessage({ type: 'diff' });
   else if (act === 'revert') vscode.postMessage({ type: 'revert' });
-  else if (act === 'fork') vscode.postMessage({ type: 'fork' });
+  else if (act === 'startParallel') vscode.postMessage({ type: 'startParallel' });
   else if (act === 'selectLearning') vscode.postMessage({ type: 'selectLearning', id });
   else if (act === 'addLearning') vscode.postMessage({ type: 'addLearning' });
   else if (act === 'editLearning') vscode.postMessage({ type: 'editLearning', id });
@@ -530,13 +662,16 @@ document.getElementById('panel').addEventListener('click', (event) => {
   else if (act === 'openWiki') vscode.postMessage({ type: 'openWiki', rel: id });
 });
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+const STALE_INTEGRATION_CLI_MESSAGE = ${JSON.stringify(STALE_INTEGRATION_CLI_MESSAGE)};
+${renderIntegrationCompat.toString()}
+${renderAttemptBlock.toString()}
 function render() {
   document.querySelectorAll('.tab').forEach(btn => btn.classList.toggle('active', btn.getAttribute('data-tab') === state.tab));
   const panel = document.getElementById('panel');
   if (state.tab === 'control') panel.innerHTML = control();
   else if (state.tab === 'plans') panel.innerHTML = plans();
   else if (state.tab === 'todos') panel.innerHTML = todos();
-  else if (state.tab === 'crew') panel.innerHTML = crew();
+  else if (state.tab === 'work' || state.tab === 'crew') panel.innerHTML = work();
   else if (state.tab === 'learnings') panel.innerHTML = learningsPanel();
   else if (state.tab === 'memory') panel.innerHTML = memoryPanel();
   else panel.innerHTML = lineage();
@@ -612,7 +747,7 @@ function plans() {
   const planTodoBlock = (state.planTodos && state.planTodos.length)
     ? '<div class="kicker">Todos</div>' + todoList(state.planTodos)
     : '';
-  return '<div class="split"><div class="list">' + left + '</div><div class="col"><div>' + esc(plan.title) + '</div><div class="muted">' + esc(plan.status) + ' · ' + esc(plan.id) + esc(todosLabel) + '</div><pre class="pre">' + esc(state.planExcerpt || '') + '</pre>' + planTodoBlock + '<div class="kicker">Assign execution</div><div>' + chips + '</div><div class="row">' + approve + done + '<button data-act="delegate" data-id="' + esc(plan.id) + '">Delegate plan</button><button class="secondary" data-act="openPlan" data-id="' + esc(plan.id) + '">Open full plan</button></div></div></div>';
+  return '<div class="split"><div class="list">' + left + '</div><div class="col"><div>' + esc(plan.title) + '</div><div class="muted">' + esc(plan.status) + ' · ' + esc(plan.id) + esc(todosLabel) + '</div><pre class="pre">' + esc(state.planExcerpt || '') + '</pre>' + planTodoBlock + '<div class="kicker">Assign execution</div><div>' + chips + '</div><div class="row">' + approve + done + '<button data-act="delegate" data-id="' + esc(plan.id) + '">Run in parallel</button><button class="secondary" data-act="openPlan" data-id="' + esc(plan.id) + '">Open full plan</button></div></div></div>';
 }
 function todos() {
   const lists = state.todos || [];
@@ -624,13 +759,14 @@ function todos() {
     return '<div class="card"><div class="kicker">' + esc(harnessName(rec.harness)) + ' · ' + esc(bind) + ' · todos ' + done + '/' + total + '</div>' + todoList(rec.items) + '</div>';
   }).join('');
 }
-function crew() {
+function work() {
   const rows = state.delegations || [];
+  const forks = state.work || [];
   const by = {};
   rows.forEach(r => { (by[r.harness] = by[r.harness] || []).push(r); });
   const harnesses = Object.keys(by);
-  if (!harnesses.length) return '<div class="muted">No delegations yet. Cursor itself is never a crew card.</div>';
-  return '<div class="row" style="align-items:flex-start">' + harnesses.map(h => {
+  const work = harnesses.length
+    ? '<div class="row" style="align-items:flex-start">' + harnesses.map(h => {
     const cards = by[h].map(r => {
       const fail = ['failed','lost','timed_out'].includes(r.status);
       const reassign = fail && !r.closedPlan;
@@ -639,7 +775,28 @@ function crew() {
         '</div>';
     }).join('');
     return '<div class="lane"><div class="kicker">' + esc(h) + '</div>' + cards + '</div>';
-  }).join('') + '</div>';
+    }).join('') + '</div>'
+    : '<div class="muted">No delegated work is running.</div>';
+  const ready = forks.filter(card => card.phase === 'ready');
+  const selected = state.selectedForks || [];
+  const branches = forks.length
+    ? '<div class="kicker">Parallel lineages</div>' + forks.map(card => {
+      const f = card.fork;
+      const plan = f.plan ? ' · ' + f.plan : '';
+      const outcome = card.outcomeRoot ? ' · outcome ' + card.outcomeRoot.slice(0, 12) : '';
+      const open = f.worktree && f.worktree.path ? '<button class="secondary" data-act="openWorktree" data-path="' + esc(f.worktree.path) + '">Open worktree</button>' : '';
+      const running = card.phase === 'running' ? '<button class="secondary" data-act="cancelFork" data-id="' + esc(f.name) + '">Cancel</button>' : '';
+      const select = card.phase === 'ready' ? '<button class="secondary" data-act="toggleFork" data-id="' + esc(f.name) + '">' + (selected.includes(f.name) ? 'Selected' : 'Select merge') + '</button>' : '';
+      const log = card.attempts[0] ? '<button class="secondary" data-act="log" data-id="' + esc(card.attempts[0].id) + '">View log</button>' : '';
+      const cleanup = card.phase === 'cleanup_pending' && f.cleanup && f.cleanup.pending ? '<div class="muted">' + esc(String(f.cleanup.pending)) + '</div>' : '';
+      const cleanupCmd = card.cleanupCommand ? '<div class="row cmd-row"><code class="cmd">' + esc(card.cleanupCommand) + '</code><button class="secondary" data-act="copyCmd" data-cmd="' + esc(card.cleanupCommand) + '">Copy</button></div>' : '';
+      return '<div class="card"><div><code>' + esc(f.name) + '</code> <span class="muted">' + esc(card.phase) + '</span></div><div class="muted">' + esc((f.tip || '').slice(0, 12) || 'no tip') + plan + outcome + '</div>' + cleanup + cleanupCmd + '<div class="row" style="margin-top:8px">' + open + log + running + select + '</div></div>';
+    }).join('')
+    : '<div class="muted">No parallel lineages yet.</div>';
+  const merge = ready.length ? '<div class="row"><button data-act="prepareMerge"' + (selected.length ? '' : ' disabled') + '>Prepare integration (' + selected.length + ')</button></div><div class="muted">A coordinating agent reviews conflicts and continues a prepared merge; this panel never chooses source resolutions.</div>' : '';
+  const compat = renderIntegrationCompat(!!state.integrationStale);
+  const attemptBlock = renderAttemptBlock(state.attempt);
+  return '<div class="muted">Work is the crew view: assigned agents and their independent lineages.</div>' + compat + work + branches + attemptBlock + merge;
 }
 function learningsPanel() {
   const rows = state.learnings || [];
@@ -681,9 +838,9 @@ function memoryPanel() {
   return '<div class="split"><div class="list">' + left + wiki + '</div><div class="col">' + record + detail + '</div></div>';
 }
 function lineage() {
-  const roots = state.roots || [];
+  const roots = (state.lineage && state.lineage.roots) || state.roots || [];
   const a = state.rootA, b = state.rootB;
-  const currentId = roots[0] && roots[0].id;
+  const currentId = (state.lineage && state.lineage.trunk && state.lineage.trunk.tip) || (roots[0] && roots[0].id);
   const left = roots.map(r => {
     const hash = (r.id || '').slice(0, 12);
     const reason = clip(r.created_reason, 88);
@@ -694,7 +851,7 @@ function lineage() {
       (meta ? '<div class="muted">' + esc(meta) + '</div>' : '') +
       '</button>';
   }).join('') || '<div class="muted">No roots yet.</div>';
-  return '<div class="split"><div class="list">' + left + '</div><div class="col"><div class="muted">Select two roots (click twice).</div><div>A: <code>' + esc((a||'').slice(0,12) || '—') + '</code> · B: <code>' + esc((b||'').slice(0,12) || '—') + '</code></div><div class="row"><button data-act="compare">Compare</button><button class="secondary" data-act="diff">Open native diff</button><button class="secondary" data-act="revert">Restore</button><button class="secondary" data-act="fork">Fork</button></div><pre class="pre">' + esc(state.compareText || '') + '</pre></div></div>';
+  return '<div class="split"><div class="list">' + left + '</div><div class="col"><div class="muted">Select two roots (click twice).</div><div>A: <code>' + esc((a||'').slice(0,12) || '—') + '</code> · B: <code>' + esc((b||'').slice(0,12) || '—') + '</code></div><div class="row"><button data-act="compare">Compare</button><button class="secondary" data-act="diff">Open native diff</button><button class="secondary" data-act="revert">Restore</button><button class="secondary" data-act="startParallel">Start parallel work</button></div><pre class="pre">' + esc(state.compareText || '') + '</pre></div></div>';
 }
 `;
   return shell(nonceVal, body, script);
