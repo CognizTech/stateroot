@@ -42,8 +42,10 @@ StateRoot is pre-1.0 and milestones land as minor versions.
   the whole process tree and records `cancelled_with_root`. `stateroot
   merge <fork>…` 3-way-merges fork tips into one N-parent root (conflicts
   reported per path, nothing half-applied), materializes the merged tree
-  into the trunk workspace with dirty-workspace protection, and cleans up
-  merged worktrees automatically. `handoff write --worktree` binds by
+  into the trunk workspace with dirty-workspace protection, and defers
+  worktree deletion: merged worktrees are marked `cleanup_pending` so the
+  merge never waits on removal — retry with `stateroot merge --cleanup
+  <fork>…` (bounded, idempotent). `handoff write --worktree` binds by
   validated fork id; `resume` in the wrong directory fails closed with the
   exact recovery.
 - **Codex capture restores historical shapes.** `shell_command`/`shell`
@@ -71,6 +73,72 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 - `stateroot --version` / `--help` now fire the first-run ping too (clap
   short-circuits them before the command dispatch — the hole was found in
   the v0.2.1 end-to-end artifact proof).
+- **Integration is agent-coordinated and resumable.** `stateroot merge
+  --prepare <fork>… [--json]` freezes the trunk tip and every selected fork
+  tip and returns a durable attempt: `ready` merges publish at once with
+  `merge --continue <attempt>`; a conflicted attempt is `attention` and
+  materializes an isolated reconciliation worktree under machine-local
+  state — the accumulated clean fold with every text conflict rendered with
+  standard markers labeled `trunk (accumulated fold)` / `fork <name>`. The
+  appointed agent edits and tests there; `--continue` revalidates every
+  frozen ref (a moved trunk or fork refuses as stale), refuses while
+  conflict markers remain, folds forks selected after the conflicted one,
+  and publishes exactly the reconciled tree as one N+1-parent root with the
+  attempt id, resolved conflicts, `--evidence` notes, and per-phase timings
+  in the transition. `merge --status <attempt>` is read-only JSON;
+  `merge --abort <attempt>` removes only attempt-local state. StateRoot
+  never picks a resolver or a source side. Materialization is all-or-
+  nothing: a checkout error or a verification mismatch restores the
+  pre-merge tree byte-for-byte and leaves the user's Git index untouched.
+- **Automatic snapshots are bounded.** Checkpoint/finalize/delegation snaps
+  run with a wall-clock, entry-count, and byte budget; on exhaustion the
+  operation still succeeds, only the automatic root is skipped, the skip
+  with observed counts and heavy top-level paths is printed and retained
+  for `stateroot doctor`, and an explicit `stateroot snap` still performs
+  the deliberate full scan. Session finalize degrades to binding the
+  boundary handoff to the current tip instead of failing the boundary.
+  `doctor` additionally warns on large unignored generated directories
+  (`node_modules`, `.venv`, `dist`, `target`, …) with the exact ignore line
+  to add, and notes WSL-mounted working copies.
+- **Handoff writes are atomic and recoverable.** `current.json` writes,
+  activity stamps, and seq updates go through lock/CAS + atomic replace, so
+  concurrent hooks can no longer leave partial JSON. `stateroot handoff
+  repair` validates the current packet, quarantines corrupt bytes
+  machine-locally with a hash, and restores the newest valid history
+  packet — or says none exists. `status`/`resume`/`checkpoint` identify
+  corruption immediately.
+- **Privacy-minimal product telemetry (accelerator metrics).** Released CLI
+  builds emit four anonymous events — `install_observed`,
+  `continuity_activated` (first delivered digest), `active_day` (at most
+  one per project/harness/day), and `harness_transition` — carrying only a
+  random install UUID, an opaque keyed project digest, coarse OS/arch, CLI
+  version, cohort, and canonical harness ids. Events append to a bounded
+  machine-local spool and drain detached; dev/nightly builds emit nothing
+  and `STATEROOT_NO_PING=1` is the single opt-out. Hooks never touch the
+  network.
+- **`stateroot editor` — extension reconciliation.** `editor status` is
+  read-only (detected VS Code/Cursor, installed extension version,
+  release-declared desired version); `editor reconcile` installs or updates
+  from the verified release VSIX with SHA-256 checked against
+  `stateroot-extension.json` — never downgrades, one editor's failure does
+  not touch the other. Automatic reconciliation runs after `install` and
+  scheduled updates.
+- **Extension v0.2.20: the Work view.** Parallel-work cards derive purely
+  from evidence (delegation records + `log --json` lineage): provisioning,
+  running, cancelling, capturing, attention, ready, merged,
+  cleanup_pending — with the retry command shown. "Prepare integration"
+  freezes an attempt via `merge --prepare --json`; conflicts render with
+  kinds, the reconciliation worktree path, and copy-ready
+  status/continue/abort commands for the appointed agent — the panel never
+  executes a merge. A CLI that predates the integration schemas gets one
+  explicit compatibility message.
+- **One verified VSIX everywhere.** CI builds `stateroot-vscode-0.2.20.vsix`
+  once, inspects required files, and attests `stateroot-extension.json`
+  (id/version/SHA-256); the same bytes feed the rolling nightly, the GitHub
+  release, and owner-authorized Marketplace/Open VSX publication. The CI
+  test matrix shards process-heavy CLI integration files across legs per OS
+  (with a drift guard that fails when a test file lands in no shard), so
+  the full Linux+Windows gate stays mandatory.
 
 ## v0.2.1 — 2026-09-09
 
