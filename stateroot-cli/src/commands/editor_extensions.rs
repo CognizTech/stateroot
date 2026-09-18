@@ -632,11 +632,71 @@ fn list_installed(launcher: &Path) -> Result<Option<String>, String> {
 }
 
 fn install_vsix(launcher: &Path, vsix: &Path) -> Result<(), String> {
-    let vsix = vsix
+    // VS Code's Electron rejects \\wsl.localhost UNC paths outright
+    // (ERR_UNC_HOST_NOT_ALLOWED), so under WSL a host launcher must receive
+    // a VSIX that lives on a real Windows drive — stage it next to the host.
+    let staged = if needs_cmd_wrap(launcher) && !cfg!(windows) {
+        Some(stage_vsix_on_host_drive(launcher, vsix)?)
+    } else {
+        None
+    };
+    let effective = staged.as_deref().unwrap_or(vsix);
+    let vsix_str = effective
         .to_str()
         .ok_or_else(|| "VSIX path is not UTF-8".to_string())?;
-    let _ = run_editor(launcher, &["--install-extension", vsix, "--force"])?;
+    let result = run_editor(launcher, &["--install-extension", vsix_str, "--force"]);
+    if let Some(staged_path) = &staged {
+        if let Some(parent) = staged_path.parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+    }
+    result?;
     Ok(())
+}
+
+/// Copy the VSIX onto the Windows drive the launcher lives on
+/// (`/mnt/<drive>/Windows/Temp/stateroot-editor-<pid>/`), so a host editor
+/// invoked under WSL reads a plain local path. No-op when the VSIX already
+/// sits on that drive.
+fn stage_vsix_on_host_drive(launcher: &Path, vsix: &Path) -> Result<PathBuf, String> {
+    let text = launcher.to_string_lossy();
+    let drive = text
+        .split('/')
+        .nth(2)
+        .filter(|d| d.len() == 1 && d.chars().next().unwrap().is_ascii_alphabetic())
+        .ok_or_else(|| format!("cannot derive the host drive from {}", launcher.display()))?;
+    if vsix
+        .to_string_lossy()
+        .starts_with(&format!("/mnt/{drive}/"))
+    {
+        return Ok(vsix.to_path_buf());
+    }
+    let name = vsix
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("VSIX filename is not UTF-8: {}", vsix.display()))?;
+    let dir = host_stage_dir(launcher)?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|err| format!("cannot stage the VSIX on the host drive {drive}: {err}"))?;
+    let dest = dir.join(name);
+    std::fs::copy(vsix, &dest)
+        .map_err(|err| format!("cannot stage the VSIX on the host drive {drive}: {err}"))?;
+    Ok(dest)
+}
+
+/// The staging directory for host-launched installs under WSL
+/// (`/mnt/<drive>/Windows/Temp/stateroot-editor-<pid>`).
+fn host_stage_dir(launcher: &Path) -> Result<PathBuf, String> {
+    let text = launcher.to_string_lossy();
+    let drive = text
+        .split('/')
+        .nth(2)
+        .filter(|d| d.len() == 1 && d.chars().next().unwrap().is_ascii_alphabetic())
+        .ok_or_else(|| format!("cannot derive the host drive from {}", launcher.display()))?;
+    Ok(PathBuf::from(format!(
+        "/mnt/{drive}/Windows/Temp/stateroot-editor-{}",
+        std::process::id()
+    )))
 }
 
 fn run_editor(program: &Path, args: &[&str]) -> Result<String, String> {
@@ -919,6 +979,9 @@ fn persist_failures(ctx: &Ctx, reports: &[EditorReport]) {
         .collect();
     let path = ctx.config_dir.join(LAST_FAILURE_NAME);
     if failed.is_empty() {
+        // A fully successful pass retires the record — a superseded failure
+        // must not read like a live alarm.
+        let _ = std::fs::remove_file(path);
         return;
     }
     let body = json!({
@@ -1019,6 +1082,18 @@ mod tests {
         let translated =
             wsl_host_path(Path::new("/mnt/c/Users/u/AppData/bin/code.cmd")).expect("drvfs");
         assert_eq!(translated, "C:\\Users\\u\\AppData\\bin\\code.cmd");
+    }
+
+    #[test]
+    fn host_drive_staging_derives_the_launcher_drive() {
+        let launcher = Path::new("/mnt/c/Users/u/AppData/bin/code.cmd");
+        let dir = host_stage_dir(launcher).expect("drive");
+        let text = dir.to_string_lossy().replace('\\', "/");
+        assert!(
+            text.starts_with("/mnt/c/Windows/Temp/stateroot-editor-"),
+            "staged onto the launcher's drive: {text}"
+        );
+        assert!(host_stage_dir(Path::new("/usr/bin/code")).is_err());
     }
 
     #[test]
