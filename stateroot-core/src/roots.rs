@@ -2671,12 +2671,15 @@ fn publish_merge(
     /// uncommitted work a force checkout would silently overwrite. Content-
     /// based and index-free; covers every path in the base tree (the checkout
     /// overwrites all of them, not just the merge's changed paths). Ignored
-    /// and `.stateroot/` bookkeeping paths never block.
+    /// and `.stateroot/` bookkeeping paths never block. Additionally: a
+    /// user-index (staged) file absent from the base tree whose path the
+    /// MERGE tree also writes, with different content, refuses — the staged
+    /// bytes would otherwise be lost without any merge record of them.
     fn workspace_conflicts(
         repo: &Repository,
         project_dir: &Path,
         base_tree: &git2::Tree,
-        _merge_tree: &git2::Tree,
+        merge_tree: &git2::Tree,
     ) -> Result<Vec<String>, RootsError> {
         let ignore = crate::sync_engine::ignore::IgnoreRules::load(project_dir);
         let mut conflicts = Vec::new();
@@ -2702,6 +2705,32 @@ fn publish_merge(
                 git2::TreeWalkResult::Ok
             })
             .expect("tree walk");
+        let index = repo.index()?;
+        for i in 0..index.len() {
+            let Some(entry) = index.get(i) else {
+                continue;
+            };
+            let rel = String::from_utf8_lossy(&entry.path).replace('\\', "/");
+            if rel.is_empty()
+                || rel.starts_with(".stateroot")
+                || ignore.is_ignored(&rel, false)
+                || base_tree.get_path(Path::new(&rel)).is_ok()
+            {
+                continue;
+            }
+            let Ok(target) = merge_tree.get_path(Path::new(&rel)) else {
+                continue;
+            };
+            let Ok(blob) = target.to_object(repo).and_then(|o| o.peel_to_blob()) else {
+                continue;
+            };
+            let staged = std::fs::read(project_dir.join(&rel))
+                .map(|bytes| bytes != blob.content())
+                .unwrap_or(false);
+            if staged {
+                conflicts.push(rel);
+            }
+        }
         Ok(conflicts)
     }
 
@@ -2980,9 +3009,10 @@ fn rewrite_workdir_byte_exact(
 }
 
 /// Checkout a root tree into the trunk working directory without rewriting
-/// the user's Git index. Git-tracked paths excluded from roots are staged
-/// on disk (not in RAM) and restored after both forward and rollback
-/// checkouts.
+/// the user's Git index. User-index paths absent from both the target tree
+/// and the current root tree (staged user work the merge/revert has no
+/// authority over) are staged on disk (not in RAM) and restored after both
+/// forward and rollback checkouts.
 fn checkout_root_tree(
     repo: &Repository,
     project_dir: &Path,
@@ -3083,12 +3113,25 @@ enum StagedExcludedEntry {
     },
 }
 
+/// User-index paths the root checkout must preserve on disk: entries that
+/// are in the user's Git index but absent from BOTH the target tree and the
+/// current root tree. Absent-from-target means the force checkout would
+/// delete (or never write) them; absent-from-current-root means they are
+/// user-private work a merge/revert has no authority over. Root-tracked
+/// paths (in the current root tree) are never staged: the target tree is
+/// their truth, including deletions. Ignore status no longer matters —
+/// ignored tracked files were always covered, but a plain staged file was
+/// silently deleted from the workdir before this rule.
 fn tracked_excluded_disk_paths(
     repo: &Repository,
     project_dir: &Path,
     target_tree: Option<&git2::Tree>,
 ) -> Result<Vec<PathBuf>, RootsError> {
-    let rules = IgnoreRules::load(project_dir);
+    let current_root_tree = repo
+        .refname_to_id(LATEST_REF)
+        .and_then(|oid| repo.find_commit(oid))
+        .and_then(|commit| commit.tree())
+        .ok();
     let index = repo.index()?;
     let mut paths = Vec::new();
     for i in 0..index.len() {
@@ -3096,10 +3139,15 @@ fn tracked_excluded_disk_paths(
             continue;
         };
         let rel = String::from_utf8_lossy(&entry.path).replace('\\', "/");
-        if rel.is_empty() || !rules.is_ignored(&rel, false) {
+        if rel.is_empty() {
             continue;
         }
         if let Some(tree) = target_tree {
+            if tree.get_path(Path::new(&rel)).is_ok() {
+                continue;
+            }
+        }
+        if let Some(tree) = &current_root_tree {
             if tree.get_path(Path::new(&rel)).is_ok() {
                 continue;
             }
@@ -5495,6 +5543,46 @@ mod tests {
         );
         merge_forks(&dir, &["fork-a".to_string()], "kimi").expect("merge");
         assert_eq!(index_entries(&dir), before);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("staged.txt")).expect("staged file on disk"),
+            "keep-me-staged\n",
+            "a staged file outside the merge must survive on disk, not just in the index"
+        );
+    }
+
+    #[test]
+    fn merge_refuses_to_overwrite_a_staged_collision() {
+        // The user staged a brand-new file at a path the merge also adds,
+        // with different content. That is uncommitted work the checkout
+        // would silently overwrite — refuse, change nothing.
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
+        write(&dir, "src/new.rs", "user staged version\n");
+        git_force_track(&dir, "src/new.rs");
+        let before = index_entries(&dir);
+        let (_wt, _) = fork_with_change(
+            &dir,
+            &first.id,
+            "fork-a",
+            "src/new.rs",
+            "pub fn fork_version() {}\n",
+        );
+        let err = merge_forks(&dir, &["fork-a".to_string()], "kimi")
+            .expect_err("staged collision must refuse");
+        assert!(err.to_string().contains("src/new.rs"), "{err}");
+        assert_eq!(index_entries(&dir), before, "index untouched");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("src/new.rs")).expect("staged file"),
+            "user staged version\n",
+            "staged bytes survive the refusal"
+        );
+        let repo = ensure_repo(&dir).expect("repo");
+        assert_eq!(
+            repo.refname_to_id(LATEST_REF).expect("latest").to_string(),
+            first.id,
+            "trunk unchanged"
+        );
     }
 
     #[test]
