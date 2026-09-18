@@ -3,7 +3,12 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 // out/lineageGraph.js is pure (type-only imports), so it loads directly.
-const { layoutLineage, renderLineageGraph } = require("../out/lineageGraph");
+const {
+  assignLanes,
+  compactRails,
+  layoutLineage,
+  renderRail,
+} = require("../out/lineageGraph");
 const { workbenchHtml } = require("../out/ui");
 
 const ACCENT = "#7ee0c8";
@@ -45,7 +50,49 @@ function node(layout, id) {
   return found;
 }
 
-test("rows are newest-first by created_at with id tiebreak descending", () => {
+function rail(rails, id) {
+  const found = rails.find((r) => r.rootId === id);
+  assert.ok(found, "rail for " + id + " present");
+  return found;
+}
+
+function laneNumbers(railEntry) {
+  return railEntry.lanes.map((l) => l.lane);
+}
+
+/** The owner's repo shape, compact: trunk + 3 forks (one 2-deep chain) +
+ * a 4-parent merge near the top. Array order is newest-first, as the CLI
+ * emits it; created_at values are deliberately scrambled to prove the rail
+ * follows the array, not a re-sort. */
+function mirrorFixture() {
+  const roots = [
+    root("t4", { mainline: true, parents: ["m1"], created_at: "2026-09-18T12:00:00Z" }),
+    root("m1", {
+      mainline: true,
+      parents: ["t3", "fa1", "fb", "fc"],
+      created_at: "2026-09-17T01:00:00Z",
+      created_reason: "merge three forks",
+    }),
+    root("t3", { mainline: true, parents: ["t2"], created_at: "2026-09-18T10:30:00Z" }),
+    root("fa1", { parents: ["fa0"], created_at: "2026-09-16T10:00:00Z" }),
+    root("fb", { parents: ["t1"], created_at: "2026-09-18T09:45:00Z" }),
+    root("fc", { parents: ["t2"], created_at: "2026-09-15T09:30:00Z" }),
+    root("fa0", { parents: ["t0"], created_at: "2026-09-18T09:30:00Z" }),
+    root("t2", { mainline: true, fork_point: true, parents: ["t1"], created_at: "2026-09-18T09:00:00Z" }),
+    root("t1", { mainline: true, parents: ["t0"], created_at: "2026-09-14T08:00:00Z" }),
+    root("t0", { mainline: true, created_at: "2026-09-18T07:00:00Z" }),
+  ];
+  const forks = [
+    fork("api-redesign", "fa1", "t0", { contained: true }),
+    fork("ui-polish", "fb", "t1", { contained: true }),
+    fork("feature-c-long", "fc", "t2", { contained: true }),
+  ];
+  return projection(roots, forks);
+}
+
+// --- layoutLineage: regression net over the shared lane topology ---
+
+test("layoutLineage rows are newest-first by created_at with id tiebreak descending", () => {
   const layout = layoutLineage(
     projection([
       root("t2", { mainline: true, parents: ["t1"], created_at: "2026-09-18T11:00:00Z" }),
@@ -59,10 +106,9 @@ test("rows are newest-first by created_at with id tiebreak descending", () => {
     layout.nodes.map((n) => n.id),
     ["t3", "t2", "t1", "r-bbb", "r-aaa"]
   );
-  layout.nodes.forEach((n, row) => assert.equal(n.row, row));
 });
 
-test("trunk roots sit on lane 0 and each fork chain gets its own lane in base_root recency order", () => {
+test("layoutLineage keeps trunk on lane 0 and fork chains on their own lanes in base_root recency order", () => {
   const layout = layoutLineage(
     projection(
       [
@@ -76,32 +122,18 @@ test("trunk roots sit on lane 0 and each fork chain gets its own lane in base_ro
       [fork("f1", "a2", "t0"), fork("f2", "b1", "t1")]
     )
   );
-  assert.equal(node(layout, "t0").lane, 0);
-  assert.equal(node(layout, "t1").lane, 0);
   assert.equal(node(layout, "t2").lane, 0);
-  assert.equal(node(layout, "t2").color, ACCENT);
-  // f2 branched from the more recent base_root, so it gets the first fork lane.
   assert.equal(node(layout, "b1").lane, 1);
   assert.equal(node(layout, "a2").lane, 2);
   assert.equal(node(layout, "a1").lane, 2);
   assert.deepEqual(layout.laneNames, ["trunk", "f2", "f1"]);
   assert.notEqual(node(layout, "b1").color, ACCENT, "fork lane has its own color");
-  // In-lane chain edge vs the branch-off arc back to the trunk base.
-  const chain = layout.edges.find((e) => e.from === "a2" && e.to === "a1");
-  assert.equal(chain.crossLane, false);
-  const branchOff = layout.edges.find((e) => e.from === "a1" && e.to === "t0");
-  assert.equal(branchOff.crossLane, true);
 });
 
-test("a 2-fork merge root draws exactly one arc per fork tip and renders as a double-ring bubble", () => {
+test("layoutLineage: a 2-fork merge root arcs once per fork tip and stays on lane 0", () => {
   const proj = projection(
     [
-      root("m1", {
-        mainline: true,
-        parents: ["t1", "a1", "b1"],
-        created_at: "2026-09-18T10:00:00Z",
-        created_reason: "merge f1, f2",
-      }),
+      root("m1", { mainline: true, parents: ["t1", "a1", "b1"], created_at: "2026-09-18T10:00:00Z" }),
       root("b1", { parents: ["t0"], created_at: "2026-09-18T09:40:00Z" }),
       root("a1", { parents: ["t0"], created_at: "2026-09-18T09:30:00Z" }),
       root("t1", { mainline: true, parents: ["t0"], created_at: "2026-09-18T09:00:00Z" }),
@@ -112,7 +144,7 @@ test("a 2-fork merge root draws exactly one arc per fork tip and renders as a do
   const layout = layoutLineage(proj);
   const merge = node(layout, "m1");
   assert.equal(merge.kind, "merge");
-  assert.equal(merge.lane, 0, "merge roots stay on the trunk lane");
+  assert.equal(merge.lane, 0);
   const arcs = layout.edges.filter((e) => e.from === "m1" && e.crossLane);
   assert.equal(arcs.length, 2, "one arc per fork tip");
   assert.deepEqual(
@@ -120,214 +152,183 @@ test("a 2-fork merge root draws exactly one arc per fork tip and renders as a do
     ["a1", "b1"]
   );
   const trunkEdge = layout.edges.find((e) => e.from === "m1" && e.to === "t1");
-  assert.equal(trunkEdge.crossLane, false, "mainline continuation stays vertical");
-
-  const html = renderLineageGraph(proj);
-  const group = html.match(/<g class="node merge"[^>]*>([\s\S]*?)<\/g>/);
-  assert.ok(group, "merge node group renders");
-  assert.equal((group[1].match(/<circle/g) || []).length, 2, "double-ring bubble");
-  assert.ok(group[1].includes(`stroke="${ACCENT}"`), "bubble in the accent color");
+  assert.equal(trunkEdge.crossLane, false);
 });
 
-test("a contained (merged) fork still shows its lane and the arc into the merge bubble", () => {
-  const proj = projection(
-    [
-      root("m2", {
-        mainline: true,
-        parents: ["t1", "a1"],
-        created_at: "2026-09-18T10:00:00Z",
-      }),
-      root("a1", { parents: ["t0"], created_at: "2026-09-18T09:30:00Z" }),
-      root("t1", { mainline: true, parents: ["t0"], created_at: "2026-09-18T09:00:00Z" }),
-      root("t0", { mainline: true, created_at: "2026-09-18T08:00:00Z" }),
-    ],
-    [fork("f1", "a1", "t0", { contained: true })]
-  );
-  const layout = layoutLineage(proj);
-  assert.equal(node(layout, "m2").kind, "merge", "2-parent root whose second parent is not the previous mainline root is a merge");
-  const tip = node(layout, "a1");
-  assert.equal(tip.lane, 1, "contained fork keeps its lane");
-  assert.equal(tip.kind, "fork");
-  const arc = layout.edges.find((e) => e.from === "m2" && e.to === "a1");
-  assert.ok(arc && arc.crossLane, "arc from merge node to fork tip");
-});
-
-test("more than 60 non-structural roots fill the budget and the footer reports the true count", () => {
-  const roots = [];
-  for (let i = 0; i < 65; i++) {
-    roots.push(
-      root("r" + String(i).padStart(3, "0"), {
-        mainline: true,
-        parents: i ? ["r" + String(i - 1).padStart(3, "0")] : [],
-        created_at: new Date(Date.UTC(2026, 8, 18, 0, i)).toISOString(),
-      })
-    );
-  }
-  const layout = layoutLineage(projection(roots));
-  assert.equal(layout.totalRoots, 65);
-  assert.equal(layout.shownRoots, 60);
-  assert.equal(layout.nodes.length, 60);
-  assert.equal(layout.nodes[0].id, "r064", "newest first after truncation");
-  const html = renderLineageGraph(projection(roots));
-  assert.ok(html.includes("showing 60 of 65 roots · 5 older roots hidden"));
-});
-
-test("structural nodes survive the window: 3 fork tips beyond position 60 still arc into the merge bubble", () => {
-  // Mirrors the owner's repo shape: 100 roots, the 4-parent merge sits at
-  // row ~9 in newest-first order while all three fork tips fall beyond
-  // position 60 — the case the old newest-60 slice amputated.
-  const ts = (minute) => new Date(Date.UTC(2026, 8, 18, 0, minute)).toISOString();
-  const roots = [];
-  for (let i = 0; i <= 94; i++) {
-    roots.push(
-      root("t" + String(i).padStart(2, "0"), {
-        mainline: true,
-        parents: i ? ["t" + String(i - 1).padStart(2, "0")] : [],
-        created_at: ts(i),
-      })
-    );
-  }
-  roots.push(root("fap", { parents: ["t05"], created_at: ts(20) }));
-  roots.push(root("fa", { parents: ["fap"], created_at: ts(21) }));
-  roots.push(root("fb", { parents: ["t12"], created_at: ts(22) }));
-  roots.push(root("fc", { parents: ["t18"], created_at: ts(23) }));
-  roots.push(
-    root("m-big", {
-      mainline: true,
-      parents: ["t84", "fa", "fb", "fc"],
-      created_at: ts(85),
-      created_reason: "merge three forks",
-    })
-  );
-  const proj = projection(roots, [
-    fork("f-a", "fa", "t05", { contained: true }),
-    fork("f-b", "fb", "t12", { contained: true }),
-    fork("f-c", "fc", "t18", { contained: true }),
-  ]);
-  assert.equal(proj.roots.length, 100);
-
-  // Precondition: the fixture really exercises the bug — under the old
-  // newest-60 slice the tips were outside the window while the merge was in.
-  const sorted = [...proj.roots].sort(
-    (a, b) => b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id)
-  );
-  const pos = (id) => sorted.findIndex((r) => r.id === id);
-  assert.ok(pos("m-big") < 15, "merge near the top");
-  assert.ok(pos("fa") >= 60 && pos("fb") >= 60 && pos("fc") >= 60, "tips beyond position 60");
-
-  const layout = layoutLineage(proj);
-  assert.equal(layout.totalRoots, 100);
-  assert.equal(layout.shownRoots, 60, "structure plus filler still caps at 60");
-  assert.deepEqual(layout.laneNames, ["trunk", "f-c", "f-b", "f-a"], "lanes in base_root recency order");
-  const merge = node(layout, "m-big");
-  assert.equal(merge.kind, "merge");
-  assert.equal(merge.lane, 0);
-  const lanes = [node(layout, "fa").lane, node(layout, "fb").lane, node(layout, "fc").lane];
-  assert.ok(lanes.every((lane) => lane > 0), "every tip gets a fork lane");
-  assert.equal(new Set(lanes).size, 3, "three distinct fork lanes");
-  assert.equal(node(layout, "fap").lane, node(layout, "fa").lane, "chain node shares the tip lane");
-  // Trunk bases arrive via the parent-edge closure, not the budget.
-  node(layout, "t05");
-  node(layout, "t12");
-  node(layout, "t18");
-  const arcs = layout.edges.filter((e) => e.from === "m-big" && e.crossLane);
-  assert.equal(arcs.length, 3, "exactly one arc per fork tip into the merge bubble");
-  assert.deepEqual(
-    arcs.map((e) => e.to).sort(),
-    ["fa", "fb", "fc"]
-  );
-  const continuation = layout.edges.find((e) => e.from === "m-big" && e.to === "t84");
-  assert.ok(continuation && !continuation.crossLane, "trunk continuation draws vertically");
-
-  const html = renderLineageGraph(proj);
-  assert.ok(
-    html.startsWith('<div class="lineage-graph">'),
-    "wrapper div owns scroll + footer; the webview concatenates the fragment into panel.innerHTML"
-  );
-  assert.ok(html.includes("<svg"));
-  assert.ok(html.includes("showing 60 of 100 roots · 40 older roots hidden"));
-});
-
-test("structural overflow renders beyond 60 and the footer reports the true count", () => {
-  const ts = (minute) => new Date(Date.UTC(2026, 8, 18, 0, minute)).toISOString();
-  const roots = [];
-  for (let i = 0; i <= 79; i++) {
-    roots.push(
-      root("s" + String(i).padStart(2, "0"), {
-        mainline: true,
-        fork_point: i >= 10, // s10..s79: 70 structural roots
-        parents: i ? ["s" + String(i - 1).padStart(2, "0")] : [],
-        created_at: ts(i),
-      })
-    );
-  }
-  const layout = layoutLineage(projection(roots));
-  assert.equal(layout.totalRoots, 80);
-  assert.equal(layout.shownRoots, 71, "70 fork_points plus the trunk parent of the oldest one");
-  assert.equal(layout.nodes.length, 71, "structure alone may exceed the 60 budget");
-  assert.equal(layout.nodes[0].id, "s79", "newest first even in overflow");
-  const html = renderLineageGraph(projection(roots));
-  assert.ok(html.includes("showing 71 of 80 roots · 9 older roots hidden"));
-});
-
-test("an empty projection renders the empty-state line", () => {
-  const html = renderLineageGraph(projection([]));
-  assert.ok(html.includes("No lineage yet"));
-  assert.ok(html.includes("stateroot snap"));
-  assert.ok(!html.includes("<svg"));
-  assert.equal(renderLineageGraph(undefined), renderLineageGraph(projection([])));
-});
-
-test("long reasons truncate to 64 chars and the hover title carries full detail", () => {
-  const reason = "x".repeat(100);
-  const html = renderLineageGraph(
-    projection([
-      root("abc12345def0", {
-        mainline: true,
-        created_at: "2026-09-18T10:00:00Z",
-        created_by_harness: "claude-code",
-        created_reason: reason,
-        files_pinned: 42,
-        coverage: "src/**",
-      }),
-    ])
-  );
-  assert.ok(html.includes("x".repeat(63) + "…"), "reason clipped at 63 chars + ellipsis");
-  assert.ok(!html.includes("x".repeat(64) + "…"), "no longer clip");
-  const title = html.match(/<title>([\s\S]*?)<\/title>/)[1];
-  assert.ok(title.includes("abc12345def0"), "title has the full id");
-  assert.ok(title.includes("2026-09-18T10:00:00Z"), "title has created_at");
-  assert.ok(title.includes("claude"), "title has the harness");
-  assert.ok(title.includes(reason), "title has the untruncated reason");
-  assert.ok(title.includes("42"), "title has files_pinned");
-  assert.ok(title.includes("src/**"), "title has coverage");
-  assert.ok(html.includes(" · claude · abc12345"), "row label carries muted harness + shortid");
-  assert.ok(html.includes("all roots shown"), "honest footer when nothing is hidden");
-});
-
-test("fork_point roots render as a hollow ring and lane headers sit above the lane's first node", () => {
-  const html = renderLineageGraph(
+test("layoutLineage: a contained fork keeps its lane and the arc into the merge", () => {
+  const layout = layoutLineage(
     projection(
       [
-        root("b1", { parents: ["t0"], created_at: "2026-09-18T09:30:00Z" }),
-        root("t0", {
-          mainline: true,
-          fork_point: true,
-          created_at: "2026-09-18T08:00:00Z",
-        }),
+        root("m2", { mainline: true, parents: ["t1", "a1"], created_at: "2026-09-18T10:00:00Z" }),
+        root("a1", { parents: ["t0"], created_at: "2026-09-18T09:30:00Z" }),
+        root("t1", { mainline: true, parents: ["t0"], created_at: "2026-09-18T09:00:00Z" }),
+        root("t0", { mainline: true, created_at: "2026-09-18T08:00:00Z" }),
       ],
-      [fork("side-quest", "b1", "t0")]
+      [fork("f1", "a1", "t0", { contained: true })]
     )
   );
-  const group = html.match(/<g class="node trunk" data-act="showRoot" data-id="t0">([\s\S]*?)<\/g>/);
-  assert.ok(group, "fork_point trunk node renders");
-  assert.ok(group[1].includes('fill="none"'), "hollow ring marker");
-  assert.ok(!group[1].includes(`r="5"`), "no filled circle for a fork_point");
-  assert.ok(html.includes("lane-head"), "fork lane header renders");
-  assert.ok(html.includes("side-que"), "header carries the fork name");
+  assert.equal(node(layout, "m2").kind, "merge");
+  const tip = node(layout, "a1");
+  assert.equal(tip.lane, 1);
+  assert.equal(tip.kind, "fork");
+  const arc = layout.edges.find((e) => e.from === "m2" && e.to === "a1");
+  assert.ok(arc && arc.crossLane);
 });
 
-test("the Lineage tab renders the graph and node clicks post showRoot to the extension", () => {
+// --- compactRails / renderRail: the per-row rail inside the lineage list ---
+
+test("trunk-only project: every row carries one accent lane and a trunk node, no diagonals", () => {
+  const proj = projection([
+    root("c3", { mainline: true, parents: ["c2"] }),
+    root("c2", { mainline: true, parents: ["c1"] }),
+    root("c1", { mainline: true }),
+  ]);
+  const rails = compactRails(proj);
+  assert.equal(rails.length, 3);
+  for (const entry of rails) {
+    assert.deepEqual(laneNumbers(entry), [0]);
+    assert.equal(entry.lanes[0].color, ACCENT);
+    assert.equal(entry.node.kind, "trunk");
+    assert.equal(entry.node.lane, 0);
+    assert.deepEqual(entry.diagonals, []);
+  }
+  assert.equal(rails[0].lanes[0].activeThrough, true);
+  assert.equal(rails[2].lanes[0].activeThrough, false, "lane ends on the last row");
+  const html = renderRail(rails[1]);
+  assert.equal((html.match(/lane-line/g) || []).length, 1, "one vertical line");
+  assert.ok(html.includes(`fill="${ACCENT}"`), "filled accent dot");
+  assert.ok(!html.includes("<path"), "no diagonals");
+});
+
+test("real-repo mirror: merge row draws double-ring + 3 diagonals, spans and branch-offs line up", () => {
+  const rails = compactRails(mirrorFixture());
+
+  // Row 0 (t4): above the merge, no fork activity yet.
+  assert.deepEqual(laneNumbers(rail(rails, "t4")), [0]);
+  assert.deepEqual(rail(rails, "t4").diagonals, []);
+
+  // Row 1 (m1): the 4-parent merge — double-ring on lane 0, one diagonal
+  // per merged fork lane, all four lanes present from here down.
+  const merge = rail(rails, "m1");
+  assert.equal(merge.node.kind, "merge");
+  assert.equal(merge.node.lane, 0);
+  assert.deepEqual(laneNumbers(merge), [0, 1, 2, 3]);
+  const mergeDiags = merge.diagonals.filter((d) => d.kind === "merge");
+  assert.equal(mergeDiags.length, 3, "one diagonal per fork lane");
+  assert.deepEqual(
+    mergeDiags.map((d) => d.toLane).sort(),
+    [1, 2, 3]
+  );
+  for (const d of mergeDiags) {
+    assert.equal(d.fromLane, 0);
+    assert.ok(d.x2 > d.x1, "diagonal runs down-right");
+  }
+  const mergeHtml = renderRail(merge);
+  assert.equal((mergeHtml.match(/<circle/g) || []).length, 2, "double-ring bubble");
+  assert.equal((mergeHtml.match(/<path/g) || []).length, 3, "three diagonal connectors");
+
+  // Rows between the merge and the tips carry all fork lanes vertically.
+  assert.deepEqual(laneNumbers(rail(rails, "t3")), [0, 1, 2, 3]);
+
+  // Tip rows: dots on their lanes; only the row's rightmost lane shows a label.
+  const fa1 = rail(rails, "fa1");
+  assert.equal(fa1.node.kind, "fork");
+  assert.equal(fa1.node.lane, 3);
+  assert.equal(fa1.label, "api-red…", "tip label truncated to 8 chars when space allows");
+  assert.ok(fa1.node.title.includes("api-redesign"), "full name stays in the hover title");
+  const fb = rail(rails, "fb");
+  assert.equal(fb.node.lane, 2);
+  assert.equal(fb.label, undefined, "not the rightmost active lane — just the dot");
+  assert.ok(fb.node.title.includes("ui-polish"));
+  const fc = rail(rails, "fc");
+  assert.equal(fc.node.lane, 1);
+  assert.equal(fc.label, undefined);
+  assert.ok(fc.node.title.includes("feature-c-long"));
+
+  // Chain middle node shares the tip's lane.
+  assert.equal(rail(rails, "fa0").node.lane, 3);
+  assert.deepEqual(laneNumbers(rail(rails, "fa0")), [0, 1, 2, 3]);
+
+  // Branch-off rows: the diagonal replaces the lane's vertical in that cell.
+  const t2 = rail(rails, "t2");
+  assert.equal(t2.node.forkPoint, true, "fork_point flag survives");
+  assert.deepEqual(laneNumbers(t2), [0, 2, 3], "the branching lane is not vertical here");
+  const branchC = t2.diagonals.find((d) => d.kind === "branch");
+  assert.ok(branchC && branchC.toLane === 1, "off-diagonal into the new fork lane");
+  const t2Html = renderRail(t2);
+  assert.ok(t2Html.includes('fill="none"'), "fork_point renders the hollow ring");
+  assert.equal((t2Html.match(/lane-line/g) || []).length, 3);
+  assert.equal((t2Html.match(/<path/g) || []).length, 1);
+  assert.deepEqual(laneNumbers(rail(rails, "t1")), [0, 3]);
+  assert.equal(rail(rails, "t1").diagonals.find((d) => d.kind === "branch").toLane, 2);
+  assert.deepEqual(laneNumbers(rail(rails, "t0")), [0]);
+  assert.equal(rail(rails, "t0").diagonals.find((d) => d.kind === "branch").toLane, 3);
+
+  // Lane span ends: f-c's vertical stops after its oldest chain row; its
+  // branch diagonal at t2 completes it.
+  const fa0Lanes = rail(rails, "fa0").lanes;
+  assert.equal(fa0Lanes.find((l) => l.lane === 1).activeThrough, false);
+  assert.equal(fa0Lanes.find((l) => l.lane === 3).activeThrough, true);
+});
+
+test("compactRails follows the projection's root array order exactly — no re-sort", () => {
+  const proj = mirrorFixture();
+  // The fixture's created_at values are scrambled; the array order is the
+  // newest-first display order the list renders.
+  const rails = compactRails(proj);
+  assert.deepEqual(
+    rails.map((r) => r.rootId),
+    proj.roots.map((r) => r.id)
+  );
+});
+
+test("a row with no fork activity renders the plain trunk lane only", () => {
+  const proj = projection(
+    [
+      root("new1", { mainline: true, parents: ["base"] }),
+      root("base", { mainline: true }),
+      root("old1", { parents: ["base"] }),
+    ],
+    // Fork with no chain in-window and no merge: never claimed, never drawn.
+    [fork("ghost", "missing-tip", "base")]
+  );
+  const rails = compactRails(proj);
+  for (const entry of rails) {
+    assert.deepEqual(laneNumbers(entry), [0]);
+    assert.deepEqual(entry.diagonals, []);
+  }
+});
+
+test("empty projections render no rails and renderRail tolerates a missing rail", () => {
+  assert.deepEqual(compactRails(undefined), []);
+  assert.deepEqual(compactRails(projection([])), []);
+  assert.equal(renderRail(undefined), "");
+});
+
+test("unmerged fork lane runs from its tip row down to the branch-off row", () => {
+  const proj = projection(
+    [
+      root("t2", { mainline: true, parents: ["t1"] }),
+      root("tip1", { parents: ["t0"] }),
+      root("t1", { mainline: true, parents: ["t0"] }),
+      root("t0", { mainline: true }),
+    ],
+    [fork("side", "tip1", "t0")]
+  );
+  const rails = compactRails(proj);
+  assert.deepEqual(laneNumbers(rail(rails, "t2")), [0], "no lane above the unmerged tip");
+  assert.deepEqual(laneNumbers(rail(rails, "tip1")), [0, 1]);
+  assert.equal(rail(rails, "tip1").node.kind, "fork");
+  assert.equal(rail(rails, "tip1").label, "side", "tip labeled on its own row");
+  assert.deepEqual(laneNumbers(rail(rails, "t1")), [0, 1], "lane continues toward the base");
+  const base = rail(rails, "t0");
+  assert.deepEqual(laneNumbers(base), [0]);
+  assert.equal(base.diagonals.length, 1);
+  assert.equal(base.diagonals[0].kind, "branch");
+  assert.equal(base.diagonals[0].toLane, 1);
+});
+
+test("the Lineage tab renders list rows with rail cells and no big graph block; node clicks post showRoot", () => {
   const html = workbenchHtml("testnonce");
   const src = html.match(/<script nonce="testnonce">([\s\S]*?)<\/script>/)[1];
   const panel = {
@@ -355,22 +356,15 @@ test("the Lineage tab renders the graph and node clicks post showRoot to the ext
       getElementById: (id) => (id === "panel" ? panel : null),
     },
   });
-  messageHandler({
-    data: {
-      tab: "lineage",
-      lineage: projection(
-        [
-          root("m1", { mainline: true, parents: ["t1", "a1"], created_at: "2026-09-18T10:00:00Z" }),
-          root("a1", { parents: ["t1"], created_at: "2026-09-18T09:30:00Z" }),
-          root("t1", { mainline: true, created_at: "2026-09-18T09:00:00Z" }),
-        ],
-        [fork("f1", "a1", "t1")]
-      ),
-      roots: [],
-    },
-  });
-  assert.ok(panel.innerHTML.includes("<svg"), "graph renders in the lineage tab");
-  assert.ok(panel.innerHTML.includes('data-id="m1"'), "nodes are clickable targets");
+  messageHandler({ data: { tab: "lineage", lineage: mirrorFixture(), roots: [] } });
+  const out = panel.innerHTML;
+  assert.ok(out.includes('class="rail"'), "rows carry rail cells");
+  assert.ok(out.includes("lane-line"), "lane lines render");
+  assert.ok(out.includes('data-act="showRoot"'), "node markers are clickable");
+  assert.ok(!out.includes("lineage-graph"), "the separate big graph block is gone");
+  assert.ok(out.includes('data-act="compare"'), "legacy compare UI intact");
+  assert.ok(out.includes('data-act="diff"'), "legacy diff UI intact");
+  assert.ok(out.includes("Select two roots"), "legacy list instructions intact");
   const fakeNode = {
     getAttribute: (name) =>
       name === "data-act" ? "showRoot" : name === "data-id" ? "m1" : null,

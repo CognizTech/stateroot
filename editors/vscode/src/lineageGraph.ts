@@ -1,12 +1,14 @@
 import type { LineageProjection, LineageRoot, ParallelFork } from "./parallelWork";
 
 /**
- * Git-style DAG layout + SVG rendering for the lineage projection
+ * Lane topology + per-row rail rendering for the lineage projection
  * (stateroot.lineage.v1). Pure functions — no vscode, no CLI — so the same
  * code runs in node:test and inside the workbench webview, where
- * workbenchHtml injects these functions by source. Everything they reference
- * must therefore be local, or one of esc/clip/harnessName, which intentionally
- * mirror the client script's helpers and resolve to them when injected.
+ * workbenchHtml injects assignLanes/compactRails/renderRail by source.
+ * Everything those three reference must be local, or one of esc/clip, which
+ * intentionally mirror the client script's helpers and resolve to them when
+ * injected. layoutLineage (the full-graph layout) is exported for tests and
+ * is not injected — the Lineage tab renders compact rails, not the big graph.
  */
 
 function esc(value: unknown): string {
@@ -32,6 +34,291 @@ function harnessName(id: unknown): string {
 }
 
 export type LineageNodeKind = "trunk" | "fork" | "merge";
+
+export interface LaneAssignment {
+  laneOf: Map<string, number>;
+  laneNames: string[];
+  merges: Set<string>;
+  chainOf: Map<string, string[]>;
+  laneColor: (lane: number) => string;
+}
+
+/** Shared lane topology over roots in display order (index 0 = newest — the
+ * caller picks the order, so compactRails can align to the list's array and
+ * layoutLineage to its sorted window). Mainline roots are lane 0, merge roots
+ * stay on lane 0, and each fork chain (first-parent walk from tip back to,
+ * excluding, base_root) claims its own lane in order of fork activity — most
+ * recent base_root first. Exported so workbenchHtml can inject it ahead of
+ * compactRails; both views must agree on lanes, so both share this code. */
+export function assignLanes(roots: LineageRoot[], forks: ParallelFork[]): LaneAssignment {
+  const ACCENT = "#7ee0c8";
+  const LANE_COLORS = ["#f2a65a", "#7aa2f7", "#bb9af7", "#f7768e", "#9ece6a", "#4fd6be", "#ff9e64"];
+  const byId = new Map(roots.map((r) => [r.id, r]));
+  const indexOf = new Map(roots.map((r, i) => [r.id, i]));
+  const isMainline = (r: LineageRoot): boolean => !!r.mainline;
+  const prevMainline = (row: number): string | undefined => {
+    for (let j = row + 1; j < roots.length; j++) {
+      if (isMainline(roots[j])) return roots[j].id;
+    }
+    return undefined;
+  };
+  const isMerge = (r: LineageRoot, row: number): boolean => {
+    const parents = r.parents || [];
+    if (parents.length > 2) return true;
+    if (parents.length === 2) return parents[1] !== prevMainline(row);
+    return false;
+  };
+
+  // Fork lanes in activity order: most recent base_root first.
+  const orderedForks = [...forks];
+  const activityOf = (f: ParallelFork): number => {
+    const base = f.base_root ? indexOf.get(f.base_root) : undefined;
+    if (base !== undefined) return base;
+    const tip = f.tip ? indexOf.get(f.tip) : undefined;
+    if (tip !== undefined) return tip;
+    return Number.MAX_SAFE_INTEGER;
+  };
+  orderedForks.sort(
+    (a, b) =>
+      activityOf(a) - activityOf(b) ||
+      (b.created_at || "").localeCompare(a.created_at || "") ||
+      a.name.localeCompare(b.name)
+  );
+
+  const laneOf = new Map<string, number>();
+  roots.forEach((r) => {
+    if (isMainline(r)) laneOf.set(r.id, 0);
+  });
+  const claimed = new Set<string>();
+  const chainOf = new Map<string, string[]>();
+  const perFork = orderedForks.map((f) => {
+    const ids: string[] = [];
+    let cur = f.tip ? byId.get(f.tip) : undefined;
+    let guard = 0;
+    while (cur && guard++ <= roots.length) {
+      if (cur.id === f.base_root) break;
+      if (isMainline(cur)) break;
+      if (claimed.has(cur.id)) break;
+      claimed.add(cur.id);
+      ids.push(cur.id);
+      const next = cur.parents?.[0];
+      if (!next) break;
+      cur = byId.get(next);
+    }
+    chainOf.set(f.name, ids);
+    return { name: f.name, ids };
+  });
+  const laneNames = ["trunk"];
+  for (const claim of perFork) {
+    if (!claim.ids.length) continue;
+    laneNames.push(claim.name);
+    const lane = laneNames.length - 1;
+    claim.ids.forEach((id) => laneOf.set(id, lane));
+  }
+  // Merge roots always sit on the trunk lane.
+  const merges = new Set<string>();
+  roots.forEach((r, i) => {
+    if (isMerge(r, i)) {
+      merges.add(r.id);
+      laneOf.set(r.id, 0);
+    }
+  });
+  const laneColor = (lane: number): string => {
+    if (lane === 0) return ACCENT;
+    const name = laneNames[lane] || String(lane);
+    let h = 0;
+    for (const ch of name) {
+      h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+    }
+    return LANE_COLORS[h % LANE_COLORS.length];
+  };
+  return { laneOf, laneNames, merges, chainOf, laneColor };
+}
+
+export interface CompactRailLane {
+  lane: number;
+  x: number;
+  color: string;
+  /** True when the lane's vertical line continues into older rows. */
+  activeThrough: boolean;
+}
+
+export interface CompactRailNode {
+  lane: number;
+  x: number;
+  color: string;
+  kind: LineageNodeKind;
+  forkPoint: boolean;
+  title: string;
+}
+
+export interface CompactRailDiagonal {
+  fromLane: number;
+  toLane: number;
+  x1: number;
+  x2: number;
+  color: string;
+  /** merge: node down-right into the fork lane below; branch: fork lane into the trunk node. */
+  kind: "merge" | "branch";
+}
+
+export interface CompactRail {
+  rootId: string;
+  width: number;
+  lanes: CompactRailLane[];
+  node: CompactRailNode;
+  diagonals: CompactRailDiagonal[];
+  /** Truncated fork name on tip rows when the tip's lane is the row's rightmost. */
+  label?: string;
+}
+
+/** Per-row, self-contained rail slices aligned to the projection's roots
+ * array order — the same array the lineage list renders, so the rail cannot
+ * drift from the list. A fork lane's vertical runs from its newest connection
+ * row (the newest merge referencing its chain, else its tip row) down to the
+ * branch-off row, which carries the off-diagonal instead of the vertical. */
+export function compactRails(projection?: LineageProjection): CompactRail[] {
+  const LANE_W = 10;
+  const PAD = 4;
+  const roots = projection?.roots ?? [];
+  if (!roots.length) return [];
+  const forks = projection?.forks ?? [];
+  const { laneOf, laneNames, merges, chainOf, laneColor } = assignLanes(roots, forks);
+  const rowOf = new Map(roots.map((r, i) => [r.id, i]));
+  const xAt = (lane: number): number => PAD + lane * LANE_W;
+
+  // Merge diagonals: one per merged parent on a non-trunk lane. The newest
+  // merge referencing a chain becomes that lane's top connection row.
+  const mergeDiags = new Map<number, CompactRailDiagonal[]>();
+  const topConnection = new Map<number, number>();
+  roots.forEach((r, row) => {
+    if (!merges.has(r.id)) return;
+    for (const parentId of (r.parents || []).slice(1)) {
+      const lane = laneOf.get(parentId);
+      if (!lane) continue;
+      const list = mergeDiags.get(row) ?? [];
+      list.push({
+        fromLane: 0,
+        toLane: lane,
+        x1: xAt(0),
+        x2: xAt(lane),
+        color: laneColor(lane),
+        kind: "merge",
+      });
+      mergeDiags.set(row, list);
+      const prev = topConnection.get(lane);
+      if (prev === undefined || row < prev) {
+        topConnection.set(lane, row);
+      }
+    }
+  });
+
+  // Per-fork vertical spans and branch-off diagonals.
+  const spans = new Map<number, { top: number; end: number }>();
+  const branchDiags = new Map<number, CompactRailDiagonal[]>();
+  const tipName = new Map<string, string>();
+  for (const f of forks) {
+    const chain = chainOf.get(f.name) ?? [];
+    if (!chain.length) continue;
+    const lane = laneNames.indexOf(f.name);
+    const chainRows = chain
+      .map((id) => rowOf.get(id))
+      .filter((r): r is number => r !== undefined);
+    if (!chainRows.length) continue;
+    if (f.tip) tipName.set(f.tip, f.name);
+    const tipRow = Math.min(...chainRows);
+    const bottom = Math.max(...chainRows);
+    const top = Math.min(tipRow, topConnection.get(lane) ?? tipRow);
+    const baseRow = f.base_root ? rowOf.get(f.base_root) : undefined;
+    const end = baseRow !== undefined ? Math.max(baseRow, bottom + 1) : bottom + 1;
+    spans.set(lane, { top, end });
+    if (baseRow !== undefined) {
+      const list = branchDiags.get(baseRow) ?? [];
+      list.push({
+        fromLane: 0,
+        toLane: lane,
+        x1: xAt(0),
+        x2: xAt(lane),
+        color: laneColor(lane),
+        kind: "branch",
+      });
+      branchDiags.set(baseRow, list);
+    }
+  }
+
+  const maxLane = Math.max(0, ...spans.keys());
+  const baseWidth = Math.max(14, xAt(maxLane) + 6);
+
+  return roots.map((r, row) => {
+    const lanes: CompactRailLane[] = [
+      { lane: 0, x: xAt(0), color: laneColor(0), activeThrough: row < roots.length - 1 },
+    ];
+    const orderedSpans = [...spans.entries()].sort((a, b) => a[0] - b[0]);
+    for (const [lane, span] of orderedSpans) {
+      if (row < span.top || row >= span.end) continue;
+      lanes.push({
+        lane,
+        x: xAt(lane),
+        color: laneColor(lane),
+        activeThrough: row + 1 < span.end,
+      });
+    }
+    const nodeLane = laneOf.get(r.id) ?? 0;
+    const isMergeRoot = merges.has(r.id);
+    const fullName = tipName.get(r.id);
+    const rightmost = lanes[lanes.length - 1]?.lane ?? 0;
+    const label = fullName && nodeLane === rightmost ? clip(fullName, 8) : undefined;
+    const node: CompactRailNode = {
+      lane: nodeLane,
+      x: xAt(nodeLane),
+      color: laneColor(nodeLane),
+      kind: isMergeRoot ? "merge" : nodeLane === 0 ? "trunk" : "fork",
+      forkPoint: !!r.fork_point && !isMergeRoot,
+      title: fullName ? `${r.id} · ${fullName}` : r.id,
+    };
+    const diagonals = [...(mergeDiags.get(row) ?? []), ...(branchDiags.get(row) ?? [])];
+    const width = label ? Math.max(baseWidth, node.x + 8 + label.length * 6 + 4) : baseWidth;
+    return { rootId: r.id, width, lanes, node, diagonals, label };
+  });
+}
+
+/** One rail cell: full-height lane lines as flex divs plus a small
+ * top-anchored SVG for the node marker and short diagonals — per-row
+ * self-contained, so variable row heights and list scrolling never require
+ * cross-row measurements. The node group carries data-act="showRoot". */
+export function renderRail(rail?: CompactRail): string {
+  if (!rail) return "";
+  const CY = 9;
+  const DIAG_BOTTOM = 26;
+  const lines: string[] = [];
+  let prevX = 0;
+  let first = true;
+  for (const lane of rail.lanes) {
+    const delta = first ? lane.x : lane.x - prevX - 2;
+    lines.push(`<div class="lane-line" style="margin-left:${delta}px;background:${lane.color}"></div>`);
+    prevX = lane.x;
+    first = false;
+  }
+  const diagonals = rail.diagonals
+    .map((d) =>
+      d.kind === "merge"
+        ? `<path d="M ${d.x1 + 1} ${CY} C ${d.x1 + 1} ${CY + 11}, ${d.x2 + 1} ${CY + 7}, ${d.x2 + 1} ${DIAG_BOTTOM}" fill="none" stroke="${d.color}" stroke-width="1.5"/>`
+        : `<path d="M ${d.x2 + 1} 0 C ${d.x2 + 1} 5, ${d.x1 + 1} 4, ${d.x1 + 1} ${CY}" fill="none" stroke="${d.color}" stroke-width="1.5"/>`
+    )
+    .join("");
+  const n = rail.node;
+  const cx = n.x + 1;
+  const marker =
+    n.kind === "merge"
+      ? `<circle cx="${cx}" cy="${CY}" r="5" fill="none" stroke="${n.color}" stroke-width="1.5"/><circle cx="${cx}" cy="${CY}" r="2.2" fill="none" stroke="${n.color}" stroke-width="1.5"/>`
+      : n.forkPoint
+        ? `<circle cx="${cx}" cy="${CY}" r="3" fill="none" stroke="${n.color}" stroke-width="1.5"/>`
+        : `<circle cx="${cx}" cy="${CY}" r="3.2" fill="${n.color}"/>`;
+  const label = rail.label
+    ? `<text class="rail-label" x="${n.x + 8}" y="${CY + 3}"><title>${esc(n.title)}</title>${esc(rail.label)}</text>`
+    : "";
+  return `<span class="rail" style="width:${rail.width}px">${lines.join("")}<svg width="${rail.width}" height="${DIAG_BOTTOM}">${diagonals}<g class="node ${n.kind}" data-act="showRoot" data-id="${esc(rail.rootId)}"><title>${esc(n.title)}</title>${marker}</g>${label}</svg></span>`;
+}
 
 export interface LineageGraphNode {
   id: string;
@@ -80,9 +367,10 @@ export interface LineageGraphLayout {
   labelX: number;
 }
 
-/** Evidence-only layout: lanes come from the CLI projection's mainline flags
- * and fork chains (first-parent walk from fork tip to base_root); the
- * extension never infers topology from files. Newest first, no lane reuse.
+/** Evidence-only full-graph layout, kept as exported API (tests cover it;
+ * the Lineage tab itself renders compactRails). Lanes come from the CLI
+ * projection's mainline flags and fork chains via assignLanes; the extension
+ * never infers topology from files. Newest first, no lane reuse.
  *
  * Window rule: structural nodes are never dropped. Structural = every fork
  * tip, every merge root (parents.length > 1), every fork_point root, and every
@@ -102,8 +390,6 @@ export function layoutLineage(projection?: LineageProjection): LineageGraphLayou
   const TOP = 12;
   const LABEL_GAP = 10;
   const LABEL_W = 560;
-  const ACCENT = "#7ee0c8";
-  const LANE_COLORS = ["#f2a65a", "#7aa2f7", "#bb9af7", "#f7768e", "#9ece6a", "#4fd6be", "#ff9e64"];
 
   const emptyLayout: LineageGraphLayout = {
     empty: true,
@@ -168,82 +454,11 @@ export function layoutLineage(projection?: LineageProjection): LineageGraphLayou
   }
   const roots = all.filter((r) => included.has(r.id));
 
-  const byId = new Map(roots.map((r) => [r.id, r]));
   const indexOf = new Map(roots.map((r, i) => [r.id, i]));
-  const prevMainline = (row: number): string | undefined => {
-    for (let j = row + 1; j < roots.length; j++) {
-      if (isMainline(roots[j])) return roots[j].id;
-    }
-    return undefined;
-  };
-  const isMerge = (r: LineageRoot, row: number): boolean => {
-    const parents = r.parents || [];
-    if (parents.length > 2) return true;
-    if (parents.length === 2) return parents[1] !== prevMainline(row);
-    return false;
-  };
-
-  // Fork lanes in activity order: most recent base_root first.
-  const forks = [...(projection?.forks ?? [])];
-  const activityOf = (f: ParallelFork): number => {
-    const base = f.base_root ? indexOf.get(f.base_root) : undefined;
-    if (base !== undefined) return base;
-    const tip = f.tip ? indexOf.get(f.tip) : undefined;
-    if (tip !== undefined) return tip;
-    return Number.MAX_SAFE_INTEGER;
-  };
-  forks.sort(
-    (a, b) =>
-      activityOf(a) - activityOf(b) ||
-      (b.created_at || "").localeCompare(a.created_at || "") ||
-      a.name.localeCompare(b.name)
-  );
-
-  const laneOf = new Map<string, number>();
-  roots.forEach((r) => {
-    if (isMainline(r)) laneOf.set(r.id, 0);
-  });
-  const claimed = new Set<string>();
-  const perFork = forks.map((f) => {
-    const ids: string[] = [];
-    let cur = f.tip ? byId.get(f.tip) : undefined;
-    let guard = 0;
-    while (cur && guard++ <= roots.length) {
-      if (cur.id === f.base_root) break;
-      if (isMainline(cur)) break;
-      if (claimed.has(cur.id)) break;
-      claimed.add(cur.id);
-      ids.push(cur.id);
-      const next = cur.parents?.[0];
-      if (!next) break;
-      cur = byId.get(next);
-    }
-    return { name: f.name, ids };
-  });
-  const laneNames = ["trunk"];
-  for (const claim of perFork) {
-    if (!claim.ids.length) continue;
-    laneNames.push(claim.name);
-    const lane = laneNames.length - 1;
-    claim.ids.forEach((id) => laneOf.set(id, lane));
-  }
-  // Merge roots always sit on the trunk lane.
-  roots.forEach((r, i) => {
-    if (isMerge(r, i)) laneOf.set(r.id, 0);
-  });
-
-  const laneColor = (lane: number): string => {
-    if (lane === 0) return ACCENT;
-    const name = laneNames[lane] || String(lane);
-    let h = 0;
-    for (const ch of name) {
-      h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-    }
-    return LANE_COLORS[h % LANE_COLORS.length];
-  };
+  const { laneOf, laneNames, merges, laneColor } = assignLanes(roots, projection?.forks ?? []);
 
   const placed = roots.map((r, row) => {
-    const merge = isMerge(r, row);
+    const merge = merges.has(r.id);
     const lane = laneOf.get(r.id) ?? 0;
     return { r, row, lane, merge };
   });
@@ -322,44 +537,4 @@ export function layoutLineage(projection?: LineageProjection): LineageGraphLayou
     height: yAt(roots.length - 1) + 14,
     labelX,
   };
-}
-
-/** SVG string for the Lineage tab. Nodes carry data-act="showRoot" so the
- * panel's existing click delegation opens `stateroot show <id>` output. */
-export function renderLineageGraph(projection?: LineageProjection): string {
-  const layout = layoutLineage(projection);
-  if (layout.empty) {
-    return '<div class="muted">No lineage yet — <code>stateroot snap</code> records the first root.</div>';
-  }
-  const edgeMarkup = layout.edges
-    .map((e) => {
-      if (!e.crossLane) {
-        return `<path d="M ${e.x1} ${e.y1} L ${e.x2} ${e.y2}" fill="none" stroke="${e.color}" stroke-width="1.6"/>`;
-      }
-      const bend = Math.min(40, Math.max(12, Math.abs(e.y2 - e.y1) / 2));
-      return `<path d="M ${e.x1} ${e.y1} C ${e.x1} ${e.y1 + bend}, ${e.x2} ${e.y2 - bend}, ${e.x2} ${e.y2}" fill="none" stroke="${e.color}" stroke-width="1.6"/>`;
-    })
-    .join("");
-  const headerMarkup = layout.headers
-    .map(
-      (h) =>
-        `<text class="lane-head" x="${h.x}" y="${h.y}" text-anchor="middle">${esc(clip(h.name, 8))}<title>${esc(h.name)}</title></text>`
-    )
-    .join("");
-  const nodeMarkup = layout.nodes
-    .map((n) => {
-      const marker =
-        n.kind === "merge"
-          ? `<circle cx="${n.x}" cy="${n.y}" r="6.5" fill="none" stroke="${n.color}" stroke-width="1.8"/><circle cx="${n.x}" cy="${n.y}" r="3" fill="none" stroke="${n.color}" stroke-width="1.8"/>`
-          : n.forkPoint
-            ? `<circle cx="${n.x}" cy="${n.y}" r="4" fill="none" stroke="${n.color}" stroke-width="1.6"/>`
-            : `<circle cx="${n.x}" cy="${n.y}" r="5" fill="${n.color}"/>`;
-      return `<g class="node ${n.kind}" data-act="showRoot" data-id="${esc(n.id)}"><title>${esc(n.title)}</title>${marker}<text x="${layout.labelX}" y="${n.y + 4}">${esc(n.label)}<tspan class="muted">${esc(n.meta)}</tspan></text></g>`;
-    })
-    .join("");
-  const footer =
-    layout.totalRoots > layout.shownRoots
-      ? `<div class="muted">showing ${layout.shownRoots} of ${layout.totalRoots} roots · ${layout.totalRoots - layout.shownRoots} older roots hidden</div>`
-      : `<div class="muted">all roots shown</div>`;
-  return `<div class="lineage-graph"><svg width="${layout.width}" height="${layout.height}" viewBox="0 0 ${layout.width} ${layout.height}" role="img">${edgeMarkup}${headerMarkup}${nodeMarkup}</svg>${footer}</div>`;
 }
