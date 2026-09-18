@@ -90,6 +90,14 @@ StateRoot is pre-1.0 and milestones land as minor versions.
   never picks a resolver or a source side. Materialization is all-or-
   nothing: a checkout error or a verification mismatch restores the
   pre-merge tree byte-for-byte and leaves the user's Git index untouched.
+  Fork worktrees and merge checkouts write raw blob bytes even under
+  `core.autocrlf=true`, and user-staged files outside the merge survive
+  on disk — a staged path the merge also writes, with different content,
+  refuses instead of overwriting silently.
+- **Lists answer "what is latest?" first.** `stateroot plan list` and
+  `stateroot handoff list` are newest-first; the active plan and the
+  current handoff stay pinned to the top row (the handoff marked
+  `← current`).
 - **Automatic snapshots are bounded.** Checkpoint/finalize/delegation snaps
   run with a wall-clock, entry-count, and byte budget; on exhaustion the
   operation still succeeds, only the automatic root is skipped, the skip
