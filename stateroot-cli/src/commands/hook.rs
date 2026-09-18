@@ -1093,9 +1093,6 @@ fn spool_tail(project_dir: &Path, count: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static TEST_HOME_ENV: Mutex<()> = Mutex::new(());
 
     #[test]
     fn payload_project_dir_prefers_agent_cwd_over_process() {
@@ -1163,7 +1160,7 @@ mod tests {
 
     #[test]
     fn digest_seeds_global_and_project_learnings_on_first_run() {
-        let _guard = TEST_HOME_ENV.lock().expect("env lock");
+        let _guard = crate::test_env::env_lock();
         let home = tempfile::tempdir().expect("home");
         let project = tempfile::tempdir().expect("project");
         local_store::init_skeleton(project.path(), "p1", "demo", "default").expect("init");
@@ -1201,7 +1198,7 @@ mod tests {
 
     #[test]
     fn identity_only_digest_needs_no_project() {
-        let _guard = TEST_HOME_ENV.lock().expect("env lock");
+        let _guard = crate::test_env::env_lock();
         let home = tempfile::tempdir().expect("home");
         std::fs::write(
             home.path().join("persona.md"),
@@ -1209,7 +1206,7 @@ mod tests {
         )
         .expect("persona");
         let prior = std::env::var("STATEROOT_TEST_HOME").ok();
-        // SAFETY: serialized by TEST_HOME_ENV.
+        // SAFETY: serialized by the shared test env lock.
         unsafe { std::env::set_var("STATEROOT_TEST_HOME", home.path()) };
         let digest = identity_only_digest(home.path(), "cursor").expect("digest");
         match prior {
@@ -1231,7 +1228,7 @@ mod tests {
 
     #[test]
     fn digest_includes_full_persona_and_user_without_truncation() {
-        let _guard = TEST_HOME_ENV.lock().expect("env lock");
+        let _guard = crate::test_env::env_lock();
         let home = tempfile::tempdir().expect("home");
         let project = tempfile::tempdir().expect("project");
         let root = local_store::root(project.path());
@@ -1259,7 +1256,7 @@ mod tests {
         std::fs::write(home.path().join(".stateroot/user/USER.md"), &long_user).expect("user");
 
         let prior = std::env::var("STATEROOT_TEST_HOME").ok();
-        // SAFETY: serialized by TEST_HOME_ENV.
+        // SAFETY: serialized by the shared test env lock.
         unsafe { std::env::set_var("STATEROOT_TEST_HOME", home.path()) };
         let digest = hook_digest(home.path(), project.path(), "codex").expect("digest");
         match prior {

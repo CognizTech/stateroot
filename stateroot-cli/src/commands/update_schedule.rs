@@ -316,9 +316,6 @@ fn run_stdin(program: &str, args: &[&str], input: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn schtasks_args_carry_daily_task_and_exe() {
@@ -381,7 +378,7 @@ mod tests {
 
     #[test]
     fn ensure_registered_skips_when_scheduled_update_disabled() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = crate::test_env::env_lock();
         std::env::set_var("STATEROOT_DISABLE_SCHEDULED_UPDATE", "1");
         // Would attempt real OS registration without the skip — reaching
         // this assert means the gate held.

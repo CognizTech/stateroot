@@ -1345,9 +1345,7 @@ mod tests {
         ctx
     }
 
-    static UPDATE_TEST_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// SAFETY for every set/remove below: serialized by UPDATE_TEST_ENV.
+    /// SAFETY for every set/remove below: serialized by the shared test env lock.
     fn set_env(key: &str, value: Option<&str>) -> Option<String> {
         let prior = std::env::var(key).ok();
         unsafe {
@@ -1369,7 +1367,7 @@ mod tests {
     }
 
     fn clean_token_env() -> (TokenEnv, tempfile::TempDir) {
-        let guard = UPDATE_TEST_ENV.lock().expect("env lock");
+        let guard = crate::test_env::env_lock();
         let home = tempfile::tempdir().expect("home");
         let home_str = home.path().to_string_lossy().into_owned();
         let priors = vec![

@@ -72,9 +72,6 @@ pub fn activity(config_dir: &Path, project_dir: &Path, harness: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct EnvGuard {
         key: &'static str,
@@ -98,7 +95,7 @@ mod tests {
 
     #[test]
     fn endpoint_defaults_and_overrides() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = crate::test_env::env_lock();
         assert_eq!(endpoint(), TELEMETRY_URL);
         let _guard = EnvGuard::set("STATEROOT_TELEMETRY_URL", "http://127.0.0.1:9/event");
         assert_eq!(endpoint(), "http://127.0.0.1:9/event");
@@ -106,7 +103,7 @@ mod tests {
 
     #[test]
     fn observe_install_is_fail_silent_and_local() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = crate::test_env::env_lock();
         let _force = EnvGuard::set(core::FORCE_ENV, "1");
         let dir = tempfile::tempdir().unwrap();
         observe_install(dir.path(), "9.9.9");

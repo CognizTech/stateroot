@@ -109,9 +109,6 @@ pub async fn drain(ctx: &Ctx) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct EnvGuard {
         key: &'static str,
@@ -198,7 +195,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn acked_events_leave_the_spool() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = crate::test_env::env_lock();
         let _force = EnvGuard::set(core::FORCE_ENV, "1");
         let config = tempfile::tempdir().unwrap();
         let id = queue_event(config.path(), "install_observed");
@@ -230,7 +227,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn server_errors_retain_the_event_with_backoff() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = crate::test_env::env_lock();
         let _force = EnvGuard::set(core::FORCE_ENV, "1");
         let config = tempfile::tempdir().unwrap();
         let id = queue_event(config.path(), "active_day");
@@ -249,7 +246,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn schema_rejection_is_accounted_not_retried() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = crate::test_env::env_lock();
         let _force = EnvGuard::set(core::FORCE_ENV, "1");
         let config = tempfile::tempdir().unwrap();
         queue_event(config.path(), "active_day");
@@ -267,7 +264,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn offline_drain_keeps_events_until_acknowledgement() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = crate::test_env::env_lock();
         let _force = EnvGuard::set(core::FORCE_ENV, "1");
         let config = tempfile::tempdir().unwrap();
         let id = queue_event(config.path(), "continuity_activated");

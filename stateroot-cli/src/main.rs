@@ -7,6 +7,8 @@
 mod cli;
 mod commands;
 mod telemetry;
+#[cfg(test)]
+mod test_env;
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
