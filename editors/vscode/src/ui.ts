@@ -1,5 +1,6 @@
 import { SWITCH_PROMPTS } from "./setup";
 import type { MergeAttempt } from "./mergeAttempt";
+import { layoutLineage, renderLineageGraph } from "./lineageGraph";
 
 const ESCAPES: Record<string, string> = {
   "&": "&amp;",
@@ -247,6 +248,19 @@ button.dismiss {
 .cmd-row { align-items: center; margin: 4px 0; }
 .conflict-row { margin: 2px 0; }
 .attempt .kicker { margin-top: 8px; }
+.lineage-graph { margin-bottom: 12px; overflow-x: auto; }
+.lineage-graph svg { display: block; }
+.lineage-graph text {
+  font-family: var(--vscode-font-family);
+  font-size: 12px;
+  fill: var(--vscode-foreground);
+}
+.lineage-graph .lane-head {
+  font-size: 10px;
+  fill: var(--vscode-descriptionForeground);
+}
+.lineage-graph tspan.muted { fill: var(--vscode-descriptionForeground); }
+.lineage-graph .node { cursor: pointer; }
 `;
 
 function shell(nonceVal: string, body: string, script: string): string {
@@ -643,6 +657,7 @@ document.getElementById('panel').addEventListener('click', (event) => {
   else if (act === 'copyCmd') vscode.postMessage({ type: 'copyCmd', text: btn.getAttribute('data-cmd') });
   else if (act === 'dismiss') vscode.postMessage({ type: 'dismiss', id });
   else if (act === 'log') vscode.postMessage({ type: 'log', id });
+  else if (act === 'showRoot') vscode.postMessage({ type: 'showRoot', id });
   else if (act === 'selectRoot') vscode.postMessage({ type: 'selectRoot', id });
   else if (act === 'compare') vscode.postMessage({ type: 'compare' });
   else if (act === 'diff') vscode.postMessage({ type: 'diff' });
@@ -665,6 +680,8 @@ function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;',
 const STALE_INTEGRATION_CLI_MESSAGE = ${JSON.stringify(STALE_INTEGRATION_CLI_MESSAGE)};
 ${renderIntegrationCompat.toString()}
 ${renderAttemptBlock.toString()}
+${layoutLineage.toString()}
+${renderLineageGraph.toString()}
 function render() {
   document.querySelectorAll('.tab').forEach(btn => btn.classList.toggle('active', btn.getAttribute('data-tab') === state.tab));
   const panel = document.getElementById('panel');
@@ -839,6 +856,7 @@ function memoryPanel() {
 }
 function lineage() {
   const roots = (state.lineage && state.lineage.roots) || state.roots || [];
+  const graph = state.lineage ? renderLineageGraph(state.lineage) : '';
   const a = state.rootA, b = state.rootB;
   const currentId = (state.lineage && state.lineage.trunk && state.lineage.trunk.tip) || (roots[0] && roots[0].id);
   const left = roots.map(r => {
@@ -851,7 +869,7 @@ function lineage() {
       (meta ? '<div class="muted">' + esc(meta) + '</div>' : '') +
       '</button>';
   }).join('') || '<div class="muted">No roots yet.</div>';
-  return '<div class="split"><div class="list">' + left + '</div><div class="col"><div class="muted">Select two roots (click twice).</div><div>A: <code>' + esc((a||'').slice(0,12) || '—') + '</code> · B: <code>' + esc((b||'').slice(0,12) || '—') + '</code></div><div class="row"><button data-act="compare">Compare</button><button class="secondary" data-act="diff">Open native diff</button><button class="secondary" data-act="revert">Restore</button><button class="secondary" data-act="startParallel">Start parallel work</button></div><pre class="pre">' + esc(state.compareText || '') + '</pre></div></div>';
+  return graph + '<div class="split"><div class="list">' + left + '</div><div class="col"><div class="muted">Select two roots (click twice).</div><div>A: <code>' + esc((a||'').slice(0,12) || '—') + '</code> · B: <code>' + esc((b||'').slice(0,12) || '—') + '</code></div><div class="row"><button data-act="compare">Compare</button><button class="secondary" data-act="diff">Open native diff</button><button class="secondary" data-act="revert">Restore</button><button class="secondary" data-act="startParallel">Start parallel work</button></div><pre class="pre">' + esc(state.compareText || '') + '</pre></div></div>';
 }
 `;
   return shell(nonceVal, body, script);

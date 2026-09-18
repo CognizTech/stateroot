@@ -332,6 +332,14 @@ export function activate(context: vscode.ExtensionContext) {
       });
       return;
     }
+    if (type === "showRoot" && typeof msg.id === "string") {
+      // The panel never renders root detail itself; the CLI owns that output.
+      await withProject(async (root) => {
+        await runCliReport(["show", String(msg.id)], root, output, 60_000);
+        output.show(true);
+      });
+      return;
+    }
     if (type === "selectRoot" && typeof msg.id === "string") {
       const id = String(msg.id);
       if (!rootA || (rootA && rootB)) {
