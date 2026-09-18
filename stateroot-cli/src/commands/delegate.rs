@@ -327,6 +327,11 @@ fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
     // immutable.  Keep a compact attempt history on the replacement record.
     let mut attempt = 1_u64;
     let mut retries = Vec::new();
+    // A terminal record's pid is dead by definition — a live pid at that
+    // number can only be the OS recycling it for an unrelated process, which
+    // once misread a retry as "already running" and silently no-opped it.
+    // Terminal retries skip the pid check entirely.
+    let mut terminal_retry = false;
     if let Some((_path, existing)) = load_record(&ctx.cwd, &record_id) {
         let prior = existing.get("fingerprint").cloned().unwrap_or(json!(null));
         if prior != json!(null) && prior != fingerprint {
@@ -355,19 +360,22 @@ fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
                 "outcome_root": existing.get("outcome_root").cloned().unwrap_or(Value::Null),
                 "log": existing.get("log").cloned().unwrap_or(Value::Null),
             }));
+            terminal_retry = true;
         }
-        if existing.get("status").and_then(Value::as_str) == Some("starting") {
-            // A reservation whose spawn never landed: resubmit under the
-            // same key (recover-before-cancel pattern).
-        } else {
-            let pid = existing.get("pid").and_then(Value::as_u64).unwrap_or(0) as u32;
-            if pid != 0 && pid_alive(pid) {
-                println!(
-                    "delegation {record_id} already running (pid {pid}) — same key, no double-spawn"
-                );
-                return Ok(0);
+        if !terminal_retry {
+            if existing.get("status").and_then(Value::as_str) == Some("starting") {
+                // A reservation whose spawn never landed: resubmit under the
+                // same key (recover-before-cancel pattern).
+            } else {
+                let pid = existing.get("pid").and_then(Value::as_u64).unwrap_or(0) as u32;
+                if pid != 0 && pid_alive(pid) {
+                    println!(
+                        "delegation {record_id} already running (pid {pid}) — same key, no double-spawn"
+                    );
+                    return Ok(0);
+                }
+                // Lost worker: fall through and resubmit under the same key.
             }
-            // Lost worker: fall through and resubmit under the same key.
         }
     }
 

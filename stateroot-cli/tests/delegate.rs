@@ -559,6 +559,58 @@ fn failed_key_retries_with_same_identity_and_preserves_attempt_history() {
 
 #[cfg(unix)]
 #[test]
+fn terminal_record_with_a_recycled_pid_still_retries() {
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    let (_bin, path) = fake_claude("#!/bin/sh\necho transient failure >&2\nexit 1\n");
+
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .env("PATH", &path)
+        .args([
+            "delegate", "--to", "claude", "--task", "t", "--key", "k-pid",
+        ])
+        .assert()
+        .success();
+    let first = wait_for_outcome(project.path(), 60);
+    assert_eq!(first["outcome"], "failed");
+
+    // Simulate pid recycling: the terminal record's dead worker pid now
+    // belongs to a live, unrelated process (this test process itself).
+    let dir = delegations(project.path());
+    let record_path = std::fs::read_dir(&dir)
+        .expect("delegations")
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|ext| ext == "json"))
+        .expect("record file");
+    let mut record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&record_path).expect("record"))
+            .expect("json");
+    record["pid"] = serde_json::json!(std::process::id());
+    std::fs::write(
+        &record_path,
+        serde_json::to_string_pretty(&record).expect("write"),
+    )
+    .expect("rewrite");
+
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .env("PATH", &path)
+        .args([
+            "delegate", "--to", "claude", "--task", "t", "--key", "k-pid",
+        ])
+        .assert()
+        .success();
+    let retried = wait_for_outcome(project.path(), 60);
+    assert_eq!(
+        retried["attempt"],
+        serde_json::json!(2),
+        "a terminal record must retry regardless of pid liveliness"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn cancel_is_two_phase_and_records_cancelled_with_root() {
     let (config_home, user_home) = homes();
     let project = tempfile::tempdir().expect("project");
