@@ -823,3 +823,116 @@ fn checkpoint_stays_bounded_on_dependency_heavy_trees() {
         "adding ignore rules must restore automatic root creation"
     );
 }
+
+#[test]
+fn corrupt_handoff_fails_loud_and_repairs_cleanly() {
+    let config_home = tempfile::tempdir().expect("config home");
+    seed_config_home(config_home.path());
+    let user_home = tempfile::tempdir().expect("user home");
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args([
+            "handoff",
+            "write",
+            "--from",
+            "kimi",
+            "--input",
+            "handoff-input.json",
+        ])
+        .assert()
+        .success();
+
+    // Corrupt the current packet (trailing garbage — the field-observed
+    // signature of a non-atomic rewrite).
+    let current = project.path().join(".stateroot/handoffs/current.json");
+    let mut bytes = std::fs::read(&current).expect("current handoff");
+    bytes.extend_from_slice(b"\n garbage trailing bytes");
+    std::fs::write(&current, &bytes).expect("corrupt");
+
+    // Checkpoint stays fast and successful — episodic + bounded snap must
+    // never be hostage to one unreadable file.
+    let started = std::time::Instant::now();
+    let cp = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["checkpoint", "--note", "during corruption"])
+        .assert()
+        .success();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(120),
+        "checkpoint hung on a corrupt handoff"
+    );
+    let cp_out = String::from_utf8(cp.get_output().stdout.clone()).expect("utf8");
+    assert!(cp_out.contains("checkpoint recorded"), "{cp_out}");
+
+    // The digest banners the degradation at the very top.
+    let resume = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["resume", "--harness", "kimi", "--force"])
+        .assert()
+        .success();
+    let resume_out = String::from_utf8(resume.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        resume_out.contains("STATE DEGRADED"),
+        "corruption must banner in the digest: {}",
+        &resume_out[..resume_out.len().min(600)]
+    );
+
+    // Doctor prescribes the repair.
+    let doctor = stateroot(config_home.path(), user_home.path(), project.path())
+        .arg("doctor")
+        .assert()
+        .success();
+    let doc_out = String::from_utf8(doctor.get_output().stdout.clone()).expect("utf8");
+    assert!(doc_out.contains("handoff repair"), "{doc_out}");
+
+    // Supported recovery only: repair restores from history.
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["handoff", "repair"])
+        .assert()
+        .success();
+    let resumed = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["resume", "--harness", "kimi", "--force"])
+        .assert()
+        .success();
+    let resumed_out = String::from_utf8(resumed.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        !resumed_out.contains("STATE DEGRADED"),
+        "repair clears the banner"
+    );
+}
+
+#[test]
+fn doctor_names_heavy_dirs_with_sizes_and_ignore_lines() {
+    let config_home = tempfile::tempdir().expect("config home");
+    seed_config_home(config_home.path());
+    let user_home = tempfile::tempdir().expect("user home");
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+
+    // A nested generated tree (monorepo layout) above the entry threshold.
+    let nested = project.path().join("server/.venv/lib");
+    std::fs::create_dir_all(&nested).expect("mkdir");
+    for i in 0..210 {
+        std::fs::write(nested.join(format!("f{i}.py")), "x = 1\n").expect("file");
+    }
+    let doctor = stateroot(config_home.path(), user_home.path(), project.path())
+        .arg("doctor")
+        .assert()
+        .success();
+    let out = String::from_utf8(doctor.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        out.contains("server/.venv/") && out.contains(".gitignore"),
+        "doctor names the nested heavy dir with a paste-ready ignore line: {out}"
+    );
+
+    // Ignored dirs stop appearing.
+    std::fs::write(project.path().join(".staterootignore"), ".venv/\n").expect("ignore");
+    let doctor = stateroot(config_home.path(), user_home.path(), project.path())
+        .arg("doctor")
+        .assert()
+        .success();
+    let out = String::from_utf8(doctor.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        !out.contains("server/.venv/"),
+        "ignored heavy dir must not warn: {out}"
+    );
+}

@@ -335,6 +335,13 @@ fn record_automatic_snapshot_skip(project_dir: &Path, detail: &str) {
     let _ = crate::safe_io::atomic_replace_json(&path, &value);
 }
 
+/// A later automatic snap that completes clears the skip record: the budget
+/// incident is then historical, and doctor stops showing it.
+fn clear_automatic_snapshot_skip(project_dir: &Path) {
+    let path = local_store::root(project_dir).join("local/automatic-snapshot-skip.json");
+    let _ = std::fs::remove_file(path);
+}
+
 /// Build the working tree; returns the tree, pin count, bytes, and index
 /// hit/miss counters (proof of the stat-cache contract in tests).
 fn build_tree_with_budget(
@@ -759,6 +766,7 @@ pub fn snap_if_changed(
         };
         if let Some(parent) = latest_oid_for(&repo, project_dir)? {
             if !project_files_changed(&repo, parent, build.tree)? {
+                clear_automatic_snapshot_skip(project_dir);
                 return Ok(SnapOutcome::Unchanged {
                     root: parent.to_string(),
                 });
@@ -785,6 +793,7 @@ pub fn snap_if_changed(
         if attempt < RECONCILE_RETRIES && project_files_changed(&repo, published, observed.tree)? {
             continue;
         }
+        clear_automatic_snapshot_skip(project_dir);
         return Ok(SnapOutcome::Created(manifest, Box::new(transition)));
     }
     unreachable!("bounded reconciliation loop always returns")
@@ -3917,8 +3926,18 @@ mod tests {
             "{err}"
         );
         assert!(err.to_string().contains("visited entries"), "{err}");
+        let skip_record = local_store::root(&dir).join("local/automatic-snapshot-skip.json");
+        assert!(skip_record.is_file(), "skip is retained for doctor");
         // An explicit user request remains intentionally unbounded.
         create_root(&dir, "cli", "explicit", None).expect("explicit snap");
+        // A later automatic snap that completes clears the retained skip —
+        // doctor must not report yesterday's incident as today's state.
+        TEST_AUTO_SNAPSHOT_ENTRY_LIMIT.with(|c| c.set(0));
+        snap_if_changed(&dir, "cli", "automatic", None).expect("recovery snap");
+        assert!(
+            !skip_record.exists(),
+            "successful automatic snap clears the skip record"
+        );
     }
 
     #[test]

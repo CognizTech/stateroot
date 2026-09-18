@@ -606,6 +606,14 @@ pub fn hook_digest_with_identity(
     let identity = identity.to_string();
     let handoff = local_store::read_handoff_local(project_dir).ok().flatten();
     let mut work = String::new();
+    // Corruption banners first — a quiet unreadable handoff silently degraded
+    // sessions for days in the field before anyone noticed.
+    let handoff_path = local_store::root(project_dir).join(local_store::HANDOFF_CURRENT_PATH);
+    if handoff_path.is_file() && local_store::read_handoff_local(project_dir).is_err() {
+        work.push_str(
+            "**STATE DEGRADED — the current handoff is unreadable.** Run `stateroot handoff repair`. Work sections below predate the corruption.\n\n",
+        );
+    }
     // The central plan store and recent checkpoint notes ride the hook digest
     // too — they are the freshest actionable state, and a harness whose digest
     // never shows them will go hunting for them (the openclaw probe lesson).

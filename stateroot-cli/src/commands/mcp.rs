@@ -208,6 +208,9 @@ pub fn doctor(ctx: &Ctx) -> Result<()> {
                 issue.get("detail").and_then(|v| v.as_str()).unwrap_or("")
             );
         }
+        // Prescribe the remedy, same contract as handoff corruption: an
+        // operator must never discover the recovery via --help spelunking.
+        note!("remedy: `stateroot mcp accept-theirs <name>` resolves a discovery collision, then `stateroot mcp sync` projects the pool outward — run both");
     }
     Ok(())
 }

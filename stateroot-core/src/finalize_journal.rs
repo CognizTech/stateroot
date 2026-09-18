@@ -204,9 +204,11 @@ pub fn transition(
     if let Some(seq) = handoff_seq {
         job.handoff_seq = Some(seq);
     }
+    // A phase that advanced cleared whatever error preceded it — the journal
+    // must not keep displaying a superseded failure as if it were live.
+    job.last_error = None;
     if phase == Phase::Complete {
         job.state = "terminal".to_string();
-        job.last_error = None;
     }
     save(project_dir, job)
 }

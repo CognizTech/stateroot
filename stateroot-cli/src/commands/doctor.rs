@@ -77,22 +77,26 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
         let auto_skip = root.join("local/automatic-snapshot-skip.json");
         if let Ok(text) = std::fs::read_to_string(&auto_skip) {
             if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                let at = value.get("at").and_then(Value::as_str).unwrap_or("");
+                let detail = value
+                    .get("detail")
+                    .and_then(Value::as_str)
+                    .unwrap_or("last automatic snapshot exceeded its scan budget");
                 checks.push(Check {
                     label: "automatic snapshot".into(),
                     ok: false,
-                    detail: value
-                        .get("detail")
-                        .and_then(Value::as_str)
-                        .unwrap_or("last automatic snapshot exceeded its scan budget")
-                        .to_string(),
+                    detail: format!("{detail} (skipped at {at}; clears after the next successful automatic snapshot)"),
                     hard: false,
                 });
             }
         }
         // Common generated directories that are large and NOT excluded are
-        // the usual cause of a blown automatic-snapshot budget. The count is
-        // hard-capped so doctor itself stays fast on huge trees.
+        // the usual cause of a blown automatic-snapshot budget. Entries AND
+        // bytes are summed with a hard cap so doctor stays fast on huge
+        // trees; one level of nesting is checked because monorepo layouts
+        // hide these dirs below the root (server/.venv, app/node_modules).
         let rules = stateroot_core::sync_engine::ignore::IgnoreRules::load(&ctx.cwd);
+        let mut candidates: Vec<String> = Vec::new();
         for name in [
             "node_modules",
             ".venv",
@@ -101,11 +105,25 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
             "build",
             "__pycache__",
         ] {
-            let dir = ctx.cwd.join(name);
-            if !dir.is_dir() || rules.is_ignored(name, true) {
+            candidates.push(name.to_string());
+            if let Ok(top) = std::fs::read_dir(&ctx.cwd) {
+                for entry in top.flatten() {
+                    let entry_name = entry.file_name().to_string_lossy().into_owned();
+                    if entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                        && !entry_name.starts_with('.')
+                    {
+                        candidates.push(format!("{entry_name}/{name}"));
+                    }
+                }
+            }
+        }
+        for name in candidates {
+            let dir = ctx.cwd.join(&name);
+            if !dir.is_dir() || rules.is_ignored(&name, true) {
                 continue;
             }
             let mut entries = 0u64;
+            let mut bytes = 0u64;
             let mut stack = vec![dir];
             let capped = 'scan: loop {
                 let Some(dir) = stack.pop() else { break false };
@@ -114,6 +132,11 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
                 };
                 for entry in rd.flatten() {
                     entries += 1;
+                    if let Ok(meta) = entry.metadata() {
+                        if meta.is_file() {
+                            bytes += meta.len();
+                        }
+                    }
                     if entries >= 2_000 {
                         break 'scan true;
                     }
@@ -122,13 +145,18 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
                     }
                 }
             };
-            if entries >= 500 {
+            if entries >= 200 || bytes >= 32 * 1024 * 1024 {
+                let size = if bytes >= 1024 * 1024 {
+                    format!("{} MiB", bytes / (1024 * 1024))
+                } else {
+                    format!("{} KiB", bytes / 1024)
+                };
                 checks.push(Check {
                     label: "generated directory".into(),
                     ok: false,
                     detail: format!(
-                        "{name}/ holds {} entries and is not ignored — add `{name}/` to the root .gitignore or .staterootignore so automatic snapshots stay bounded",
-                        if capped { "2000+".into() } else { entries.to_string() }
+                        "{name}/ holds {size}{} and is not ignored — add `{name}/` to the root .gitignore or .staterootignore so automatic snapshots stay bounded",
+                        if capped { "+ (capped)".into() } else { String::new() }
                     ),
                     hard: false,
                 });

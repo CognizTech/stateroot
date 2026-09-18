@@ -891,6 +891,10 @@ skipping duplicate. If this session has no digest in context, pass --force to re
 
     let root = local_store::root(&ctx.cwd);
     let memory_md = read_hot_apex(&root, local_store::MEMORY_CORE_PATH);
+    // Corruption must be LOUD: an unreadable current handoff silently
+    // degraded the digest for days in the field before anyone noticed.
+    let handoff_corrupt = root.join(local_store::HANDOFF_CURRENT_PATH).is_file()
+        && local_store::read_handoff_local(&ctx.cwd).is_err();
 
     // --- digest (stdout only) ---
     let mut out = String::new();
@@ -900,6 +904,11 @@ skipping duplicate. If this session has no digest in context, pass --force to re
         project.name.as_str()
     };
     out.push_str(&format!("# StateRoot Resume — {name}\n\n"));
+    if handoff_corrupt {
+        out.push_str(
+            "**STATE DEGRADED — the current handoff is unreadable.** Run `stateroot handoff repair` (corrupt bytes are quarantined machine-locally; the newest valid history packet is restored when one exists). Everything below predates the corruption.\n\n",
+        );
+    }
 
     // Update nudge (cache-only, never network here): agents act on what they
     // see, and the skill tells them what to do with this line.
