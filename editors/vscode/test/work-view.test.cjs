@@ -192,3 +192,29 @@ test("copy buttons post copyCmd to the extension — nothing executes in the web
     "the webview never asks the extension to run continue/abort"
   );
 });
+
+test("render preserves panel scroll position across poll pushes", () => {
+  const { panel, push } = loadWorkbench();
+  let top = 0;
+  let left = 0;
+  let html = "";
+  Object.defineProperty(panel, "scrollTop", {
+    get: () => top,
+    set: (v) => { top = v; },
+  });
+  Object.defineProperty(panel, "scrollLeft", {
+    get: () => left,
+    set: (v) => { left = v; },
+  });
+  // A real DOM resets scroll when innerHTML is replaced; emulate that.
+  Object.defineProperty(panel, "innerHTML", {
+    get: () => html,
+    set: (v) => { html = v; top = 0; left = 0; },
+  });
+  push({ ...BASE, tab: "lineage" });
+  panel.scrollTop = 480;
+  panel.scrollLeft = 12;
+  push({ ...BASE, tab: "lineage" });
+  assert.equal(panel.scrollTop, 480, "scrollTop preserved across re-render");
+  assert.equal(panel.scrollLeft, 12, "scrollLeft preserved across re-render");
+});

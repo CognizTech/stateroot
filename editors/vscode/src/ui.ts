@@ -696,6 +696,10 @@ ${renderRail.toString()}
 function render() {
   document.querySelectorAll('.tab').forEach(btn => btn.classList.toggle('active', btn.getAttribute('data-tab') === state.tab));
   const panel = document.getElementById('panel');
+  // Poll pushes re-render wholesale; preserve the scroll position so reading
+  // the lineage list is never force-scrolled back to the top.
+  const keepTop = panel.scrollTop;
+  const keepLeft = panel.scrollLeft;
   if (state.tab === 'control') panel.innerHTML = control();
   else if (state.tab === 'plans') panel.innerHTML = plans();
   else if (state.tab === 'todos') panel.innerHTML = todos();
@@ -703,6 +707,8 @@ function render() {
   else if (state.tab === 'learnings') panel.innerHTML = learningsPanel();
   else if (state.tab === 'memory') panel.innerHTML = memoryPanel();
   else panel.innerHTML = lineage();
+  panel.scrollTop = keepTop;
+  panel.scrollLeft = keepLeft;
 }
 function todoMark(status) {
   if (status === 'completed') return '[x]';
