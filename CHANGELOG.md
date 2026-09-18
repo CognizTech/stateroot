@@ -130,7 +130,10 @@ StateRoot is pre-1.0 and milestones land as minor versions.
   from the verified release VSIX with SHA-256 checked against
   `stateroot-extension.json` — never downgrades, one editor's failure does
   not touch the other. Automatic reconciliation runs after `install` and
-  scheduled updates.
+  scheduled updates. Under WSL, management targets the Windows *host*
+  launchers (`.cmd` via `cmd.exe /C`, the VSIX staged onto the host drive)
+  — WSL server shims and `\\wsl.localhost` UNC paths never see a UI
+  extension.
 - **Extension v0.2.20: the Work view.** Parallel-work cards derive purely
   from evidence (delegation records + `log --json` lineage): provisioning,
   running, cancelling, capturing, attention, ready, merged,
