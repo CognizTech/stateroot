@@ -423,7 +423,73 @@ fn discover_candidates(kind: EditorKind) -> Vec<PathBuf> {
     let mut out = Vec::new();
     out.extend(path_candidates(kind));
     out.extend(known_locations(kind));
+    if is_wsl() {
+        rank_wsl_candidates(&mut out);
+    }
     out
+}
+
+/// Under WSL the `code`/`cursor` shims on PATH usually resolve to the WSL
+/// *server* CLI (remote-cli), which manages extensions on the remote side —
+/// invisible to the Windows host UI our extension runs on. Host launchers
+/// (.cmd/.bat/.exe via DrvFs) go first; remote shims go last.
+fn rank_wsl_candidates(paths: &mut [PathBuf]) {
+    paths.sort_by_key(|path| {
+        let text = path.to_string_lossy();
+        let name = text.rsplit('/').next().unwrap_or("").to_ascii_lowercase();
+        let host_launcher =
+            name.ends_with(".cmd") || name.ends_with(".bat") || name.ends_with(".exe");
+        let remote_shim = text.contains("-server/") || text.contains("remote-cli");
+        if host_launcher {
+            0
+        } else if remote_shim {
+            2
+        } else {
+            1
+        }
+    });
+}
+
+/// True on Windows Subsystem for Linux (Linux kernel, Windows host).
+fn is_wsl() -> bool {
+    if !cfg!(target_os = "linux") {
+        return false;
+    }
+    if std::env::var_os("WSL_DISTRO_NAME").is_some() {
+        return true;
+    }
+    std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .map(|text| {
+            let lower = text.to_ascii_lowercase();
+            lower.contains("microsoft") || lower.contains("wsl")
+        })
+        .unwrap_or(false)
+}
+
+/// Translate a WSL path for a Windows host process: DrvFs mounts map
+/// directly (`/mnt/c/…` → `C:\…`); anything else goes through `wslpath`.
+fn wsl_host_path(path: &Path) -> Result<String, String> {
+    let text = path.to_string_lossy();
+    let mut parts = text.split('/');
+    if parts.next() == Some("") {
+        if let (Some("mnt"), Some(drive)) = (parts.next(), parts.next()) {
+            if drive.len() == 1 && drive.chars().next().unwrap().is_ascii_alphabetic() {
+                let rest: Vec<&str> = parts.collect();
+                let mut win = format!("{}:\\", drive.to_ascii_uppercase());
+                win.push_str(&rest.join("\\"));
+                return Ok(win);
+            }
+        }
+    }
+    let output = std::process::Command::new("wslpath")
+        .arg("-w")
+        .arg(path)
+        .output()
+        .map_err(|err| format!("wslpath unavailable: {err}"))?;
+    if !output.status.success() {
+        return Err(format!("wslpath -w failed for {}", path.display()));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn path_candidates(kind: EditorKind) -> Vec<PathBuf> {
@@ -441,7 +507,10 @@ fn path_candidates(kind: EditorKind) -> Vec<PathBuf> {
 
 fn binary_names(kind: EditorKind) -> Vec<String> {
     let bin = kind.bin();
-    if cfg!(windows) {
+    if cfg!(windows) || is_wsl() {
+        // Windows hosts append their PATH into WSL, so host launchers like
+        // `code.cmd`/`cursor.cmd` are discoverable here; ranking prefers
+        // them over WSL server shims (see rank_wsl_candidates).
         vec![
             format!("{bin}.cmd"),
             format!("{bin}.exe"),
@@ -572,7 +641,22 @@ fn install_vsix(launcher: &Path, vsix: &Path) -> Result<(), String> {
 
 fn run_editor(program: &Path, args: &[&str]) -> Result<String, String> {
     let mut cmd = spawn_editor(program);
-    cmd.args(args)
+    let args_vec: Vec<String> = if needs_cmd_wrap(program) {
+        // Windows host processes can't read Linux paths; absolute path
+        // arguments (the VSIX) must arrive as Windows paths.
+        let mut out = Vec::with_capacity(args.len());
+        for arg in args {
+            if arg.starts_with('/') {
+                out.push(wsl_host_path(Path::new(arg))?);
+            } else {
+                out.push((*arg).to_string());
+            }
+        }
+        out
+    } else {
+        args.iter().map(|a| (*a).to_string()).collect()
+    };
+    cmd.args(&args_vec)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -591,14 +675,31 @@ fn run_editor(program: &Path, args: &[&str]) -> Result<String, String> {
     String::from_utf8(output.stdout).map_err(|err| format!("stdout utf8: {err}"))
 }
 
+/// A `.cmd`/`.bat` launcher must run through `cmd.exe /C`; on Windows that is
+/// the only way to exec it, and under WSL it is how a Windows *host* launcher
+/// (the extension-management side that matters for UI extensions) is invoked.
+fn needs_cmd_wrap(program: &Path) -> bool {
+    let ext = program
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if ext != "cmd" && ext != "bat" {
+        return false;
+    }
+    cfg!(windows) || is_wsl()
+}
+
 fn spawn_editor(program: &Path) -> Command {
-    if cfg!(windows) {
-        let ext = program.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat") {
-            let mut cmd = Command::new("cmd.exe");
-            cmd.arg("/C").arg(program);
-            return cmd;
-        }
+    if needs_cmd_wrap(program) {
+        let host_program = if cfg!(windows) {
+            program.to_string_lossy().into_owned()
+        } else {
+            wsl_host_path(program).unwrap_or_else(|_| program.to_string_lossy().into_owned())
+        };
+        let mut cmd = Command::new("cmd.exe");
+        cmd.arg("/C").arg(host_program);
+        return cmd;
     }
     Command::new(program)
 }
@@ -898,6 +999,26 @@ mod tests {
 
     fn has_component(path: &Path, name: &str) -> bool {
         path.components().any(|c| c.as_os_str() == OsStr::new(name))
+    }
+
+    #[test]
+    fn wsl_ranking_prefers_host_launchers_then_generic_then_remote_shims() {
+        let mut paths = vec![
+            PathBuf::from("/home/u/.cursor-server/bin/abc/bin/remote-cli/cursor"),
+            PathBuf::from("/usr/bin/cursor"),
+            PathBuf::from("/mnt/d/Installations/cursor/resources/app/bin/cursor.cmd"),
+        ];
+        rank_wsl_candidates(&mut paths);
+        assert!(has_component(&paths[0], "Installations"));
+        assert_eq!(paths[1], PathBuf::from("/usr/bin/cursor"));
+        assert!(has_component(&paths[2], "remote-cli"));
+    }
+
+    #[test]
+    fn wsl_host_path_maps_drvfs_and_leaves_relative_alone() {
+        let translated =
+            wsl_host_path(Path::new("/mnt/c/Users/u/AppData/bin/code.cmd")).expect("drvfs");
+        assert_eq!(translated, "C:\\Users\\u\\AppData\\bin\\code.cmd");
     }
 
     #[test]
