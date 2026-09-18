@@ -334,6 +334,9 @@ test("the Lineage tab renders list rows with rail cells and no big graph block; 
   const panel = {
     innerHTML: "",
     listeners: {},
+    scrollTop: 0,
+    scrollLeft: 0,
+    querySelector: () => null,
     addEventListener(type, fn) {
       this.listeners[type] = fn;
     },

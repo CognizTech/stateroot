@@ -24,6 +24,9 @@ function loadWorkbench() {
   const panel = {
     innerHTML: "",
     listeners: {},
+    scrollTop: 0,
+    scrollLeft: 0,
+    querySelector: () => null,
     addEventListener(type, fn) {
       this.listeners[type] = fn;
     },
@@ -211,10 +214,23 @@ test("render preserves panel scroll position across poll pushes", () => {
     get: () => html,
     set: (v) => { html = v; top = 0; left = 0; },
   });
+  // The split views scroll on an inner `.list` element, not the panel — and
+  // a real innerHTML replacement resets that inner scroller too.
+  let listTop = 0;
+  const listEl = {
+    get scrollTop() { return listTop; },
+    set scrollTop(v) { listTop = v; },
+    scrollLeft: 0,
+  };
+  Object.defineProperty(panel, "innerHTML", {
+    get: () => html,
+    set: (v) => { html = v; top = 0; left = 0; listTop = 0; },
+  });
+  panel.querySelector = (sel) => (sel === ".list" ? listEl : null);
   push({ ...BASE, tab: "lineage" });
   panel.scrollTop = 480;
-  panel.scrollLeft = 12;
+  listTop = 640;
   push({ ...BASE, tab: "lineage" });
   assert.equal(panel.scrollTop, 480, "scrollTop preserved across re-render");
-  assert.equal(panel.scrollLeft, 12, "scrollLeft preserved across re-render");
+  assert.equal(listEl.scrollTop, 640, "inner .list scrollTop preserved across re-render");
 });

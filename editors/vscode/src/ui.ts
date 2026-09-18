@@ -696,10 +696,14 @@ ${renderRail.toString()}
 function render() {
   document.querySelectorAll('.tab').forEach(btn => btn.classList.toggle('active', btn.getAttribute('data-tab') === state.tab));
   const panel = document.getElementById('panel');
-  // Poll pushes re-render wholesale; preserve the scroll position so reading
-  // the lineage list is never force-scrolled back to the top.
+  // Poll pushes re-render wholesale; preserve the scroll position of the
+  // panel AND of the inner list scroller (the split views scroll there), so
+  // reading the lineage list is never force-scrolled back to the top.
   const keepTop = panel.scrollTop;
   const keepLeft = panel.scrollLeft;
+  const list = panel.querySelector('.list');
+  const keepListTop = list ? list.scrollTop : 0;
+  const keepListLeft = list ? list.scrollLeft : 0;
   if (state.tab === 'control') panel.innerHTML = control();
   else if (state.tab === 'plans') panel.innerHTML = plans();
   else if (state.tab === 'todos') panel.innerHTML = todos();
@@ -709,6 +713,11 @@ function render() {
   else panel.innerHTML = lineage();
   panel.scrollTop = keepTop;
   panel.scrollLeft = keepLeft;
+  const newList = panel.querySelector('.list');
+  if (newList && (keepListTop || keepListLeft)) {
+    newList.scrollTop = keepListTop;
+    newList.scrollLeft = keepListLeft;
+  }
 }
 function todoMark(status) {
   if (status === 'completed') return '[x]';
