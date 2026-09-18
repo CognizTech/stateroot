@@ -3,7 +3,7 @@
 All notable changes to StateRoot. Format loosely follows Keep a Changelog;
 StateRoot is pre-1.0 and milestones land as minor versions.
 
-## Unreleased
+## v0.2.3 — 2026-09-19
 
 - **Session boundaries finalize through a durable journal.** Stop/session_end
   enqueues one composite boundary job (`local/finalize-journal/`) that
