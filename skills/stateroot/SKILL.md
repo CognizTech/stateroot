@@ -1,10 +1,10 @@
 ---
 name: stateroot
 description: >-
-  Install and set up StateRoot, the continuity layer for AI coding agents.
-  Switch harnesses. Keep the agent: personality, plans, tools and skills,
-  memories, learnings, and project context carry across Claude Code, Codex,
-  Cursor, Kimi Code, OpenClaw, and other supported harnesses. Use this
+  Install and set up StateRoot, the persistent, federated meta-harness for
+  AI agents. Your work. Your way. Every agent: personality, plans, tools
+  and skills, memories, learnings, and project context carry across Claude
+  Code, Codex, Cursor, Kimi, OpenClaw, and other supported harnesses. Use this
   bootstrap skill when the user asks to install or set up StateRoot, when
   `stateroot` is missing from PATH, or when setup has not run. After setup,
   follow the built-in StateRoot skill for resume, checkpoint, handoff,
@@ -36,9 +36,9 @@ metadata:
       modifies_files: false
 ---
 
-# Install StateRoot for AI coding agents
+# Install StateRoot
 
-**Switch harnesses. Keep the agent.** StateRoot carries personality, plans, tools and skills, memories, learnings, and project context across Claude Code, Codex, Cursor, Kimi Code, OpenClaw, and other supported AI coding agents.
+**Your work. Your way. Every agent.** StateRoot — the persistent, federated meta-harness for AI agents — carries personality, plans, tools and skills, memories, learnings, and project context across Claude Code, Codex, Cursor, Kimi, OpenClaw, and other supported AI agents.
 
 This is the install skill. It installs the CLI and runs global `stateroot setup` to connect supported harnesses. After setup, the CLI-embedded session skill becomes the default.
 
@@ -202,9 +202,9 @@ Do not continue from this file. Do not summarize a homemade session protocol. Ru
 
 ## About StateRoot
 
-**StateRoot — for AI coding agents. Switch harnesses. Keep the agent.**
+**StateRoot — the persistent, federated meta-harness for AI agents. Your work. Your way. Every agent.**
 
-StateRoot is an open-source, local-first CLI for continuity across AI coding agents. When a usage limit interrupts the work—or another harness is better for the next task—you can switch without rebuilding the working relationship and project context. Claude Code, Codex, Cursor, Kimi Code, OpenClaw, and other supported harnesses inherit the shared state around the work.
+StateRoot is an open-source, local-first CLI that federates AI agents across harnesses: they share what they know, continue each other's work, delegate tasks, and work in parallel on independent project states that merge when the work converges. When a usage limit interrupts the work—or another harness is better for the next task—you can switch without rebuilding the working relationship and project context. Claude Code, Codex, Cursor, Kimi, OpenClaw, and other supported harnesses inherit the shared state around the work.
 
 What it does:
 
@@ -213,11 +213,11 @@ What it does:
 - **Shared learnings and self-improvement** — record a correction once and every agent on the machine lives by it immediately; the team of agents gets smarter together.
 - **Plans across agents** — a plan store with an approval lifecycle; plan with a strong model in one agent, implement with a cheaper one in another.
 - **Cross-agent subagents** — delegate a bounded task into another agent's CLI and get back the conclusion.
-- **State versioning** — working-tree snapshots in Git plumbing: restore, fork, compare, with receipts. Your branches are never touched.
+- **State versioning** — working-tree snapshots in Git plumbing: restore, fork, merge, compare, with receipts. Your branches are never touched.
 - **Skills and MCP sync** — SKILL.md packages and MCP server configs pooled and projected across agent configs without clobbering user content.
 - **Personality sharing** — one persona and user profile, injected in full at every session start.
 - **Local-first and private** — one static binary, zero config to start, everything on your machine, Apache-2.0.
 
-Keywords for search: AI coding agents, cross-agent memory, shared agent context, project state, session handoff, context engineering, multi-agent workflow, agent skills, MCP, Claude Code, Codex, Cursor, developer tools, local-first, open source.
+Keywords for search: AI agents, meta-harness, cross-agent memory, shared agent context, project state, session handoff, context engineering, multi-agent workflow, agent skills, MCP, Claude Code, Codex, Cursor, developer tools, local-first, open source.
 
 Homepage: https://stateroot.dev · Source: https://github.com/CognizTech/stateroot

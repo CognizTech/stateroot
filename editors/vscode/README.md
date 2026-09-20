@@ -1,16 +1,15 @@
 # StateRoot
 
-**Switch harnesses. Keep the agent.**
+**Persistent, federated meta-harness for AI agents.**
 
-StateRoot is the cross-harness continuity layer for AI coding agents: one
-continuous agent across Claude Code, Codex, Cursor, Kimi Code, Pi, DeepSeek
-Harness and friends — same persona, memory, plans, skills, sessions, and
-project history — while each model keeps its own native runtime. One local
-CLI, everything on your machine.
+**Your work. Your way. Every agent.**
 
-Close Claude Code. Open Codex. Keep working. The next agent starts already
-knowing the goal, the plan, the decisions, and how you work — and every
-lesson one agent learns becomes a rule for all of them.
+StateRoot federates Claude Code, Codex, Cursor, Kimi, OpenClaw, Pi, DeepSeek
+Harness and other agent harnesses through shared working intelligence and
+versioned project state. Continue work in another harness. Delegate bounded
+tasks across tools. Run agents in parallel on independent StateRoot forks.
+Merge the results when the work converges — while each harness keeps its own
+runtime and strengths. One local CLI, everything on your machine.
 
 This extension is the Conductor UI for that CLI: the sidebar glance and the
 workbench for the human directing several harnesses at once.
@@ -39,7 +38,8 @@ own runtime:
   resumable native sessions.
 - **Branch and restore the work** — snapshots live in Git plumbing under
   `refs/stateroot`; your branches are never rewritten. Restore exactly, fork
-  safely, compare honestly, and read the receipt of what changed.
+  safely, merge the forks back, compare honestly, and read the receipt of
+  what changed.
 - **One personality everywhere** — soul + USER.md injected in full at every
   session start, never trimmed. The agent you brief in Codex is the same
   person in Claude Code.
@@ -97,4 +97,4 @@ project state directly.
   [GitHub](https://github.com/CognizTech/stateroot) ·
   [Releases](https://github.com/CognizTech/stateroot/releases)
 
-Cross-harness continuity for AI coding agents — local-first, Apache-2.0.
+Persistent, federated meta-harness for AI agents — local-first, Apache-2.0.
