@@ -1,12 +1,14 @@
 # StateRoot
 
-**Switch harnesses. Keep the agent.**
+**Persistent, federated meta-harness for AI agents.**
 
-StateRoot is the cross-harness continuity layer for AI coding agents: one continuous agent across Claude Code, Codex, Cursor, Kimi Code, Pi, DeepSeek Harness and friends — same persona, memory, plans, skills, sessions, and project history — while each model keeps its own native runtime. One local CLI, everything on your machine.
+**Your work. Your way. Every agent.**
 
-Close Claude Code. Open Codex. Keep working. The next agent starts already knowing the goal, the plan, the decisions, and how you work — and every lesson one agent learns becomes a rule for all of them.
+StateRoot federates Claude Code, Codex, Cursor, Kimi, OpenClaw, Pi, DeepSeek Harness and other agent harnesses through shared working intelligence and versioned project state. Continue work in another harness. Hand a plan to a different agent. Delegate bounded tasks across tools. Run agents in parallel on independent StateRoot forks. Merge the results when the work converges.
 
-**And it versions the work itself.** Snapshot, restore, fork, and compare the complete state of the project at any point — immutable, content-addressed, with receipts for how it changed.
+Your persona, memory, rules and hard-won learnings follow you across every project and harness. Each harness keeps its own runtime and strengths.
+
+**Shared intelligence. Independent execution.**
 
 <p align="center">
   <img alt="Close one agent, open another — it just knows" src="demo.gif">
@@ -29,17 +31,56 @@ Close Claude Code. Open Codex. Keep working. The next agent starts already knowi
 
 Every model wants its own harness — Claude works best in Claude Code, GPT in Codex, DeepSeek in its own. And every harness keeps its own context: its own transcripts, rules, skills, and plans. So the everyday moments of modern AI work — a usage limit hit mid-task, a better model launching in a rival tool, an expensive model you'd rather only plan with — all carry the same hidden tax: re-explaining the project, re-reading the codebase, re-teaching how you work.
 
-StateRoot is the shared layer above the agent runtime:
+StateRoot is the persistent, federated meta-harness above those runtimes: one shared layer through which every agent inherits the same working intelligence and the same versioned project state — while each model keeps its own native runtime. One local CLI, everything on your machine.
 
-- **Continue anywhere** — hooks inject a bounded digest (goal, plan, decisions, memories, next actions) at session start. No pasting transcripts.
-- **Plan in one harness, implement in another** — a strong model authors the plan in its plan mode; a cheaper model executes it. `stateroot plan` carries the artifact and its approval state, and the executor's digest says *"execute this plan; do not re-plan."*
-- **Spawn subagents across harnesses** — `stateroot delegate --to codex --task "…"` runs a bounded task inside another harness with full project context. The parent gets the conclusion, not the transcript.
-- **Move the session itself** — sessions canonicalize from every supported harness into one store, and transfer into Pi / DeepSeek Harness as real, resumable native sessions.
-- **Branch and restore the work** — snapshots live in Git plumbing under `refs/stateroot`; your branches are never rewritten.
+It supports two ways of working:
 
-And when a harness is retired or replaced, the work doesn't care. **The harness is disposable; the work is not.**
+- **Sequential continuity** — close Claude Code, open Codex, keep working. The next agent starts already knowing the goal, the plan, the decisions, and how you work — and every lesson one agent learns becomes a rule for all of them.
+- **Parallel collaboration** — several harnesses work at the same time on independent StateRoot forks, sharing what they know while their execution stays separate. When the work converges, `stateroot merge` folds it back into one continuing project.
 
 Memory tools preserve what your agents *know*. StateRoot also preserves what the work *is* — every meaningful state of the project, immutable and restorable, with a provable lineage of how it changed.
+
+## Continue. Delegate. Fork. Merge.
+
+**Continue.** One harness stops; another continues from the accumulated state. Hooks inject a bounded digest (goal, plan, decisions, memories, next actions) at session start — no pasting transcripts. Plans cross too: a strong model authors the plan in its plan mode, a cheaper model executes it, and the executor's digest says *"execute this plan; do not re-plan."* Sessions themselves canonicalize into one store and transfer into Pi / DeepSeek Harness as real, resumable native sessions.
+
+```text
+Claude Code ──→ State A ──→ State B
+                             │
+                             ├── continue with Codex
+                             ├── branch with Cursor
+                             └── restore an earlier state
+```
+
+**Delegate.** `stateroot delegate --to codex --task "…"` runs a bounded task inside another harness CLI with full project context — depth-capped, lineage recorded. The parent gets the conclusion, not the transcript.
+
+**Fork.** `stateroot fork` branch-materializes any project state into its own worktree under `refs/stateroot/forks/`. Agents work in parallel on independent states of the same project — shared intelligence, independent execution. Your Git branches are never touched.
+
+**Merge.** `stateroot merge` folds fork lineages back into the trunk: each fork is 3-way-merged into the accumulated union and committed as one root with the trunk and every fork tip as parents. Conflicts are reported per path; contained forks report nothing-to-merge. The work converges with its lineage intact.
+
+```text
+                    one project, three forks
+                            │
+             ┌──────────────┼──────────────┐
+             │              │              │
+           Codex          Kimi          Cursor
+             │              │              │
+          fork A         fork B         fork C
+             │              │              │
+             └──────────────┼──────────────┘
+                            │
+                     stateroot merge
+                            │
+                  one continuing project
+```
+
+**The harness is disposable; the work is not.** Switch harnesses, change models, retire tools — the project, the persona, and every lesson it ever learned carry on.
+
+## Native harnesses stay native
+
+StateRoot does not replace Claude Code, Codex, Cursor, Kimi or any other tool with a proprietary runtime. Each harness keeps its own model, interface, capabilities and strengths; StateRoot is the persistent layer through which they share intelligence and work state. Choose the agent for the job: Codex authors the plan, Kimi implements one task, Cursor implements another on its own fork, Codex reviews and integrates. The agents remain distinct; the project does not reset when the worker changes.
+
+And the federation is wider than coding assistants: StateRoot began as knowledge-work infrastructure, and OpenClaw and Hermes agents install it themselves from ClawHub. Any agent that works on your projects can join the same shared layer.
 
 ### What crosses the boundary
 
@@ -53,16 +94,8 @@ One project, every harness — no new runtime, no required cloud, no lock-in:
 | Rules & preferences | shared pool, recorded once, seen everywhere |
 | Real, resumable sessions | canon across harnesses + transfer |
 | Subagents in *other* harnesses | `stateroot delegate` |
-| State lineage (branch / restore) | Git plumbing, your branches untouched |
+| State lineage (fork / merge / restore) | Git plumbing, your branches untouched |
 | Personality | full persona + USER.md, never trimmed |
-
-```text
-Claude Code ──→ State A ──→ State B
-                             │
-                             ├── continue with Codex
-                             ├── branch with Cursor
-                             └── restore an earlier state
-```
 
 ## What it shares
 
