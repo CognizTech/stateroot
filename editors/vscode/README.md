@@ -2,7 +2,7 @@
 
 **Persistent, federated meta-harness for AI agents.**
 
-**Your work. Your way. Every agent.**
+**The harness is disposable. The work is not.**
 
 StateRoot federates Claude Code, Codex, Cursor, Kimi, OpenClaw, Pi, DeepSeek
 Harness and other agent harnesses through shared working intelligence and
@@ -41,8 +41,9 @@ own runtime:
   safely, merge the forks back, compare honestly, and read the receipt of
   what changed.
 - **One personality everywhere** — soul + USER.md injected in full at every
-  session start, never trimmed. The agent you brief in Codex is the same
-  person in Claude Code.
+  session start, never trimmed. The same persona, USER.md and working
+  identity project into every harness; the agents stay distinct, and the
+  working relationship does not reset when the harness changes.
 - **Memory in three layers** — a curated hot-apex every session sees, a
   compiled wiki distilled from evidence, and an episodic log with full-text
   recall (`stateroot memory recall`). Every fact carries provenance:

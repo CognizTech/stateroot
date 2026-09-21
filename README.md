@@ -2,11 +2,11 @@
 
 **Persistent, federated meta-harness for AI agents.**
 
-**Your work. Your way. Every agent.**
+**The harness is disposable. The work is not.**
 
-StateRoot federates Claude Code, Codex, Cursor, Kimi, OpenClaw, Pi, DeepSeek Harness and other agent harnesses through shared working intelligence and versioned project state. Continue work in another harness. Hand a plan to a different agent. Delegate bounded tasks across tools. Run agents in parallel on independent StateRoot forks. Merge the results when the work converges.
+StateRoot federates Claude Code, Codex, Cursor, Kimi, OpenClaw, Hermes, Pi, DeepSeek Harness and other agent harnesses through shared working intelligence and versioned project state. Continue work in another harness. Hand a plan to a different agent. Delegate bounded tasks across tools. Run agents in parallel on independent StateRoot forks. Merge the results when the work converges.
 
-Your persona, memory, rules and hard-won learnings follow you across every project and harness. Each harness keeps its own runtime and strengths.
+Memory, personality, rules, skills, tools, plans and hard-won learnings persist across the harnesses using them. Each harness keeps its own runtime, model and strengths.
 
 **Shared intelligence. Independent execution.**
 
@@ -31,7 +31,7 @@ Your persona, memory, rules and hard-won learnings follow you across every proje
 
 Every model wants its own harness — Claude works best in Claude Code, GPT in Codex, DeepSeek in its own. And every harness keeps its own context: its own transcripts, rules, skills, and plans. So the everyday moments of modern AI work — a usage limit hit mid-task, a better model launching in a rival tool, an expensive model you'd rather only plan with — all carry the same hidden tax: re-explaining the project, re-reading the codebase, re-teaching how you work.
 
-StateRoot is the persistent, federated meta-harness above those runtimes: one shared layer through which every agent inherits the same working intelligence and the same versioned project state — while each model keeps its own native runtime. One local CLI, everything on your machine.
+StateRoot is the persistent, federated meta-harness above those runtimes: a shared layer through which agents inherit common working intelligence while operating on versioned project states that can continue, diverge, and later converge — while each model keeps its own native runtime. One local CLI, everything on your machine.
 
 It supports two ways of working:
 
@@ -74,13 +74,13 @@ Claude Code ──→ State A ──→ State B
                   one continuing project
 ```
 
-**The harness is disposable; the work is not.** Switch harnesses, change models, retire tools — the project, the persona, and every lesson it ever learned carry on.
+Switch harnesses, change models, retire tools — the project, the persona, and every lesson it ever learned carry on.
 
 ## Native harnesses stay native
 
 StateRoot does not replace Claude Code, Codex, Cursor, Kimi or any other tool with a proprietary runtime. Each harness keeps its own model, interface, capabilities and strengths; StateRoot is the persistent layer through which they share intelligence and work state. Choose the agent for the job: Codex authors the plan, Kimi implements one task, Cursor implements another on its own fork, Codex reviews and integrates. The agents remain distinct; the project does not reset when the worker changes.
 
-And the federation is wider than coding assistants: StateRoot began as knowledge-work infrastructure, and OpenClaw and Hermes agents install it themselves from ClawHub. Any agent that works on your projects can join the same shared layer.
+OpenClaw, Hermes and other general agent harnesses can join the same persistent layer alongside Claude Code, Codex, Cursor, Kimi and Pi.
 
 ### What crosses the boundary
 
@@ -110,7 +110,7 @@ One project, every harness — no new runtime, no required cloud, no lock-in:
 
 ### One personality across every agent
 
-Soul + USER.md — your agent's name, character, voice, and boundaries, plus who you are and how you work — are injected in full at every session start, never truncated to fit a token budget. The agent you brief in Codex is the same person when you open Claude Code: same manners, same tone, same knowledge of you and how you like things done. You never re-introduce yourself, and the working relationship does not reset when the harness changes.
+Soul + USER.md — your agent's name, character, voice, and boundaries, plus who you are and how you work — are injected in full at every session start, never truncated to fit a token budget. StateRoot projects the same persona, USER.md, communication preferences and working identity into every harness. The agents remain distinct — Codex stays Codex, Claude Code stays Claude Code — but the working relationship does not reset when the harness changes. You never re-introduce yourself.
 
 ### Memory, in three layers
 
