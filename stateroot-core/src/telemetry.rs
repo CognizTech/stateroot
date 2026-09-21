@@ -41,8 +41,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::fs_lock::FileLock;
 
-/// Wire/state schema version.
-pub const SCHEMA_VERSION: u32 = 1;
+/// Wire schema version (HTTP X-SR-Schema). Independent of local state schema.
+pub const WIRE_SCHEMA_VERSION: u32 = 2;
+/// Mutable local-state schema. Bumping this must migrate, never remint.
+pub const STATE_SCHEMA_VERSION: u32 = 2;
+/// Immutable identity file schema.
+pub const IDENTITY_SCHEMA_VERSION: u32 = 1;
+/// Back-compat alias: new events use the wire schema.
+pub const SCHEMA_VERSION: u32 = WIRE_SCHEMA_VERSION;
 /// The single telemetry opt-out (preserved from the legacy ping).
 pub const OPT_OUT_ENV: &str = "STATEROOT_NO_PING";
 /// Test-only override allowing telemetry on dev builds. Never set in
@@ -51,9 +57,21 @@ pub const FORCE_ENV: &str = "STATEROOT_TELEMETRY_FORCE";
 
 /// Event kinds on the wire.
 pub const EVENT_INSTALL_OBSERVED: &str = "install_observed";
+pub const EVENT_INTEGRATION_COMPLETED: &str = "integration_completed";
+pub const EVENT_PROJECT_INITIALIZED: &str = "project_initialized";
 pub const EVENT_CONTINUITY_ACTIVATED: &str = "continuity_activated";
 pub const EVENT_ACTIVE_DAY: &str = "active_day";
 pub const EVENT_HARNESS_TRANSITION: &str = "harness_transition";
+pub const EVENT_OBSERVED_HARNESS_SWITCH: &str = "observed_harness_switch";
+pub const EVENT_EDITOR_RECONCILE_RESULT: &str = "editor_reconcile_result";
+
+/// Install-via allowlist (STATEROOT_INSTALL_VIA).
+pub const VIA_DIRECT: &str = "direct";
+pub const VIA_SCRIPT: &str = "script";
+pub const VIA_EXTENSION: &str = "extension";
+pub const VIA_SELF_UPDATE: &str = "self_update";
+pub const VIA_UNKNOWN: &str = "unknown";
+pub const INSTALL_VIA_ENV: &str = "STATEROOT_INSTALL_VIA";
 
 /// Cohorts.
 pub const COHORT_MEASURED_NEW: &str = "measured_new";
@@ -95,6 +113,8 @@ pub struct TelemetryEvent {
     pub channel: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
 }
 
 impl TelemetryEvent {
@@ -126,6 +146,9 @@ impl TelemetryEvent {
         }
         if let Some(v) = &self.kind {
             out.push(("x-sr-kind", v.clone()));
+        }
+        if let Some(v) = &self.via {
+            out.push(("x-sr-via", v.clone()));
         }
         out
     }
@@ -168,15 +191,25 @@ pub struct TelemetryState {
     pub activated_on: Option<String>,
     /// Opaque project digest → last qualifying harness (transition detection).
     pub last_harness_by_project: BTreeMap<String, String>,
+    /// Project ids in last-seen order (oldest first). Eviction uses this,
+    /// never lexicographic key order.
+    #[serde(default)]
+    pub last_harness_order: Vec<String>,
     /// Sent `project|harness|YYYY-MM-DD` daily keys (pruned to recent days).
     pub sent_daily_keys: Vec<String>,
+    /// Deduped integration milestone.
+    #[serde(default)]
+    pub integration_emitted: bool,
+    /// Opaque project ids that already emitted project_initialized.
+    #[serde(default)]
+    pub initialized_projects: Vec<String>,
     pub drain: DrainMeta,
 }
 
 impl Default for TelemetryState {
     fn default() -> Self {
         Self {
-            schema_version: SCHEMA_VERSION,
+            schema_version: STATE_SCHEMA_VERSION,
             install_id: String::new(),
             secret: String::new(),
             cohort: COHORT_MEASURED_NEW.to_string(),
@@ -185,7 +218,10 @@ impl Default for TelemetryState {
             activated: false,
             activated_on: None,
             last_harness_by_project: BTreeMap::new(),
+            last_harness_order: Vec::new(),
             sent_daily_keys: Vec::new(),
+            integration_emitted: false,
+            initialized_projects: Vec::new(),
             drain: DrainMeta::default(),
         }
     }
@@ -267,6 +303,121 @@ fn now_utc() -> chrono::DateTime<chrono::Utc> {
     chrono::Utc::now()
 }
 
+fn identity_path(config_dir: &Path) -> PathBuf {
+    state_dir(config_dir).join("identity.json")
+}
+
+fn identity_backup_path(config_dir: &Path) -> PathBuf {
+    state_dir(config_dir).join("identity.json.bak")
+}
+
+fn paused_path(config_dir: &Path) -> PathBuf {
+    state_dir(config_dir).join("paused.json")
+}
+
+/// Immutable telemetry identity. Never reminted on mutable-state corruption.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TelemetryIdentity {
+    pub schema_version: u32,
+    pub install_id: String,
+    pub secret: String,
+    pub cohort: String,
+    pub created_on: String,
+}
+
+fn identity_valid(ident: &TelemetryIdentity) -> bool {
+    !ident.install_id.is_empty()
+        && ident.secret.len() == 64
+        && hex_decode_32(&ident.secret).is_some()
+        && !ident.created_on.is_empty()
+}
+
+fn read_identity_file(path: &Path) -> Option<TelemetryIdentity> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let ident: TelemetryIdentity = serde_json::from_str(&text).ok()?;
+    identity_valid(&ident).then_some(ident)
+}
+
+fn persist_identity(config_dir: &Path, ident: &TelemetryIdentity) -> std::io::Result<()> {
+    std::fs::create_dir_all(state_dir(config_dir))?;
+    let value = serde_json::to_value(ident)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    crate::safe_io::atomic_replace_json(&identity_path(config_dir), &value)?;
+    crate::safe_io::atomic_replace_json(&identity_backup_path(config_dir), &value)?;
+    Ok(())
+}
+
+/// True when identity is unrecoverable and emitters must stay silent.
+pub fn is_paused(config_dir: &Path) -> bool {
+    paused_path(config_dir).exists()
+}
+
+fn pause_telemetry(config_dir: &Path, reason: &str) {
+    let _ = std::fs::create_dir_all(state_dir(config_dir));
+    let value = serde_json::json!({
+        "reason": reason,
+        "at": crate::local_store::now_rfc3339(),
+    });
+    let _ = crate::safe_io::atomic_replace_json(&paused_path(config_dir), &value);
+}
+
+fn identity_from_state(state: &TelemetryState) -> Option<TelemetryIdentity> {
+    let ident = TelemetryIdentity {
+        schema_version: IDENTITY_SCHEMA_VERSION,
+        install_id: state.install_id.clone(),
+        secret: state.secret.clone(),
+        cohort: state.cohort.clone(),
+        created_on: state.created_on.clone(),
+    };
+    identity_valid(&ident).then_some(ident)
+}
+
+fn apply_identity(state: &mut TelemetryState, ident: &TelemetryIdentity) {
+    state.install_id = ident.install_id.clone();
+    state.secret = ident.secret.clone();
+    if state.cohort.is_empty() {
+        state.cohort = ident.cohort.clone();
+    }
+    if state.created_on.is_empty() {
+        state.created_on = ident.created_on.clone();
+    }
+    state.schema_version = STATE_SCHEMA_VERSION;
+}
+
+/// Public identity for `_telemetry-identity --json` (never includes the secret).
+pub fn public_identity_json(config_dir: &Path) -> Option<String> {
+    let ident = read_identity_file(&identity_path(config_dir))
+        .or_else(|| read_identity_file(&identity_backup_path(config_dir)))?;
+    serde_json::to_string(&serde_json::json!({
+        "install_id": ident.install_id,
+        "cohort": ident.cohort,
+        "created_on": ident.created_on,
+        "paused": is_paused(config_dir),
+    }))
+    .ok()
+}
+
+pub fn normalize_via(raw: Option<&str>) -> String {
+    match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(VIA_DIRECT) => VIA_DIRECT.to_string(),
+        Some(VIA_SCRIPT) => VIA_SCRIPT.to_string(),
+        Some(VIA_EXTENSION) => VIA_EXTENSION.to_string(),
+        Some(VIA_SELF_UPDATE) => VIA_SELF_UPDATE.to_string(),
+        Some(_) => VIA_UNKNOWN.to_string(),
+        None => match std::env::var(INSTALL_VIA_ENV) {
+            Ok(value) => match value.trim() {
+                "" => VIA_UNKNOWN.to_string(),
+                VIA_DIRECT => VIA_DIRECT.to_string(),
+                VIA_SCRIPT => VIA_SCRIPT.to_string(),
+                VIA_EXTENSION => VIA_EXTENSION.to_string(),
+                VIA_SELF_UPDATE => VIA_SELF_UPDATE.to_string(),
+                _ => VIA_UNKNOWN.to_string(),
+            },
+            Err(_) => VIA_UNKNOWN.to_string(),
+        },
+    }
+}
+
 // ---------------------------------------------------------------------
 // State load/create (callers hold the state lock)
 // ---------------------------------------------------------------------
@@ -281,24 +432,65 @@ fn mint_identity() -> (String, String) {
     (install_id, secret)
 }
 
-/// Load state, or mint it. Cohort: a pre-existing legacy version marker means
-/// this install predates telemetry v1 → `legacy_existing`, and the marker's
-/// version seeds `last_seen_version` so the upgrade is not double counted.
+/// Load state, or mint it. Identity lives in identity.json and is never
+/// reminted because mutable state.json is corrupt or the schema moved.
 fn load_or_create(config_dir: &Path, today: &str) -> std::io::Result<TelemetryState> {
+    if is_paused(config_dir) {
+        return Err(std::io::Error::other(
+            "telemetry paused: identity unrecoverable",
+        ));
+    }
+    let stored_identity = read_identity_file(&identity_path(config_dir))
+        .or_else(|| read_identity_file(&identity_backup_path(config_dir)));
     let path = state_path(config_dir);
     match std::fs::read_to_string(&path) {
-        Ok(text) => {
-            let mut state: TelemetryState = serde_json::from_str(&text).unwrap_or_default();
-            if state.schema_version != SCHEMA_VERSION
-                || state.install_id.is_empty()
-                || state.secret.len() != 64
-            {
-                state = fresh_state(today, &legacy_marker_contents(config_dir));
+        Ok(text) => match serde_json::from_str::<TelemetryState>(&text) {
+            Ok(mut state) => {
+                if let Some(ident) = stored_identity.or_else(|| identity_from_state(&state)) {
+                    apply_identity(&mut state, &ident);
+                    let _ = persist_identity(config_dir, &ident);
+                    let _ = save_state(config_dir, &state);
+                    Ok(state)
+                } else {
+                    pause_telemetry(config_dir, "corrupt_identity");
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "telemetry paused: identity unrecoverable",
+                    ))
+                }
             }
-            Ok(state)
-        }
+            Err(_) => {
+                if let Some(ident) = stored_identity {
+                    let mut state = TelemetryState {
+                        created_on: ident.created_on.clone(),
+                        ..Default::default()
+                    };
+                    apply_identity(&mut state, &ident);
+                    save_state(config_dir, &state)?;
+                    Ok(state)
+                } else {
+                    pause_telemetry(config_dir, "corrupt_state_without_identity");
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "telemetry paused: identity unrecoverable",
+                    ))
+                }
+            }
+        },
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(ident) = stored_identity {
+                let mut state = TelemetryState {
+                    created_on: ident.created_on.clone(),
+                    ..Default::default()
+                };
+                apply_identity(&mut state, &ident);
+                save_state(config_dir, &state)?;
+                return Ok(state);
+            }
             let state = fresh_state(today, &legacy_marker_contents(config_dir));
+            if let Some(ident) = identity_from_state(&state) {
+                persist_identity(config_dir, &ident)?;
+            }
             save_state(config_dir, &state)?;
             Ok(state)
         }
@@ -411,7 +603,7 @@ fn append_event(
 fn is_priority(event: &TelemetryEvent) -> bool {
     matches!(
         event.event.as_str(),
-        EVENT_CONTINUITY_ACTIVATED | EVENT_HARNESS_TRANSITION
+        EVENT_CONTINUITY_ACTIVATED | EVENT_HARNESS_TRANSITION | EVENT_OBSERVED_HARNESS_SWITCH
     )
 }
 
@@ -566,7 +758,7 @@ pub fn clear_stale_drain_lock(config_dir: &Path) {
 
 fn base_event(state: &TelemetryState, event: &str, today: &str, version: &str) -> TelemetryEvent {
     TelemetryEvent {
-        schema_version: SCHEMA_VERSION,
+        schema_version: WIRE_SCHEMA_VERSION,
         event_id: uuid::Uuid::new_v4().to_string(),
         install_id: state.install_id.clone(),
         event: event.to_string(),
@@ -579,6 +771,7 @@ fn base_event(state: &TelemetryState, event: &str, today: &str, version: &str) -
         cohort: state.cohort.clone(),
         channel: None,
         kind: None,
+        via: None,
     }
 }
 
@@ -612,7 +805,7 @@ pub fn observe_install_on(
     channel: &str,
     today: &str,
 ) -> std::io::Result<bool> {
-    if !allowed(version) {
+    if !allowed(version) || is_paused(config_dir) {
         return Ok(false);
     }
     let Some(_lock) = FileLock::acquire(state_lock_path(config_dir)) else {
@@ -631,6 +824,7 @@ pub fn observe_install_on(
     let mut event = base_event(&state, EVENT_INSTALL_OBSERVED, today, &version);
     event.channel = Some(sanitize_scalar(channel, 32));
     event.kind = Some(kind.to_string());
+    event.via = Some(normalize_via(None));
     state.last_seen_version = version;
     append_event(config_dir, &mut state, &event)?;
     save_state(config_dir, &state)?;
@@ -659,7 +853,7 @@ pub fn continuity_delivered_on(
     version: &str,
     today: &str,
 ) -> std::io::Result<usize> {
-    if !allowed(version) {
+    if !allowed(version) || is_paused(config_dir) {
         return Ok(0);
     }
     let Some(identity) = project_identity(project_dir) else {
@@ -702,7 +896,7 @@ pub fn continuity_delivered_on(
     let previous = state.last_harness_by_project.get(&project_id).cloned();
     if let Some(prev) = previous {
         if prev != harness_id {
-            let mut event = base_event(&state, EVENT_HARNESS_TRANSITION, today, version);
+            let mut event = base_event(&state, EVENT_OBSERVED_HARNESS_SWITCH, today, version);
             event.project_id = Some(project_id.clone());
             event.from_harness = Some(prev);
             event.harness = Some(harness_id.clone());
@@ -710,14 +904,7 @@ pub fn continuity_delivered_on(
             emitted += 1;
         }
     }
-    state.last_harness_by_project.insert(project_id, harness_id);
-    // Cap the map: abandoned projects must not grow the state forever.
-    while state.last_harness_by_project.len() > 256 {
-        let oldest = state.last_harness_by_project.keys().next().cloned();
-        if let Some(k) = oldest {
-            state.last_harness_by_project.remove(&k);
-        }
-    }
+    touch_project_harness(&mut state, project_id, harness_id);
 
     prune_daily_keys(&mut state, today);
     save_state(config_dir, &state)?;
@@ -743,7 +930,7 @@ pub fn record_activity_on(
     version: &str,
     today: &str,
 ) -> std::io::Result<usize> {
-    if !allowed(version) {
+    if !allowed(version) || is_paused(config_dir) {
         return Ok(0);
     }
     let Some(identity) = project_identity(project_dir) else {
@@ -769,6 +956,82 @@ pub fn record_activity_on(
     prune_daily_keys(&mut state, today);
     save_state(config_dir, &state)?;
     Ok(1)
+}
+
+fn touch_project_harness(state: &mut TelemetryState, project_id: String, harness_id: String) {
+    state
+        .last_harness_by_project
+        .insert(project_id.clone(), harness_id);
+    state.last_harness_order.retain(|p| p != &project_id);
+    state.last_harness_order.push(project_id);
+    while state.last_harness_order.len() > 256 {
+        let Some(old) = state.last_harness_order.first().cloned() else {
+            break;
+        };
+        state.last_harness_order.remove(0);
+        state.last_harness_by_project.remove(&old);
+    }
+}
+
+/// Deduped milestone: integration_completed or project_initialized.
+/// Never activation. `project_dir` is required only for project_initialized.
+pub fn record_milestone(
+    config_dir: &Path,
+    event: &str,
+    project_dir: Option<&Path>,
+    version: &str,
+) -> std::io::Result<bool> {
+    record_milestone_on(config_dir, event, project_dir, version, &today_utc())
+}
+
+pub fn record_milestone_on(
+    config_dir: &Path,
+    event: &str,
+    project_dir: Option<&Path>,
+    version: &str,
+    today: &str,
+) -> std::io::Result<bool> {
+    if !allowed(version) || is_paused(config_dir) {
+        return Ok(false);
+    }
+    if event != EVENT_INTEGRATION_COMPLETED
+        && event != EVENT_PROJECT_INITIALIZED
+        && event != EVENT_EDITOR_RECONCILE_RESULT
+    {
+        return Ok(false);
+    }
+    let Some(_lock) = FileLock::acquire(state_lock_path(config_dir)) else {
+        return Ok(false);
+    };
+    let mut state = load_or_create(config_dir, today)?;
+    let mut payload = base_event(&state, event, today, version);
+    if event == EVENT_INTEGRATION_COMPLETED {
+        if state.integration_emitted {
+            return Ok(false);
+        }
+        payload.channel = Some("cli".to_string());
+        state.integration_emitted = true;
+    } else if event == EVENT_PROJECT_INITIALIZED {
+        let Some(dir) = project_dir else {
+            return Ok(false);
+        };
+        let Some(identity) = project_identity(dir) else {
+            return Ok(false);
+        };
+        let Some(project_id) = opaque_project_id(&state.secret, &identity) else {
+            return Ok(false);
+        };
+        if state.initialized_projects.contains(&project_id) {
+            return Ok(false);
+        }
+        payload.project_id = Some(project_id.clone());
+        state.initialized_projects.push(project_id);
+    } else {
+        payload.channel = Some("cli".to_string());
+    }
+    append_event(config_dir, &mut state, &payload)?;
+    save_state(config_dir, &state)?;
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------
@@ -989,13 +1252,15 @@ mod tests {
         // A different project does not fabricate a transition.
         continuity_delivered_on(config.path(), b.path(), "codex", "9.9.9", "2026-09-17").unwrap();
         let before = spool_events(config.path());
-        assert!(before.iter().all(|e| e.event != EVENT_HARNESS_TRANSITION));
+        assert!(before
+            .iter()
+            .all(|e| e.event != EVENT_OBSERVED_HARNESS_SWITCH));
         // Same project, new harness: exactly one verified A→B transition.
         continuity_delivered_on(config.path(), a.path(), "codex", "9.9.9", "2026-09-18").unwrap();
         let events = spool_events(config.path());
         let transitions: Vec<&TelemetryEvent> = events
             .iter()
-            .filter(|e| e.event == EVENT_HARNESS_TRANSITION)
+            .filter(|e| e.event == EVENT_OBSERVED_HARNESS_SWITCH)
             .collect();
         assert_eq!(transitions.len(), 1);
         assert_eq!(transitions[0].from_harness.as_deref(), Some("claude"));
@@ -1180,5 +1445,142 @@ mod tests {
         }
         let ids: Vec<String> = handles.into_iter().map(|h| h.join().unwrap()).collect();
         assert!(ids.windows(2).all(|w| w[0] == w[1]), "one identity");
+    }
+
+    #[test]
+    fn corrupt_state_recovers_identity_and_never_remints() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = EnvGuard::clear();
+        let config = temp_config();
+        observe_install_on(config.path(), "9.9.9", "cli", "2026-09-17").unwrap();
+        let original = load_or_create(config.path(), "2026-09-17").unwrap();
+        std::fs::write(state_path(config.path()), "{not json").unwrap();
+        let recovered = load_or_create(config.path(), "2026-09-18").unwrap();
+        assert_eq!(recovered.install_id, original.install_id);
+        assert_eq!(recovered.secret, original.secret);
+        assert!(!is_paused(config.path()));
+    }
+
+    #[test]
+    fn corrupt_identity_and_state_pauses_instead_of_minting() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = EnvGuard::clear();
+        let config = temp_config();
+        std::fs::create_dir_all(state_dir(config.path())).unwrap();
+        std::fs::write(state_path(config.path()), "{").unwrap();
+        std::fs::write(identity_path(config.path()), "{").unwrap();
+        assert!(load_or_create(config.path(), "2026-09-17").is_err());
+        assert!(is_paused(config.path()));
+        assert!(!observe_install_on(config.path(), "9.9.9", "cli", "2026-09-17").unwrap());
+        let public = public_identity_json(config.path());
+        assert!(public.is_none());
+    }
+
+    #[test]
+    fn last_seen_order_evicts_not_lexicographic_keys() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = EnvGuard::clear();
+        let mut state = TelemetryState::default();
+        for i in 0..260 {
+            let project = format!("p{i:03}");
+            touch_project_harness(&mut state, project, "claude".into());
+        }
+        assert_eq!(state.last_harness_order.len(), 256);
+        assert!(!state.last_harness_by_project.contains_key("p000"));
+        assert!(state.last_harness_by_project.contains_key("p259"));
+        // Lexicographically first remaining key is not how we evict.
+        assert!(state.last_harness_order.first().unwrap().starts_with("p"));
+    }
+
+    #[test]
+    fn v1_state_migrates_without_reminting_identity() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = EnvGuard::clear();
+        let config = temp_config();
+        let install_id = uuid::Uuid::new_v4().to_string();
+        let secret = "ab".repeat(32);
+        std::fs::create_dir_all(state_dir(config.path())).unwrap();
+        std::fs::write(
+            state_path(config.path()),
+            serde_json::json!({
+                "schema_version": 1,
+                "install_id": install_id,
+                "secret": secret,
+                "cohort": COHORT_MEASURED_NEW,
+                "created_on": "2026-09-01",
+                "last_seen_version": "0.2.3",
+                "activated": true,
+                "activated_on": "2026-09-02",
+                "last_harness_by_project": { "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "claude" },
+                "sent_daily_keys": [],
+                "drain": {}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let migrated = load_or_create(config.path(), "2026-09-21").unwrap();
+        assert_eq!(migrated.install_id, install_id);
+        assert_eq!(migrated.secret, secret);
+        assert!(migrated.activated);
+        assert_eq!(migrated.schema_version, STATE_SCHEMA_VERSION);
+        assert!(!is_paused(config.path()));
+        let ident = read_identity_file(&identity_path(config.path())).expect("identity written");
+        assert_eq!(ident.install_id, install_id);
+    }
+
+    #[test]
+    fn normalize_via_allowlist_never_recurses_on_empty_env() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var_os(INSTALL_VIA_ENV);
+        std::env::set_var(INSTALL_VIA_ENV, "");
+        assert_eq!(normalize_via(None), VIA_UNKNOWN);
+        std::env::set_var(INSTALL_VIA_ENV, "extension");
+        assert_eq!(normalize_via(None), VIA_EXTENSION);
+        assert_eq!(normalize_via(Some("self_update")), VIA_SELF_UPDATE);
+        assert_eq!(normalize_via(Some("nope")), VIA_UNKNOWN);
+        match prev {
+            Some(v) => std::env::set_var(INSTALL_VIA_ENV, v),
+            None => std::env::remove_var(INSTALL_VIA_ENV),
+        }
+    }
+
+    #[test]
+    fn milestones_dedup_and_never_activate() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = EnvGuard::clear();
+        let config = temp_config();
+        let project = temp_project("prj-ms");
+        assert!(record_milestone_on(
+            config.path(),
+            EVENT_INTEGRATION_COMPLETED,
+            None,
+            "9.9.9",
+            "2026-09-17"
+        )
+        .unwrap());
+        assert!(!record_milestone_on(
+            config.path(),
+            EVENT_INTEGRATION_COMPLETED,
+            None,
+            "9.9.9",
+            "2026-09-17"
+        )
+        .unwrap());
+        assert!(record_milestone_on(
+            config.path(),
+            EVENT_PROJECT_INITIALIZED,
+            Some(project.path()),
+            "9.9.9",
+            "2026-09-17"
+        )
+        .unwrap());
+        let state = load_or_create(config.path(), "2026-09-17").unwrap();
+        assert!(!state.activated);
+        let kinds: Vec<_> = spool_events(config.path())
+            .into_iter()
+            .map(|e| e.event)
+            .collect();
+        assert!(kinds.contains(&EVENT_INTEGRATION_COMPLETED.to_string()));
+        assert!(kinds.contains(&EVENT_PROJECT_INITIALIZED.to_string()));
     }
 }

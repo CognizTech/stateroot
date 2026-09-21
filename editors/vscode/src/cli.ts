@@ -80,13 +80,19 @@ export function runCli(
   args: string[],
   cwd: string,
   timeoutMs = 20_000,
-  binary = cliPath()
+  binary = cliPath(),
+  env?: NodeJS.ProcessEnv
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     cp.execFile(
       binary,
       args,
-      { cwd, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 },
+      {
+        cwd,
+        timeout: timeoutMs,
+        maxBuffer: 4 * 1024 * 1024,
+        env: env ? { ...process.env, ...env } : undefined,
+      },
       (err, stdout, stderr) => {
         if (err) {
           const error = err as NodeJS.ErrnoException;

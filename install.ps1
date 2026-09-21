@@ -74,16 +74,23 @@ try {
         try { Remove-Item $Parked -Force } catch { Log "previous running binary retained at $Parked" }
     }
     Log "installed to $Dest"
+    if (-not $env:STATEROOT_INSTALL_VIA) { $env:STATEROOT_INSTALL_VIA = 'script' }
+    try { & $Dest --version | Out-Null } catch { }
 
     Log 'configuring harness integrations (global persona, hooks, MCP)'
     $IntegrationOk = $false
-    try {
-        & $Dest install | Out-Host
-        if ($LASTEXITCODE -ne 0) { throw "integration exited with code $LASTEXITCODE" }
+    if ($env:STATEROOT_SKIP_INTEGRATION -eq '1') {
+        Log 'CLI-only installation; run stateroot install when ready to configure harness integrations'
         $IntegrationOk = $true
-        Log 'harness integration complete'
-    } catch {
-        Log "ERROR: CLI installed, but harness integration failed: $($_.Exception.Message)"
+    } else {
+        try {
+            & $Dest install | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "integration exited with code $LASTEXITCODE" }
+            $IntegrationOk = $true
+            Log 'harness integration complete'
+        } catch {
+            Log "ERROR: CLI installed, but harness integration failed: $($_.Exception.Message)"
+        }
     }
 
     # --- PATH (user scope) ---
@@ -97,7 +104,8 @@ try {
     # One GET with os + version + channel, counted in the stateroot.dev web
     # server logs. Never blocks (3s cap), never fails the install.
     # Disable with: $env:STATEROOT_NO_PING = '1'
-    if ($env:STATEROOT_NO_PING -ne '1') {
+    # Retired after telemetry v2: the installed binary emits install_observed.
+    if ($env:STATEROOT_TELEMETRY_PING -eq '1' -and $env:STATEROOT_NO_PING -ne '1') {
         try {
             # PS 5.1 on older .NET defaults to TLS 1.0/1.1 and modern nginx
             # refuses it - pin TLS 1.2 so the ping is not silently dropped.

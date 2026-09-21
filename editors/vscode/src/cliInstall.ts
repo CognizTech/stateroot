@@ -118,7 +118,12 @@ function execInstaller(
     const opts = {
       maxBuffer: 8 * 1024 * 1024,
       timeout: INSTALL_TIMEOUT_MS,
-      env: { ...process.env, STATEROOT_INSTALL_VIA: "extension" },
+      env: {
+        ...process.env,
+        STATEROOT_INSTALL_VIA: "extension",
+        STATEROOT_SKIP_INTEGRATION: "1",
+        STATEROOT_SKIP_REARM: "1",
+      },
     };
     const windows = scriptName === "install.ps1";
     const command = windows ? "powershell.exe" : "sh";
@@ -232,7 +237,7 @@ export async function confirmAndInstallCli(output: vscode.OutputChannel): Promis
       `Install the latest stable release to:`,
       platform.installDest,
       "",
-      "The official installer also runs global harness integration (hooks, persona).",
+      "The extension then configures global harness integration (hooks, persona).",
     ].join("\n"),
     { modal: true },
     "Install",

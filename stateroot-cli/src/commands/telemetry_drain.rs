@@ -27,6 +27,22 @@ pub async fn run(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
+/// Hidden `stateroot _telemetry-identity --json` — anonymous install_id only.
+pub fn print_identity(ctx: &Ctx, json: bool) -> Result<()> {
+    if !json {
+        anyhow::bail!("pass --json");
+    }
+    if core::is_paused(&ctx.config_dir) {
+        println!("{{\"paused\":true}}");
+        return Ok(());
+    }
+    match core::public_identity_json(&ctx.config_dir) {
+        Some(body) => println!("{body}"),
+        None => anyhow::bail!("no telemetry identity"),
+    }
+    Ok(())
+}
+
 /// Drain loop, separated from [`run`] so tests can call it directly.
 pub async fn drain(ctx: &Ctx) -> std::io::Result<()> {
     if !core::allowed(crate::cli::BUILD_VERSION) {
@@ -45,7 +61,6 @@ pub async fn drain(ctx: &Ctx) -> std::io::Result<()> {
         Ok(client) => client,
         Err(_) => return Ok(()),
     };
-    let url = crate::telemetry::endpoint();
     let deadline = std::time::Instant::now() + DRAIN_TIME_CAP;
     let mut delivered = 0u64;
     let mut rejected = 0u64;
@@ -61,6 +76,7 @@ pub async fn drain(ctx: &Ctx) -> std::io::Result<()> {
                 stop_error = Some("time cap reached".to_string());
                 break 'outer;
             }
+            let url = crate::telemetry::endpoint_for_schema(event.schema_version);
             let mut request = client.post(&url);
             for (name, value) in event.headers() {
                 if let Ok(value) = reqwest::header::HeaderValue::from_str(&value) {

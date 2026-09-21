@@ -178,6 +178,13 @@ pub enum Command {
     /// Hidden: detached single-flight telemetry spool drain.
     #[command(name = "_drain-telemetry", hide = true)]
     DrainTelemetry,
+    /// Hidden: print the anonymous CLI telemetry identity as JSON.
+    #[command(name = "_telemetry-identity", hide = true)]
+    TelemetryIdentity {
+        /// Machine-readable JSON (the only supported output).
+        #[arg(long)]
+        json: bool,
+    },
     /// External extension (any `stateroot-<name>` executable on PATH).
     #[command(external_subcommand)]
     External(Vec<String>),

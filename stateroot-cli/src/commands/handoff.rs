@@ -946,6 +946,7 @@ pub async fn write_with_origin(
     if let Some(footer) = super::resume::digest_footer(&delivery_dir) {
         println!("{footer}");
     }
+    crate::telemetry::activity(&ctx.config_dir, &delivery_dir, Some(&source));
     Ok(())
 }
 
@@ -1098,6 +1099,7 @@ pub async fn accept(ctx: &Ctx, by: &str) -> anyhow::Result<()> {
         println!("no current handoff to accept");
     } else {
         println!("handoff accepted by {by} ({count} acceptance(s) total)");
+        crate::telemetry::activity(&ctx.config_dir, &ctx.cwd, Some(by));
     }
     if let Some(footer) = super::resume::digest_footer(&ctx.cwd) {
         println!("{footer}");

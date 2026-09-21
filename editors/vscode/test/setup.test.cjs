@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const path = require('node:path');
-const { ensureSetup, SETUP_KEY, editorHarness } = require('../out/setup');
+const { ensureSetup, SETUP_KEY, editorHarness, classifyRecovery, allowInstallerFallback, classifySetupFailure } = require('../out/setup');
 
 function fixture() {
   const store = {};
@@ -114,8 +114,62 @@ test('retry setup repairs same-version integrations', async () => {
   assert.ok(f.calls.includes('self-update'));
 });
 
+test('unrunnable selected CLI is recovered with the bundled installer', async () => {
+  const f = fixture();
+  const run = f.options.run;
+  let versionCalls = 0;
+  f.options.run = async (args, binary) => {
+    if (args[0] === '--version' && versionCalls++ === 0) throw new Error('ENOENT');
+    return run(args, binary);
+  };
+  f.options.install = async () => f.options.binary;
+  await ensureSetup(f.options);
+  assert.equal(f.store[SETUP_KEY].binary, f.options.binary);
+});
+
+test('failed updater falls back to the bundled installer only on the default stable path', async () => {
+  const f = fixture();
+  const run = f.options.run;
+  f.options.pathClass = 'default_stable';
+  let installed = 0;
+  f.options.install = async () => { installed++; return f.options.binary; };
+  f.options.run = async (args, binary) => {
+    if (args[0] === 'self-update') throw new Error('offline');
+    return run(args, binary);
+  };
+  await ensureSetup(f.options);
+  assert.equal(installed, 1);
+  assert.equal(f.store[SETUP_KEY].extensionVersion, '0.2.19');
+});
+
+test('custom and cargo paths never fall back to the bundled installer', async () => {
+  const f = fixture();
+  const run = f.options.run;
+  f.options.pathClass = 'cargo';
+  f.options.install = async () => { throw new Error('must not replace cargo CLI'); };
+  f.options.run = async (args, binary) => args[0] === 'self-update'
+    ? Promise.reject(new Error('offline')) : run(args, binary);
+  await assert.rejects(ensureSetup(f.options), /offline/);
+  assert.equal(f.store[SETUP_KEY], undefined);
+});
+
 test('host identities distinguish Cursor and VS Code including Insiders', () => {
   assert.equal(editorHarness('Cursor'), 'cursor');
   assert.equal(editorHarness('Visual Studio Code'), 'vscode-copilot');
   assert.equal(editorHarness('Visual Studio Code - Insiders'), 'vscode-copilot');
+});
+
+test('recovery classifier: missing CLI installs, stale CLI updates, current receipt is health-only', () => {
+  assert.equal(classifyRecovery({ cliStatus: 'missing', receiptCurrent: false, retry: false, staleForUpdate: false }), 'install');
+  assert.equal(classifyRecovery({ cliStatus: 'unrunnable', receiptCurrent: true, retry: false, staleForUpdate: false }), 'install');
+  assert.equal(classifyRecovery({ cliStatus: 'working', receiptCurrent: false, retry: false, staleForUpdate: true }), 'self_update');
+  assert.equal(classifyRecovery({ cliStatus: 'working', receiptCurrent: true, retry: false, staleForUpdate: false }), 'health');
+  assert.equal(classifyRecovery({ cliStatus: 'working', receiptCurrent: true, retry: true, staleForUpdate: false }), 'self_update');
+  assert.equal(allowInstallerFallback('default_stable'), true);
+  assert.equal(allowInstallerFallback('cargo'), false);
+  assert.equal(allowInstallerFallback('nightly'), false);
+  assert.equal(allowInstallerFallback('custom'), false);
+  assert.equal(classifySetupFailure('macOS on Intel is not shipped'), 'unsupported_platform');
+  assert.equal(classifySetupFailure('CLI update did not reach 0.2.2'), 'update_failed');
+  assert.equal(classifySetupFailure('hooks could not be written'), 'integration_failed');
 });

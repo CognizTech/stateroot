@@ -120,6 +120,8 @@ mkdir -p "$DEST_DIR"
 install -m 0755 "$WORK/$ASSET" "$DEST_DIR/stateroot" 2>/dev/null || cp "$WORK/$ASSET" "$DEST_DIR/stateroot"
 chmod 0755 "$DEST_DIR/stateroot" 2>/dev/null || true
 log "installed to $DEST_DIR/stateroot"
+export STATEROOT_INSTALL_VIA="${STATEROOT_INSTALL_VIA:-script}"
+"$DEST_DIR/stateroot" --version >/dev/null 2>&1 || true
 
 # --- harness integration (global persona + hooks) --------------------------
 INTEGRATION_OK=0
@@ -165,10 +167,10 @@ case ":$PATH:" in
 esac
 
 # --- anonymous install ping ------------------------------------------------
-# One GET with os + version + channel, counted in the stateroot.dev web
-# server logs. Never blocks (3s cap), never fails the install.
-# Disable with: STATEROOT_NO_PING=1
-if [ "${STATEROOT_NO_PING:-}" != "1" ]; then
+# Retired after telemetry v2: the installed binary emits install_observed on
+# first run (`stateroot --version` above). Remaining compatibility pings come
+# only from older installers still in the wild.
+if [ "${STATEROOT_TELEMETRY_PING:-}" = "1" ] && [ "${STATEROOT_NO_PING:-}" != "1" ]; then
     VER="$("$DEST_DIR/stateroot" --version 2>/dev/null | awk '{print $NF}')"
     VIA="${STATEROOT_INSTALL_VIA:-script}"
     PING_URL="https://stateroot.dev/api/install-ping?os=$TARGET&v=${VER:-unknown}&via=$VIA"

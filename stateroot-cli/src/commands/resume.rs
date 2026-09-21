@@ -1108,9 +1108,8 @@ skipping duplicate. If this session has no digest in context, pass --force to re
     // Telemetry: explicit resume after successful non-empty delivery counts
     // as continuity delivery when a harness is named; unattributed resume is
     // daily activity only (activation requires a recognized harness).
-    match recorded_harness.as_deref() {
-        Some(h) => crate::telemetry::continuity_delivered(&ctx.config_dir, &ctx.cwd, h),
-        None => crate::telemetry::activity(&ctx.config_dir, &ctx.cwd, None),
+    if let Some(h) = recorded_harness.as_deref() {
+        crate::telemetry::continuity_delivered(&ctx.config_dir, &ctx.cwd, h);
     }
     Ok(())
 }

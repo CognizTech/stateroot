@@ -231,6 +231,10 @@ pub async fn install(ctx: &Ctx) -> Result<()> {
             failed.join(", ")
         );
     }
+    crate::telemetry::integration_completed(&ctx.config_dir);
+    if std::env::var("STATEROOT_INSTALL_VIA").ok().as_deref() == Some("extension") {
+        crate::telemetry::editor_reconcile_result(&ctx.config_dir);
+    }
     Ok(())
 }
 

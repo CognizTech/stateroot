@@ -587,11 +587,6 @@ fn worker(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
                 outcome,
                 started.elapsed().as_secs(),
             )?;
-            // Telemetry: a completed delegated-task lifecycle transition is
-            // qualifying daily activity; failures never count.
-            if output.status.success() {
-                crate::telemetry::activity(&ctx.config_dir, &record_root, None);
-            }
             Ok(output.status.code().unwrap_or(1))
         }
         Err(err) => {

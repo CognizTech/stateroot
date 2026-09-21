@@ -67,6 +67,8 @@ test("Apple Silicon first install executes the bundled script and verifies the C
   assert.equal(calls[0].command, "sh");
   assert.equal(calls[0].args[0], path.join(extension, "assets", "install.sh"));
   assert.equal(calls[0].options.env.STATEROOT_INSTALL_VIA, "extension");
+  assert.equal(calls[0].options.env.STATEROOT_SKIP_INTEGRATION, "1");
+  assert.equal(calls[0].options.env.STATEROOT_SKIP_REARM, "1");
   assert.equal(calls[1].command, result);
   assert.equal(calls[1].args[0], "--version");
 });

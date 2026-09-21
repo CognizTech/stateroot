@@ -118,6 +118,7 @@ pub async fn run(ctx: &Ctx, args: crate::cli::InitArgs) -> Result<()> {
     }
 
     println!("initialized '{}' ({project_id}) at {}", name, dir.display());
+    crate::telemetry::project_initialized(&ctx.config_dir, &dir);
     println!();
     if ctx.config.installed_harnesses.is_empty() {
         println!("Agent integration is not recorded yet. Run `stateroot install` to configure your agents.");

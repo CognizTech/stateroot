@@ -56,6 +56,7 @@ pub fn snap(ctx: &Ctx, reason: Option<&str>, harness: Option<&str>) -> anyhow::R
             manifest.tree_bytes / (1024 * 1024)
         );
     }
+    crate::telemetry::activity(&ctx.config_dir, &ctx.cwd, Some(resolved_harness.as_str()));
     Ok(())
 }
 

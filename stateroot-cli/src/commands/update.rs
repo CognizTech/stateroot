@@ -762,8 +762,16 @@ pub async fn download_and_install_quiet(
 /// 0.1.1 hooks.json incident — the binary moved on, the wiring never
 /// migrated). Best-effort: a failed re-arm never fails the update.
 fn rearm_install(installed: &Path, quiet: bool) {
+    if std::env::var_os("STATEROOT_SKIP_REARM").is_some()
+        || std::env::var("STATEROOT_INSTALL_VIA").ok().as_deref() == Some("extension")
+    {
+        return;
+    }
     let mut cmd = std::process::Command::new(installed);
     cmd.arg("install").env("STATEROOT_NO_AUTO_UPDATE", "1");
+    if std::env::var_os("STATEROOT_INSTALL_VIA").is_none() {
+        cmd.env("STATEROOT_INSTALL_VIA", "self_update");
+    }
     let result = if quiet {
         cmd.output().map(|o| o.status.success())
     } else {

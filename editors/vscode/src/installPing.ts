@@ -1,18 +1,16 @@
 import * as vscode from "vscode";
 
 /**
- * First-run install/update telemetry: one anonymous GET when the extension's
- * version differs from the last seen one. Independent of setup/update state.
+ * Extension version marker used to classify legacy profiles and to decide
+ * whether a working CLI needs a refresh. Editor recovery telemetry lives in
+ * `editorTelemetry.ts` (durable POST /api/telemetry/v2/editor).
  *
- * Contract: fire-and-forget (never blocks activation), 3s cap, every error
- * swallowed, STATEROOT_NO_PING=1 opts out. One attempt per version change per
- * machine: the marker is written before firing, so an offline machine is not
- * retried — the floor is installs that happened and could reach us, never an
- * exact census.
+ * `STATEROOT_NO_PING=1` still opts out of network telemetry. The local
+ * version marker is recovery state, not a ping.
  */
 
 const PING_URL = "https://stateroot.dev/api/install-ping";
-const MARKER_KEY = "stateroot.lastSeenVersion";
+export const MARKER_KEY = "stateroot.lastSeenVersion";
 
 /** OS token in the same vocabulary as the CLI and installer pings. */
 export function osTarget(platform: string, arch: string): string {
@@ -54,24 +52,14 @@ export function shouldRefreshCli(
   return cliAvailable && !noAutoUpdate && previous !== current;
 }
 
-/** Fire one fail-silent ping when the extension version changed. */
+/** Record the extension version marker. Network pings moved to editor v2 events. */
 export function maybePing(context: vscode.ExtensionContext): void {
   try {
-    if (process.env.STATEROOT_NO_PING) return;
     const current = String(context.extension.packageJSON.version ?? "");
     if (!current) return;
     const lastSeen = context.globalState.get<string>(MARKER_KEY);
-    const kind = pingKind(lastSeen, current);
-    if (!kind) return;
-    // Record before firing: one attempt per version change, even offline.
+    if (lastSeen === current) return;
     void context.globalState.update(MARKER_KEY, current);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 3000);
-    void fetch(pingUrl(current, kind, kind === "update" ? lastSeen : undefined), {
-      signal: controller.signal,
-    })
-      .catch(() => undefined)
-      .finally(() => clearTimeout(timer));
   } catch {
     // fail-silent by contract
   }

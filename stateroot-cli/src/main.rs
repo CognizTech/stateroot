@@ -75,6 +75,7 @@ async fn main() -> anyhow::Result<()> {
             | cli::Command::External(_)
             | cli::Command::DrainFinalize
             | cli::Command::DrainTelemetry
+            | cli::Command::TelemetryIdentity { .. }
     );
 
     match cli.command {
@@ -456,6 +457,9 @@ async fn main() -> anyhow::Result<()> {
         },
         Command::DrainFinalize => commands::drain_finalize::run(&ctx).await?,
         Command::DrainTelemetry => commands::telemetry_drain::run(&ctx).await?,
+        Command::TelemetryIdentity { json } => {
+            commands::telemetry_drain::print_identity(&ctx, json)?;
+        }
         Command::External(argv) => {
             let code = commands::ext::run_external(&ctx, &argv)?;
             std::process::exit(code);

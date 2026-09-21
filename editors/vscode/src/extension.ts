@@ -10,6 +10,7 @@ import {
   runCliReport,
   runCli,
   useCli,
+  getPlatformInfo,
 } from "./cli";
 import { SidebarProvider } from "./sidebarProvider";
 import {
@@ -39,13 +40,28 @@ import { readParallelWork, type LineageProjection } from "./parallelWork";
 import { isStaleIntegrationCli, parseMergeAttempt, type MergeAttempt } from "./mergeAttempt";
 import { WorkbenchPanel } from "./workbench";
 import { terminalPathUpdater } from "./terminalPath";
-import { maybePing } from "./installPing";
-import { editorHarness, ensureSetup, SWITCH_PROMPTS, type SetupState } from "./setup";
+import { MARKER_KEY, previousVersion } from "./installPing";
+import {
+  buildEvent,
+  capturePreflight,
+  enqueue,
+  flushQueue,
+  getOrCreateEditorId,
+  parseInstallId,
+  type CliStatus,
+} from "./editorTelemetry";
+import {
+  classifySetupFailure,
+  editorHarness,
+  ensureSetup,
+  SETUP_KEY,
+  SWITCH_PROMPTS,
+  type SetupState,
+} from "./setup";
 
 export function activate(context: vscode.ExtensionContext) {
   const output = vscode.window.createOutputChannel("StateRoot");
   const THIS_HARNESS = editorHarness(vscode.env.appName);
-  maybePing(context);
   const updateTerminalPath = terminalPathUpdater(context.environmentVariableCollection);
   const sidebar = new SidebarProvider(context.extensionUri, (msg) => void onMessage(msg));
   const workbench = new WorkbenchPanel(context.extensionUri, (msg) => void onMessage(msg));
@@ -916,17 +932,60 @@ export function activate(context: vscode.ExtensionContext) {
   function runSetup(retry = false): Promise<void> {
     if (setupPending) return setupPending;
     setupPending = (async () => {
+      const folder = vscode.workspace.workspaceFolders?.[0];
+      const extVersion = String(context.extension.packageJSON.version);
+      const host = /cursor/i.test(vscode.env.appName) ? "cursor" as const : "vscode" as const;
+      const editorId = await getOrCreateEditorId(context.globalState);
+      let recoveryStarted = false;
       try {
         setup = { phase: "checking", detail: "Checking StateRoot setup…" };
         push();
         const available = await refreshCliProbe();
-        const folder = vscode.workspace.workspaceFolders?.[0];
+        const platform = getPlatformInfo();
+        const defaultDest = platform.supported ? platform.installDest : undefined;
+        const binaryPath = available ? cliPath() : undefined;
+        const cliStatus: CliStatus = available ? "working" : (platform.supported ? "missing" : "unrunnable");
+        const previousReceipt = context.globalState.get<{
+          extensionVersion?: string; binary?: string; version?: string;
+        }>(SETUP_KEY);
+        const preflight = capturePreflight({
+          previousVersion: previousVersion(context),
+          previousReceipt,
+          host,
+          workspaceInitialized: !!(folder && fs.existsSync(path.join(folder.uri.fsPath, STORE, "manifest.json"))),
+          cliStatus,
+          binary: binaryPath,
+          defaultDest,
+        });
+        if (previousVersion(context) !== extVersion) {
+          await enqueue(context.globalState, buildEvent(editorId, "editor_seen", extVersion, host, {
+            profile_class: preflight.profileClass,
+            cli_status: preflight.cliStatus,
+            path_class: preflight.pathClass,
+          }));
+          await context.globalState.update(MARKER_KEY, extVersion);
+        }
+        const needsRecovery = retry
+          || preflight.cliStatus !== "working"
+          || !previousReceipt
+          || previousReceipt.extensionVersion !== extVersion
+          || previousReceipt.binary !== binaryPath;
+        if (needsRecovery) {
+          recoveryStarted = true;
+          await enqueue(context.globalState, buildEvent(editorId, "setup_started", extVersion, host, {
+            profile_class: preflight.profileClass,
+            cli_status: preflight.cliStatus,
+            path_class: preflight.pathClass,
+          }));
+        }
+        void flushQueue(context.globalState);
         const binary = await ensureSetup({
           state: context.globalState,
-          extensionVersion: String(context.extension.packageJSON.version),
+          extensionVersion: extVersion,
           binary: available ? cliPath() : undefined,
           noAutoUpdate: !!process.env.STATEROOT_NO_AUTO_UPDATE,
           retry,
+          pathClass: preflight.pathClass,
           install: async () => {
             const { installCli } = await import("./cliInstall");
             const result = await installCli(output);
@@ -934,9 +993,9 @@ export function activate(context: vscode.ExtensionContext) {
             useCli(result.binaryPath);
             return result.binaryPath;
           },
-          run: async (args, selected) => {
+          run: async (args, selected, env) => {
             const text = await runCli(args, folder?.uri.fsPath || path.dirname(context.extensionPath),
-              600_000, selected);
+              600_000, selected, env);
             output.appendLine(`$ ${selected} ${args.join(" ")}`);
             output.appendLine(text);
             return text;
@@ -944,22 +1003,58 @@ export function activate(context: vscode.ExtensionContext) {
           report: (state) => { setup = state; push(); },
         });
         useCli(binary);
+        let installId: string | undefined;
+        try {
+          const identity = await runCli(
+            ["_telemetry-identity", "--json"],
+            folder?.uri.fsPath || path.dirname(context.extensionPath),
+            8_000,
+            binary
+          );
+          installId = parseInstallId(identity);
+        } catch {
+          // linking is best-effort; machine recovery still counts
+        }
+        if (recoveryStarted) {
+          await enqueue(context.globalState, buildEvent(editorId, "setup_finished", extVersion, host, {
+            profile_class: preflight.profileClass,
+            cli_status: "working",
+            path_class: preflight.pathClass,
+            result: "ready",
+            install_id: installId,
+          }));
+        }
         if ((!available || retry) && folder && !fs.existsSync(path.join(folder.uri.fsPath, STORE, "manifest.json"))) {
           const result = await runCliReport(["init"], folder.uri.fsPath, output, 60_000);
-          if (result === undefined) throw new Error("Project initialization failed. Retry setup or initialize the project again.");
-          void vscode.commands.executeCommand("stateroot.overview.focus");
+          if (result === undefined) {
+            void vscode.window.showErrorMessage(
+              "StateRoot CLI is ready, but project initialization failed. Retry Initialize from the command palette.",
+              "Retry"
+            ).then(pick => {
+              if (pick === "Retry") void vscode.commands.executeCommand("stateroot.init");
+            });
+          } else {
+            void vscode.commands.executeCommand("stateroot.overview.focus");
+          }
         }
         if (folder) void maybeOfferCopilotHooks(context, folder.uri.fsPath, output);
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
         setup = { phase: "error", detail };
         output.appendLine(`Setup incomplete: ${detail}`);
+        if (recoveryStarted) {
+          await enqueue(context.globalState, buildEvent(editorId, "setup_finished", extVersion, host, {
+            result: "failed",
+            stage: classifySetupFailure(detail),
+          }));
+        }
         void vscode.window.showErrorMessage(`StateRoot setup incomplete: ${detail}`, "Retry setup", "Show details")
           .then(pick => {
             if (pick === "Retry setup") void runSetup(true);
             if (pick === "Show details") output.show(true);
           });
       } finally {
+        void flushQueue(context.globalState);
         push();
       }
     })().finally(() => { setupPending = undefined; });

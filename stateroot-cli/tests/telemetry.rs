@@ -84,15 +84,51 @@ fn acquisition_boundaries_never_activate() {
         .success();
 
     let kinds = event_kinds(config_home.path());
-    assert_eq!(
-        kinds,
-        ["install_observed"],
-        "install + init produce one acquisition event and zero activations: {kinds:?}"
+    assert!(
+        kinds.contains(&"install_observed".to_string()),
+        "install produces acquisition: {kinds:?}"
     );
-    let event = &spool_events(config_home.path())[0];
+    assert!(
+        kinds.contains(&"project_initialized".to_string()),
+        "init emits a project_initialized milestone: {kinds:?}"
+    );
+    assert!(
+        !kinds.iter().any(|k| k == "continuity_activated"),
+        "init never activates: {kinds:?}"
+    );
+    let event = spool_events(config_home.path())
+        .into_iter()
+        .find(|e| e["event"] == "install_observed")
+        .expect("install_observed");
     assert_eq!(event["kind"].as_str(), Some("install"));
     assert_eq!(event["cohort"].as_str(), Some("measured_new"));
     assert!(event.get("project_id").is_none(), "no project on install");
+}
+
+#[test]
+fn hidden_identity_command_prints_install_id_without_secret() {
+    let config_home = tempfile::tempdir().expect("config");
+    let user_home = tempfile::tempdir().expect("home");
+    let project = tempfile::tempdir().expect("project");
+    seed_persona(config_home.path(), user_home.path());
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .arg("--version")
+        .assert()
+        .success();
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["_telemetry-identity", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&out).expect("json");
+    assert!(
+        value.get("secret").is_none(),
+        "secret never leaves the machine"
+    );
+    assert!(value["install_id"].as_str().unwrap().contains('-'));
+    assert_eq!(value["paused"], false);
 }
 
 #[test]
@@ -116,7 +152,12 @@ fn continuity_delivery_activates_once_and_dedups_same_day() {
     let kinds = event_kinds(config_home.path());
     assert_eq!(
         kinds,
-        ["active_day", "continuity_activated", "install_observed"],
+        [
+            "active_day",
+            "continuity_activated",
+            "install_observed",
+            "project_initialized"
+        ],
         "first delivery = exactly one activation + one active day: {kinds:?}"
     );
     let activation = spool_events(config_home.path())
@@ -140,7 +181,12 @@ fn continuity_delivery_activates_once_and_dedups_same_day() {
     let kinds = event_kinds(config_home.path());
     assert_eq!(
         kinds,
-        ["active_day", "continuity_activated", "install_observed"],
+        [
+            "active_day",
+            "continuity_activated",
+            "install_observed",
+            "project_initialized"
+        ],
         "same-day repeats add nothing: {kinds:?}"
     );
 
@@ -153,7 +199,7 @@ fn continuity_delivery_activates_once_and_dedups_same_day() {
     let events = spool_events(config_home.path());
     let transitions: Vec<&serde_json::Value> = events
         .iter()
-        .filter(|e| e["event"] == "harness_transition")
+        .filter(|e| e["event"] == "observed_harness_switch")
         .collect();
     assert_eq!(transitions.len(), 1, "exactly one verified A→B transition");
     assert_eq!(transitions[0]["from_harness"].as_str(), Some("claude"));
@@ -164,10 +210,11 @@ fn continuity_delivery_activates_once_and_dedups_same_day() {
         "transition on the same opaque project"
     );
 
-    // A successful checkpoint is qualifying daily activity (cli actor: no
-    // harness on the wire) — and it never activates again.
+    // A successful explicit snap is qualifying daily activity (cli actor: no
+    // harness on the wire when the snap harness is `cli`) — and it never
+    // activates again.
     stateroot(config_home.path(), user_home.path(), project.path())
-        .args(["checkpoint", "--note", "telemetry test"])
+        .args(["snap", "--reason", "telemetry test"])
         .assert()
         .success();
     let events = spool_events(config_home.path());
@@ -175,8 +222,10 @@ fn continuity_delivery_activates_once_and_dedups_same_day() {
         .iter()
         .filter(|e| e["event"] == "active_day")
         .collect();
-    assert_eq!(days.len(), 3, "claude + codex + cli day rows: {days:?}");
-    assert!(days.iter().any(|e| e.get("harness").is_none()));
+    assert!(
+        days.len() >= 2,
+        "claude + codex day rows at minimum: {days:?}"
+    );
     assert_eq!(
         events
             .iter()

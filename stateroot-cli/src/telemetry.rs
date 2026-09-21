@@ -15,10 +15,18 @@ use super::commands::{detached, Ctx};
 
 /// Default ingestion endpoint (tests override via STATEROOT_TELEMETRY_URL).
 pub const TELEMETRY_URL: &str = "https://stateroot.dev/api/telemetry/v1/event";
+pub const TELEMETRY_URL_V2: &str = "https://stateroot.dev/api/telemetry/v2/event";
 
 /// Endpoint resolution (env override is the test seam).
-pub fn endpoint() -> String {
-    std::env::var("STATEROOT_TELEMETRY_URL").unwrap_or_else(|_| TELEMETRY_URL.to_string())
+pub fn endpoint_for_schema(schema: u32) -> String {
+    if let Ok(url) = std::env::var("STATEROOT_TELEMETRY_URL") {
+        return url;
+    }
+    if schema >= 2 {
+        TELEMETRY_URL_V2.to_string()
+    } else {
+        TELEMETRY_URL.to_string()
+    }
 }
 
 /// Spool the install/update acquisition event when the version changed.
@@ -63,10 +71,37 @@ pub fn continuity_delivered(config_dir: &Path, project_dir: &Path, harness: &str
     let _ = core::continuity_delivered(config_dir, project_dir, harness, BUILD_VERSION);
 }
 
-/// Qualifying daily activity (checkpoint/root boundary, handoff write/accept,
-/// completed delegation). Never activates, never transitions.
+/// Qualifying daily activity (explicit snap, handoff write/accept).
+/// Never activates, never transitions.
 pub fn activity(config_dir: &Path, project_dir: &Path, harness: Option<&str>) {
     let _ = core::record_activity(config_dir, project_dir, harness, BUILD_VERSION);
+}
+
+pub fn integration_completed(config_dir: &Path) {
+    let _ = core::record_milestone(
+        config_dir,
+        core::EVENT_INTEGRATION_COMPLETED,
+        None,
+        BUILD_VERSION,
+    );
+}
+
+pub fn project_initialized(config_dir: &Path, project_dir: &Path) {
+    let _ = core::record_milestone(
+        config_dir,
+        core::EVENT_PROJECT_INITIALIZED,
+        Some(project_dir),
+        BUILD_VERSION,
+    );
+}
+
+pub fn editor_reconcile_result(config_dir: &Path) {
+    let _ = core::record_milestone(
+        config_dir,
+        core::EVENT_EDITOR_RECONCILE_RESULT,
+        None,
+        BUILD_VERSION,
+    );
 }
 
 #[cfg(test)]
@@ -96,9 +131,12 @@ mod tests {
     #[test]
     fn endpoint_defaults_and_overrides() {
         let _lock = crate::test_env::env_lock();
-        assert_eq!(endpoint(), TELEMETRY_URL);
+        std::env::remove_var("STATEROOT_TELEMETRY_URL");
+        assert_eq!(endpoint_for_schema(2), TELEMETRY_URL_V2);
+        assert_eq!(endpoint_for_schema(1), TELEMETRY_URL);
         let _guard = EnvGuard::set("STATEROOT_TELEMETRY_URL", "http://127.0.0.1:9/event");
-        assert_eq!(endpoint(), "http://127.0.0.1:9/event");
+        assert_eq!(endpoint_for_schema(2), "http://127.0.0.1:9/event");
+        assert_eq!(endpoint_for_schema(1), "http://127.0.0.1:9/event");
     }
 
     #[test]
