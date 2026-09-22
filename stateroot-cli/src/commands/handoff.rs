@@ -1094,12 +1094,21 @@ async fn automatic_checkpoint_only(ctx: &Ctx, note_text: Option<&str>) -> anyhow
 /// `stateroot handoff accept` — mark the current handoff accepted by a harness.
 pub async fn accept(ctx: &Ctx, by: &str) -> anyhow::Result<()> {
     ctx.require_project()?;
-    let count = super::resume::accept_handoff_local(&ctx.cwd, by)?;
+    // The accepter is part of the shared record — validate it as a canonical
+    // harness id (aliases resolve), with `cli` kept as the local-CLI actor.
+    let by = if by.trim() == "cli" {
+        "cli".to_string()
+    } else {
+        super::active_harness::canonical_id(by).map_err(|_| {
+            anyhow::anyhow!("unknown harness '{by}'; pass --by with a known harness id or alias")
+        })?
+    };
+    let count = super::resume::accept_handoff_local(&ctx.cwd, &by)?;
     if count == 0 {
         println!("no current handoff to accept");
     } else {
         println!("handoff accepted by {by} ({count} acceptance(s) total)");
-        crate::telemetry::activity(&ctx.config_dir, &ctx.cwd, Some(by));
+        crate::telemetry::activity(&ctx.config_dir, &ctx.cwd, Some(&by));
     }
     if let Some(footer) = super::resume::digest_footer(&ctx.cwd) {
         println!("{footer}");

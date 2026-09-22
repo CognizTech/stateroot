@@ -333,3 +333,36 @@ fn drain_delivers_queued_events_and_clears_the_spool() {
         "no extra requests"
     );
 }
+
+#[test]
+fn integration_completed_requires_a_successful_integration() {
+    let config_home = tempfile::tempdir().expect("config");
+    let user_home = tempfile::tempdir().expect("home");
+    let project = tempfile::tempdir().expect("project");
+    seed_persona(config_home.path(), user_home.path());
+    std::fs::create_dir_all(project.path()).expect("project dir");
+
+    // No harnesses on the machine: install reports "no agents detected" and
+    // must not claim integration_completed.
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .arg("install")
+        .assert()
+        .success();
+    assert!(
+        !event_kinds(config_home.path()).contains(&"integration_completed".to_string()),
+        "empty integration emits no milestone: {:?}",
+        event_kinds(config_home.path())
+    );
+
+    // A detected harness integrates: the milestone is earned.
+    std::fs::create_dir_all(user_home.path().join(".codex")).expect("codex dir");
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .arg("install")
+        .assert()
+        .success();
+    assert!(
+        event_kinds(config_home.path()).contains(&"integration_completed".to_string()),
+        "a real integration emits the milestone: {:?}",
+        event_kinds(config_home.path())
+    );
+}

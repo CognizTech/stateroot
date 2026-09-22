@@ -54,6 +54,7 @@ export interface Preflight {
 }
 
 const MAX_QUEUE = 50;
+let flushInFlight: Promise<void> | undefined;
 
 export function editorHost(appName: string): EditorHost {
   return /cursor/i.test(appName) ? "cursor" : "vscode";
@@ -128,8 +129,10 @@ export async function enqueue(state: vscode.Memento, event: EditorEvent): Promis
   if (process.env.STATEROOT_NO_PING) return;
   const queue = state.get<EditorEvent[]>(QUEUE_KEY, []);
   if (queue.some((item) => item.event_id === event.event_id)) return;
+  // The queue holds only unacknowledged events — evicting one would drop
+  // exactly what we promised to keep. At the bound, refuse the newcomer.
+  if (queue.length >= MAX_QUEUE) return;
   queue.push(event);
-  while (queue.length > MAX_QUEUE) queue.shift();
   await state.update(QUEUE_KEY, queue);
 }
 
@@ -143,24 +146,34 @@ export async function flushQueue(
   fetchImpl: typeof fetch = fetch,
   url = process.env.STATEROOT_TELEMETRY_URL || TELEMETRY_URL
 ): Promise<void> {
-  if (process.env.STATEROOT_NO_PING) return;
-  const queue = state.get<EditorEvent[]>(QUEUE_KEY, []);
-  for (const event of queue) {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 3000);
-      const response = await fetchImpl(url, {
-        method: "POST",
-        headers: eventHeaders(event),
-        body: "",
-        signal: controller.signal,
-      });
-      clearTimeout(timer);
-      if (response.ok) await ack(state, event.event_id);
-    } catch {
-      // retry on next activation
-    }
+  // Single-flight: concurrent activations share one serialized pass, so an
+  // event is never sent twice racing itself nor acked by a stale response.
+  if (!flushInFlight) {
+    flushInFlight = (async () => {
+      if (process.env.STATEROOT_NO_PING) return;
+      const queue = state.get<EditorEvent[]>(QUEUE_KEY, []);
+      for (const event of queue) {
+        try {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 3000);
+          const response = await fetchImpl(url, {
+            method: "POST",
+            headers: eventHeaders(event),
+            body: "",
+            signal: controller.signal,
+          });
+          clearTimeout(timer);
+          if (response.ok) await ack(state, event.event_id);
+        } catch {
+          // retry on next activation
+        }
+      }
+    })();
+    flushInFlight = flushInFlight.finally(() => {
+      flushInFlight = undefined;
+    });
   }
+  return flushInFlight;
 }
 
 export function buildEvent(
@@ -192,6 +205,34 @@ export function parseInstallId(raw: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+export const LINK_ID_KEY = "stateroot.linkedInstallId";
+export const LINK_PENDING_KEY = "stateroot.pendingInstallLink";
+
+/** Resolve the CLI's anonymous install_id for this editor profile. A resolved
+ * link is persisted and reused without probing; a failed probe leaves a
+ * pending marker so the next activation retries — the link is never lost
+ * because one identity call timed out. The probe itself runs the hidden
+ * `_telemetry-identity --json` and must never block recovery. */
+export async function resolveInstallIdLink(
+  state: vscode.Memento,
+  probe: () => Promise<string | undefined>
+): Promise<string | undefined> {
+  const linked = state.get<string>(LINK_ID_KEY);
+  if (linked) return linked;
+  const installId = await probe().catch(() => undefined);
+  if (installId) {
+    await state.update(LINK_ID_KEY, installId);
+    await state.update(LINK_PENDING_KEY, false);
+    return installId;
+  }
+  await state.update(LINK_PENDING_KEY, true);
+  return undefined;
+}
+
+export function linkRetryPending(state: vscode.Memento): boolean {
+  return state.get<boolean>(LINK_PENDING_KEY, false);
 }
 
 export function capturePreflight(input: {

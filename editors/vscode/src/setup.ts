@@ -102,7 +102,21 @@ export async function ensureSetup(options: {
   const needsSetup = options.retry || missing || previous?.extensionVersion !== extensionVersion ||
     previous?.binary !== binary || previous?.version !== before;
   if (!needsSetup && previous && binary) {
-    report({ phase: "ready", detail: "Ready", version: before, configured: previous.configured });
+    // A current receipt still earns a health check: integration drift
+    // (missing hooks or blocks) falls through to one repair pass below
+    // instead of surfacing only when the next version lands.
+    if (await integrationHealthy(run, binary)) {
+      report({ phase: "ready", detail: "Ready", version: before, configured: previous.configured });
+      return binary;
+    }
+    report({ phase: "connecting", detail: "Repairing harness integration…" });
+    const integration = await run(["install"], binary, REARM_SKIP_ENV);
+    const configured = integration.match(/^Installed for:[ \t]*([^\r\n]*)/m)?.[1]
+      .split(",").map(s => s.trim()).filter(Boolean);
+    if (!configured) throw new Error("Integration repair was not confirmed. Retry setup.");
+    const version = (await run(["--version"], binary)).trim();
+    await state.update(SETUP_KEY, { extensionVersion, binary, version, configured } satisfies Receipt);
+    report({ phase: "ready", detail: "Ready", version, configured });
     return binary;
   }
 
@@ -128,6 +142,17 @@ export async function ensureSetup(options: {
   await state.update(SETUP_KEY, { extensionVersion, binary: recovered, version, configured } satisfies Receipt);
   report({ phase: "ready", detail: "Ready", version, configured });
   return recovered;
+}
+
+async function integrationHealthy(run: Run, binary: string): Promise<boolean> {
+  try {
+    // `stateroot doctor` exits nonzero on hard failures, including missing
+    // harness wiring — the actual drift this route exists to repair.
+    await run(["doctor"], binary, { STATEROOT_NO_AUTO_UPDATE: "1" });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function verifySelfUpdate(run: Run, binary: string, before: string): Promise<string> {

@@ -231,9 +231,13 @@ pub async fn install(ctx: &Ctx) -> Result<()> {
             failed.join(", ")
         );
     }
-    crate::telemetry::integration_completed(&ctx.config_dir);
-    if std::env::var("STATEROOT_INSTALL_VIA").ok().as_deref() == Some("extension") {
-        crate::telemetry::editor_reconcile_result(&ctx.config_dir);
+    // integration_completed claims at least one harness was actually
+    // integrated — an empty run ("no agents detected") must not emit it.
+    if !installed.is_empty() {
+        crate::telemetry::integration_completed(&ctx.config_dir);
+        if std::env::var("STATEROOT_INSTALL_VIA").ok().as_deref() == Some("extension") {
+            crate::telemetry::editor_reconcile_result(&ctx.config_dir);
+        }
     }
     Ok(())
 }

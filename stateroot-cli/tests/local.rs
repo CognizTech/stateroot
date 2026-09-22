@@ -502,6 +502,52 @@ fn handoff_rejects_unknown_and_missing_source() {
 }
 
 #[test]
+fn handoff_accept_validates_and_canonicalizes_by() {
+    let config_home = tempfile::tempdir().expect("config home");
+    seed_config_home(config_home.path());
+    let user_home = tempfile::tempdir().expect("user home");
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args([
+            "handoff",
+            "write",
+            "--from",
+            "codex",
+            "--objective",
+            "obj",
+            "--task",
+            "task",
+            "--context-summary",
+            "ctx",
+        ])
+        .assert()
+        .success();
+
+    // Unknown accepter is refused before anything is recorded.
+    let unknown = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["handoff", "accept", "--by", "not-a-harness"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(unknown.get_output().stderr.clone()).expect("utf8");
+    assert!(
+        stderr.contains("unknown harness 'not-a-harness'"),
+        "stderr: {stderr}"
+    );
+
+    // An alias is canonicalized into the shared record.
+    let accepted = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["handoff", "accept", "--by", "kimi-code"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(accepted.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains("handoff accepted by kimi (1 acceptance(s) total)"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
 fn resume_refreshes_active_marker_before_deduplicating_output() {
     let config_home = tempfile::tempdir().expect("config home");
     seed_config_home(config_home.path());

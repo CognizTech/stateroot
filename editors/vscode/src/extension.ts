@@ -44,12 +44,16 @@ import { MARKER_KEY, previousVersion } from "./installPing";
 import {
   buildEvent,
   capturePreflight,
+  classifyPath,
   enqueue,
   flushQueue,
   getOrCreateEditorId,
   parseInstallId,
+  resolveInstallIdLink,
   type CliStatus,
+  type Preflight,
 } from "./editorTelemetry";
+import { anyCliBinaryExists } from "./cliInstall";
 import {
   classifySetupFailure,
   editorHarness,
@@ -929,6 +933,19 @@ export function activate(context: vscode.ExtensionContext) {
   // Keep the read-only StateRoot view eventually consistent without invoking
   // the CLI or requiring a manual refresh.
   storePoll = setInterval(push, 3000);
+  const FIRST_COHORT_KEY = "stateroot.firstProfileClass";
+  /** The cohort assigned at first sight persists across every retry — a
+   * failed recovery must never rewrite it (e.g. unknown_first_seen must not
+   * flip to verified_legacy just because the marker landed mid-attempt). */
+  async function firstProfileClass(
+    state: vscode.Memento,
+    current: Preflight["profileClass"]
+  ): Promise<Preflight["profileClass"]> {
+    const stored = state.get<Preflight["profileClass"]>(FIRST_COHORT_KEY);
+    if (stored) return stored;
+    await state.update(FIRST_COHORT_KEY, current);
+    return current;
+  }
   function runSetup(retry = false): Promise<void> {
     if (setupPending) return setupPending;
     setupPending = (async () => {
@@ -937,6 +954,7 @@ export function activate(context: vscode.ExtensionContext) {
       const host = /cursor/i.test(vscode.env.appName) ? "cursor" as const : "vscode" as const;
       const editorId = await getOrCreateEditorId(context.globalState);
       let recoveryStarted = false;
+      let firstCohort: Preflight["profileClass"] | undefined;
       try {
         setup = { phase: "checking", detail: "Checking StateRoot setup…" };
         push();
@@ -944,7 +962,24 @@ export function activate(context: vscode.ExtensionContext) {
         const platform = getPlatformInfo();
         const defaultDest = platform.supported ? platform.installDest : undefined;
         const binaryPath = available ? cliPath() : undefined;
-        const cliStatus: CliStatus = available ? "working" : (platform.supported ? "missing" : "unrunnable");
+        // missing = nothing at any known location; unrunnable = a binary is
+        // present but the probe failed. Never guess one from the other.
+        const cliStatus: CliStatus = available
+          ? "working"
+          : (anyCliBinaryExists(cliPath()) ? "unrunnable" : "missing");
+        let cliVersion: string | undefined;
+        if (available) {
+          try {
+            cliVersion = (await runCli(
+              ["--version"],
+              folder?.uri.fsPath || path.dirname(context.extensionPath),
+              8_000,
+              cliPath()
+            )).trim();
+          } catch {
+            cliVersion = undefined;
+          }
+        }
         const previousReceipt = context.globalState.get<{
           extensionVersion?: string; binary?: string; version?: string;
         }>(SETUP_KEY);
@@ -954,12 +989,14 @@ export function activate(context: vscode.ExtensionContext) {
           host,
           workspaceInitialized: !!(folder && fs.existsSync(path.join(folder.uri.fsPath, STORE, "manifest.json"))),
           cliStatus,
+          cliVersion,
           binary: binaryPath,
           defaultDest,
         });
+        firstCohort = await firstProfileClass(context.globalState, preflight.profileClass);
         if (previousVersion(context) !== extVersion) {
           await enqueue(context.globalState, buildEvent(editorId, "editor_seen", extVersion, host, {
-            profile_class: preflight.profileClass,
+            profile_class: firstCohort,
             cli_status: preflight.cliStatus,
             path_class: preflight.pathClass,
           }));
@@ -973,7 +1010,7 @@ export function activate(context: vscode.ExtensionContext) {
         if (needsRecovery) {
           recoveryStarted = true;
           await enqueue(context.globalState, buildEvent(editorId, "setup_started", extVersion, host, {
-            profile_class: preflight.profileClass,
+            profile_class: firstCohort,
             cli_status: preflight.cliStatus,
             path_class: preflight.pathClass,
           }));
@@ -1003,23 +1040,27 @@ export function activate(context: vscode.ExtensionContext) {
           report: (state) => { setup = state; push(); },
         });
         useCli(binary);
-        let installId: string | undefined;
-        try {
-          const identity = await runCli(
-            ["_telemetry-identity", "--json"],
-            folder?.uri.fsPath || path.dirname(context.extensionPath),
-            8_000,
-            binary
-          );
-          installId = parseInstallId(identity);
-        } catch {
-          // linking is best-effort; machine recovery still counts
-        }
+        // Identity linking is durable: a resolved editor→CLI link is reused
+        // without probing; a failed probe stays pending for the next
+        // activation instead of vanishing.
+        const installId = await resolveInstallIdLink(context.globalState, async () => {
+          try {
+            const identity = await runCli(
+              ["_telemetry-identity", "--json"],
+              folder?.uri.fsPath || path.dirname(context.extensionPath),
+              8_000,
+              binary
+            );
+            return parseInstallId(identity);
+          } catch {
+            return undefined;
+          }
+        });
         if (recoveryStarted) {
           await enqueue(context.globalState, buildEvent(editorId, "setup_finished", extVersion, host, {
-            profile_class: preflight.profileClass,
+            profile_class: firstCohort,
             cli_status: "working",
-            path_class: preflight.pathClass,
+            path_class: classifyPath(binary, defaultDest),
             result: "ready",
             install_id: installId,
           }));
@@ -1044,6 +1085,7 @@ export function activate(context: vscode.ExtensionContext) {
         output.appendLine(`Setup incomplete: ${detail}`);
         if (recoveryStarted) {
           await enqueue(context.globalState, buildEvent(editorId, "setup_finished", extVersion, host, {
+            ...(firstCohort ? { profile_class: firstCohort } : {}),
             result: "failed",
             stage: classifySetupFailure(detail),
           }));

@@ -17,6 +17,7 @@ function fixture() {
       assert.equal(selected, binary);
       calls.push(args.join(' '));
       if (args[0] === '--version') return version;
+      if (args[0] === 'doctor') return '';
       if (args[0] === 'self-update') {
         version = 'stateroot 0.2.2';
         return 'current: 0.1.15\nrelease: v0.2.2 (production)\nupdated';
@@ -37,7 +38,35 @@ test('pre-marker installs refresh their selected binary and persist only success
   assert.equal(f.reports.at(-1).version, 'stateroot 0.2.2');
   f.calls.length = 0;
   await ensureSetup(f.options);
-  assert.deepEqual(f.calls, ['--version']);
+  assert.deepEqual(f.calls, ['--version', 'doctor'], 'current receipt earns a health probe, nothing else');
+});
+
+test('current receipt with a healthy integration runs no repair', async () => {
+  const f = fixture();
+  await ensureSetup(f.options);
+  f.calls.length = 0;
+  await ensureSetup(f.options);
+  assert.ok(!f.calls.includes('install'), 'healthy doctor means no install run');
+  assert.ok(!f.calls.includes('self-update'));
+});
+
+test('integration drift on a current receipt is repaired once with rearm skipped', async () => {
+  const f = fixture();
+  await ensureSetup(f.options);
+  f.calls.length = 0;
+  const seenEnv = [];
+  const base = f.options.run;
+  f.options.run = async (args, binary, env) => {
+    if (args[0] === 'doctor') throw new Error('hooks check failed');
+    if (args[0] === 'install') seenEnv.push(env);
+    return base(args, binary, env);
+  };
+  await ensureSetup(f.options);
+  assert.equal(f.calls.filter((c) => c === 'install').length, 1, 'one repair pass');
+  assert.equal(seenEnv.length, 1);
+  assert.equal(seenEnv[0].STATEROOT_SKIP_REARM, '1');
+  assert.equal(seenEnv[0].STATEROOT_INSTALL_VIA, 'extension');
+  assert.equal(f.store[SETUP_KEY].extensionVersion, '0.2.19', 'receipt refreshed after repair');
 });
 
 test('failed update retries on the same extension version without telemetry involvement', async () => {

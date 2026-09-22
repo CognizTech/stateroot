@@ -109,6 +109,14 @@ export async function findWorkingCli(configuredPath: string): Promise<string | u
   return undefined;
 }
 
+/** True when any known CLI location holds a binary — runnable or not. Used
+ * to distinguish `missing` (nothing there) from `unrunnable` (present but
+ * broken) without ever transmitting the path. */
+export function anyCliBinaryExists(configuredPath: string): boolean {
+  const candidates = [configuredPath.trim(), ...defaultCliCandidates()].filter(Boolean);
+  return candidates.some((candidate) => fs.existsSync(candidate));
+}
+
 function execInstaller(
   scriptPath: string,
   scriptName: SupportedPlatform["scriptName"],

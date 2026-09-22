@@ -375,10 +375,13 @@ fn identity_from_state(state: &TelemetryState) -> Option<TelemetryIdentity> {
 fn apply_identity(state: &mut TelemetryState, ident: &TelemetryIdentity) {
     state.install_id = ident.install_id.clone();
     state.secret = ident.secret.clone();
-    if state.cohort.is_empty() {
+    // Immutable attributes: the identity is the source of truth. After
+    // mutable-state recovery a defaulted cohort (measured_new) must never
+    // outrank the minted one — a legacy installation stays legacy.
+    if !ident.cohort.is_empty() {
         state.cohort = ident.cohort.clone();
     }
-    if state.created_on.is_empty() {
+    if !ident.created_on.is_empty() {
         state.created_on = ident.created_on.clone();
     }
     state.schema_version = STATE_SCHEMA_VERSION;
@@ -564,12 +567,38 @@ fn hex_decode_32(hex: &str) -> Option<[u8; 32]> {
 
 /// Normalize a harness alias to the canonical registry id. Empty and the
 /// local-CLI actor label (`cli`) carry no harness on the wire.
+///
+/// Fail closed: an id that is not in the canonical registry never reaches
+/// the wire — the server allowlist would permanently reject it anyway, so
+/// the event drops the harness here instead of emitting a value ingestion
+/// can never accept.
 fn normalize_harness_opt(harness: Option<&str>) -> Option<String> {
     let raw = harness?.trim();
     if raw.is_empty() || raw == "cli" {
         return None;
     }
-    Some(crate::harness_identity::normalize(raw))
+    let id = crate::harness_identity::normalize(raw);
+    if is_wire_harness(&id) {
+        Some(id)
+    } else {
+        None
+    }
+}
+
+/// True when `id` is a canonical harness id allowed on the wire. Derived
+/// from the embedded harness registry (the same source the website's nginx
+/// allowlist mirrors) so there is no parallel list to drift.
+pub fn is_wire_harness(id: &str) -> bool {
+    static IDS: std::sync::OnceLock<Option<Vec<String>>> = std::sync::OnceLock::new();
+    let ids = IDS.get_or_init(|| {
+        crate::skill_federation::load_registry()
+            .ok()
+            .map(|reg| reg.harnesses.iter().map(|e| e.id.clone()).collect())
+    });
+    match ids {
+        Some(ids) => ids.iter().any(|e| e == id),
+        None => false,
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -1462,6 +1491,25 @@ mod tests {
     }
 
     #[test]
+    fn recovery_restores_legacy_cohort_from_immutable_identity() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = EnvGuard::clear();
+        let config = temp_config();
+        // Mint a legacy installation: the marker makes the first state legacy.
+        std::fs::create_dir_all(state_dir(config.path())).unwrap();
+        std::fs::write(legacy_marker_path(config.path()), "2026-01-01").unwrap();
+        observe_install_on(config.path(), "0.1.14", "cli", "2026-09-17").unwrap();
+        let original = load_or_create(config.path(), "2026-09-17").unwrap();
+        assert_eq!(original.cohort, COHORT_LEGACY_EXISTING);
+        // Corrupt the mutable state; recovery must never reclassify the install.
+        std::fs::write(state_path(config.path()), "{not json").unwrap();
+        let recovered = load_or_create(config.path(), "2026-09-18").unwrap();
+        assert_eq!(recovered.install_id, original.install_id);
+        assert_eq!(recovered.cohort, COHORT_LEGACY_EXISTING);
+        assert_eq!(recovered.created_on, original.created_on);
+    }
+
+    #[test]
     fn corrupt_identity_and_state_pauses_instead_of_minting() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _g = EnvGuard::clear();
@@ -1542,6 +1590,26 @@ mod tests {
             Some(v) => std::env::set_var(INSTALL_VIA_ENV, v),
             None => std::env::remove_var(INSTALL_VIA_ENV),
         }
+    }
+
+    #[test]
+    fn harness_normalization_fails_closed_off_the_wire_allowlist() {
+        assert_eq!(normalize_harness_opt(None), None);
+        assert_eq!(normalize_harness_opt(Some("")), None);
+        assert_eq!(normalize_harness_opt(Some("cli")), None);
+        assert_eq!(
+            normalize_harness_opt(Some("kimi")),
+            Some("kimi".to_string())
+        );
+        // Aliases resolve to the canonical id…
+        assert_eq!(
+            normalize_harness_opt(Some("claude-code")),
+            Some("claude".to_string())
+        );
+        // …but an unrecognized harness never reaches the wire.
+        assert_eq!(normalize_harness_opt(Some("skynet-9000")), None);
+        assert!(!is_wire_harness("skynet-9000"));
+        assert!(is_wire_harness("kimi"));
     }
 
     #[test]
