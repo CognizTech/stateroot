@@ -3,6 +3,50 @@
 All notable changes to StateRoot. Format loosely follows Keep a Changelog;
 StateRoot is pre-1.0 and milestones land as minor versions.
 
+## v0.2.4 — 2026-09-22
+
+- **Telemetry v2: truthful recovery, activation, and usage data.** Anonymous
+  CLI identity splits into an immutable identity file (install_id, secret,
+  cohort, created_on — atomic backup/recovery, never silently reminted) and
+  mutable state that pauses or recovers on corruption; wire and local-state
+  schema versions split; `install via` propagates as
+  `direct|script|extension|self_update|unknown`; deduplicated
+  `integration_completed` / `project_initialized` milestones (never
+  activation); observed-harness-switch history preserved in real last-seen
+  order; v1 `harness_transition` events map forward. Hidden
+  `stateroot _telemetry-identity --json` lets the editor link its anonymous
+  `editor_id` to the CLI's `install_id`. Harness ids fail closed to the
+  canonical registry allowlist, `integration_completed` emits only after at
+  least one real integration, and activity milestones fire only on
+  successful command boundaries. The editor recovery controller captures an
+  immutable preflight snapshot, classifies profiles
+  (`verified_legacy|existing_cli|verified_project|unknown_first_seen`,
+  preserved across retries), runs exactly one recovery path per activation
+  (missing/unrunnable → bundled installer; stale working CLI → self-update;
+  current receipt → `doctor` health check with one repair pass; failed
+  updater → bundled fallback only on the default stable destination),
+  performs exactly one final integration (extension-driven installers and
+  self-update skip their internal integration/rearm), and persists bounded
+  editor events that retry until 2xx and are removed only after
+  acknowledgement — `STATEROOT_NO_PING=1` opts out of all of it.
+- **Server pipeline tells the truth.** v2 CLI and editor ingestion
+  endpoints validate strict allowlists (optional-UUID install ids, the full
+  editor os_arch vocabulary) before anything is logged; funnel rates nest
+  numerator inside same-cohort denominator and cannot exceed 100%;
+  `data_complete_through` advances only after a healthy completed import
+  cycle with failed cycles recorded stale; delayed arrivals are counted;
+  database rebuilds preserve registry snapshots, import runs, editor links,
+  quarantine and rejection ledgers; the private report renders registry
+  coverage estimates, the editor recovery funnel, the product funnel, and
+  repeat/retention/DAU/WAU/MAU; daily maintenance now snapshots registry
+  counters.
+- **Fix: hook commands no longer break `config.toml` on Windows.** Verbatim
+  UNC paths (`\\?\C:\…\stateroot.exe`) are TOML-escaped at the emitter, so
+  kimi / kimi-code configs load after `stateroot install` instead of dying
+  on invalid string escapes.
+- **Public narrative realigned** to "persistent, federated meta-harness for
+  AI agents" across README, repository metadata, and stateroot.dev.
+
 ## v0.2.3 — 2026-09-19
 
 - **Session boundaries finalize through a durable journal.** Stop/session_end
