@@ -37,6 +37,36 @@ fn command_for(quirk: &HarnessQuirk, canonical: &str) -> String {
     paths::hook_command(quirk.id, canonical)
 }
 
+/// Escape a value for a TOML basic (double-quoted) string. Windows hook
+/// commands carry verbatim paths like `\\?\C:\Users\…\stateroot.exe` —
+/// written raw into `command = "…"` they are invalid escapes (`\C`, `\U`,
+/// `\A`, `\P`, `\s`), and the harness's whole config.toml fails to load.
+fn toml_basic_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 8);
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// One `[[hooks]]` block, TOML-escaped. Kept separate so tests can drive a
+/// Windows-shaped command through it (the real command comes from
+/// `hook_command`, which is bare `stateroot` under test binaries).
+fn toml_hook_block(harness_event: &str, command: &str) -> String {
+    format!(
+        "[[hooks]]\nevent = \"{harness_event}\"\ncommand = \"{}\"\n",
+        toml_basic_escape(command)
+    )
+}
+
 fn nested_entries(quirk: &HarnessQuirk) -> Map<String, Value> {
     let mut out = Map::new();
     for (harness_event, canonical) in quirk.event_map {
@@ -298,11 +328,9 @@ fn install_toml_hooks(path: &Path, quirk: &HarnessQuirk) -> Result<Vec<String>, 
         "\n# stateroot hooks (managed by `stateroot install` — do not edit by hand)\n",
     );
     for (harness_event, canonical) in quirk.event_map {
-        block.push_str("[[hooks]]\n");
-        block.push_str(&format!("event = \"{harness_event}\"\n"));
-        block.push_str(&format!(
-            "command = \"{}\"\n",
-            command_for(quirk, canonical)
+        block.push_str(&toml_hook_block(
+            harness_event,
+            &command_for(quirk, canonical),
         ));
     }
     let mut updated = cleaned.trim_end().to_string();
@@ -914,6 +942,17 @@ mod tests {
             q.event_map.len(),
             "exactly one set of hook blocks: {text}"
         );
+    }
+
+    #[test]
+    fn toml_hooks_escape_windows_verbatim_paths() {
+        let command = "\\\\?\\C:\\Users\\usama\\AppData\\Local\\Programs\\StateRoot\\stateroot.exe hook session_start --harness kimi";
+        let block = toml_hook_block("session_start", command);
+        let parsed: toml::Value = toml::from_str(&block).expect("hook block parses as TOML");
+        let written = parsed["hooks"][0]["command"]
+            .as_str()
+            .expect("command is a string");
+        assert_eq!(written, command, "the path round-trips exactly");
     }
 
     #[test]
