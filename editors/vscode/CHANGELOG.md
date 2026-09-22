@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.2.21
+
+- The extension is now a measurable recovery controller. On install or update
+  it captures an immutable preflight snapshot (prior marker and receipt,
+  editor host, workspace presence, CLI status missing/unrunnable/working with
+  version, path class — never the path), classifies the profile
+  (verified_legacy, existing_cli, verified_project, unknown_first_seen —
+  preserved across retries), and runs exactly one recovery path: bundled
+  stable installer for a missing or unrunnable CLI, self-update for a stale
+  working one, a `doctor` health check with a single repair pass for a
+  current receipt, and the bundled fallback only for the default stable
+  destination — never custom, Cargo, or nightly paths.
+- Exactly one integration: extension-driven installers skip their internal
+  integration and extension-driven self-update skips automatic rearming, then
+  the controller performs one final `stateroot install` with
+  `STATEROOT_INSTALL_VIA=extension`.
+- Anonymous editor recovery telemetry (opt out with `STATEROOT_NO_PING=1`):
+  `editor_seen` once per extension version, `setup_started`, and
+  `setup_finished` with ready/failed, a bounded failure stage, and the CLI
+  install_id once linked. Events persist with stable ids in bounded
+  globalState, retry until acknowledged, and are removed only after 2xx —
+  the queue never evicts unacknowledged events, flushes are single-flight,
+  and a failed identity link stays pending and retries on the next
+  activation.
+- Project initialization stays separately retryable so a recovered machine
+  cannot hide a failed workspace init.
+- Marketplace description realigned: persistent, federated meta-harness for
+  AI agents.
+
 ## 0.2.18
 
 - Bundle installers with the extension so macOS and PATH fixes no longer depend

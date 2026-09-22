@@ -2,7 +2,7 @@
   "name": "stateroot",
   "displayName": "StateRoot",
   "description": "Persistent, federated meta-harness for AI agents — shared memory, plans, handoffs, cross-harness delegation and versioned project state across Claude Code, Codex, Cursor, Kimi and more, inside your editor.",
-  "version": "0.2.20",
+  "version": "0.2.21",
   "publisher": "CognizTech",
   "license": "Apache-2.0",
   "homepage": "https://stateroot.dev",
