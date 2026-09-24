@@ -12,10 +12,23 @@ fn home() -> Result<std::path::PathBuf> {
 /// `stateroot memory compact` — pain-driven hot-apex compaction: the oldest
 /// entries demote into the tier-2 wiki archive (deterministic floor);
 /// `--synthesis` appends an LLM digest of the batch when a key is present.
-pub async fn compact(ctx: &Ctx, target: &str, dry_run: bool, synthesis: bool) -> Result<()> {
+/// Writes auto-compact at 95% full; `--to N` drains to a chosen watermark.
+pub async fn compact(
+    ctx: &Ctx,
+    target: &str,
+    dry_run: bool,
+    synthesis: bool,
+    to: Option<u8>,
+) -> Result<()> {
     ctx.require_project()?;
     let home = home()?;
-    let report = hot_apex::compact_for_capacity(&ctx.cwd, &home, target, 0, dry_run)?;
+    let report = match to {
+        Some(pct) => {
+            anyhow::ensure!((1..=99).contains(&pct), "--to must be between 1 and 99");
+            hot_apex::compact_to_percent(&ctx.cwd, &home, target, pct as usize, dry_run)?
+        }
+        None => hot_apex::compact_for_capacity(&ctx.cwd, &home, target, 0, dry_run)?,
+    };
     println!(
         "apex compact: {} entries demoted · {} chars freed · archive {}{}",
         report.demoted_entries.len(),

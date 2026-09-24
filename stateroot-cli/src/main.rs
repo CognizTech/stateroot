@@ -365,7 +365,8 @@ async fn main() -> anyhow::Result<()> {
                 target,
                 dry_run,
                 synthesis,
-            } => commands::memory::compact(&ctx, &target, dry_run, synthesis).await?,
+                to,
+            } => commands::memory::compact(&ctx, &target, dry_run, synthesis, to).await?,
             MemoryAction::Sync {
                 harness,
                 dry_run,

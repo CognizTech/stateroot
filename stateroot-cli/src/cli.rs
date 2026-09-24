@@ -1000,6 +1000,7 @@ pub enum MemoryAction {
     },
     /// Pain-driven hot-apex compaction: demote the oldest entries into the
     /// tier-2 wiki archive (deterministic), leaving a pointer in MEMORY.md.
+    /// Writes auto-compact at 95% full; this command is the manual drain.
     Compact {
         /// `memory` (default) or `global_memory`.
         #[arg(long, default_value = "memory")]
@@ -1011,6 +1012,10 @@ pub enum MemoryAction {
         /// DEEPSEEK_API_KEY or OPENAI_API_KEY; deterministic floor without).
         #[arg(long)]
         synthesis: bool,
+        /// Drain to this percent of the limit (1-99, e.g. `--to 80`); the
+        /// default keeps the standard headroom target.
+        #[arg(long)]
+        to: Option<u8>,
     },
     /// Federate harness-native memory: pull in as observed tier (default) or
     /// push the curated brief back (`--push`).

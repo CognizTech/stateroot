@@ -299,10 +299,13 @@ pub fn add(
                 let candidate = join_entries(&entries);
                 if candidate.len() <= limit {
                     write_memory_body(&path, &entries, target == "global_memory")?;
-                    return Ok(MutationResult::ok(
-                        usage(candidate.len(), limit),
+                    return Ok(finish_write(
+                        project_dir,
+                        home,
+                        target,
+                        limit,
                         path,
-                        false,
+                        candidate.len(),
                     ));
                 }
             }
@@ -319,10 +322,13 @@ pub fn add(
         ));
     }
     write_memory_body(&path, &entries, target == "global_memory")?;
-    Ok(MutationResult::ok(
-        usage(candidate.len(), limit),
+    Ok(finish_write(
+        project_dir,
+        home,
+        target,
+        limit,
         path,
-        false,
+        candidate.len(),
     ))
 }
 
@@ -379,6 +385,12 @@ const POINTER_PREFIX: &str = "[apex archive]";
 /// Headroom kept beyond the incoming entry so the next add does not
 /// immediately re-trigger compaction.
 const COMPACT_HEADROOM: usize = 512;
+/// Usage percentage at or above which a successful write automatically
+/// compacts the hot apex — no manual `memory compact` needed.
+pub const AUTO_COMPACT_TRIGGER_PCT: usize = 95;
+/// Low watermark the automatic trigger drains to (percent of the limit),
+/// leaving room for several ordinary adds before the next trigger.
+pub const AUTO_COMPACT_TARGET_PCT: usize = 90;
 
 /// Outcome of a compaction run.
 #[derive(Debug, Clone)]
@@ -531,6 +543,66 @@ pub fn compact_for_capacity(
     })
 }
 
+/// Compact until the surviving body fits `pct` percent of the target's limit
+/// (owner-facing drain-to, e.g. `--to 80`): the same deterministic
+/// oldest-first demotion as [`compact_for_capacity`], with the standard
+/// headroom preserved on top of the chosen watermark.
+pub fn compact_to_percent(
+    project_dir: &Path,
+    home: &Path,
+    target: &str,
+    pct: usize,
+    dry_run: bool,
+) -> Result<CompactReport, HotApexError> {
+    let limit = limit_for(target)?;
+    let watermark = limit * pct.min(100) / 100;
+    let needed = limit.saturating_sub(COMPACT_HEADROOM + watermark);
+    compact_for_capacity(project_dir, home, target, needed, dry_run)
+}
+
+/// Threshold auto-compact after a successful write: at or above
+/// [`AUTO_COMPACT_TRIGGER_PCT`]% of the limit, demote oldest-first down to
+/// [`AUTO_COMPACT_TARGET_PCT`]% so the hot apex never needs a manual
+/// `memory compact`. Same deterministic demotion as the manual path; a
+/// compaction failure never fails the write that triggered it (the next
+/// write re-triggers, and the pain path still guards the hard cap).
+/// Returns true when a compaction actually demoted entries.
+fn auto_compact_if_hot(
+    project_dir: &Path,
+    home: &Path,
+    target: &str,
+    limit: usize,
+    path: &Path,
+) -> bool {
+    let current = fs::read_to_string(path).unwrap_or_default().trim().len();
+    if current * 100 < limit * AUTO_COMPACT_TRIGGER_PCT {
+        return false;
+    }
+    compact_to_percent(project_dir, home, target, AUTO_COMPACT_TARGET_PCT, false)
+        .map(|report| !report.demoted_entries.is_empty())
+        .unwrap_or(false)
+}
+
+/// Successful-write epilogue for memory targets: run the threshold
+/// auto-compact when hot, then report the usage the caller actually left
+/// behind (post-compact), not the transient peak.
+fn finish_write(
+    project_dir: &Path,
+    home: &Path,
+    target: &str,
+    limit: usize,
+    path: PathBuf,
+    written_len: usize,
+) -> MutationResult {
+    let fired = auto_compact_if_hot(project_dir, home, target, limit, &path);
+    let len = if fired {
+        fs::read_to_string(&path).unwrap_or_default().trim().len()
+    } else {
+        written_len
+    };
+    MutationResult::ok(usage(len, limit), path, false)
+}
+
 /// Append a synthesized summary of a demoted batch to the archive page
 /// (flag-gated; labeled `synthesized` per the truth contract).
 pub fn append_synthesized_summary(project_dir: &Path, summary: &str) -> Result<(), HotApexError> {
@@ -624,7 +696,14 @@ pub fn replace(
             ));
         }
         atomic_write_locked(&path, &updated)?;
-        return Ok(MutationResult::ok(usage(updated.len(), limit), path, false));
+        return Ok(finish_write(
+            project_dir,
+            home,
+            target,
+            limit,
+            path,
+            updated.len(),
+        ));
     } else {
         return Ok(MutationResult::err(
             usage(existing.trim().len(), limit),
@@ -1045,6 +1124,59 @@ mod tests {
         .expect("archive");
         let e0 = archive.matches("entry 0:").count();
         assert_eq!(e0, 1, "no duplicated bullets: {archive}");
+    }
+
+    #[test]
+    fn compact_to_percent_drains_to_the_target_watermark() {
+        let (project, home) = dirs();
+        fill_near_cap(project.path(), home.path(), 12, 620);
+        let report = compact_to_percent(project.path(), home.path(), "memory", 80, false)
+            .expect("compact to 80%");
+        assert!(!report.demoted_entries.is_empty());
+        let body = read_text(project.path(), home.path(), "memory").unwrap();
+        assert!(
+            body.len() <= MEMORY_CHAR_LIMIT * 85 / 100,
+            "survivors + pointer must sit at/below the 80% watermark + pointer: {}",
+            body.len()
+        );
+        assert!(body.contains("[apex archive]"), "{body}");
+        let archive = std::fs::read_to_string(
+            crate::wiki::pages_dir(project.path()).join("memory/apex-archive.md"),
+        )
+        .expect("archive");
+        assert!(archive.contains("entry 0:"), "{archive}");
+    }
+
+    #[test]
+    fn add_auto_compacts_at_the_trigger_threshold() {
+        let (project, home) = dirs();
+        // Each entry ~378 chars; the trigger (95% of 8000) trips on the 21st.
+        for i in 0..21 {
+            add(
+                project.path(),
+                home.path(),
+                "memory",
+                &format!("fact number {i}: {}", "y".repeat(360)),
+                false,
+            )
+            .unwrap();
+        }
+        let body = read_text(project.path(), home.path(), "memory").unwrap();
+        // Oldest entries demoted verbatim into the archive; the pointer stays;
+        // the newest add survives; the apex sits below the trigger again.
+        assert!(body.contains("[apex archive]"), "{body}");
+        assert!(!body.contains("fact number 0:"), "oldest demoted: {body}");
+        assert!(body.contains("fact number 20:"), "newest survives: {body}");
+        assert!(
+            body.len() * 100 < MEMORY_CHAR_LIMIT * AUTO_COMPACT_TRIGGER_PCT,
+            "back below trigger: {} bytes",
+            body.len()
+        );
+        let archive = std::fs::read_to_string(
+            crate::wiki::pages_dir(project.path()).join("memory/apex-archive.md"),
+        )
+        .expect("archive");
+        assert!(archive.contains("fact number 0:"), "demoted archived");
     }
 
     #[test]
