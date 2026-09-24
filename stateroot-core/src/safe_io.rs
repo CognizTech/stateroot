@@ -216,7 +216,7 @@ pub fn ref_lock_path(lock_dir: &Path, refname: &str) -> PathBuf {
     let sanitized: String = refname
         .chars()
         .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
                 c
             } else {
                 '-'

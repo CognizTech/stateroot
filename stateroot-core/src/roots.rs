@@ -85,6 +85,9 @@ pub enum RootsError {
     /// A merge cannot complete cleanly (conflicts or nothing to fold).
     #[error("{0}")]
     Merge(String),
+    /// A fork name is not portable across filesystems and git refnames.
+    #[error("{0}")]
+    InvalidForkName(String),
     /// An automatic snapshot reached its bounded scan budget. The checkpoint
     /// itself remains durable; only its optional root is skipped.
     #[error("automatic snapshot skipped: {0}")]
@@ -600,7 +603,7 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<(), RootsError> {
         std::fs::create_dir_all(parent)?;
     }
     let pretty = serde_json::to_string_pretty(value)?;
-    std::fs::write(path, format!("{pretty}\n"))?;
+    crate::safe_io::atomic_replace(path, format!("{pretty}\n").as_bytes())?;
     Ok(())
 }
 
@@ -1411,6 +1414,47 @@ pub fn revert_to_root(
     }
 }
 
+/// Fork names become BOTH a git refname component
+/// (`refs/stateroot/forks/<name>`) and a filename (`<name>.json`): validate
+/// once against the strictest consumer so a name that works on Linux never
+/// fails cryptically on Windows or escapes the forks directory.
+fn validate_fork_name(name: &str) -> Result<(), RootsError> {
+    const MAX_LEN: usize = 64;
+    let reject = || {
+        RootsError::InvalidForkName(format!(
+            "fork name '{name}' is not portable: use 1-{MAX_LEN} ASCII letters, digits, '-', '_' or '.', no leading/trailing '.' or '-', no '..', no '.lock' suffix, no DOS device names"
+        ))
+    };
+    if name.is_empty() || name.chars().count() > MAX_LEN {
+        return Err(reject());
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return Err(reject());
+    }
+    if name.starts_with(['.', '-']) || name.ends_with(['.', '-']) || name.contains("..") {
+        return Err(reject());
+    }
+    if name.to_ascii_lowercase().ends_with(".lock") {
+        return Err(reject());
+    }
+    const DOS_STEMS: [&str; 22] = [
+        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+        "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    ];
+    let first_stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if DOS_STEMS.contains(&first_stem.as_str()) {
+        return Err(reject());
+    }
+    Ok(())
+}
+
 /// `fork <hash> --branch <name>`: fork ref + record at the root commit.
 /// `fork_materialize` turns the ref into an isolated worktree on demand.
 pub fn fork_root(
@@ -1424,6 +1468,7 @@ pub fn fork_root(
     let name = branch
         .map(str::to_string)
         .unwrap_or_else(|| format!("f-{}", &uuid::Uuid::now_v7().to_string()[..8]));
+    validate_fork_name(&name)?;
     let refname = format!("{FORKS_REF_PREFIX}{name}");
     repo.reference(&refname, commit.id(), true, "fork root")?;
     let record = json!({
@@ -1448,9 +1493,9 @@ pub fn fork_root(
 /// every partial failure, and `--branch` is gone: no user branch is ever
 /// created, moved, or pointed at a synthetic root.
 ///
-/// Validated up front: the fork exists, the destination does NOT exist and
-/// is NOT inside the project tree, and a claimed plan exists and is not
-/// already claimed by another fork.
+/// Validated up front: the fork name is portable, the fork exists, the
+/// destination does NOT exist and is NOT inside the project tree, and a
+/// claimed plan exists and is not already claimed by another fork.
 ///
 /// The checkout contains the root's full tree — including `.stateroot/`
 /// (minus `local/`). A plan can have been recorded after that root, so a
@@ -1465,6 +1510,7 @@ pub fn fork_materialize(
     worktree_path: &Path,
     plan: Option<&str>,
 ) -> Result<(), RootsError> {
+    validate_fork_name(name)?;
     let repo = ensure_repo(project_dir)?;
     let refname = format!("{FORKS_REF_PREFIX}{name}");
 
@@ -3826,6 +3872,60 @@ mod tests {
         let oid = repo.refname_to_id(&refname).expect("fork ref");
         assert_eq!(oid.to_string(), a.id);
         assert!(dir.join(".stateroot/forks/claude-line.json").is_file());
+    }
+
+    #[test]
+    fn fork_names_are_validated_for_portability() {
+        for good in ["fork-a", "f-1234abcd", "left", "line.v2", "a_b-c"] {
+            assert!(validate_fork_name(good).is_ok(), "rejected {good:?}");
+        }
+        let too_long = "x".repeat(65);
+        for bad in [
+            "con",
+            "COM1",
+            "aux.json",
+            "a..b",
+            ".x",
+            "x.",
+            "-x",
+            "x-",
+            "x.lock",
+            "a/b",
+            "../escape",
+            "a b",
+            "a:b",
+            "",
+            too_long.as_str(),
+        ] {
+            assert!(validate_fork_name(bad).is_err(), "accepted {bad:?}");
+        }
+    }
+
+    #[test]
+    fn fork_root_rejects_an_unportable_name_before_any_ref() {
+        let (_tmp, dir) = project();
+        write(&dir, "a.txt", "v1");
+        let (a, _) = create_root(&dir, "cli", "v1", None).expect("a");
+        let err = fork_root(&dir, &a.id, Some("con"), "cli").expect_err("must reject");
+        assert!(
+            matches!(err, RootsError::InvalidForkName(_)),
+            "wrong error: {err}"
+        );
+        let repo = git2::Repository::open(&dir).unwrap();
+        assert!(repo.refname_to_id("refs/stateroot/forks/con").is_err());
+        assert!(!dir.join(".stateroot/forks/con.json").exists());
+    }
+
+    #[test]
+    fn fork_materialize_rejects_a_traversal_name() {
+        let (_tmp, dir) = project();
+        let dest = dir.parent().unwrap().join("never-created-worktree");
+        let err = fork_materialize(&dir, "../escape", &dest, None).expect_err("must reject");
+        assert!(
+            matches!(err, RootsError::InvalidForkName(_)),
+            "wrong error: {err}"
+        );
+        assert!(!dest.exists());
     }
 
     #[test]

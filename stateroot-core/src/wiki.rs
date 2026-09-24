@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use serde_yaml::{Mapping, Value};
 
 use crate::local_store;
+use crate::safe_io::atomic_replace;
 
 /// Wiki directory relative to `.stateroot/` (the OKF bundle root).
 pub const WIKI_DIR: &str = "wiki";
@@ -289,19 +290,19 @@ pub fn ensure_layout(project_dir: &Path) -> Result<(), WikiError> {
     fs::create_dir_all(&pages)?;
     let schema = wiki.join(SCHEMA_FILE);
     if !schema.exists() {
-        fs::write(&schema, DEFAULT_SCHEMA)?;
+        atomic_replace(&schema, DEFAULT_SCHEMA.as_bytes())?;
     }
     let index = wiki.join(INDEX_FILE);
     if !index.exists() {
-        fs::write(&index, DEFAULT_INDEX)?;
+        atomic_replace(&index, DEFAULT_INDEX.as_bytes())?;
     }
     let log = wiki.join(LOG_FILE);
     if !log.exists() {
-        fs::write(&log, "")?;
+        atomic_replace(&log, b"")?;
     }
     let inbox = pages.join(INBOX_PAGE);
     if !inbox.exists() {
-        fs::write(&inbox, DEFAULT_INBOX)?;
+        atomic_replace(&inbox, DEFAULT_INBOX.as_bytes())?;
         upsert_index(
             project_dir,
             &format!("{PAGES_DIR}/{INBOX_PAGE}"),
@@ -462,7 +463,7 @@ pub fn migrate_okf(project_dir: &Path) -> Result<(), WikiError> {
         if rel.ends_with(INBOX_PAGE) {
             fm.insert(yaml_str("status"), Value::String("draft".to_string()));
         }
-        fs::write(&path, render_page(&fm, body))?;
+        atomic_replace(&path, render_page(&fm, body).as_bytes())?;
     }
 
     // SCHEMA.md is a non-reserved document inside the bundle: it needs
@@ -474,7 +475,7 @@ pub fn migrate_okf(project_dir: &Path) -> Result<(), WikiError> {
             let mut fm = Mapping::new();
             fm.insert(yaml_str("type"), Value::String("Reference".to_string()));
             let (_, body) = split_frontmatter(&schema);
-            fs::write(&schema_path, render_page(&fm, body))?;
+            atomic_replace(&schema_path, render_page(&fm, body).as_bytes())?;
         }
     }
 
@@ -486,7 +487,7 @@ pub fn migrate_okf(project_dir: &Path) -> Result<(), WikiError> {
         "---\nokf_version: \"{OKF_VERSION}\"\n---\n\n{}",
         body.trim_start()
     );
-    fs::write(index_path, upgraded)?;
+    atomic_replace(&index_path, upgraded.as_bytes())?;
     Ok(())
 }
 
@@ -533,7 +534,7 @@ pub fn upsert_index(
     if !body.ends_with('\n') {
         body.push('\n');
     }
-    fs::write(index_path, body)?;
+    atomic_replace(&index_path, body.as_bytes())?;
     Ok(())
 }
 
@@ -584,7 +585,7 @@ pub fn append_log(project_dir: &Path, summary: &str) -> Result<(), WikiError> {
             out.push('\n');
         }
     }
-    fs::write(path, out)?;
+    atomic_replace(&path, out.as_bytes())?;
     Ok(())
 }
 
@@ -695,7 +696,7 @@ pub fn write_page(
         &Mapping::new(),
         &body,
     );
-    fs::write(&path, text)?;
+    atomic_replace(&path, text.as_bytes())?;
     let rel = format!("{PAGES_DIR}/{file}");
     upsert_index(project_dir, &rel, summary, kind)?;
     Ok(path)
@@ -732,7 +733,7 @@ pub fn append_inbox_bullets(project_dir: &Path, bullets: &[String]) -> Result<us
         added += 1;
     }
     if added > 0 {
-        fs::write(&path, body)?;
+        atomic_replace(&path, body.as_bytes())?;
         upsert_index(
             project_dir,
             &format!("{PAGES_DIR}/{INBOX_PAGE}"),

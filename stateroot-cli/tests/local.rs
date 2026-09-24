@@ -340,7 +340,7 @@ fn hook_session_start_injects_digest_once() {
             .expect("active harness marker"),
     )
     .expect("marker json");
-    assert_eq!(marker["harness"], "claude");
+    assert!(marker["harnesses"]["claude"]["recorded_at"].is_string());
 }
 
 #[test]
@@ -583,7 +583,7 @@ fn resume_refreshes_active_marker_before_deduplicating_output() {
     let marker: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(marker).expect("refreshed marker"))
             .expect("marker json");
-    assert_eq!(marker["harness"], "codex");
+    assert!(marker["harnesses"]["codex"]["recorded_at"].is_string());
 }
 
 #[test]
