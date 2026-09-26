@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.22
+
+_GitHub-release artifact only; registries intentionally remain on 0.2.21
+while the campaign measurement window is open._
+
+- A full editor-event queue no longer silently loses a version's
+  `editor_seen`: the version marker advances only after the event is
+  durably enqueued (or telemetry is opted out), so a full queue retries on
+  the next activation.
+- Dead installer-ping code removed.
+
 ## 0.2.21
 
 - The extension is now a measurable recovery controller. On install or update

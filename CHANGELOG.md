@@ -3,6 +3,34 @@
 All notable changes to StateRoot. Format loosely follows Keep a Changelog;
 StateRoot is pre-1.0 and milestones land as minor versions.
 
+## v0.2.5 — 2026-09-26
+
+- **Linux ARM64 builds.** The release pipeline now ships
+  `stateroot-linux-arm64` (glibc 2.17) in both preview and tagged releases,
+  and `install.sh` detects ARM64 Linux (Raspberry Pi, AWS Graviton, VMs on
+  Apple Silicon) and installs it.
+- **Hot-apex memory auto-compaction.** Memory writes now compact
+  automatically at 95% full, demoting the oldest entries verbatim into the
+  tier-2 wiki archive and draining to 90% — no manual `memory compact`
+  needed. Manual drains gain `stateroot memory compact --to <1-99>`.
+- **Store write hardening.** All wiki write paths and root/fork record
+  writes are atomic (temp + sync + rename). The active-harness marker is a
+  per-harness ledger written under a mandatory lock; an ambiguous marker
+  resolves to unknown instead of guessing. Fork names are validated for
+  portability (Windows-illegal characters, DOS device stems, `.lock`
+  suffix, traversal) before any ref or record is written.
+- **Telemetry v2 delta fixes.** `editor_reconcile_result` now carries its
+  `ready` result end-to-end (CLI emission, edge acceptance, import
+  validation). The extension no longer loses a version's `editor_seen`
+  when its event queue is full — the version marker advances only after a
+  durable enqueue. Activity milestones and their docs agree again, dead
+  installer-ping code is removed, and failure-path tests prove failed
+  commands emit nothing.
+- The README now carries an in-repo build-from-source path for Intel Macs.
+- Extension artifact ticks to 0.2.22 for the GitHub release; registries
+  intentionally remain on 0.2.21 while the campaign measurement window is
+  open, and 0.2.21 remains fully compatible with this CLI.
+
 ## v0.2.4 — 2026-09-22
 
 - **Telemetry v2: truthful recovery, activation, and usage data.** Anonymous
