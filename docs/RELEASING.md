@@ -22,8 +22,8 @@ Pre-1.0: minor versions per milestone (0.1.0 = M1–M4). After 1.0: semver.
    Ordinary `main` pushes publish the rolling `nightly` preview after tests.
    Install it with `stateroot self-update --tag nightly`. Production stays
    on the latest `v*` GitHub release (`stateroot self-update`, no `--tag`).
-5. CI (`release` job) builds `stateroot-linux-x64` and
-   `stateroot-windows-x64.exe`, plus `StateRootSetup-x64.msi`, the
+5. CI (`release` job) builds `stateroot-linux-x64`, `stateroot-linux-arm64`
+   and `stateroot-windows-x64.exe`, plus `StateRootSetup-x64.msi`, the
    verified `stateroot-vscode-<extension-version>.vsix`, and
    `stateroot-extension.json`, and attaches them with `checksums.txt`
    and the install scripts. Linux is linked with

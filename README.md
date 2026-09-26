@@ -138,7 +138,7 @@ Full map: **[stateroot.dev/docs](https://stateroot.dev/docs/intro)**.
 
 Install the StateRoot extension for [**Cursor**](https://open-vsx.org/extension/CognizTech/stateroot) or [**VS Code**](https://marketplace.visualstudio.com/items?itemName=CognizTech.stateroot) for guided setup and automatic CLI installation on supported platforms.
 
-The CLI ships for **Linux x64**, **Windows x64**, and **macOS Apple Silicon**. One binary, no extra runtime.
+The CLI ships for **Linux x64 and ARM64**, **Windows x64**, and **macOS Apple Silicon**. One binary, no extra runtime.
 
 ### Linux
 
@@ -164,7 +164,7 @@ irm https://github.com/CognizTech/stateroot/releases/latest/download/install.ps1
 curl -sSfL https://github.com/CognizTech/stateroot/releases/latest/download/install.sh | sh
 ```
 
-Installs to `~/.local/bin`. Intel Macs can [build from source](https://stateroot.dev/docs/getting-started/installation#from-source).
+Installs to `~/.local/bin`. Intel Macs can [build from source](https://stateroot.dev/docs/getting-started/installation#from-source), or straight from this repo: clone it, then `cargo build --release -p stateroot-cli` (Rust 1.85+; libgit2 is vendored) — the binary lands at `target/release/stateroot`.
 
 ```bash
 stateroot --version

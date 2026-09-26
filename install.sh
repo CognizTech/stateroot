@@ -20,9 +20,18 @@ fail() { printf '%s\n' "stateroot-install: ERROR: $*" >&2; exit 1; }
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 case "$OS" in
-    Linux)  [ "$ARCH" = "x86_64" ] || fail "unsupported arch: $ARCH"; TARGET="linux-x64" ;;
-    Darwin) [ "$ARCH" = "arm64" ] || fail "unsupported arch: $ARCH (need Apple Silicon)"; TARGET="macos-aarch64" ;;
-    *)      fail "unsupported OS: $OS (use install.ps1 on Windows)" ;;
+    Linux)
+        case "$ARCH" in
+            x86_64)        TARGET="linux-x64" ;;
+            aarch64|arm64) TARGET="linux-arm64" ;;
+            *)             fail "unsupported arch: $ARCH" ;;
+        esac
+        ;;
+    Darwin)
+        [ "$ARCH" = "arm64" ] || fail "unsupported arch: $ARCH (Intel Macs can build from source — see the README Install section)"
+        TARGET="macos-aarch64"
+        ;;
+    *)  fail "unsupported OS: $OS (use install.ps1 on Windows)" ;;
 esac
 ASSET="stateroot-$TARGET"
 
