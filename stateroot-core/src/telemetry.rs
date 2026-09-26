@@ -12,10 +12,10 @@
 //!   installation). Installs, marketplace hits, `--version`, `init`, and
 //!   detected harnesses never activate.
 //! - `active_day` fires at most once per installation/project/harness/UTC day
-//!   from qualifying activity (continuity delivery, checkpoint/root boundary,
-//!   handoff write/accept, completed delegation).
-//! - `harness_transition` fires when the previous qualifying harness on the
-//!   same opaque project differs from the one that just delivered — read
+//!   from qualifying activity (continuity delivery, successful explicit snap,
+//!   handoff write/accept).
+//! - `observed_harness_switch` fires when the previous qualifying harness on
+//!   the same opaque project differs from the one that just delivered — read
 //!   before update, emitted only after destination delivery succeeded.
 //! - `install_observed` (kind install/update) stays acquisition evidence,
 //!   separate from activation.
@@ -192,7 +192,10 @@ pub struct TelemetryState {
     /// Opaque project digest → last qualifying harness (transition detection).
     pub last_harness_by_project: BTreeMap<String, String>,
     /// Project ids in last-seen order (oldest first). Eviction uses this,
-    /// never lexicographic key order.
+    /// never lexicographic key order. Entries migrated from v1 state have no
+    /// recorded order and none is fabricated (truth contract): they persist
+    /// in the map unordered — and outside eviction — until natural
+    /// re-observation appends them here via `touch_project_harness`.
     #[serde(default)]
     pub last_harness_order: Vec<String>,
     /// Sent `project|harness|YYYY-MM-DD` daily keys (pruned to recent days).
@@ -863,9 +866,9 @@ pub fn observe_install_on(
 /// Continuity delivered: a non-empty digest was actually emitted/accepted in
 /// `harness` while attached to the initialized `project_dir`. Emits
 /// `continuity_activated` once per installation, `active_day` once per
-/// project/harness/day, and `harness_transition` when the previous qualifying
-/// harness on this project differs. Errors are for tests — call sites
-/// swallow them so telemetry never alters the operation.
+/// project/harness/day, and `observed_harness_switch` when the previous
+/// qualifying harness on this project differs. Errors are for tests — call
+/// sites swallow them so telemetry never alters the operation.
 pub fn continuity_delivered(
     config_dir: &Path,
     project_dir: &Path,
@@ -941,8 +944,9 @@ pub fn continuity_delivered_on(
 }
 
 /// Qualifying daily activity without continuity semantics: successful
-/// checkpoint/root boundary, handoff write/accept, completed delegation.
-/// Emits `active_day` only — never activation, never a transition.
+/// explicit snap, handoff write/accept (callers invoke this only after the
+/// operation succeeded). Emits `active_day` only — never activation, never a
+/// harness switch.
 pub fn record_activity(
     config_dir: &Path,
     project_dir: &Path,
@@ -1057,6 +1061,12 @@ pub fn record_milestone_on(
         state.initialized_projects.push(project_id);
     } else {
         payload.channel = Some("cli".to_string());
+        // editor_reconcile_result fires only after a successful non-empty
+        // extension-driven integration (the install command bails on failure
+        // before reaching its emit), so the wire result is always ready.
+        if event == EVENT_EDITOR_RECONCILE_RESULT {
+            payload.kind = Some("ready".to_string());
+        }
     }
     append_event(config_dir, &mut state, &payload)?;
     save_state(config_dir, &state)?;

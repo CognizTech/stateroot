@@ -62,30 +62,6 @@ test("pingKind: absent marker is install, differing marker is update, same is si
   assert.equal(api.pingKind("0.2.18", "0.2.18"), undefined);
 });
 
-test("marker is written without a legacy GET ping", () => {
-  const store = {};
-  const { api, calls } = loadInstallPing();
-  api.maybePing(fakeContext("0.2.18", store));
-  assert.equal(store["stateroot.lastSeenVersion"], "0.2.18");
-  assert.equal(calls.length, 0);
-});
-
-test("same version stays silent", () => {
-  const store = { "stateroot.lastSeenVersion": "0.2.18" };
-  const { api, calls } = loadInstallPing();
-  api.maybePing(fakeContext("0.2.18", store));
-  assert.equal(calls.length, 0);
-  assert.equal(store["stateroot.lastSeenVersion"], "0.2.18");
-});
-
-test("STATEROOT_NO_PING no longer owns the version marker", () => {
-  const store = {};
-  const { api, calls } = loadInstallPing({ env: { STATEROOT_NO_PING: "1" } });
-  api.maybePing(fakeContext("0.2.18", store));
-  assert.equal(calls.length, 0);
-  assert.equal(store["stateroot.lastSeenVersion"], "0.2.18");
-});
-
 test("shouldRefreshCli: only a real extension update under a working CLI refreshes", () => {
   const { api } = loadInstallPing();
   // Extension updated, CLI present → refresh.

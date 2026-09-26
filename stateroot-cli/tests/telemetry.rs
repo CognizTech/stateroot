@@ -366,3 +366,91 @@ fn integration_completed_requires_a_successful_integration() {
         event_kinds(config_home.path())
     );
 }
+
+#[test]
+fn editor_reconcile_result_only_fires_on_the_extension_install_path() {
+    let config_home = tempfile::tempdir().expect("config");
+    let user_home = tempfile::tempdir().expect("home");
+    let project = tempfile::tempdir().expect("project");
+    seed_persona(config_home.path(), user_home.path());
+    std::fs::create_dir_all(project.path()).expect("project dir");
+    std::fs::create_dir_all(user_home.path().join(".codex")).expect("codex dir");
+
+    // A direct CLI install integrates the harness but is not an editor
+    // reconciliation.
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .arg("install")
+        .assert()
+        .success();
+    assert!(
+        !event_kinds(config_home.path()).contains(&"editor_reconcile_result".to_string()),
+        "direct install reports no editor reconciliation: {:?}",
+        event_kinds(config_home.path())
+    );
+
+    // The extension-driven install reports the reconcile outcome.
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .env("STATEROOT_INSTALL_VIA", "extension")
+        .arg("install")
+        .assert()
+        .success();
+    let kinds = event_kinds(config_home.path());
+    assert!(
+        kinds.contains(&"editor_reconcile_result".to_string()),
+        "via=extension install emits the reconcile milestone: {kinds:?}"
+    );
+    let event = spool_events(config_home.path())
+        .into_iter()
+        .find(|e| e["event"] == "editor_reconcile_result")
+        .expect("editor_reconcile_result");
+    assert!(event.get("project_id").is_none(), "no project on reconcile");
+    assert_eq!(
+        event["kind"].as_str(),
+        Some("ready"),
+        "a reconcile emitted after a successful integration reports ready"
+    );
+}
+
+#[test]
+fn failed_boundaries_emit_no_activity_milestone() {
+    let config_home = tempfile::tempdir().expect("config");
+    let user_home = tempfile::tempdir().expect("home");
+    let project = tempfile::tempdir().expect("project");
+    seed_persona(config_home.path(), user_home.path());
+    std::fs::create_dir_all(project.path()).expect("project dir");
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .arg("init")
+        .assert()
+        .success();
+
+    // Failed qualifying boundaries: each command errors before the activity
+    // call, so nothing may reach the spool.
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["snap", "--harness", "skynet-9000"])
+        .assert()
+        .failure();
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["handoff", "write", "--from", "skynet-9000"])
+        .assert()
+        .failure();
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["handoff", "accept", "--by", "skynet-9000"])
+        .assert()
+        .failure();
+    let kinds = event_kinds(config_home.path());
+    assert!(
+        !kinds.iter().any(|k| k == "active_day"),
+        "failed commands emit no activity milestone: {kinds:?}"
+    );
+
+    // Control: a successful explicit snap on the same day earns exactly one.
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["snap", "--reason", "control"])
+        .assert()
+        .success();
+    let days = event_kinds(config_home.path())
+        .into_iter()
+        .filter(|k| k == "active_day")
+        .count();
+    assert_eq!(days, 1, "only the successful snap qualifies");
+}

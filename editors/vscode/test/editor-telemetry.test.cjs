@@ -101,7 +101,7 @@ test("STATEROOT_NO_PING skips enqueue and flush", async () => {
   process.env.STATEROOT_NO_PING = "1";
   try {
     const state = memory();
-    await enqueue(state, buildEvent("e", "editor_seen", "0.2.21", "vscode"));
+    assert.equal(await enqueue(state, buildEvent("e", "editor_seen", "0.2.21", "vscode")), false);
     assert.equal(state.get(QUEUE_KEY, []).length, 0);
     let called = 0;
     await flushQueue(state, async () => { called++; return { ok: true }; });
@@ -193,11 +193,15 @@ test("raw wire carries only the frozen allowlisted headers and an empty body", a
 test("queue bound refuses newcomers instead of dropping unacknowledged events", async () => {
   const state = memory();
   for (let i = 0; i < 50; i++) {
-    await enqueue(state, buildEvent("e", "editor_seen", "0.2.21", "vscode"));
+    assert.equal(await enqueue(state, buildEvent("e", "editor_seen", "0.2.21", "vscode")), true);
   }
   assert.equal(state.get(QUEUE_KEY).length, 50);
   const firstId = state.get(QUEUE_KEY)[0].event_id;
-  await enqueue(state, buildEvent("e", "setup_finished", "0.2.21", "vscode"));
+  assert.equal(
+    await enqueue(state, buildEvent("e", "setup_finished", "0.2.21", "vscode")),
+    false,
+    "a full queue reports the no-op so callers can retry later"
+  );
   const queue = state.get(QUEUE_KEY);
   assert.equal(queue.length, 50, "bound holds");
   assert.equal(queue[0].event_id, firstId, "oldest unacknowledged event is never evicted");

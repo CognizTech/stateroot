@@ -9,7 +9,6 @@ import * as vscode from "vscode";
  * version marker is recovery state, not a ping.
  */
 
-const PING_URL = "https://stateroot.dev/api/install-ping";
 export const MARKER_KEY = "stateroot.lastSeenVersion";
 
 /** OS token in the same vocabulary as the CLI and installer pings. */
@@ -28,15 +27,8 @@ export function pingKind(
   return lastSeen === undefined ? "install" : "update";
 }
 
-export function pingUrl(current: string, kind: "install" | "update", from?: string): string {
-  let url = `${PING_URL}?os=${osTarget(process.platform, process.arch)}&v=${encodeURIComponent(
-    current
-  )}&via=extension&kind=${kind}`;
-  if (from) url += `&from=${encodeURIComponent(from)}`;
-  return url;
-}
-
-/** The marker as it stood before this activation (read-only — maybePing writes it). */
+/** The marker as it stood before this activation (read-only — activation
+ * writes it after queueing this version's `editor_seen`). */
 export function previousVersion(context: vscode.ExtensionContext): string | undefined {
   return context.globalState.get<string>(MARKER_KEY);
 }
@@ -50,17 +42,4 @@ export function shouldRefreshCli(
   noAutoUpdate: boolean
 ): boolean {
   return cliAvailable && !noAutoUpdate && previous !== current;
-}
-
-/** Record the extension version marker. Network pings moved to editor v2 events. */
-export function maybePing(context: vscode.ExtensionContext): void {
-  try {
-    const current = String(context.extension.packageJSON.version ?? "");
-    if (!current) return;
-    const lastSeen = context.globalState.get<string>(MARKER_KEY);
-    if (lastSeen === current) return;
-    void context.globalState.update(MARKER_KEY, current);
-  } catch {
-    // fail-silent by contract
-  }
 }

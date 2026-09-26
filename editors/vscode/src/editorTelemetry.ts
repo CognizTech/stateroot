@@ -125,15 +125,19 @@ export function eventHeaders(event: EditorEvent): Record<string, string> {
   return headers;
 }
 
-export async function enqueue(state: vscode.Memento, event: EditorEvent): Promise<void> {
-  if (process.env.STATEROOT_NO_PING) return;
+/** Queue one event. Returns true only when the event was actually persisted
+ * (false on opt-out, duplicate id, or a full queue) so callers can tell a
+ * durable enqueue from a silent no-op. */
+export async function enqueue(state: vscode.Memento, event: EditorEvent): Promise<boolean> {
+  if (process.env.STATEROOT_NO_PING) return false;
   const queue = state.get<EditorEvent[]>(QUEUE_KEY, []);
-  if (queue.some((item) => item.event_id === event.event_id)) return;
+  if (queue.some((item) => item.event_id === event.event_id)) return false;
   // The queue holds only unacknowledged events — evicting one would drop
   // exactly what we promised to keep. At the bound, refuse the newcomer.
-  if (queue.length >= MAX_QUEUE) return;
+  if (queue.length >= MAX_QUEUE) return false;
   queue.push(event);
   await state.update(QUEUE_KEY, queue);
+  return true;
 }
 
 export async function ack(state: vscode.Memento, eventId: string): Promise<void> {

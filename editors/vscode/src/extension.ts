@@ -995,12 +995,17 @@ export function activate(context: vscode.ExtensionContext) {
         });
         firstCohort = await firstProfileClass(context.globalState, preflight.profileClass);
         if (previousVersion(context) !== extVersion) {
-          await enqueue(context.globalState, buildEvent(editorId, "editor_seen", extVersion, host, {
+          const editorSeenQueued = await enqueue(context.globalState, buildEvent(editorId, "editor_seen", extVersion, host, {
             profile_class: firstCohort,
             cli_status: preflight.cliStatus,
             path_class: preflight.pathClass,
           }));
-          await context.globalState.update(MARKER_KEY, extVersion);
+          // Advance the marker only when this version's editor_seen is durably
+          // queued, or when the user opted out (nothing will ever be sent).
+          // A full queue leaves the marker so the next activation retries.
+          if (editorSeenQueued || process.env.STATEROOT_NO_PING) {
+            await context.globalState.update(MARKER_KEY, extVersion);
+          }
         }
         const needsRecovery = retry
           || preflight.cliStatus !== "working"
