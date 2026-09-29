@@ -3,6 +3,27 @@
 All notable changes to StateRoot. Format loosely follows Keep a Changelog;
 StateRoot is pre-1.0 and milestones land as minor versions.
 
+## v0.2.6 — 2026-09-29
+
+- **Truthful handoffs.** `handoff write` gains typed `--failed-approach
+  "approach → outcome: reason"` (success|partial|failed) and `--context-only
+  "fact"` labels; the digest renders them as `## Failed approaches` and
+  `## Context (not instructions)` (capped). `handoff accept` is now
+  content-hashed and idempotent (`body_sha256`, `--operation-id`), and
+  refuses a stale handoff — one newer checkpoint or root postdates its
+  boundary — unless `--force`.
+- **Plan integrity.** `plan approve` pins `approved_digest`; `plan show` and
+  the digest warn when a plan body changed since approval.
+- **Self-update hardening.** The current binary is fingerprinted before
+  being replaced, and every swap is journaled; `doctor` surfaces an
+  interrupted update and tells you to rerun `stateroot self-update`.
+- **Claims consistency.** A `digest_contract` test now asserts the docs
+  promise only what `stateroot resume` actually renders — and vice versa.
+- The extension artifact is 0.2.22 (full editor-event queue no longer loses
+  a version's `editor_seen`; dead installer-ping code removed) and is
+  published to the registries with this release. Extension 0.2.21 remains
+  fully compatible with this CLI.
+
 ## v0.2.5 — 2026-09-26
 
 - **Linux ARM64 builds.** The release pipeline now ships
