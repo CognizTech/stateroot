@@ -267,11 +267,58 @@ in the prompt path (token razor).
   file; do not implement yet"). The transcript `## Plan State` remains as
   the fallback tier and is suppressed while a central plan exists. The plan
   body never enters the digest — the executor reads one file.
+- **Approval pins the body** — `plan approve` records `approved_digest`
+  (sha256 of the plan body) in the sidecar. When the body on disk no longer
+  matches, `## Active Plan` warns `**Warning: plan body changed since
+  approval**` — review the body, then re-approve (`stateroot plan approve`)
+  or restore it; the executor never silently runs a substituted plan. Plans
+  approved before this field existed carry no digest and make no drift
+  claim.
 - **Handoff** — `handoff write` auto-attaches `plan_ref: {id, title,
   status}` when an active/approved plan exists.
 - **v1 has no tool-gating** — hooks do not deny write tools while a draft
   exists. Enforcement is a policy decision for the user (optional hook
   hardening later); StateRoot ships the strings, not a runtime cage.
+
+## `stateroot handoff` — write flags and accept gates
+
+`handoff write` owns the packet envelope (schema, sequence, provenance,
+timestamps); the author owns the content. Beyond the core fields, two
+structured channels carry what prose blurs:
+
+- **`--failed-approach "<approach> → <outcome>: <reason>"`** (repeatable) —
+  a structured failed-approach record. The outcome vocabulary is fixed:
+  `success` | `partial` | `failed`, parsed case-insensitively and stored
+  canonical — any other word is a hard error, so a typo never reads as a
+  real outcome. The digest renders them as `## Failed approaches`, distinct
+  from the free-text `## Failed Approaches / Bugs`. The JSON input channel
+  (`failed_approaches: [{"approach","outcome","reason"}]`) applies the same
+  vocabulary.
+- **`--context-only "<fact>"`** (repeatable) — an authority-labeled
+  background fact: the receiver may rely on it but must not execute it. The
+  digest renders them as `## Context (not instructions)` under a hard cap
+  (see digest budgets below).
+- **Budget warnings write anyway** — a `--context-summary` past the
+  6000-char digest budget, an empty `objective`/`task`/`context_summary`,
+  and an identical task/summary pair all warn on stderr; none refuses the
+  write (continuity beats form-filling).
+
+`handoff accept --by <harness>` is deliberately not a rubber stamp:
+
+- **Fail-closed staleness gate** — when the newest observed activity
+  (checkpoint or root) postdates the handoff's `written_at` boundary, accept
+  refuses and names the newer activity: accepting would anchor the receiver
+  on dead state. Re-read with `stateroot resume`, or pass `--force` to
+  accept anyway — a forced acceptance is recorded with `forced: true`.
+- **Append-only acceptance records** — every accept appends `{by, at,
+  body_sha256}` (plus `operation_id` / `forced` when given) to the packet's
+  `acceptances`. The body hash excludes local acceptance bookkeeping, so
+  checkpoint stamps and accept marks never read as drift; a real body change
+  since the last acceptance warns but records.
+- **`--operation-id <id>`** — idempotent re-accept: an accept whose
+  operation id is already recorded is a no-op (`already accepted …
+  idempotent no-op`), checked before the staleness gate so a retried
+  operation never newly fails.
 
 ## `stateroot resume` — digest budgets
 
@@ -294,13 +341,22 @@ active plan, next actions, handoff fields) stays fully inline.
   share a 16000-char total budget in pack order, and docs past the budget
   appear as a one-line title listing: `(capped — N more docs on disk)`. The
   top-level tree listing is unbounded (it is short by construction).
+- **Failed approaches** — structured `approach → outcome: reason` records
+  (`handoff write --failed-approach`) render as `## Failed approaches`, kept
+  distinct from the free-text `## Failed Approaches / Bugs` section.
+- **Context (not instructions)** — author-asserted background facts
+  (`handoff write --context-only`) render as `## Context (not
+  instructions)`, hard-capped at 8 items and 4000 chars; what does not fit
+  appears as a `- … +N more` tail — bounded in the digest, never dropped
+  from the packet.
 
 ## The digest's freshness lines — Latest Activity & update notice
 
 Two one-line sections keep every arriving harness oriented:
 
-- **Latest Activity** — the newest observed activity anywhere (last checkpoint
-  or latest root) with harness and timestamp. A long-running session that
+- **Latest Activity** — the `## Latest Activity` section names the newest
+  observed activity anywhere (last checkpoint or latest root) with harness
+  and timestamp. A long-running session that
   never writes a formal handoff is no longer invisible: when activity
   postdates the handoff boundary, the digest says so plainly (`activity
   continues after formal handoff #2 by codex — the formal handoff is stale`).
@@ -324,6 +380,18 @@ hour liveness); the child updates the binary and re-arms harness wiring as
 usual, logging to `update-scheduled.log`. The digest's update notice is the
 visible layer; this is the layer that acts.
 
+The swap itself is fail-closed and journaled. `self-update` fingerprints the
+running binary before anything in its directory is touched — a binary whose
+`--version` does not answer a `stateroot ` line is left completely untouched
+— then writes `<config_home>/update-journal.json` (`status: in_progress`,
+from/to versions) before parking the old binary, and clears the journal only
+after the new binary's `--version` readback confirms the target tag. A clean
+rollback rewrites the journal as `rolled_back` — a recovered failure, not an
+interruption. A leftover in-progress journal means the process died
+mid-swap: `stateroot doctor` surfaces it as a soft `self-update` warning
+(`update interrupted (from … to … at …) — rerun \`stateroot self-update\``),
+never a hard failure.
+
 ## `stateroot doctor` — hook-binary health
 
 Doctor inspects the binary every installed hook config actually points at
@@ -335,6 +403,12 @@ failure) — e.g. `cursor hook binary is stateroot 0.1.1 — run \`stateroot
 self-update\` on this machine`. This is the check for fail-open staleness:
 hooks that resolve to an old `stateroot` silently do nothing, and nothing
 else reports it.
+
+Doctor also reads the self-update crash journal
+(`<config_home>/update-journal.json`): a leftover in-progress swap reports
+`update interrupted … rerun \`stateroot self-update\`` as a soft warning,
+a completed rollback reports as a recovered failure, and an unreadable
+journal comes with a delete instruction — see Scheduled self-update above.
 
 ## `stateroot projects` — the global registry window
 

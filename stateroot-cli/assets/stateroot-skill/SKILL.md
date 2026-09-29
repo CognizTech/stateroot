@@ -106,14 +106,15 @@ Lineage does not depend on you remembering: `stateroot checkpoint` and the turn-
 ### 4) Session end / usage limit / harness switch -> handoff
 
 Before ending a session, when approaching usage limits, or when the user asks to switch harness:
-1. prefer a **flag-first** one-liner: `scripts/handoff.sh write --from <resolved-current-harness> [--to <harness>] --objective "…" --task "…" --context-summary "…" [--next "…"]` — one command, no temp JSON
+1. prefer a **flag-first** one-liner: `scripts/handoff.sh write --from <resolved-current-harness> [--to <harness>] --objective "…" --task "…" --context-summary "…" [--next "…"] [--failed-approach "<approach> → <outcome>: <reason>"] [--context-only "<fact>"]` — one command, no temp JSON
 2. omit `--to` for continuity-only; use it only when orchestrating a cross-harness switch; when continuity suffices and hooks may not run, `stateroot handoff finalize` is acceptable — or rely on session_end/stop hook finalize when it ran
 3. resolve `--from` to the actual current harness id; never copy a placeholder or infer it from an environment variable
 4. include the durable objective, immediate task (`--task`, not `immediate_task`), detailed continuity narrative, decisions, next actions, and truthful failures; the CLI auto-captures recent verified conversation when author content is absent
-5. use `--input <handoff.json>` only when the payload is too large for flags; never write under `.stateroot/handoffs/` by hand
-6. thin fields warn; they do not refuse the write — continuity beats form-filling
-7. do not paste giant state or transcript dumps into `--note`; `--note` is only a legacy short-summary fallback
-8. never invent a second approval story — learnings, soul, skills, memory, and distill activate immediately
+5. record failed approaches and background facts structurally: `--failed-approach "<approach> → <outcome>: <reason>"` (repeatable; outcome is exactly `success` / `partial` / `failed`) for every approach tried and abandoned or only partly successful — the receiver's digest renders them as `## Failed approaches`; `--context-only "<fact>"` (repeatable) for facts the receiver may rely on but must not execute — rendered as `## Context (not instructions)`, capped at 8 items / 4000 chars, so keep facts tight
+6. use `--input <handoff.json>` only when the payload is too large for flags; never write under `.stateroot/handoffs/` by hand
+7. thin fields warn; they do not refuse the write — continuity beats form-filling
+8. do not paste giant state or transcript dumps into `--note`; `--note` is only a legacy short-summary fallback
+9. never invent a second approval story — learnings, soul, skills, memory, and distill activate immediately
 
 ### 5) Never edit `.stateroot/` directly
 
@@ -132,7 +133,8 @@ The CLI is offline-safe: when the server is unreachable it queues operations in 
 |---|---|---|
 | `stateroot resume [--harness H]` | last fallback at session start | prints the **full** digest when hooks did not inject. Never pipe through `head`/`tail` or any limiter |
 | `stateroot checkpoint --note "..." [--files a,b]` | after any state-changing step | appends an episodic record and updates handoff state |
-| `stateroot handoff write --from CURRENT_HARNESS [--to H] [--task …] [--context-summary …] [--next …]` | session end / harness switch | prefer flags near limits; `--to` optional (routing only); `--input` for large payloads |
+| `stateroot handoff write --from CURRENT_HARNESS [--to H] [--task …] [--context-summary …] [--next …]` | session end / harness switch | prefer flags near limits; `--to` optional (routing only); `--input` for large payloads; `--failed-approach "<approach> → <outcome>: <reason>"` and `--context-only "<fact>"` (both repeatable) carry structured failed approaches and background facts |
+| `stateroot handoff accept [--by H]` | claim the current handoff | fail-closed when newer observed activity postdates the handoff boundary — re-read with `resume`, or `--force` (recorded as `forced`); `--operation-id <id>` makes a retried accept an idempotent no-op; acceptances are append-only and carry the packet body hash |
 | `stateroot handoff finalize [--from H]` | hook missed / quota exit | observed continuity from verified transcript; no routing |
 | `stateroot handoff list` / `stateroot handoff show` | inspect prior handoffs | read-only; list is newest-first with the current packet pinned at top |
 | `stateroot handoff repair` | corrupt `current.json` | quarantines corrupt bytes (hash-stamped), restores the newest valid history packet, or says none exists — never fabricates |

@@ -62,6 +62,8 @@ Resolve `--from` explicitly to the actual current harness. Omit `--to` for norma
 4. **decisions** — each decision with the *why*.
 5. **next_actions** — ordered, concrete, executable without re-discovery (`--next`, repeatable); required only when `--to` names a different harness (cross-harness routing).
 6. **failures** and **bugs_found** — truthful observed failures and known bugs; an explicit empty `failures` array means none were observed.
+7. **failed_approaches** — structured records (`--failed-approach "<approach> → <outcome>: <reason>"`, repeatable, or JSON `failed_approaches: [{"approach","outcome","reason"}]`); the outcome vocabulary is fixed (`success` / `partial` / `failed`) and anything else is rejected. The digest renders them as `## Failed approaches`, distinct from the free-text failures section.
+8. **context_only** — background facts the receiver may rely on but must not execute (`--context-only "<fact>"`, repeatable); the digest renders them as `## Context (not instructions)`, hard-capped at 8 items / 4000 chars with a `- … +N more` overflow tail.
 
 Supporting input fields are `current_phase`, `implementation_status`, `changed_files`, `tests_run`, `blockers`, `open_questions`, `warnings`, `relevant_memories`, `relevant_skills`, `artifacts`, and `traces`. Every field is optional so omission remains distinct from an explicitly empty value. Recent conversation, plan state, progress summaries, milestones, files, failures, objective, task, and actions are auto-captured only from the latest matching verified native transcript when author content is absent.
 
