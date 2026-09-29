@@ -133,6 +133,11 @@ pub fn show(ctx: &Ctx, id: &str) -> anyhow::Result<()> {
     if !body.ends_with('\n') {
         println!();
     }
+    if plans::drifted_since_approval(&ctx.cwd, &meta) {
+        note!(
+            "warning: plan body changed since approval — review, then re-approve or restore the approved body"
+        );
+    }
     note!(
         "({} · {} · by {}{})",
         meta.id,

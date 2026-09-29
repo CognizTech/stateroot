@@ -501,6 +501,14 @@ pub struct HandoffWriteArgs {
     /// Failed approach or bug (repeatable).
     #[arg(long, action = clap::ArgAction::Append)]
     pub failure: Vec<String>,
+    /// Structured failed approach, "approach → outcome: reason" (repeatable;
+    /// outcome is success|partial|failed).
+    #[arg(long, action = clap::ArgAction::Append)]
+    pub failed_approach: Vec<String>,
+    /// Background fact the receiver may rely on but must not execute
+    /// (repeatable; rendered as context, not instructions).
+    #[arg(long, action = clap::ArgAction::Append)]
+    pub context_only: Vec<String>,
     /// Bind the receiving agent to a directory (a fork worktree): the
     /// digest tells them to work there.
     #[arg(long)]
@@ -523,6 +531,14 @@ pub enum HandoffAction {
         /// Accepting harness (default: cli).
         #[arg(long, default_value = "cli")]
         by: String,
+        /// Idempotency key: repeating an accept with the same operation id is
+        /// a no-op instead of a second record.
+        #[arg(long)]
+        operation_id: Option<String>,
+        /// Accept even when newer observed activity postdates the handoff
+        /// boundary (recorded as a forced acceptance).
+        #[arg(long)]
+        force: bool,
     },
     /// Finalize continuity from the latest verified transcript (no routing).
     Finalize {

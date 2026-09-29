@@ -102,6 +102,16 @@ pub(crate) fn central_plan_section(project_dir: Option<&Path>) -> Option<String>
             ));
         }
     }
+    // Plan integrity: an approved body that changed under the executor is
+    // drift — name it, never silently execute the substituted body. Plans
+    // approved before approved_digest existed make no claim.
+    if let Some(dir) = project_dir {
+        if stateroot_core::plans::drifted_since_approval(dir, &plan) {
+            section.push_str(
+                "**Warning: plan body changed since approval** — review the body, then re-approve (`stateroot plan approve`) or restore the approved body.\n\n",
+            );
+        }
+    }
     Some(section)
 }
 
@@ -186,14 +196,14 @@ pub(crate) fn latest_activity_section(project_dir: &Path) -> Option<String> {
     Some(section)
 }
 
-struct Activity {
-    harness: String,
-    kind: &'static str,
-    at: String,
+pub(crate) struct Activity {
+    pub harness: String,
+    pub kind: &'static str,
+    pub at: String,
 }
 
 /// The newest observed activity: last checkpoint vs latest root, newest wins.
-fn latest_activity(project_dir: &Path) -> Option<Activity> {
+pub(crate) fn latest_activity(project_dir: &Path) -> Option<Activity> {
     let mut best: Option<Activity> = stateroot_core::local_store::recent_episodic(project_dir, 1)
         .into_iter()
         .next()
@@ -232,7 +242,7 @@ fn latest_activity(project_dir: &Path) -> Option<Activity> {
 }
 
 /// Strict RFC3339 comparison; unparseable sides stay honest (no claim).
-fn ts_newer(a: &str, b: &str) -> bool {
+pub(crate) fn ts_newer(a: &str, b: &str) -> bool {
     match (
         chrono::DateTime::parse_from_rfc3339(a),
         chrono::DateTime::parse_from_rfc3339(b),
@@ -513,6 +523,30 @@ pub fn render_handoff_digest_full(
             }
         }
     }
+    // Structured failed approaches (truthful handoffs): the authored
+    // approach → outcome: reason records, kept distinct from the free-text
+    // failures/bugs section below.
+    if let Some(items) = packet.get("failed_approaches").and_then(|v| v.as_array()) {
+        let entries: Vec<String> = items
+            .iter()
+            .filter_map(|item| {
+                let approach = item.get("approach").and_then(Value::as_str)?.trim();
+                if approach.is_empty() {
+                    return None;
+                }
+                let outcome = item.get("outcome").and_then(Value::as_str).unwrap_or("");
+                let reason = item.get("reason").and_then(Value::as_str).unwrap_or("");
+                Some(format!("{approach} → {outcome}: {reason}"))
+            })
+            .collect();
+        if !entries.is_empty() {
+            out.push_str("## Failed approaches\n\n");
+            for entry in entries {
+                out.push_str(&format!("- {entry}\n"));
+            }
+            out.push('\n');
+        }
+    }
     // Failures and bugs are separate authoring channels but one reader-facing
     // section. Preserve first-seen wording and avoid duplicate rendering.
     let mut failures = Vec::new();
@@ -568,6 +602,36 @@ pub fn render_handoff_digest_full(
     let summary = get_str("context_summary");
     if !summary.is_empty() && summaries.first() != Some(&summary) {
         out.push_str(&format!("## Context Summary\n\n{summary}\n\n"));
+    }
+    // Authority labels: author-asserted background facts, explicitly NOT work
+    // directives. Hard-capped so a stuffed packet cannot flood the digest.
+    if let Some(items) = packet.get("context_only").and_then(|v| v.as_array()) {
+        let facts: Vec<&str> = items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .collect();
+        if !facts.is_empty() {
+            const MAX_ITEMS: usize = 8;
+            const MAX_CHARS: usize = 4000;
+            let mut rendered = 0usize;
+            let mut chars = 0usize;
+            out.push_str("## Context (not instructions)\n\n");
+            for fact in &facts {
+                let len = fact.chars().count();
+                if rendered >= MAX_ITEMS || chars + len > MAX_CHARS {
+                    break;
+                }
+                out.push_str(&format!("- {fact}\n"));
+                rendered += 1;
+                chars += len;
+            }
+            if rendered < facts.len() {
+                out.push_str(&format!("- … +{} more\n", facts.len() - rendered));
+            }
+            out.push('\n');
+        }
     }
     // Transcript-sourced sections (Progress Narrative / Milestones /
     // Conversation Tail). B3: once the project has captured state, they are

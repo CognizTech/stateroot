@@ -150,6 +150,8 @@ async fn main() -> anyhow::Result<()> {
                     next: &args.next,
                     decisions: &args.decision,
                     failures: &args.failure,
+                    failed_approaches: &args.failed_approach,
+                    context_only: &args.context_only,
                     worktree: args.worktree.as_deref(),
                 };
                 commands::handoff::write(
@@ -164,7 +166,11 @@ async fn main() -> anyhow::Result<()> {
             }
             HandoffAction::List => commands::handoff::list(&ctx).await?,
             HandoffAction::Show { seq } => commands::handoff::show(&ctx, seq).await?,
-            HandoffAction::Accept { by } => commands::handoff::accept(&ctx, &by).await?,
+            HandoffAction::Accept {
+                by,
+                operation_id,
+                force,
+            } => commands::handoff::accept(&ctx, &by, operation_id.as_deref(), force).await?,
             HandoffAction::Finalize { from } => {
                 commands::handoff::finalize(&ctx, from.as_deref()).await?
             }

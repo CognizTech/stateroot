@@ -17,6 +17,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha2::Digest as _;
 
 use crate::local_store::{self, now_rfc3339};
 
@@ -100,6 +101,10 @@ pub struct PlanMeta {
     pub root_ref: Option<String>,
     /// The original file the plan was recorded from, when any.
     pub source_path: Option<String>,
+    /// sha256 of the plan body captured at approve time. `None` for plans
+    /// approved before this field existed — they make no drift claim.
+    #[serde(default)]
+    pub approved_digest: Option<String>,
     /// Lifecycle notes (demotions are recorded here).
     pub notes: String,
 }
@@ -202,6 +207,7 @@ pub fn record(
         updated_at: now,
         root_ref: latest_root_ref(project_dir),
         source_path: source_path.map(str::to_string),
+        approved_digest: None,
         notes: String::new(),
     };
     let body_file = body_path(project_dir, &id);
@@ -355,10 +361,33 @@ pub fn transition(
         }
     }
     meta.status = to.as_str().into();
+    if to == PlanStatus::Approved {
+        // Pin the exact body that was approved: a later edit is detectable
+        // drift, never a silent substitution of what was signed off.
+        let digest = body_digest(&body_path(project_dir, &meta.id))
+            .ok_or_else(|| format!("cannot approve {}: plan body is unreadable", meta.id))?;
+        meta.approved_digest = Some(digest);
+    }
     meta.updated_at = now_rfc3339();
     meta.root_ref = latest_root_ref(project_dir);
     write_meta(project_dir, &meta)?;
     Ok((meta, demoted))
+}
+
+/// sha256 (hex) of a plan body file; `None` when unreadable.
+pub fn body_digest(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    Some(format!("{:x}", sha2::Sha256::digest(&bytes)))
+}
+
+/// True when the plan carries an `approved_digest` and the current body no
+/// longer matches it (an unreadable body after approval IS drift). Plans
+/// approved before the field existed make no drift claim.
+pub fn drifted_since_approval(project_dir: &Path, meta: &PlanMeta) -> bool {
+    let Some(approved) = &meta.approved_digest else {
+        return false;
+    };
+    body_digest(&body_path(project_dir, &meta.id)).as_ref() != Some(approved)
 }
 
 /// Append a lineage note without changing status.
@@ -486,6 +515,63 @@ mod tests {
         let dir = tempfile::tempdir().expect("dir");
         assert!(record(dir.path(), "T", "cli", None, "  \n").is_err());
         assert!(record(dir.path(), "  ", "cli", None, "# T\n").is_err());
+    }
+
+    #[test]
+    fn approve_pins_body_digest_and_drift_is_detected() {
+        let dir = tempfile::tempdir().expect("dir");
+        let plan = record_plan(dir.path(), "Pinned plan");
+        assert_eq!(plan.approved_digest, None, "drafts carry no digest");
+
+        let (approved, _) =
+            transition(dir.path(), &plan.id, PlanStatus::Approved).expect("approve");
+        let digest = approved
+            .approved_digest
+            .expect("approved pins the body digest");
+        let body = std::fs::read(body_path(dir.path(), &plan.id)).expect("body");
+        assert_eq!(
+            digest,
+            format!("{:x}", sha2::Sha256::digest(&body)),
+            "digest is sha256 of the canonical body"
+        );
+        let (loaded, _) = load(dir.path(), &plan.id).expect("load");
+        assert!(
+            !drifted_since_approval(dir.path(), &loaded),
+            "untouched body"
+        );
+
+        // An edit after approval is drift; re-approval re-pins.
+        std::fs::write(
+            body_path(dir.path(), &plan.id),
+            "# Pinned plan\n\nEdited after approval.\n",
+        )
+        .expect("edit");
+        let (loaded, _) = load(dir.path(), &plan.id).expect("load");
+        assert!(drifted_since_approval(dir.path(), &loaded), "edited body");
+        transition(dir.path(), &plan.id, PlanStatus::Active).expect("activate");
+        transition(dir.path(), &plan.id, PlanStatus::Done).expect("done");
+
+        // A pre-existing sidecar without the field parses and makes no claim.
+        let legacy = record_plan(dir.path(), "Legacy plan");
+        let meta_file = plans_dir(dir.path()).join(format!("{}.json", legacy.id));
+        let mut sidecar: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&meta_file).expect("sidecar"))
+                .expect("sidecar json");
+        sidecar
+            .as_object_mut()
+            .expect("object")
+            .remove("approved_digest");
+        std::fs::write(&meta_file, sidecar.to_string()).expect("rewrite");
+        let (loaded, _) = load(dir.path(), &legacy.id).expect("load legacy");
+        assert_eq!(loaded.approved_digest, None);
+        assert!(
+            !drifted_since_approval(dir.path(), &loaded),
+            "no claim without digest"
+        );
+        // Approving a legacy plan pins it from now on.
+        let (approved, _) =
+            transition(dir.path(), &legacy.id, PlanStatus::Approved).expect("approve legacy");
+        assert!(approved.approved_digest.is_some());
     }
 
     #[test]

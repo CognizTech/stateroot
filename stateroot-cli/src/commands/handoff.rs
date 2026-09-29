@@ -7,6 +7,7 @@ use std::path::Path;
 use anyhow::Context as _;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::Digest as _;
 use stateroot_core::handoff_continuity::{self, FINALIZE_WARNING};
 use stateroot_core::local_store::now_rfc3339;
 use stateroot_core::local_store::{self, SCHEMA_HANDOFF_V1};
@@ -46,6 +47,13 @@ fn validate_packet(packet: &Value, handing_to_another: bool) -> anyhow::Result<(
             note!("warning: handoff {key} is empty — writing anyway");
         }
     }
+    let summary_len = required("context_summary").chars().count();
+    if summary_len > stateroot_core::handoff_bounds::CONTEXT_SUMMARY_MAX {
+        note!(
+            "warning: handoff context_summary is {summary_len} chars — over the {} digest budget; writing anyway",
+            stateroot_core::handoff_bounds::CONTEXT_SUMMARY_MAX
+        );
+    }
     if !required("task").is_empty()
         && !required("context_summary").is_empty()
         && required("task").eq_ignore_ascii_case(required("context_summary"))
@@ -72,6 +80,8 @@ pub struct HandoffWriteFlags<'a> {
     pub next: &'a [String],
     pub decisions: &'a [String],
     pub failures: &'a [String],
+    pub failed_approaches: &'a [String],
+    pub context_only: &'a [String],
     pub worktree: Option<&'a str>,
 }
 
@@ -94,6 +104,8 @@ const HANDOFF_INPUT_KEYS: &[&str] = &[
     "relevant_skills",
     "artifacts",
     "traces",
+    "failed_approaches",
+    "context_only",
 ];
 
 const HANDOFF_INPUT_ALIASES: &[(&str, &str)] =
@@ -116,6 +128,18 @@ const HANDOFF_ENVELOPE_KEYS: &[&str] = &[
     "conversation_tail",
     "accepted_by",
 ];
+
+/// One structured failed-approach record: what was tried, how it ended, why.
+/// The outcome vocabulary is fixed so the receiver can trust the label.
+#[derive(Debug, Default, Deserialize)]
+struct FailedApproachInput {
+    #[serde(default)]
+    approach: String,
+    #[serde(default)]
+    outcome: String,
+    #[serde(default)]
+    reason: String,
+}
 
 /// Author-controlled handoff content. Envelope, provenance, transcript-rich
 /// fields, and timestamps intentionally do not appear here: parsing rejects
@@ -140,8 +164,46 @@ struct HandoffInput {
     relevant_skills: Option<Vec<String>>,
     artifacts: Option<Vec<String>>,
     traces: Option<Vec<String>>,
+    /// Structured failed approaches (A1); additive — old packets without the
+    /// key parse unchanged.
+    failed_approaches: Option<Vec<FailedApproachInput>>,
+    /// Authority-labeled background facts (A4): context, never instructions.
+    context_only: Option<Vec<String>>,
     /// WS5: bind the receiving agent to a directory (fork worktree).
     worktree: Option<String>,
+}
+
+/// The fixed outcome vocabulary for structured failed approaches; anything
+/// else is rejected so a typo never reads as a real outcome.
+fn canonical_outcome(raw: &str) -> Option<String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "success" => Some("success".into()),
+        "partial" => Some("partial".into()),
+        "failed" => Some("failed".into()),
+        _ => None,
+    }
+}
+
+/// Parse one `--failed-approach "approach → outcome: reason"` flag.
+fn parse_failed_approach_flag(raw: &str) -> anyhow::Result<FailedApproachInput> {
+    let shape = || {
+        anyhow::anyhow!(
+            "invalid --failed-approach '{raw}': expected \"<approach> → <outcome>: <reason>\" with outcome success|partial|failed"
+        )
+    };
+    let (approach, rest) = raw.split_once('→').ok_or_else(shape)?;
+    let (outcome, reason) = rest.split_once(':').ok_or_else(shape)?;
+    let outcome = canonical_outcome(outcome).ok_or_else(|| {
+        anyhow::anyhow!(
+            "invalid --failed-approach outcome '{}': expected success|partial|failed",
+            outcome.trim()
+        )
+    })?;
+    Ok(FailedApproachInput {
+        approach: approach.trim().to_string(),
+        outcome,
+        reason: reason.trim().to_string(),
+    })
 }
 
 fn coerce_decision_item(item: &Value) -> Option<String> {
@@ -239,9 +301,21 @@ fn parse_handoff_input_text(text: &str, path: &str) -> anyhow::Result<HandoffInp
         anyhow::anyhow!("invalid handoff JSON in '{path}': expected a JSON object")
     })?;
     normalize_handoff_input_object(obj)?;
-    serde_json::from_value(Value::Object(std::mem::take(obj))).with_context(|| {
-        format!("invalid handoff input '{path}': could not parse normalized content fields")
-    })
+    let mut input: HandoffInput = serde_json::from_value(Value::Object(std::mem::take(obj)))
+        .with_context(|| {
+            format!("invalid handoff input '{path}': could not parse normalized content fields")
+        })?;
+    if let Some(entries) = input.failed_approaches.as_mut() {
+        for entry in entries.iter_mut() {
+            entry.outcome = canonical_outcome(&entry.outcome).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "invalid handoff input '{path}': failed_approaches outcome '{}' is not success|partial|failed",
+                    entry.outcome.trim()
+                )
+            })?;
+        }
+    }
+    Ok(input)
 }
 
 fn read_input(path: Option<&str>) -> anyhow::Result<HandoffInput> {
@@ -265,7 +339,10 @@ fn read_input(path: Option<&str>) -> anyhow::Result<HandoffInput> {
     parse_handoff_input_text(&text, path)
 }
 
-fn apply_write_flags(mut input: HandoffInput, flags: &HandoffWriteFlags<'_>) -> HandoffInput {
+fn apply_write_flags(
+    mut input: HandoffInput,
+    flags: &HandoffWriteFlags<'_>,
+) -> anyhow::Result<HandoffInput> {
     if let Some(task) = flags.task.filter(|text| !text.trim().is_empty()) {
         input.task = Some(task.to_string());
     }
@@ -281,10 +358,20 @@ fn apply_write_flags(mut input: HandoffInput, flags: &HandoffWriteFlags<'_>) -> 
     if !flags.failures.is_empty() {
         input.failures = Some(flags.failures.to_vec());
     }
+    if !flags.failed_approaches.is_empty() {
+        let mut parsed = Vec::with_capacity(flags.failed_approaches.len());
+        for raw in flags.failed_approaches {
+            parsed.push(parse_failed_approach_flag(raw)?);
+        }
+        input.failed_approaches = Some(parsed);
+    }
+    if !flags.context_only.is_empty() {
+        input.context_only = Some(flags.context_only.to_vec());
+    }
     if let Some(worktree) = flags.worktree.filter(|text| !text.trim().is_empty()) {
         input.worktree = Some(worktree.to_string());
     }
-    input
+    Ok(input)
 }
 
 fn nonempty(text: Option<String>) -> Option<String> {
@@ -582,6 +669,17 @@ fn assemble_packet(
     let relevant_skills = clean_list(input.relevant_skills.take());
     let artifacts = clean_list(input.artifacts.take());
     let traces = clean_list(input.traces.take());
+    let failed_approaches: Vec<Value> = input
+        .failed_approaches
+        .take()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|entry| !entry.approach.trim().is_empty())
+        .map(|entry| {
+            json!({"approach": entry.approach, "outcome": entry.outcome, "reason": entry.reason})
+        })
+        .collect();
+    let context_only = clean_list(input.context_only.take());
 
     if !failures_explicit_empty {
         fill_list(&mut failures, &legacy.failures);
@@ -657,6 +755,8 @@ fn assemble_packet(
         "relevant_skills": relevant_skills,
         "artifacts": artifacts,
         "traces": traces,
+        "failed_approaches": failed_approaches,
+        "context_only": context_only,
         "context_summary": context_summary,
         "created_at": now,
         "written_at": now,
@@ -882,7 +982,7 @@ pub async fn write_with_origin(
         })?,
         None => source.clone(),
     };
-    let input = apply_write_flags(read_input(input_path)?, write_flags);
+    let input = apply_write_flags(read_input(input_path)?, write_flags)?;
     // Read directly so malformed state cannot silently reset the sequence.
     let current = local_store::read_handoff_local(&ctx.cwd)?;
     let current_seq = std::iter::once(current)
@@ -1091,8 +1191,39 @@ async fn automatic_checkpoint_only(ctx: &Ctx, note_text: Option<&str>) -> anyhow
     Ok(())
 }
 
+/// Local-only acceptance bookkeeping mutates the packet in place (accept
+/// marks, checkpoint activity stamps); it is not handoff content, so it is
+/// stripped before hashing — otherwise every checkpoint would read as drift.
+const ACCEPTANCE_BOOKKEEPING_KEYS: &[&str] = &["accepted_by", "acceptances", "last_activity"];
+
+/// sha256 of the canonical handoff body: the packet minus local acceptance
+/// bookkeeping (serde_json objects serialize with sorted keys, so the digest
+/// is stable across in-place rewrites).
+fn handoff_body_sha256(packet: &Value) -> String {
+    let mut canonical = packet.clone();
+    if let Some(obj) = canonical.as_object_mut() {
+        for key in ACCEPTANCE_BOOKKEEPING_KEYS {
+            obj.remove(*key);
+        }
+    }
+    let text = serde_json::to_string(&canonical).unwrap_or_default();
+    format!("{:x}", sha2::Sha256::digest(text.as_bytes()))
+}
+
 /// `stateroot handoff accept` — mark the current handoff accepted by a harness.
-pub async fn accept(ctx: &Ctx, by: &str) -> anyhow::Result<()> {
+///
+/// Fail-closed on a stale boundary (the digest's ts_newer rule): accepting a
+/// handoff that newer observed activity has overtaken would anchor the
+/// receiver on dead state; `--force` overrides and is recorded. Acceptances
+/// are append-only records carrying the content hash at accept time, so a
+/// repeated `--operation-id` is an idempotent no-op and a changed body since
+/// the last acceptance reads as drift (warning, never a refusal).
+pub async fn accept(
+    ctx: &Ctx,
+    by: &str,
+    operation_id: Option<&str>,
+    force: bool,
+) -> anyhow::Result<()> {
     ctx.require_project()?;
     // The accepter is part of the shared record — validate it as a canonical
     // harness id (aliases resolve), with `cli` kept as the local-CLI actor.
@@ -1103,13 +1234,112 @@ pub async fn accept(ctx: &Ctx, by: &str) -> anyhow::Result<()> {
             anyhow::anyhow!("unknown harness '{by}'; pass --by with a known harness id or alias")
         })?
     };
-    let count = super::resume::accept_handoff_local(&ctx.cwd, &by)?;
-    if count == 0 {
+    let operation_id = operation_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string);
+    let Some(packet) = local_store::read_handoff_local(&ctx.cwd)? else {
         println!("no current handoff to accept");
-    } else {
-        println!("handoff accepted by {by} ({count} acceptance(s) total)");
-        crate::telemetry::activity(&ctx.config_dir, &ctx.cwd, Some(&by));
+        return Ok(());
+    };
+    let seq = packet.get("seq").and_then(|v| v.as_i64()).unwrap_or(0);
+
+    // Idempotency is checked before the staleness gate: re-issuing an
+    // already-applied operation must not newly fail.
+    if let Some(id) = operation_id.as_deref() {
+        let already = packet
+            .get("acceptances")
+            .and_then(Value::as_array)
+            .is_some_and(|records| {
+                records
+                    .iter()
+                    .any(|record| record.get("operation_id").and_then(Value::as_str) == Some(id))
+            });
+        if already {
+            println!("handoff #{seq} already accepted (operation {id}) — idempotent no-op");
+            return Ok(());
+        }
     }
+
+    let boundary = packet
+        .get("written_at")
+        .and_then(Value::as_str)
+        .filter(|t| !t.is_empty())
+        .or_else(|| packet.get("created_at").and_then(Value::as_str))
+        .unwrap_or("")
+        .to_string();
+    let stale = super::resume::latest_activity(&ctx.cwd).filter(|activity| {
+        !boundary.is_empty() && super::resume::ts_newer(&activity.at, &boundary)
+    });
+    if let Some(activity) = &stale {
+        if !force {
+            anyhow::bail!(
+                "refusing to accept handoff #{seq}: {} by {} at {} postdates the handoff boundary {boundary} — the handoff is stale. Re-read with `stateroot resume` or pass --force to accept anyway",
+                activity.kind,
+                activity.harness,
+                activity.at
+            );
+        }
+        note!(
+            "warning: accepting stale handoff #{seq} under --force (newer activity: {} by {} at {})",
+            activity.kind,
+            activity.harness,
+            activity.at
+        );
+    }
+
+    let body_sha256 = handoff_body_sha256(&packet);
+    if let Some(prior) = packet
+        .get("acceptances")
+        .and_then(Value::as_array)
+        .and_then(|records| records.last())
+        .and_then(|record| record.get("body_sha256"))
+        .and_then(Value::as_str)
+    {
+        if prior != body_sha256 {
+            note!(
+                "warning: handoff body changed since the last acceptance (sha256 {}… → {}…) — recording anyway",
+                &prior[..prior.len().min(12)],
+                &body_sha256[..body_sha256.len().min(12)]
+            );
+        }
+    }
+
+    let mut record = json!({
+        "by": by,
+        "at": now_rfc3339(),
+        "body_sha256": body_sha256,
+    });
+    if let Some(id) = operation_id {
+        record["operation_id"] = json!(id);
+    }
+    if force {
+        record["forced"] = json!(true);
+    }
+    let mut count = 0usize;
+    local_store::update_handoff_current(&ctx.cwd, |packet| {
+        let Some(obj) = packet.as_object_mut() else {
+            return false;
+        };
+        if let Value::Array(records) = obj
+            .entry("acceptances")
+            .or_insert_with(|| Value::Array(vec![]))
+        {
+            records.push(record.clone());
+        }
+        if let Value::Array(accepted) = obj
+            .entry("accepted_by")
+            .or_insert_with(|| Value::Array(vec![]))
+        {
+            if !accepted.iter().any(|a| a.as_str() == Some(by.as_str())) {
+                accepted.push(Value::String(by.clone()));
+            }
+            count = accepted.len();
+        }
+        true
+    })?;
+    println!("handoff accepted by {by} ({count} acceptance(s) total)");
+    crate::telemetry::activity(&ctx.config_dir, &ctx.cwd, Some(&by));
     if let Some(footer) = super::resume::digest_footer(&ctx.cwd) {
         println!("{footer}");
     }
@@ -1380,8 +1610,41 @@ mod tests {
                 next: &["new".into()],
                 ..Default::default()
             },
-        );
+        )
+        .expect("flags");
         assert_eq!(input.task.as_deref(), Some("from flag"));
         assert_eq!(input.next_actions, Some(vec!["new".to_string()]));
+    }
+
+    #[test]
+    fn failed_approach_flag_parsing_and_outcome_vocabulary() {
+        let parsed = parse_failed_approach_flag("Naive parser → failed: blew the stack")
+            .expect("valid flag");
+        assert_eq!(parsed.approach, "Naive parser");
+        assert_eq!(parsed.outcome, "failed");
+        assert_eq!(parsed.reason, "blew the stack");
+
+        // Outcome parsing is case-insensitive but stores the canonical label.
+        let parsed = parse_failed_approach_flag("Cache → Partial: warmed").expect("case");
+        assert_eq!(parsed.outcome, "partial");
+
+        let err = parse_failed_approach_flag("No arrow here: failed").expect_err("no arrow");
+        assert!(format!("{err:#}").contains("expected \"<approach> → <outcome>: <reason>\""));
+        let err = parse_failed_approach_flag("X → exploded: boom").expect_err("bad outcome");
+        assert!(
+            format!("{err:#}").contains("invalid --failed-approach outcome 'exploded'"),
+            "{err:#}"
+        );
+
+        // The JSON input channel applies the same vocabulary.
+        let err = parse_handoff_input_text(
+            r#"{"task":"t","failed_approaches":[{"approach":"a","outcome":"mystery","reason":"r"}]}"#,
+            "test.json",
+        )
+        .expect_err("bad input outcome");
+        assert!(
+            format!("{err:#}").contains("is not success|partial|failed"),
+            "{err:#}"
+        );
     }
 }

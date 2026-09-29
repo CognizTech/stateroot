@@ -1031,3 +1031,412 @@ fn handoff_list_is_newest_first_with_current_marked() {
     );
     assert!(lines[2].starts_with('1'), "oldest last: {stdout}");
 }
+
+#[test]
+fn failed_approaches_roundtrip_through_write_show_and_digest() {
+    let (config, home, project) = project();
+    stateroot(config.path(), home.path(), project.path())
+        .args([
+            "handoff",
+            "write",
+            "--from",
+            "codex",
+            "--objective",
+            "Ship truthful handoffs",
+            "--task",
+            "Record failed approaches",
+            "--context-summary",
+            "Structured failure records carry approach, outcome, and reason.",
+            "--failed-approach",
+            "Naive recursive parser → failed: blew the stack on deep input",
+            "--failed-approach",
+            "Arena cache → partial: warmed but inconsistent under forks",
+        ])
+        .assert()
+        .success();
+    let packet = current(project.path());
+    assert_eq!(
+        packet["failed_approaches"],
+        json!([
+            {"approach":"Naive recursive parser","outcome":"failed","reason":"blew the stack on deep input"},
+            {"approach":"Arena cache","outcome":"partial","reason":"warmed but inconsistent under forks"}
+        ])
+    );
+
+    let out = stateroot(config.path(), home.path(), project.path())
+        .args(["handoff", "show"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(stdout.contains("## Failed approaches"), "show: {stdout}");
+    assert!(
+        stdout.contains("Naive recursive parser → failed: blew the stack on deep input"),
+        "show: {stdout}"
+    );
+
+    let out = stateroot(config.path(), home.path(), project.path())
+        .args(["resume", "--force"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(stdout.contains("## Failed approaches"), "digest: {stdout}");
+    assert!(
+        stdout.contains("Arena cache → partial: warmed but inconsistent under forks"),
+        "digest: {stdout}"
+    );
+
+    // An invalid outcome is refused with a clear error and writes nothing.
+    let before = std::fs::read(project.path().join(".stateroot/handoffs/current.json"))
+        .expect("before invalid");
+    let out = stateroot(config.path(), home.path(), project.path())
+        .args([
+            "handoff",
+            "write",
+            "--from",
+            "codex",
+            "--objective",
+            "goal",
+            "--task",
+            "task",
+            "--context-summary",
+            "summary",
+            "--failed-approach",
+            "Mystery → exploded: no reason needed",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).expect("utf8");
+    assert!(
+        stderr.contains("invalid --failed-approach outcome 'exploded'"),
+        "stderr: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read(project.path().join(".stateroot/handoffs/current.json"))
+            .expect("after invalid"),
+        before
+    );
+
+    // A pre-A1 packet (no failed_approaches key) still parses and renders
+    // without the section.
+    let mut packet = current(project.path());
+    packet
+        .as_object_mut()
+        .expect("packet")
+        .remove("failed_approaches");
+    std::fs::write(
+        project.path().join(".stateroot/handoffs/current.json"),
+        serde_json::to_vec(&packet).expect("json"),
+    )
+    .expect("legacy packet");
+    let out = stateroot(config.path(), home.path(), project.path())
+        .args(["handoff", "show"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(!stdout.contains("## Failed approaches"), "legacy: {stdout}");
+    assert!(
+        stdout.contains("Ship truthful handoffs"),
+        "legacy: {stdout}"
+    );
+}
+
+#[test]
+fn over_budget_context_summary_warns_but_still_writes() {
+    let (config, home, project) = project();
+    let long = "detailed continuity narrative ".repeat(220);
+    assert!(
+        long.chars().count() > stateroot_core::handoff_bounds::CONTEXT_SUMMARY_MAX,
+        "fixture must exceed the budget"
+    );
+    let out = stateroot(config.path(), home.path(), project.path())
+        .args([
+            "handoff",
+            "write",
+            "--from",
+            "codex",
+            "--objective",
+            "goal",
+            "--task",
+            "task",
+            "--context-summary",
+            &long,
+        ])
+        .assert()
+        .success();
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).expect("utf8");
+    assert!(stderr.contains("digest budget"), "stderr: {stderr}");
+    assert!(stderr.contains("writing anyway"), "stderr: {stderr}");
+    let packet = current(project.path());
+    assert_eq!(packet["context_summary"].as_str().expect("summary"), long);
+}
+
+#[test]
+fn context_only_facts_render_labeled_and_capped() {
+    let (config, home, project) = project();
+    let mut args = vec![
+        "handoff".to_string(),
+        "write".to_string(),
+        "--from".to_string(),
+        "codex".to_string(),
+        "--objective".to_string(),
+        "goal".to_string(),
+        "--task".to_string(),
+        "task".to_string(),
+        "--context-summary".to_string(),
+        "summary".to_string(),
+    ];
+    for index in 1..=10 {
+        args.push("--context-only".to_string());
+        args.push(format!("background fact {index}"));
+    }
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    stateroot(config.path(), home.path(), project.path())
+        .args(&arg_refs)
+        .assert()
+        .success();
+    let packet = current(project.path());
+    assert_eq!(
+        packet["context_only"]
+            .as_array()
+            .expect("context_only")
+            .len(),
+        10
+    );
+
+    // The digest caps at 8 items and names the overflow.
+    let out = stateroot(config.path(), home.path(), project.path())
+        .args(["handoff", "show"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains("## Context (not instructions)"),
+        "show: {stdout}"
+    );
+    assert!(stdout.contains("- background fact 1"), "show: {stdout}");
+    assert!(stdout.contains("- background fact 8"), "show: {stdout}");
+    assert!(!stdout.contains("- background fact 9"), "show: {stdout}");
+    assert!(stdout.contains("+2 more"), "show: {stdout}");
+
+    // The character cap breaks mid-list and reports the remainder.
+    let huge = "x".repeat(3990);
+    stateroot(config.path(), home.path(), project.path())
+        .args([
+            "handoff",
+            "write",
+            "--from",
+            "codex",
+            "--objective",
+            "goal",
+            "--task",
+            "task",
+            "--context-summary",
+            "summary",
+            "--context-only",
+            &huge,
+            "--context-only",
+            "second fact that overflows the budget",
+            "--context-only",
+            "third fact never rendered",
+        ])
+        .assert()
+        .success();
+    let out = stateroot(config.path(), home.path(), project.path())
+        .args(["resume", "--force"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(stdout.contains(&huge), "digest: {stdout}");
+    assert!(
+        !stdout.contains("second fact that overflows the budget"),
+        "digest: {stdout}"
+    );
+    assert!(stdout.contains("+2 more"), "digest: {stdout}");
+}
+
+fn acceptances(project: &Path) -> Vec<Value> {
+    current(project)
+        .get("acceptances")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+#[test]
+fn accept_records_content_hash_and_is_idempotent_by_operation_id() {
+    let (config, home, project) = project();
+    let input = write_json(
+        project.path(),
+        "accept.json",
+        &json!({
+            "objective":"goal",
+            "task":"original task",
+            "context_summary":"state ready for the receiver",
+            "next_actions":["continue"],
+            "failures":[]
+        }),
+    );
+    stateroot(config.path(), home.path(), project.path())
+        .args(["handoff", "write", "--from", "codex", "--input", &input])
+        .assert()
+        .success();
+
+    let out = stateroot(config.path(), home.path(), project.path())
+        .args([
+            "handoff",
+            "accept",
+            "--by",
+            "cursor",
+            "--operation-id",
+            "op-1",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains("handoff accepted by cursor (1 acceptance(s) total)"),
+        "stdout: {stdout}"
+    );
+    let records = acceptances(project.path());
+    assert_eq!(records.len(), 1, "records: {records:?}");
+    assert_eq!(records[0]["by"], "cursor");
+    assert_eq!(records[0]["operation_id"], "op-1");
+    let first_hash = records[0]["body_sha256"]
+        .as_str()
+        .expect("hash")
+        .to_string();
+    assert_eq!(first_hash.len(), 64, "sha256 hex: {first_hash}");
+    assert!(
+        records[0].get("forced").is_none(),
+        "not forced: {records:?}"
+    );
+
+    // Re-accept with the same operation id: idempotent no-op, no new record.
+    let out = stateroot(config.path(), home.path(), project.path())
+        .args([
+            "handoff",
+            "accept",
+            "--by",
+            "cursor",
+            "--operation-id",
+            "op-1",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(stdout.contains("idempotent no-op"), "stdout: {stdout}");
+    assert_eq!(acceptances(project.path()).len(), 1);
+    assert_eq!(
+        current(project.path())["accepted_by"]
+            .as_array()
+            .expect("accepted_by")
+            .len(),
+        1
+    );
+
+    // The body changed after the first acceptance: a drift warning, but the
+    // acceptance is still recorded.
+    let mut packet = current(project.path());
+    packet["task"] = json!("rewritten task after acceptance");
+    std::fs::write(
+        project.path().join(".stateroot/handoffs/current.json"),
+        format!("{}\n", serde_json::to_string_pretty(&packet).expect("json")),
+    )
+    .expect("drift");
+    let out = stateroot(config.path(), home.path(), project.path())
+        .args([
+            "handoff",
+            "accept",
+            "--by",
+            "kimi",
+            "--operation-id",
+            "op-2",
+        ])
+        .assert()
+        .success();
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).expect("utf8");
+    assert!(
+        stderr.contains("handoff body changed since the last acceptance"),
+        "stderr: {stderr}"
+    );
+    let records = acceptances(project.path());
+    assert_eq!(records.len(), 2, "records: {records:?}");
+    assert_eq!(records[1]["operation_id"], "op-2");
+    assert_ne!(
+        records[1]["body_sha256"].as_str().expect("hash"),
+        first_hash
+    );
+
+    // Idempotency wins over drift: replaying op-1 against the drifted body
+    // is still a no-op.
+    let out = stateroot(config.path(), home.path(), project.path())
+        .args([
+            "handoff",
+            "accept",
+            "--by",
+            "cursor",
+            "--operation-id",
+            "op-1",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(stdout.contains("idempotent no-op"), "stdout: {stdout}");
+    assert_eq!(acceptances(project.path()).len(), 2);
+}
+
+#[test]
+fn accept_refuses_stale_boundary_unless_forced() {
+    let (config, home, project) = project();
+    let input = write_json(
+        project.path(),
+        "stale-accept.json",
+        &json!({
+            "objective":"goal",
+            "task":"stale boundary",
+            "context_summary":"Formal handoff written before newer work landed.",
+            "next_actions":["continue"],
+            "failures":[]
+        }),
+    );
+    stateroot(config.path(), home.path(), project.path())
+        .args(["handoff", "write", "--from", "claude", "--input", &input])
+        .assert()
+        .success();
+    patch_handoff_written_at(project.path(), "2026-08-12T08:00:00Z");
+    stateroot(config.path(), home.path(), project.path())
+        .args(["checkpoint", "--note", "newer work after the handoff"])
+        .assert()
+        .success();
+
+    // Fail closed: the refusal names the newer activity and the boundary.
+    let out = stateroot(config.path(), home.path(), project.path())
+        .args(["handoff", "accept", "--by", "codex"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).expect("utf8");
+    assert!(
+        stderr.contains("refusing to accept handoff #1"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("postdates the handoff boundary 2026-08-12T08:00:00Z"),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("--force"), "stderr: {stderr}");
+    assert!(acceptances(project.path()).is_empty());
+
+    // --force overrides and the record says so.
+    let out = stateroot(config.path(), home.path(), project.path())
+        .args(["handoff", "accept", "--by", "codex", "--force"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains("handoff accepted by codex"),
+        "stdout: {stdout}"
+    );
+    let records = acceptances(project.path());
+    assert_eq!(records.len(), 1, "records: {records:?}");
+    assert_eq!(records[0]["forced"], json!(true));
+}

@@ -457,3 +457,107 @@ fn plan_list_is_newest_first_with_active_pinned() {
     );
     assert!(lines[1].contains(&first), "oldest last: {stdout}");
 }
+
+#[test]
+fn plan_approval_pins_digest_and_body_drift_warns() {
+    use sha2::Digest as _;
+
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+
+    let id = record_plan(
+        config_home.path(),
+        user_home.path(),
+        project.path(),
+        "Pinned Plan",
+        "# Pinned Plan\n\n1. do the approved thing\n",
+    );
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["plan", "approve", &id])
+        .assert()
+        .success();
+
+    // The sidecar pins sha256 of the approved body.
+    let sidecar_path = project.path().join(format!(".stateroot/plans/{id}.json"));
+    let body_path = project.path().join(format!(".stateroot/plans/{id}.md"));
+    let sidecar: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&sidecar_path).expect("sidecar"))
+            .expect("sidecar json");
+    let digest = sidecar["approved_digest"]
+        .as_str()
+        .expect("approved_digest")
+        .to_string();
+    let body = std::fs::read(&body_path).expect("body");
+    assert_eq!(digest, format!("{:x}", sha2::Sha256::digest(&body)));
+
+    // No drift → no warning on show or in the digest.
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["plan", "show", &id])
+        .assert()
+        .success();
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).expect("utf8");
+    assert!(
+        !stderr.contains("plan body changed since approval"),
+        "stderr: {stderr}"
+    );
+
+    // An edit after approval: show warns (stderr), the digest warns in the
+    // Active Plan section.
+    std::fs::write(&body_path, "# Pinned Plan\n\nEDITED AFTER APPROVAL\n").expect("edit");
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["plan", "show", &id])
+        .assert()
+        .success();
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).expect("utf8");
+    assert!(
+        stderr.contains("plan body changed since approval"),
+        "stderr: {stderr}"
+    );
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["resume", "--force"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(stdout.contains("## Active Plan"), "digest: {stdout}");
+    assert!(
+        stdout.contains("plan body changed since approval"),
+        "digest: {stdout}"
+    );
+
+    // A pre-existing sidecar without approved_digest makes no drift claim,
+    // even though the body no longer matches anything on record.
+    let mut sidecar: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&sidecar_path).expect("sidecar"))
+            .expect("sidecar json");
+    sidecar
+        .as_object_mut()
+        .expect("object")
+        .remove("approved_digest");
+    std::fs::write(
+        &sidecar_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&sidecar).expect("json")
+        ),
+    )
+    .expect("legacy sidecar");
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["plan", "show", &id])
+        .assert()
+        .success();
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).expect("utf8");
+    assert!(
+        !stderr.contains("plan body changed since approval"),
+        "legacy stderr: {stderr}"
+    );
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["resume", "--force"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        !stdout.contains("plan body changed since approval"),
+        "legacy digest: {stdout}"
+    );
+}
