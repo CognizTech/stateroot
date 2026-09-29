@@ -114,3 +114,58 @@ fn doctor_oks_a_current_hook_binary() {
         "stdout: {stdout}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn doctor_surfaces_an_orphaned_update_journal_without_failing() {
+    let config_home = tempfile::tempdir().expect("config home");
+    std::fs::create_dir_all(config_home.path()).expect("config home");
+    let user_home = tempfile::tempdir().expect("user home");
+    let cwd = tempfile::tempdir().expect("cwd");
+    // The shape the updater leaves behind when it dies between parking the
+    // old binary and verifying the new one.
+    let mut journal = serde_json::json!({
+        "from_version": "0.1.9",
+        "to_version": "v0.2.0",
+        "started_at": "2026-09-29T01:02:03Z",
+        "status": "in_progress",
+    });
+    std::fs::write(
+        config_home.path().join("update-journal.json"),
+        serde_json::to_string_pretty(&journal).expect("json"),
+    )
+    .expect("journal");
+
+    let out = stateroot(config_home.path(), user_home.path(), cwd.path())
+        .arg("doctor")
+        .assert()
+        .success(); // an interrupted update is a warning, never a hard failure
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains("update interrupted (from 0.1.9 to v0.2.0 at 2026-09-29T01:02:03Z)"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("rerun `stateroot self-update`"),
+        "stdout: {stdout}"
+    );
+
+    // A completed rollback is a recovered failure, not an interruption.
+    journal["status"] = serde_json::json!("rolled_back");
+    journal["finished_at"] = serde_json::json!("2026-09-29T01:02:40Z");
+    std::fs::write(
+        config_home.path().join("update-journal.json"),
+        serde_json::to_string_pretty(&journal).expect("json"),
+    )
+    .expect("journal");
+    let out = stateroot(config_home.path(), user_home.path(), cwd.path())
+        .arg("doctor")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(!stdout.contains("update interrupted"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("previous binary restored"),
+        "stdout: {stdout}"
+    );
+}

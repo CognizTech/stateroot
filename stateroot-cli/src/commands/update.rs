@@ -742,7 +742,7 @@ pub async fn download_and_install_quiet(
         let _ = std::fs::remove_file(&tmp);
         return Ok(current_exe);
     }
-    let outcome = self_replace(&current_exe, &tmp)?;
+    let outcome = self_replace(&ctx.config_dir, &current_exe, &tmp, &info.tag)?;
     let _ = std::fs::remove_file(&tmp);
     let detail = match &outcome.old_version {
         Some(old) if old != &outcome.new_version => format!("{old} → {}", outcome.new_version),
@@ -1001,7 +1001,7 @@ pub async fn self_update(ctx: &Ctx, check_only: bool, tag: Option<&str>) -> anyh
 /// What a successful self-update did.
 #[derive(Debug)]
 pub struct SelfUpdateOutcome {
-    /// Version line of the replaced binary (when it answered `--version`).
+    /// Version line of the replaced binary (fingerprinted before the swap).
     pub old_version: Option<String>,
     /// Version line of the freshly installed binary.
     pub new_version: String,
@@ -1009,8 +1009,94 @@ pub struct SelfUpdateOutcome {
     pub installed_path: PathBuf,
 }
 
+/// Crash journal for the swap (`<config>/update-journal.json`). It lives in
+/// the global config home because self-update runs outside any project — a
+/// leftover `in_progress` journal means the process died between parking the
+/// old binary and verifying the new one, and `stateroot doctor` surfaces it.
+pub fn update_journal_path(config_dir: &Path) -> PathBuf {
+    config_dir.join("update-journal.json")
+}
+
+/// Best-effort by contract: a read-only config dir must never block or break
+/// the update itself (the rollback machinery protects the binary either way).
+fn journal_update(config_dir: &Path, from_version: &str, to_version: &str) {
+    let entry = json!({
+        "from_version": from_version,
+        "to_version": to_version,
+        "started_at": stateroot_core::local_store::now_rfc3339(),
+        "status": "in_progress",
+    });
+    if let Err(err) =
+        stateroot_core::safe_io::atomic_replace_json(&update_journal_path(config_dir), &entry)
+    {
+        tracing::warn!("could not write the update journal: {err}");
+    }
+}
+
+/// Rewrite the journal as a completed rollback: the swap failed cleanly and
+/// the previous binary is back, so the record stays visible without
+/// impersonating a mid-swap crash.
+fn journal_mark_rolled_back(config_dir: &Path) {
+    let path = update_journal_path(config_dir);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(mut journal) = serde_json::from_str::<Value>(&text) else {
+        return;
+    };
+    journal["status"] = json!("rolled_back");
+    journal["finished_at"] = json!(stateroot_core::local_store::now_rfc3339());
+    let _ = stateroot_core::safe_io::atomic_replace_json(&path, &journal);
+}
+
+fn journal_clear(config_dir: &Path) {
+    let _ = std::fs::remove_file(update_journal_path(config_dir));
+}
+
+/// Fail-closed identity check on the binary about to be replaced: it must
+/// answer `--version` with a `stateroot ` line. Anything else (a foreign
+/// tool renamed into place, a wrapper script, a corrupt install) is left
+/// completely untouched.
+fn fingerprint_current_exe(current_exe: &Path) -> anyhow::Result<String> {
+    match verify_binary(current_exe) {
+        Ok(line) if line.starts_with("stateroot ") => Ok(line),
+        Ok(line) => anyhow::bail!(
+            "refusing to replace {} — `--version` answered `{line}`, not a stateroot binary",
+            current_exe.display()
+        ),
+        Err(err) => anyhow::bail!(
+            "refusing to replace {} — the current binary does not answer `--version` ({err})",
+            current_exe.display()
+        ),
+    }
+}
+
+/// True when the freshly installed binary's version line matches the tag we
+/// set out to install. Non-semver tags (`nightly`) carry no version to
+/// confirm against — a successful readback is confirmation enough.
+fn version_confirms_tag(version_line: &str, tag: &str) -> bool {
+    let Some(expected) = parse_semver(tag) else {
+        return true;
+    };
+    let version = version_line
+        .strip_prefix("stateroot ")
+        .unwrap_or(version_line);
+    parse_semver(version) == Some(expected)
+}
+
 /// Replace `current_exe` with `new_binary`, rolling back on any failure.
-pub fn self_replace(current_exe: &Path, new_binary: &Path) -> anyhow::Result<SelfUpdateOutcome> {
+///
+/// Hardening contract (fail closed): the current binary is fingerprinted
+/// before anything in its directory is touched; the swap is journaled so a
+/// process death mid-swap is visible to `stateroot doctor`; and the journal
+/// is cleared only after the installed binary's `--version` readback
+/// confirms the target tag.
+pub fn self_replace(
+    config_dir: &Path,
+    current_exe: &Path,
+    new_binary: &Path,
+    to_version: &str,
+) -> anyhow::Result<SelfUpdateOutcome> {
     let current_exe = std::fs::canonicalize(current_exe)
         .with_context(|| format!("resolving {}", current_exe.display()))?;
     let new_binary = std::fs::canonicalize(new_binary)
@@ -1030,6 +1116,13 @@ pub fn self_replace(current_exe: &Path, new_binary: &Path) -> anyhow::Result<Sel
         .and_then(|n| n.to_str())
         .unwrap_or(file_name);
 
+    let old_version = fingerprint_current_exe(&current_exe)?;
+    journal_update(
+        config_dir,
+        old_version.trim_start_matches("stateroot "),
+        to_version,
+    );
+
     // Cleanup pass: delete stale `<stem>*.old*` siblings from previous runs.
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -1041,26 +1134,43 @@ pub fn self_replace(current_exe: &Path, new_binary: &Path) -> anyhow::Result<Sel
         }
     }
 
-    let old_version = version_of(&current_exe);
     let parked = park_target(dir, file_name);
-    rename_retrying(&current_exe, &parked).with_context(|| {
-        format!(
-            "could not rename {} → {} (is the install directory writable?)",
-            current_exe.display(),
-            parked.display()
-        )
-    })?;
+    if let Err(err) = rename_retrying(&current_exe, &parked) {
+        // The swap never started — a parked-failure journal would falsely
+        // read as an interruption to doctor.
+        journal_clear(config_dir);
+        return Err(err).with_context(|| {
+            format!(
+                "could not rename {} → {} (is the install directory writable?)",
+                current_exe.display(),
+                parked.display()
+            )
+        });
+    }
 
-    let outcome = install_and_verify(&current_exe, &new_binary, old_version);
+    let outcome =
+        install_and_verify(&current_exe, &new_binary, Some(old_version)).and_then(|outcome| {
+            if version_confirms_tag(&outcome.new_version, to_version) {
+                Ok(outcome)
+            } else {
+                Err(anyhow!(
+                    "installed binary reports `{}`, expected the {to_version} release",
+                    outcome.new_version
+                ))
+            }
+        });
     if let Err(err) = outcome {
         let _ = std::fs::remove_file(&current_exe);
         if let Err(rollback_err) = rename_retrying(&parked, &current_exe) {
+            // The park could not be restored: the journal stays in_progress —
+            // this genuinely IS the interrupted state doctor must surface.
             return Err(anyhow!(
                 "self-update failed ({err:#}) AND rollback failed ({rollback_err:#}) — \
                  the previous binary is parked at {}; restore it manually",
                 parked.display()
             ));
         }
+        journal_mark_rolled_back(config_dir);
         return Err(anyhow!(
             "self-update failed, previous binary restored: {err:#}"
         ));
@@ -1068,6 +1178,7 @@ pub fn self_replace(current_exe: &Path, new_binary: &Path) -> anyhow::Result<Sel
     let mut outcome = outcome?;
     outcome.installed_path = current_exe;
     let _ = std::fs::remove_file(&parked);
+    journal_clear(config_dir);
     Ok(outcome)
 }
 
@@ -1179,12 +1290,6 @@ fn verify_binary(path: &Path) -> Result<String, String> {
     Ok(text.lines().next().unwrap_or("").trim().to_string())
 }
 
-/// Version line of a runnable binary (None when it can't answer).
-fn version_of(path: &Path) -> Option<String> {
-    let version = verify_binary(path).ok();
-    version.filter(|v| !v.is_empty())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1264,25 +1369,35 @@ mod tests {
         Some(path)
     }
 
+    /// Executable stub answering `--version` with a `stateroot <version>`
+    /// line — the fingerprint gate refuses anything less.
+    #[cfg(unix)]
+    fn stateroot_stub(dir: &Path, name: &str, version: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\necho 'stateroot {version}'\n")).expect("stub");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        path
+    }
+
+    #[cfg(unix)]
     #[test]
     fn self_replace_happy_path_replaces_and_cleans_stale() {
         let dir = tempfile::tempdir().expect("tmp");
-        let installed = dir.path().join("stateroot.exe");
-        std::fs::write(&installed, b"OLD-CONTENT").expect("old exe");
+        let installed = stateroot_stub(dir.path(), "stateroot.exe", "0.1.0");
         let stale = dir.path().join("stateroot.exe.old-prev");
         std::fs::write(&stale, b"stale").expect("stale");
-        let Some(new_binary) = stub_binary(dir.path(), "new-stateroot.exe") else {
-            eprintln!("skipping: /bin/true unavailable");
-            return;
-        };
-        let outcome = self_replace(&installed, &new_binary).expect("self_replace");
+        let new_binary = stateroot_stub(dir.path(), "new-stateroot.exe", "0.2.0");
+        let outcome =
+            self_replace(dir.path(), &installed, &new_binary, "v0.2.0").expect("self_replace");
         assert_eq!(
             std::fs::read(&installed).expect("installed"),
             std::fs::read(&new_binary).expect("source")
         );
+        assert_eq!(outcome.old_version.as_deref(), Some("stateroot 0.1.0"));
+        assert_eq!(outcome.new_version, "stateroot 0.2.0");
         assert!(!dir.path().join("stateroot.exe.old").exists());
         assert!(!stale.exists());
-        let _ = outcome;
     }
 
     #[cfg(unix)]
@@ -1291,16 +1406,12 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().expect("tmp");
-        let installed = dir.path().join("stateroot");
-        std::fs::write(&installed, b"OLD-CONTENT").expect("old exe");
-        let Some(new_binary) = stub_binary(dir.path(), "update-download") else {
-            eprintln!("skipping: /bin/true unavailable");
-            return;
-        };
+        let installed = stateroot_stub(dir.path(), "stateroot", "0.1.0");
+        let new_binary = stateroot_stub(dir.path(), "update-download", "0.2.0");
         std::fs::set_permissions(&new_binary, std::fs::Permissions::from_mode(0o644))
             .expect("make download non-executable");
 
-        self_replace(&installed, &new_binary).expect("self_replace");
+        self_replace(dir.path(), &installed, &new_binary, "v0.2.0").expect("self_replace");
 
         let mode = std::fs::metadata(&installed)
             .expect("installed metadata")
@@ -1310,19 +1421,17 @@ mod tests {
         verify_binary(&installed).expect("installed binary must run");
     }
 
+    #[cfg(unix)]
     #[test]
     fn self_replace_bogus_binary_rolls_back() {
         let dir = tempfile::tempdir().expect("tmp");
-        let installed = dir.path().join("stateroot.exe");
-        std::fs::write(&installed, b"OLD-CONTENT").expect("old exe");
+        let installed = stateroot_stub(dir.path(), "stateroot.exe", "0.1.0");
         let bogus = dir.path().join("bogus.exe");
         std::fs::write(&bogus, b"definitely not an executable").expect("bogus");
-        let err = self_replace(&installed, &bogus).expect_err("must fail");
+        let err = self_replace(dir.path(), &installed, &bogus, "v0.2.0").expect_err("must fail");
         assert!(format!("{err:#}").contains("previous binary restored"));
-        assert_eq!(
-            std::fs::read(&installed).expect("installed"),
-            b"OLD-CONTENT"
-        );
+        let restored = std::fs::read_to_string(&installed).expect("installed");
+        assert!(restored.contains("stateroot 0.1.0"), "{restored}");
         assert!(!dir.path().join("stateroot.exe.old").exists());
     }
 
@@ -1331,12 +1440,108 @@ mod tests {
         let dir = tempfile::tempdir().expect("tmp");
         let installed = dir.path().join("stateroot.exe");
         std::fs::write(&installed, b"OLD-CONTENT").expect("old exe");
-        let err = self_replace(&installed, &installed).expect_err("must refuse");
+        let err =
+            self_replace(dir.path(), &installed, &installed, "v9.9.9").expect_err("must refuse");
         assert!(format!("{err:#}").contains("current executable itself"));
         assert_eq!(
             std::fs::read(&installed).expect("installed"),
             b"OLD-CONTENT"
         );
+        assert!(
+            !update_journal_path(dir.path()).exists(),
+            "refusal leaves no journal behind"
+        );
+    }
+
+    #[test]
+    fn self_replace_refuses_a_binary_that_cannot_answer() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let installed = dir.path().join("stateroot.exe");
+        std::fs::write(&installed, b"OLD-CONTENT").expect("old exe");
+        let new_binary = dir.path().join("new.exe");
+        std::fs::write(&new_binary, b"NEW-CONTENT").expect("new");
+        let err =
+            self_replace(dir.path(), &installed, &new_binary, "v9.9.9").expect_err("must refuse");
+        assert!(
+            format!("{err:#}").contains("refusing to replace"),
+            "{err:#}"
+        );
+        assert_eq!(
+            std::fs::read(&installed).expect("installed"),
+            b"OLD-CONTENT",
+            "an unverified actor is left completely untouched"
+        );
+        assert!(!update_journal_path(dir.path()).exists());
+        assert!(!dir.path().join("stateroot.exe.old").exists());
+    }
+
+    #[test]
+    fn self_replace_refuses_a_foreign_binary() {
+        let dir = tempfile::tempdir().expect("tmp");
+        // /bin/true answers `--version` (where it does) without a
+        // `stateroot ` prefix — a renamed foreign tool must never be parked.
+        let Some(foreign) = stub_binary(dir.path(), "stateroot.exe") else {
+            eprintln!("skipping: /bin/true unavailable");
+            return;
+        };
+        let Some(new_binary) = stub_binary(dir.path(), "new.exe") else {
+            eprintln!("skipping: /bin/true unavailable");
+            return;
+        };
+        let err =
+            self_replace(dir.path(), &foreign, &new_binary, "v9.9.9").expect_err("must refuse");
+        assert!(
+            format!("{err:#}").contains("refusing to replace"),
+            "{err:#}"
+        );
+        assert!(!update_journal_path(dir.path()).exists());
+        assert!(!dir.path().join("stateroot.exe.old").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn self_replace_writes_then_clears_the_journal_on_success() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let installed = stateroot_stub(dir.path(), "stateroot", "0.1.0");
+        let new_binary = stateroot_stub(dir.path(), "update-download", "0.2.0");
+        self_replace(dir.path(), &installed, &new_binary, "v0.2.0").expect("self_replace");
+        assert!(
+            !update_journal_path(dir.path()).exists(),
+            "journal cleared once the new binary confirms the target version"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn self_replace_marks_the_journal_rolled_back_when_the_new_binary_lies() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let installed = stateroot_stub(dir.path(), "stateroot", "0.1.0");
+        let wrong = stateroot_stub(dir.path(), "update-download", "9.9.9");
+        let err = self_replace(dir.path(), &installed, &wrong, "v0.2.0")
+            .expect_err("version mismatch must roll back");
+        assert!(
+            format!("{err:#}").contains("previous binary restored"),
+            "{err:#}"
+        );
+        let restored = std::fs::read_to_string(&installed).expect("restored");
+        assert!(restored.contains("stateroot 0.1.0"), "{restored}");
+        // Honest record: rolled back, not interrupted — the process finished.
+        let text = std::fs::read_to_string(update_journal_path(dir.path())).expect("journal kept");
+        let journal: Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(journal["status"], "rolled_back");
+        assert_eq!(journal["from_version"], "0.1.0");
+        assert_eq!(journal["to_version"], "v0.2.0");
+        assert!(journal["started_at"].as_str().is_some());
+        assert!(journal["finished_at"].as_str().is_some());
+    }
+
+    #[test]
+    fn version_confirmation_matches_semver_tags_and_passes_nightly() {
+        assert!(version_confirms_tag("stateroot 0.2.0", "v0.2.0"));
+        assert!(version_confirms_tag("stateroot 0.2.0", "0.2.0"));
+        assert!(!version_confirms_tag("stateroot 0.1.9", "v0.2.0"));
+        assert!(!version_confirms_tag("stateroot 0.1.10-dev.125", "v0.2.0"));
+        assert!(version_confirms_tag("stateroot 0.1.10-dev.125", "nightly"));
     }
 
     fn test_ctx(dir: &Path) -> crate::commands::Ctx {

@@ -31,6 +31,12 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
         hard: false,
     });
 
+    // Self-update crash journal (global config home, not the project store —
+    // self-update runs outside any project).
+    if let Some(check) = update_journal_check(&ctx.config_dir) {
+        checks.push(check);
+    }
+
     // Harness registry contract parses.
     match stateroot_core::skill_federation::load_registry() {
         Ok(reg) => checks.push(Check {
@@ -557,6 +563,56 @@ fn hook_binary_checks(home: &Path) -> Vec<Check> {
     checks
 }
 
+/// Self-update crash journal: the updater writes `<config>/update-journal.json`
+/// before parking the old binary and clears it only after the new binary's
+/// `--version` readback confirms the target. A leftover in-progress journal
+/// means the process died mid-swap — surface it (a warning, never a gate).
+fn update_journal_check(config_dir: &Path) -> Option<Check> {
+    let path = super::update::update_journal_path(config_dir);
+    let text = std::fs::read_to_string(&path).ok()?;
+    let label = "self-update".to_string();
+    let Ok(journal) = serde_json::from_str::<Value>(&text) else {
+        return Some(Check {
+            label,
+            ok: false,
+            detail: format!("update journal is unreadable — delete {}", path.display()),
+            hard: false,
+        });
+    };
+    let from = journal
+        .get("from_version")
+        .and_then(Value::as_str)
+        .unwrap_or("?");
+    let to = journal
+        .get("to_version")
+        .and_then(Value::as_str)
+        .unwrap_or("?");
+    let at = journal
+        .get("started_at")
+        .and_then(Value::as_str)
+        .unwrap_or("?");
+    // A completed rollback is a recovered failure, not an interruption — the
+    // record stays visible without crying wolf.
+    if journal.get("status").and_then(Value::as_str) == Some("rolled_back") {
+        return Some(Check {
+            label,
+            ok: true,
+            detail: format!(
+                "last update (from {from} to {to} at {at}) failed; previous binary restored"
+            ),
+            hard: false,
+        });
+    }
+    Some(Check {
+        label,
+        ok: false,
+        detail: format!(
+            "update interrupted (from {from} to {to} at {at}) — rerun `stateroot self-update`"
+        ),
+        hard: false,
+    })
+}
+
 /// Recursive directory size in bytes (best-effort; unreadable entries
 /// contribute zero).
 fn dir_size(path: &std::path::Path) -> u64 {
@@ -1006,5 +1062,68 @@ mod tests {
             "{}",
             checks[1].detail
         );
+    }
+
+    #[test]
+    fn update_journal_check_grades_interrupted_rolled_back_and_unreadable() {
+        let dir = tempfile::tempdir().expect("dir");
+        assert!(
+            update_journal_check(dir.path()).is_none(),
+            "no journal, no check"
+        );
+
+        let journal = |status: &str| {
+            let mut entry = json!({
+                "from_version": "0.1.9",
+                "to_version": "v0.2.0",
+                "started_at": "2026-09-29T01:02:03Z",
+            });
+            if !status.is_empty() {
+                entry["status"] = json!(status);
+            }
+            std::fs::write(
+                dir.path().join("update-journal.json"),
+                serde_json::to_string_pretty(&entry).expect("json"),
+            )
+            .expect("journal");
+        };
+
+        // Interrupted (explicit in_progress, and a status-less legacy journal).
+        for status in ["in_progress", ""] {
+            journal(status);
+            let check = update_journal_check(dir.path()).expect("check");
+            assert!(!check.ok, "status {status:?}");
+            assert!(!check.hard, "an interrupted update warns, never hard-fails");
+            assert!(
+                check
+                    .detail
+                    .contains("update interrupted (from 0.1.9 to v0.2.0 at 2026-09-29T01:02:03Z)"),
+                "{}",
+                check.detail
+            );
+            assert!(
+                check.detail.contains("stateroot self-update"),
+                "{}",
+                check.detail
+            );
+        }
+
+        // Rolled back: informational, never the crash warning.
+        journal("rolled_back");
+        let check = update_journal_check(dir.path()).expect("check");
+        assert!(check.ok, "{}", check.detail);
+        assert!(!check.detail.contains("interrupted"), "{}", check.detail);
+        assert!(
+            check.detail.contains("previous binary restored"),
+            "{}",
+            check.detail
+        );
+
+        // Unreadable journal: warn, don't crash.
+        std::fs::write(dir.path().join("update-journal.json"), b"not json").expect("journal");
+        let check = update_journal_check(dir.path()).expect("check");
+        assert!(!check.ok);
+        assert!(!check.hard);
+        assert!(check.detail.contains("unreadable"), "{}", check.detail);
     }
 }
