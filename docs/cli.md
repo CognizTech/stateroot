@@ -261,12 +261,25 @@ in the prompt path (token razor).
   currently active plan to `approved`, recorded in its notes — never
   silent.
 - **Digest** — resume renders `## Active Plan` before `## Plan State`:
-  title, status, provenance, the `.md` path, and a directive. Approved or
-  active → the executor directive ("Execute it as written; do not re-plan
-  or re-explore"); only a draft → the planner directive ("refine the plan
-  file; do not implement yet"). The transcript `## Plan State` remains as
-  the fallback tier and is suppressed while a central plan exists. The plan
-  body never enters the digest — the executor reads one file.
+  title, status, provenance, the `.md` path, and a state-aware directive.
+  Unfinished bound work → the executor directive ("Execute it as written;
+  do not re-plan or re-explore"); structurally complete work (all
+  plan-bound todos done, or an open plan-closure obligation) → the closure
+  directive ("do not restart implementation; record completion evidence or
+  state concrete remaining work"); an approved plan with no executor →
+  "assign or claim execution"; only a draft → the planner directive
+  ("refine the plan file; do not implement yet"). The transcript
+  `## Plan State` remains as the fallback tier and is suppressed while a
+  central plan exists. The plan body never enters the digest — the
+  executor reads one file.
+- **Completion requires evidence** — `stateroot plan done <id> --evidence
+  "…"` first creates/verifies a completion snapshot, then records an
+  additive completion receipt (completion time, actor, exact plan-body
+  digest, completion root, evidence) and transitions the plan in one
+  command; any failure leaves the plan active. Plans are never
+  auto-completed: all-completed plan-bound todos open a plan-closure
+  obligation instead, and the plan stays active until the explicit
+  receipt.
 - **Approval pins the body** — `plan approve` records `approved_digest`
   (sha256 of the plan body) in the sidecar. When the body on disk no longer
   matches, `## Active Plan` warns `**Warning: plan body changed since
@@ -279,6 +292,62 @@ in the prompt path (token razor).
 - **v1 has no tool-gating** — hooks do not deny write tools while a draft
   exists. Enforcement is a policy decision for the user (optional hook
   hardening later); StateRoot ships the strings, not a runtime cage.
+
+## `stateroot obligation` — durable, federated obligations
+
+Explicit future-work items (campaign reviews, plan-closure receipts,
+scheduled follow-ups) shared across harnesses through the project store:
+
+- `add --task TEXT [--due RFC3339 | --in DURATION] [--assign HARNESS]
+  [--plan ID] [--operation-id ID]` — create. One-shot due dates only;
+  milestone series use multiple obligations. `--in` accepts `30m`, `24h`,
+  `7d`, `2w` and compounds (`1h30m`). The operation id makes retries
+  idempotent: the same key returns the existing obligation.
+- `list [--all] [--json]`, `show ID` — inspect. Corrupt event lines are
+  preserved and counted, never silently dropped.
+- `done ID --evidence TEXT` / `snooze ID --until RFC3339` / `cancel ID
+  --reason TEXT` — lifecycle. States: `open | snoozed | done | cancelled`;
+  a lapsed snooze is open again. UUIDv7 ids (prefix allowed), UTC
+  timestamps.
+
+Definitions live at `.stateroot/obligations/<id>.json`; lifecycle changes
+append to `.stateroot/obligations/events.jsonl` (merge-union, synced).
+
+## `stateroot service` — the background continuity service
+
+A deterministic per-user resident process reconciles every registered
+project on the `[continuity] poll_interval_seconds` cadence (default 30s):
+due obligations, plan lifecycle contradictions, handoff freshness,
+boundary-journal health — one atomic machine-local projection per project
+at `.stateroot/local/projections/continuity.v1.json`. It never embeds or
+runs an AI agent.
+
+- `service install|remove|start|stop|restart|status [--json]|run` —
+  registration is a per-user systemd service (Linux), LaunchAgent (macOS),
+  or logon Scheduled Task (native Windows); under WSL a functional
+  user-systemd wins, otherwise a Windows-host task launches the service
+  through the current WSL distribution. `stateroot install`, self-update
+  rearm, and uninstall manage it automatically. When OS registration is
+  unavailable the service runs detached, hooks/CLI keep reconciling on
+  activity, and `doctor` reports degraded background coverage.
+- Single-instance per user (lock + heartbeat in the config dir), capped
+  log, per-project locks. `[continuity] enabled = false` disables the
+  runtime; `[continuity] synthesis = true` (requires the existing
+  synthesis credentials) may attach one hash-idempotent, provenance-
+  labeled advisory line — advisory-only, never state-changing.
+
+## `## Needs Attention` — the push section
+
+Injected digests (resume + hooks) carry `## Needs Attention` before the
+plan section: the highest-priority five derived items plus an overflow
+count. Items are deterministic — due obligations, a structurally complete
+active plan awaiting its completion receipt, an approved plan with no
+executor, a routed handoff awaiting acceptance or one made stale by newer
+activity, a failed/lost delegation against an open plan, boundary-journal
+jobs parked for manual attention, an unhealthy continuity service,
+registry projects missing from disk. Attention IDs are stable
+(`<kind>:<entity>`); nothing is derived from keyword classifiers or model
+calls. `stateroot status` renders the same projection (human or `--json`).
 
 ## `stateroot handoff` — write flags and accept gates
 

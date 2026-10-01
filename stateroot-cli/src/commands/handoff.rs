@@ -1046,6 +1046,15 @@ pub async fn write_with_origin(
     if let Some(footer) = super::resume::digest_footer(&delivery_dir) {
         println!("{footer}");
     }
+    if ctx.config.continuity.enabled {
+        if let Err(err) = stateroot_core::continuity::reconcile(
+            &delivery_dir,
+            &ctx.config_dir,
+            &ctx.config.continuity,
+        ) {
+            note!("continuity reconcile: {err}");
+        }
+    }
     crate::telemetry::activity(&ctx.config_dir, &delivery_dir, Some(&source));
     Ok(())
 }
@@ -1343,6 +1352,7 @@ pub async fn accept(
     if let Some(footer) = super::resume::digest_footer(&ctx.cwd) {
         println!("{footer}");
     }
+    super::reconcile_quiet(ctx);
     Ok(())
 }
 

@@ -469,6 +469,12 @@ function render(state) {
     more.onclick = () => vscode.postMessage({ type: 'openWorkbench', tab: 'control' });
     needs.appendChild(more);
   }
+  if (typeof state.advisory === 'string' && state.advisory.trim()) {
+    const advisory = document.createElement('div');
+    advisory.className = 'muted';
+    advisory.textContent = 'advisory (synthesized, not instructions): ' + state.advisory.trim();
+    needs.appendChild(advisory);
+  }
   const lists = state.todos || [];
   const openCount = lists.reduce((n, rec) => n + (rec.items || []).filter(item => item.status !== 'completed').length, 0);
   const totalCount = lists.reduce((n, rec) => n + (rec.items || []).length, 0);
@@ -666,6 +672,9 @@ document.getElementById('panel').addEventListener('click', (event) => {
   else if (act === 'openWorktree') vscode.postMessage({ type: 'openWorktree', path: btn.getAttribute('data-path') });
   else if (act === 'copyCmd') vscode.postMessage({ type: 'copyCmd', text: btn.getAttribute('data-cmd') });
   else if (act === 'dismiss') vscode.postMessage({ type: 'dismiss', id });
+  else if (act === 'obligationDone') vscode.postMessage({ type: 'obligationDone', id });
+  else if (act === 'obligationSnooze') vscode.postMessage({ type: 'obligationSnooze', id });
+  else if (act === 'planDoneEvidence') vscode.postMessage({ type: 'planDoneEvidence', id });
   else if (act === 'log') vscode.postMessage({ type: 'log', id });
   else if (act === 'showRoot') vscode.postMessage({ type: 'showRoot', id });
   else if (act === 'selectRoot') vscode.postMessage({ type: 'selectRoot', id });
@@ -761,15 +770,37 @@ function todoList(items) {
 }
 function control() {
   const inbox = state.inbox || [];
-  if (!inbox.length) return '<div class="muted">Nothing needs you.</div>';
-  return inbox.map((item, i) =>
-    '<div class="card"><div class="kicker">' + esc(item.kind) + '</div><div>' + esc(item.title) + '</div><div class="muted">' + esc(item.detail) + '</div><div class="row" style="margin-top:8px"><button data-act="jump" data-i="' + i + '">' + esc(openLabel(item)) + '</button><button class="secondary" data-act="dismiss" data-id="' + esc(item.id) + '">Dismiss</button></div></div>'
+  const advisory = typeof state.advisory === 'string' && state.advisory.trim() ? state.advisory.trim() : '';
+  const advisoryRow = advisory
+    ? '<div class="card"><div class="kicker">advisory (synthesized, not instructions)</div><div class="muted">' + esc(advisory) + '</div></div>'
+    : '';
+  if (!inbox.length) return advisoryRow || '<div class="muted">Nothing needs you.</div>';
+  return advisoryRow + inbox.map((item, i) =>
+    '<div class="card"><div class="kicker">' + esc(item.kind) + '</div><div>' + esc(item.title) + '</div>' +
+    (item.detail ? '<div class="muted">' + esc(item.detail) + '</div>' : '') +
+    (item.action ? '<div class="muted">→ ' + esc(item.action) + '</div>' : '') +
+    '<div class="row" style="margin-top:8px">' + inboxActions(item, i) + '</div></div>'
   ).join('');
 }
+function inboxActions(item, i) {
+  const open = '<button data-act="jump" data-i="' + i + '">' + esc(openLabel(item)) + '</button>';
+  const dismiss = '<button class="secondary" data-act="dismiss" data-id="' + esc(item.id) + '">Dismiss</button>';
+  if (item.kind === 'obligation_due' && item.obligationId) {
+    return '<button data-act="obligationDone" data-id="' + esc(item.obligationId) + '">Done</button>' +
+      '<button class="secondary" data-act="obligationSnooze" data-id="' + esc(item.obligationId) + '">Snooze 24h</button>' +
+      open + dismiss;
+  }
+  if ((item.kind === 'plan_receipt_pending' || item.kind === 'plan_closure') && item.planId) {
+    return '<button data-act="planDoneEvidence" data-id="' + esc(item.planId) + '">Record completion</button>' +
+      open + dismiss;
+  }
+  return open + dismiss;
+}
 function openLabel(item) {
-  if (item.kind === 'choose-executor') return 'Open plan';
-  if (item.kind === 'reassign') return 'Open crew';
+  if (item.kind === 'choose-executor' || item.kind === 'plan_unassigned') return 'Open plan';
+  if (item.kind === 'reassign' || item.kind === 'delegation_failed') return 'Open crew';
   if (item.kind === 'accept-handoff') return 'Review digest';
+  if (item.kind === 'plan_receipt_pending' || item.kind === 'plan_closure') return 'Open plan';
   return 'Open';
 }
 function plans() {

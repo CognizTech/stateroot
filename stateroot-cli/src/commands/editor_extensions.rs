@@ -451,7 +451,7 @@ fn rank_wsl_candidates(paths: &mut [PathBuf]) {
 }
 
 /// True on Windows Subsystem for Linux (Linux kernel, Windows host).
-fn is_wsl() -> bool {
+pub fn is_wsl() -> bool {
     if !cfg!(target_os = "linux") {
         return false;
     }

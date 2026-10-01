@@ -41,6 +41,7 @@ pub fn run(ctx: &Ctx, note_text: &str, files: &[String]) -> anyhow::Result<()> {
     if let Some(footer) = super::resume::digest_footer(&ctx.cwd) {
         println!("{footer}");
     }
+    super::reconcile_quiet(ctx);
     Ok(())
 }
 

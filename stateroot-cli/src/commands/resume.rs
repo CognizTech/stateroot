@@ -88,17 +88,32 @@ pub(crate) fn central_plan_section(project_dir: Option<&Path>) -> Option<String>
         }
     }
     section.push('\n');
-    match plan.status() {
-        stateroot_core::plans::PlanStatus::Approved | stateroot_core::plans::PlanStatus::Active => {
-            section.push_str(&format!(
-                "\nAn {} plan exists at `.stateroot/plans/{}.md`. Execute it as written; do not re-plan or re-explore.\n\n",
-                plan.status, plan.id
-            ));
-        }
-        _ => {
+    let directive = project_dir
+        .map(|dir| stateroot_core::continuity::plan_directive(dir, &plan))
+        .unwrap_or(stateroot_core::continuity::PlanDirective::Execute);
+    match directive {
+        stateroot_core::continuity::PlanDirective::Plan => {
             section.push_str(&format!(
                 "\nA draft plan is being authored at `.stateroot/plans/{}.md` — refine the plan file; do not implement yet.\n\n",
                 plan.id
+            ));
+        }
+        stateroot_core::continuity::PlanDirective::Close => {
+            section.push_str(&format!(
+                "\nThe {} plan at `.stateroot/plans/{}.md` is structurally complete. Do not restart implementation; record completion evidence (`stateroot plan done {} --evidence \"…\"`) or state concrete remaining work.\n\n",
+                plan.status, plan.id, plan.id
+            ));
+        }
+        stateroot_core::continuity::PlanDirective::Assign => {
+            section.push_str(&format!(
+                "\nAn approved plan exists at `.stateroot/plans/{}.md` with no executor — assign or claim execution (activate it, or `stateroot delegate --to <harness>`).\n\n",
+                plan.id
+            ));
+        }
+        stateroot_core::continuity::PlanDirective::Execute => {
+            section.push_str(&format!(
+                "\nAn {} plan exists at `.stateroot/plans/{}.md`. Execute it as written; do not re-plan or re-explore.\n\n",
+                plan.status, plan.id
             ));
         }
     }
@@ -113,6 +128,17 @@ pub(crate) fn central_plan_section(project_dir: Option<&Path>) -> Option<String>
         }
     }
     Some(section)
+}
+
+/// "## Needs Attention" — the deterministic continuity push section, read
+/// from the machine-local projection the last reconcile wrote (resume/hook
+/// boundaries reconcile before assembling the digest). Absent when nothing
+/// needs attention; a hash-current synthesis advisory may trail as one
+/// labeled line. Placed before the plan section: obligations outrank work.
+pub(crate) fn needs_attention_section(project_dir: &Path) -> Option<String> {
+    let assessment = stateroot_core::continuity::read_projection(project_dir)?;
+    let advisory = stateroot_core::continuity::current_advisory(project_dir, &assessment);
+    stateroot_core::continuity::needs_attention_markdown(&assessment, advisory.as_deref())
 }
 
 /// "## Shared Capabilities" — the pooled reference-only capabilities another
@@ -346,8 +372,30 @@ pub fn render_handoff_digest_full(
             .and_then(|value| value.as_str())
             .unwrap_or("approved");
         if !id.is_empty() {
+            // State-aware directive: a structurally complete plan must not
+            // read "execute it as written" (the Telemetry-v2 poison).
+            let directive = project_dir
+                .and_then(|dir| stateroot_core::plans::load(dir, id))
+                .map(|(meta, _)| {
+                    project_dir
+                        .map(|dir| stateroot_core::continuity::plan_directive(dir, &meta))
+                        .unwrap_or(stateroot_core::continuity::PlanDirective::Execute)
+                });
+            let instruction = match directive {
+                Some(stateroot_core::continuity::PlanDirective::Close) => {
+                    "It is structurally complete — do not restart implementation; record completion evidence (`stateroot plan done <id> --evidence \"…\"`) or state concrete remaining work."
+                        .to_string()
+                }
+                Some(stateroot_core::continuity::PlanDirective::Assign) => {
+                    "It has no executor — assign or claim execution.".to_string()
+                }
+                Some(stateroot_core::continuity::PlanDirective::Plan) => {
+                    "It is still a draft — refine the plan file; do not implement yet.".to_string()
+                }
+                _ => "Execute it as written; do not re-plan or re-explore.".to_string(),
+            };
             out.push_str(&format!(
-                "## Assigned Plan\n\n**{title}** ({status}) at `.stateroot/plans/{id}.md`. Execute it as written; do not re-plan or re-explore.\n\n"
+                "## Assigned Plan\n\n**{title}** ({status}) at `.stateroot/plans/{id}.md`. {instruction}\n\n"
             ));
         }
     }
@@ -377,6 +425,10 @@ pub fn render_handoff_digest_full(
         out.push_str(&format!("## Current Phase\n\n{phase}\n\n"));
     }
     if let Some(section) = project_dir.and_then(latest_activity_section) {
+        out.push_str(&section);
+    }
+    // Push before pull: derived obligations/attention outrank the work view.
+    if let Some(section) = project_dir.and_then(needs_attention_section) {
         out.push_str(&section);
     }
     // The authoritative plan tier: the central plan store as pointer +
@@ -1073,6 +1125,11 @@ skipping duplicate. If this session has no digest in context, pass --force to re
         }
         None => {
             out.push_str("(no handoff yet — write one with `stateroot handoff write`)\n");
+            // Push before pull, even before the first handoff.
+            if let Some(section) = needs_attention_section(&ctx.cwd) {
+                out.push('\n');
+                out.push_str(&section);
+            }
             // A plan may exist before any handoff (plan/implement split):
             // the planner/executor directive must still surface.
             if let Some(section) = central_plan_section(Some(&ctx.cwd)) {
@@ -1433,16 +1490,35 @@ mod tests {
             out.contains("**Ship It** (approved) — planned by claude"),
             "out: {out}"
         );
-        assert!(
-            out.contains("Execute it as written; do not re-plan or re-explore"),
-            "out: {out}"
-        );
+        // State-aware directive: an approved plan with no executor pushes
+        // assignment, not execution.
+        assert!(out.contains("assign or claim execution"), "out: {out}");
         assert!(
             out.contains(&format!(".stateroot/plans/{}.md", meta.id)),
             "out: {out}"
         );
         assert!(!out.contains("## Plan State"), "out: {out}");
         assert!(!out.contains("BODY-SECRET-NEVER-IN-DIGEST"), "out: {out}");
+
+        // An executor on record flips the directive back to execution.
+        let delegations = dir.path().join(".stateroot/delegations");
+        std::fs::create_dir_all(&delegations).expect("delegations dir");
+        std::fs::write(
+            delegations.join("d1.json"),
+            serde_json::json!({
+                "schema": "stateroot.delegation.v2",
+                "id": "d1",
+                "plan_id": meta.id,
+                "outcome": "completed",
+            })
+            .to_string(),
+        )
+        .expect("delegation");
+        let out = render_handoff_digest_full(&packet, true, &[], None, Some(dir.path()));
+        assert!(
+            out.contains("Execute it as written; do not re-plan or re-explore"),
+            "out: {out}"
+        );
 
         stateroot_core::todo_federation::upsert_plan_bound(
             dir.path(),

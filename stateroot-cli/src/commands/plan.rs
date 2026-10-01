@@ -165,6 +165,7 @@ fn transition(ctx: &Ctx, id: &str, to: PlanStatus) -> anyhow::Result<()> {
     }
     let actor = harness(ctx, None);
     episodic(ctx, &format!("plan {} {status} by {actor}", meta.id))?;
+    super::reconcile_quiet(ctx);
     Ok(())
 }
 
@@ -178,9 +179,47 @@ pub fn activate(ctx: &Ctx, id: &str) -> anyhow::Result<()> {
     transition(ctx, id, PlanStatus::Active)
 }
 
-/// Run `stateroot plan done <id>`.
-pub fn done(ctx: &Ctx, id: &str) -> anyhow::Result<()> {
-    transition(ctx, id, PlanStatus::Done)
+/// Run `stateroot plan done <id> --evidence "…"` — the evidence-bearing
+/// completion transaction: completion snapshot first, then receipt +
+/// lifecycle transition in one command; any failure leaves the plan active.
+pub fn done(ctx: &Ctx, id: &str, evidence: &str, from: Option<&str>) -> anyhow::Result<()> {
+    ctx.require_project()?;
+    let actor = harness(ctx, from);
+    // 1. Completion snapshot: capture the state of the work being closed.
+    //    Failure here (or an unreadable plan body later) aborts before any
+    //    lifecycle mutation.
+    let snap =
+        stateroot_core::roots::snap_if_changed(&ctx.cwd, &actor, "plan completion snapshot", None);
+    let completion_root = match snap {
+        Ok(stateroot_core::roots::SnapOutcome::Unchanged { root }) => Some(root),
+        Ok(stateroot_core::roots::SnapOutcome::Created(manifest, _)) => {
+            (!manifest.id.is_empty()).then_some(manifest.id)
+        }
+        Err(err) => {
+            note!("completion snapshot failed ({err}) — aborting; plan stays unchanged");
+            return Err(anyhow::anyhow!("completion snapshot failed: {err}"));
+        }
+    };
+    // 2. Receipt + transition.
+    let meta = plans::complete(&ctx.cwd, id, evidence, &actor, completion_root)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    println!("plan {} → done", meta.id);
+    if let Some(receipt) = &meta.completion_receipt {
+        println!(
+            "  receipt: {} by {} · body {}",
+            receipt.completed_at,
+            receipt.completed_by,
+            &receipt.body_digest[..12.min(receipt.body_digest.len())]
+        );
+        if let Some(root) = &receipt.completion_root {
+            println!("  root:    {}", &root[..12.min(root.len())]);
+        }
+    }
+    // 3. The plan-closure obligation resolves with the same evidence.
+    stateroot_core::obligations::resolve_plan_closure(&ctx.cwd, &meta.id, evidence, &actor);
+    episodic(ctx, &format!("plan {} done by {actor}", meta.id))?;
+    super::reconcile_quiet(ctx);
+    Ok(())
 }
 
 /// Run `stateroot plan abandon <id>`.
@@ -205,9 +244,9 @@ pub fn sync(ctx: &Ctx) -> anyhow::Result<()> {
             any = true;
             println!("updated {line}");
         }
-        for line in &report.completed {
+        for line in &report.closure_obligations {
             any = true;
-            println!("completed {line}");
+            println!("closure-obligation {line}");
         }
         for line in &report.notes {
             super::note!("plan sync: {line}");

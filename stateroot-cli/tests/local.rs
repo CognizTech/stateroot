@@ -287,7 +287,13 @@ fn status_and_doctor_are_local() {
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-    assert!(stdout.contains("all local checks pass"), "doctor: {stdout}");
+    // The continuity service is not registered in a hermetic test env —
+    // degraded background coverage is a counted soft warning now, and
+    // doctor says so honestly instead of claiming all checks pass.
+    assert!(
+        stdout.contains("checks pass with") && stdout.contains("warning"),
+        "doctor: {stdout}"
+    );
 }
 
 #[test]

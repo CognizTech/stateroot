@@ -15,6 +15,7 @@ pub mod active_harness;
 pub mod blocks;
 pub mod checkpoint;
 pub mod compiler;
+pub mod continuity_synthesis;
 pub mod delegate;
 pub mod detached;
 pub mod doctor;
@@ -35,6 +36,7 @@ pub mod learnings_reader;
 pub mod mcp;
 pub mod mcp_stdio;
 pub mod memory;
+pub mod obligation;
 pub mod observations;
 pub mod persona;
 pub mod plan;
@@ -45,6 +47,7 @@ pub mod resume;
 pub mod roots;
 pub mod rules;
 pub mod seed;
+pub mod service;
 pub mod session;
 pub mod setup;
 pub mod skill;
@@ -155,5 +158,19 @@ pub fn truncate(text: &str, max: usize) -> String {
         let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
         out.push('…');
         out
+    }
+}
+
+/// Run the deterministic continuity reconciliation after a state mutation.
+/// Best-effort: reconciliation never breaks the mutation that triggered it,
+/// and it only runs inside a project with continuity enabled.
+pub fn reconcile_quiet(ctx: &Ctx) {
+    if !ctx.config.continuity.enabled || !local_store::is_stateroot_dir(&ctx.cwd) {
+        return;
+    }
+    if let Err(err) =
+        stateroot_core::continuity::reconcile(&ctx.cwd, &ctx.config_dir, &ctx.config.continuity)
+    {
+        note!("continuity reconcile: {err}");
     }
 }

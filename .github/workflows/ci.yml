@@ -95,10 +95,10 @@ jobs:
               cargo test -p stateroot-cli --test roots --test delegate
               ;;
             cli-b)
-              cargo test -p stateroot-cli --test digest_delivery --test digest_bounds --test digest_contract --test local --test session --test finalize_journal
+              cargo test -p stateroot-cli --test digest_delivery --test digest_bounds --test digest_contract --test local --test session --test finalize_journal --test obligation --test continuity
               ;;
             cli-c)
-              cargo test -p stateroot-cli --test doctor_hooks --test editor_extensions --test ext --test handoff --test handoff_binding --test identity --test init_seed --test m3 --test m4 --test memory_federation --test persona_scheduler --test plan --test projects --test remove --test soul_sync --test telemetry --test uninstall --test update
+              cargo test -p stateroot-cli --test doctor_hooks --test editor_extensions --test ext --test handoff --test handoff_binding --test identity --test init_seed --test m3 --test m4 --test memory_federation --test persona_scheduler --test plan --test projects --test remove --test service --test soul_sync --test telemetry --test uninstall --test update
               ;;
           esac
 
@@ -106,7 +106,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sharded=" roots delegate digest_delivery digest_bounds digest_contract finalize_journal local session doctor_hooks editor_extensions ext handoff handoff_binding identity init_seed m3 m4 memory_federation persona_scheduler plan projects remove soul_sync telemetry uninstall update "
+          sharded=" roots delegate digest_delivery digest_bounds digest_contract finalize_journal local session doctor_hooks editor_extensions ext handoff handoff_binding identity init_seed m3 m4 memory_federation persona_scheduler plan projects remove soul_sync telemetry uninstall update obligation continuity service "
           for f in stateroot-cli/tests/*.rs; do
             name=$(basename "$f" .rs)
             case "$sharded" in

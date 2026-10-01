@@ -5,17 +5,24 @@ import {
   type HandoffPacket,
   type PlanMeta,
 } from "./store";
+import type { AttentionItem, ContinuityProjection } from "./continuity";
 
 export type InboxTab = "plans" | "crew" | "control";
 
 export interface InboxItem {
   id: string;
-  kind: "choose-executor" | "reassign" | "accept-handoff";
+  /** Derived kinds (choose-executor/reassign/accept-handoff) or a projection
+   * attention kind verbatim (obligation_due, handoff_routed, …). */
+  kind: string;
   title: string;
   detail: string;
   tab: InboxTab;
   planId?: string;
   delegationId?: string;
+  obligationId?: string;
+  handoffSeq?: number;
+  /** The CLI's concrete next action, when the projection carries one. */
+  action?: string;
 }
 
 export function assembleInbox(input: {
@@ -24,6 +31,7 @@ export function assembleInbox(input: {
   handoff?: HandoffPacket;
   thisHarness?: string;
   dismissed?: readonly string[];
+  continuity?: ContinuityProjection;
 }): InboxItem[] {
   const items: InboxItem[] = [];
   const thisHarness = input.thisHarness ?? "cursor";
@@ -77,7 +85,93 @@ export function assembleInbox(input: {
     }
   }
 
-  return items.filter((item) => !dismissed.has(item.id));
+  return mergeContinuity(items, input.continuity).filter((item) => !dismissed.has(item.id));
+}
+
+/** Which workbench tab a projection attention item opens. */
+export function continuityItemTab(item: AttentionItem): InboxTab {
+  switch (item.kind) {
+    case "plan_receipt_pending":
+    case "plan_closure":
+    case "plan_unassigned":
+      return "plans";
+    case "delegation_failed":
+      return "crew";
+    default:
+      return "control";
+  }
+}
+
+export function continuityInboxItem(item: AttentionItem): InboxItem {
+  return {
+    id: item.id,
+    kind: item.kind,
+    title: item.title,
+    detail: item.detail,
+    tab: continuityItemTab(item),
+    planId: item.plan_id,
+    delegationId: item.delegation_id,
+    obligationId: item.obligation_id,
+    handoffSeq: item.handoff_seq,
+    action: item.action,
+  };
+}
+
+/** Fold the CLI's continuity projection into the derived inbox. The
+ * projection is the CLI's single assessment, so its items win over the
+ * extension's local derivations of the same evidence (routed/stale handoff
+ * over accept-handoff, failed delegation over reassign, plan attention over
+ * choose-executor). */
+export function mergeContinuity(
+  derived: InboxItem[],
+  continuity?: ContinuityProjection
+): InboxItem[] {
+  const attention = continuity?.attention ?? [];
+  if (!attention.length) {
+    return derived;
+  }
+  const projected: InboxItem[] = [];
+  const seen = new Set<string>();
+  for (const item of attention) {
+    if (seen.has(item.id)) {
+      continue;
+    }
+    seen.add(item.id);
+    projected.push(continuityInboxItem(item));
+  }
+  const superseded = new Set<string>();
+  for (const item of projected) {
+    if (item.kind === "handoff_routed" || item.kind === "handoff_stale") {
+      for (const row of derived) {
+        if (row.kind === "accept-handoff") {
+          superseded.add(row.id);
+        }
+      }
+    } else if (item.kind === "delegation_failed" && item.delegationId) {
+      for (const row of derived) {
+        if (
+          row.kind === "reassign" &&
+          row.delegationId &&
+          (row.delegationId.startsWith(item.delegationId) ||
+            item.delegationId.startsWith(row.delegationId))
+        ) {
+          superseded.add(row.id);
+        }
+      }
+    } else if (
+      (item.kind === "plan_receipt_pending" ||
+        item.kind === "plan_closure" ||
+        item.kind === "plan_unassigned") &&
+      item.planId
+    ) {
+      for (const row of derived) {
+        if (row.kind === "choose-executor" && row.planId === item.planId) {
+          superseded.add(row.id);
+        }
+      }
+    }
+  }
+  return [...projected, ...derived.filter((row) => !superseded.has(row.id))];
 }
 
 export function isClosedPlanStatus(status: string): boolean {

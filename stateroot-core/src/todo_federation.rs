@@ -19,7 +19,6 @@ use serde_json::Value;
 
 use crate::local_store::{self, now_rfc3339};
 use crate::path_identity;
-use crate::plans::{self, PlanStatus};
 
 /// Schema tag on a todo record.
 pub const SCHEMA_TODO_V1: &str = "stateroot.todo.v1";
@@ -254,26 +253,91 @@ pub fn upsert_plan_bound(
     )
 }
 
-/// Draft → approved → done, or approved/active → done. Terminal no-op.
-/// Notes get `auto: all todos completed`.
-pub fn complete_plan(project_dir: &Path, plan_id: &str) -> Result<bool, String> {
-    let Some((meta, _)) = plans::load(project_dir, plan_id) else {
-        return Ok(false);
+// ---------------------------------------------------------------------
+// verified session-to-plan bindings
+// ---------------------------------------------------------------------
+//
+// When a harness receives a plan-bearing handoff (digest delivery marks the
+// receipt), the (harness, session) pair binds to that plan. Todo updates
+// from Codex/Kimi/Claude then attach to the plan STRUCTURALLY — never by
+// inferring plan membership from task wording.
+
+/// Bindings dir, relative to `.stateroot/`.
+pub const BINDINGS_REL: &str = "plan-bindings";
+/// Schema tag on a binding record.
+pub const SCHEMA_BINDING_V1: &str = "stateroot.plan-binding.v1";
+
+/// One verified session-to-plan binding.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PlanBinding {
+    pub schema_version: String,
+    pub harness: String,
+    pub session_id: String,
+    pub plan_id: String,
+    pub bound_at: String,
+    /// Where the binding was verified (`hook-delivery` | `resume`).
+    pub source: String,
+}
+
+fn binding_path(project_dir: &Path, harness: &str, session_id: &str) -> PathBuf {
+    local_store::root(project_dir)
+        .join(BINDINGS_REL)
+        .join(sanitize_key(harness))
+        .join(format!("{}.json", sanitize_key(session_id)))
+}
+
+/// Record (or refresh) a binding. Only approved/active plans bind — a
+/// verified binding must point at executable work.
+pub fn record_binding(
+    project_dir: &Path,
+    harness: &str,
+    session_id: &str,
+    plan_id: &str,
+    source: &str,
+) -> Result<PlanBinding, String> {
+    let Some((meta, _)) = crate::plans::load(project_dir, plan_id) else {
+        return Err(format!("cannot bind to unknown plan `{plan_id}`"));
     };
-    match meta.status() {
-        PlanStatus::Done | PlanStatus::Abandoned => Ok(false),
-        PlanStatus::Draft => {
-            plans::transition(project_dir, plan_id, PlanStatus::Approved)?;
-            plans::transition(project_dir, plan_id, PlanStatus::Done)?;
-            plans::append_notes(project_dir, plan_id, "auto: all todos completed")?;
-            Ok(true)
-        }
-        PlanStatus::Approved | PlanStatus::Active => {
-            plans::transition(project_dir, plan_id, PlanStatus::Done)?;
-            plans::append_notes(project_dir, plan_id, "auto: all todos completed")?;
-            Ok(true)
-        }
+    if !matches!(
+        meta.status(),
+        crate::plans::PlanStatus::Approved | crate::plans::PlanStatus::Active
+    ) {
+        return Err(format!(
+            "cannot bind session to plan {plan_id} (status {})",
+            meta.status
+        ));
     }
+    let binding = PlanBinding {
+        schema_version: SCHEMA_BINDING_V1.into(),
+        harness: harness.to_string(),
+        session_id: session_id.to_string(),
+        plan_id: plan_id.to_string(),
+        bound_at: now_rfc3339(),
+        source: source.to_string(),
+    };
+    let path = binding_path(project_dir, harness, session_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create bindings dir: {e}"))?;
+    }
+    let json = serde_json::to_string_pretty(&binding).map_err(|e| e.to_string())?;
+    std::fs::write(&path, format!("{json}\n")).map_err(|e| format!("write binding: {e}"))?;
+    Ok(binding)
+}
+
+/// The binding for one (harness, session), when it points at a still-open
+/// plan. Stale bindings (plan done/abandoned) resolve to None.
+pub fn bound_plan_id(project_dir: &Path, harness: &str, session_id: &str) -> Option<String> {
+    let text = std::fs::read_to_string(binding_path(project_dir, harness, session_id)).ok()?;
+    let binding: PlanBinding = serde_json::from_str(&text).ok()?;
+    if binding.schema_version != SCHEMA_BINDING_V1 {
+        return None;
+    }
+    let (meta, _) = crate::plans::load(project_dir, &binding.plan_id)?;
+    matches!(
+        meta.status(),
+        crate::plans::PlanStatus::Approved | crate::plans::PlanStatus::Active
+    )
+    .then_some(binding.plan_id)
 }
 
 /// Parse Cursor plan frontmatter `todos:` (real shape includes `isProject`).
@@ -566,7 +630,7 @@ fn sync_claude(home: &Path, project_dir: &Path) -> TodoSyncReport {
                 session_id,
                 items,
                 &path.to_string_lossy(),
-                None,
+                bound_plan_id(project_dir, "claude-code", session_id),
             );
             match result {
                 Ok(record) => report.written.push(format!(
@@ -633,7 +697,7 @@ fn sync_kimi(home: &Path, project_dir: &Path) -> TodoSyncReport {
                 session_id,
                 items,
                 &wire.to_string_lossy(),
-                None,
+                bound_plan_id(project_dir, "kimi-code", session_id),
             ) {
                 Ok(record) => report.written.push(format!(
                     "kimi-code/{} ({} items)",
@@ -728,7 +792,7 @@ fn sync_codex(home: &Path, project_dir: &Path) -> TodoSyncReport {
             &session_id,
             items,
             &path.to_string_lossy(),
-            None,
+            bound_plan_id(project_dir, "codex", &session_id),
         ) {
             Ok(record) => report.written.push(format!(
                 "codex/{} ({} items)",
@@ -891,6 +955,7 @@ fn read_tail(path: &Path, cap: usize) -> std::io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plans::{self, PlanStatus};
 
     fn project() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().expect("project");
@@ -1019,7 +1084,7 @@ isProject: false
     }
 
     #[test]
-    fn plan_bound_all_complete_from_draft_approved_active() {
+    fn complete_requires_evidence_and_open_status() {
         let dir = project();
         for start in [PlanStatus::Draft, PlanStatus::Approved, PlanStatus::Active] {
             let meta = plans::record(
@@ -1041,10 +1106,25 @@ isProject: false
                 PlanStatus::Draft => {}
                 _ => unreachable!(),
             }
-            assert!(complete_plan(dir.path(), &meta.id).expect("complete"));
-            let (done, _) = plans::load(dir.path(), &meta.id).expect("load");
-            assert_eq!(done.status(), PlanStatus::Done);
-            assert!(done.notes.contains("auto: all todos completed"));
+            // Evidence is mandatory at every status.
+            assert!(plans::complete(dir.path(), &meta.id, "", "cli", None).is_err());
+            match start {
+                PlanStatus::Draft => {
+                    // Drafts cannot complete — approve first.
+                    assert!(
+                        plans::complete(dir.path(), &meta.id, "gate green", "cli", None).is_err()
+                    );
+                }
+                _ => {
+                    let done = plans::complete(dir.path(), &meta.id, "gate green", "cli", None)
+                        .expect("complete");
+                    assert_eq!(done.status(), PlanStatus::Done);
+                    let receipt = done.completion_receipt.expect("receipt");
+                    assert_eq!(receipt.evidence, "gate green");
+                    assert_eq!(receipt.completed_by, "cli");
+                    assert!(!receipt.body_digest.is_empty());
+                }
+            }
         }
     }
 
@@ -1054,14 +1134,15 @@ isProject: false
         let abandoned =
             plans::record(dir.path(), "Drop", "cursor", None, "# Drop\n\nno.\n").expect("record");
         plans::transition(dir.path(), &abandoned.id, PlanStatus::Abandoned).expect("abandon");
-        assert!(!complete_plan(dir.path(), &abandoned.id).expect("noop"));
+        // Terminal plans refuse completion, receipt or not.
+        assert!(plans::complete(dir.path(), &abandoned.id, "x", "cli", None).is_err());
         let (meta, _) = plans::load(dir.path(), &abandoned.id).expect("load");
         assert_eq!(meta.status(), PlanStatus::Abandoned);
 
         assert!(!all_completed(&[]));
         let open = plans::record(dir.path(), "Open", "cursor", None, "# Open\n\nbody.\n")
             .expect("record2");
-        // zero-todo: we never call complete_plan from federation
+        // zero-todo: no plan-bound record exists at all
         assert_eq!(plan_todo_progress(dir.path(), &open.id), None);
         let (meta, _) = plans::load(dir.path(), &open.id).expect("load2");
         assert_eq!(meta.status(), PlanStatus::Draft);
@@ -1158,15 +1239,24 @@ isProject: false
         std::fs::write(plans.join("auto_abcd1234.plan.md"), FRONTMATTER).expect("plan");
 
         let report = crate::plan_federation::sync_from(home.path(), project.path(), "cursor");
-        assert_eq!(report.completed.len(), 1, "{report:?}");
+        // All todos completed: the plan is NOT auto-completed anymore — a
+        // plan-closure obligation is opened instead.
+        assert_eq!(report.closure_obligations.len(), 1, "{report:?}");
         let (meta, _) = crate::plans::list(project.path())
             .into_iter()
             .find(|m| m.title == "cli-autoinstall")
             .map(|m| crate::plans::load(project.path(), &m.id).expect("load"))
             .expect("plan");
-        assert_eq!(meta.status(), PlanStatus::Done);
+        assert_ne!(meta.status(), PlanStatus::Done);
         let (done, total) = plan_todo_progress(project.path(), &meta.id).expect("progress");
         assert_eq!((done, total), (4, 4));
+        let closure = crate::obligations::find_by_operation(
+            project.path(),
+            &crate::obligations::plan_closure_operation_id(&meta.id),
+        )
+        .expect("closure obligation");
+        assert_eq!(closure.plan_id.as_deref(), Some(meta.id.as_str()));
+        assert!(!closure.state().is_terminal());
     }
 
     #[test]

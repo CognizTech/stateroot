@@ -15,8 +15,8 @@ use tracing_subscriber::EnvFilter;
 
 use cli::{
     Command, EditorAction, ExtAction, HandoffAction, HarnessAction, LearnAction, LearningsAction,
-    McpAction, MemoryAction, ObservationsAction, PlanAction, ProposalsAction, RulesAction,
-    SessionAction, SkillAction, SoulAction, TodoAction, WikiAction,
+    McpAction, MemoryAction, ObligationAction, ObservationsAction, PlanAction, ProposalsAction,
+    RulesAction, ServiceAction, SessionAction, SkillAction, SoulAction, TodoAction, WikiAction,
 };
 use commands::Ctx;
 
@@ -73,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
             | cli::Command::Uninstall { .. }
             | cli::Command::Editor(_)
             | cli::Command::External(_)
+            | cli::Command::Service(_)
             | cli::Command::DrainFinalize
             | cli::Command::DrainTelemetry
             | cli::Command::TelemetryIdentity { .. }
@@ -123,7 +124,9 @@ async fn main() -> anyhow::Result<()> {
             PlanAction::Show { id } => commands::plan::show(&ctx, &id)?,
             PlanAction::Approve { id } => commands::plan::approve(&ctx, &id)?,
             PlanAction::Activate { id } => commands::plan::activate(&ctx, &id)?,
-            PlanAction::Done { id } => commands::plan::done(&ctx, &id)?,
+            PlanAction::Done { id, evidence, from } => {
+                commands::plan::done(&ctx, &id, &evidence, from.as_deref())?
+            }
             PlanAction::Abandon { id } => commands::plan::abandon(&ctx, &id)?,
             PlanAction::Sync => commands::plan::sync(&ctx)?,
         },
@@ -204,7 +207,51 @@ async fn main() -> anyhow::Result<()> {
             &args.evidence,
         )?,
         Command::Receipt { id } => commands::roots::receipt(&ctx, &id)?,
-        Command::Status => commands::status::run(&ctx)?,
+        Command::Status { json } => commands::status::run(&ctx, json)?,
+        Command::Obligation(args) => match args.action {
+            ObligationAction::Add {
+                task,
+                due,
+                in_duration,
+                assign,
+                plan,
+                operation_id,
+            } => commands::obligation::add(
+                &ctx,
+                &task,
+                due.as_deref(),
+                in_duration.as_deref(),
+                assign.as_deref(),
+                plan.as_deref(),
+                operation_id.as_deref(),
+            )?,
+            ObligationAction::List { all, json } => commands::obligation::list(&ctx, all, json)?,
+            ObligationAction::Show { id } => commands::obligation::show(&ctx, &id)?,
+            ObligationAction::Done {
+                id,
+                evidence,
+                operation_id,
+            } => commands::obligation::done(&ctx, &id, &evidence, operation_id.as_deref())?,
+            ObligationAction::Snooze {
+                id,
+                until,
+                operation_id,
+            } => commands::obligation::snooze(&ctx, &id, &until, operation_id.as_deref())?,
+            ObligationAction::Cancel {
+                id,
+                reason,
+                operation_id,
+            } => commands::obligation::cancel(&ctx, &id, &reason, operation_id.as_deref())?,
+        },
+        Command::Service(args) => match args.action {
+            ServiceAction::Install => commands::service::install(&ctx)?,
+            ServiceAction::Remove => commands::service::remove(&ctx)?,
+            ServiceAction::Start => commands::service::start(&ctx)?,
+            ServiceAction::Stop => commands::service::stop(&ctx)?,
+            ServiceAction::Restart => commands::service::restart(&ctx)?,
+            ServiceAction::Status { json } => commands::service::status(&ctx, json)?,
+            ServiceAction::Run => commands::service::run_resident(&ctx).await?,
+        },
         Command::Projects { json, prune } => commands::projects::run(&ctx, json, prune)?,
         Command::Doctor => {
             let code = commands::doctor::run(&ctx).await?;

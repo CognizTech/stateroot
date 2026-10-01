@@ -213,6 +213,11 @@ pub async fn install(ctx: &Ctx) -> Result<()> {
     // what keeps it current. Best-effort; honors every updater opt-out.
     super::update_schedule::ensure_registered(ctx);
 
+    // The per-user continuity service keeps every registered project
+    // reconciled between harness sessions. Best-effort: hooks/CLI
+    // reconciliation covers a registration failure.
+    super::service::ensure_installed(ctx);
+
     super::editor_extensions::reconcile_after_install(ctx).await;
 
     // Record for `init`'s one-time global install + `uninstall`.

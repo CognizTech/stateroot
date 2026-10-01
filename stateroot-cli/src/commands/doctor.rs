@@ -329,6 +329,10 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
         // — duplicate managed blocks, last captured checkpoint per harness,
         // and the legacy outbox pile.
         checks.extend(continuity_chain_checks(&home, &ctx.cwd));
+        // Active continuity runtime: service registration/liveness,
+        // projection freshness, corrupt obligation events, and unresolved
+        // lifecycle contradictions.
+        checks.extend(continuity_runtime_checks(ctx));
     }
 
     for (label, ok, detail) in super::editor_extensions::doctor_checks(ctx).await {
@@ -341,20 +345,140 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
     }
 
     let mut hard_failures = 0;
+    let mut soft_warnings = 0;
     for check in &checks {
         let mark = if check.ok { "ok" } else { "!!" };
         println!("  [{mark}] {} — {}", check.label, check.detail);
-        if check.hard && !check.ok {
-            hard_failures += 1;
+        if !check.ok {
+            if check.hard {
+                hard_failures += 1;
+            } else {
+                soft_warnings += 1;
+            }
         }
     }
     if hard_failures > 0 {
-        println!("{hard_failures} hard failure(s)");
+        println!("{hard_failures} hard failure(s), {soft_warnings} warning(s)");
         Ok(1)
+    } else if soft_warnings > 0 {
+        println!("doctor: checks pass with {soft_warnings} warning(s)");
+        Ok(0)
     } else {
         println!("doctor: all local checks pass");
         Ok(0)
     }
+}
+
+/// Active-continuity runtime checks (all soft): the resident service, the
+/// machine-local projection, obligation-event integrity, and lifecycle
+/// contradictions the assessment already derived.
+fn continuity_runtime_checks(ctx: &Ctx) -> Vec<Check> {
+    let mut out = Vec::new();
+    let cfg = &ctx.config.continuity;
+    if !cfg.enabled {
+        out.push(Check {
+            label: "continuity service".into(),
+            ok: true,
+            detail: "disabled in config ([continuity] enabled = false)".into(),
+            hard: false,
+        });
+        return out;
+    }
+    let registration = stateroot_core::continuity::read_service_registration(&ctx.config_dir);
+    let heartbeat = stateroot_core::continuity::read_service_heartbeat(&ctx.config_dir);
+    let (running, stale_detail) = match &heartbeat {
+        Some(beat) => {
+            let pid_live = beat.pid > 0 && stateroot_core::safe_io::pid_alive(beat.pid);
+            let stale = stateroot_core::continuity::service_beat_stale(
+                &beat.beat_at,
+                &stateroot_core::local_store::now_rfc3339(),
+                cfg.poll_interval_seconds,
+            );
+            (
+                pid_live && !stale,
+                format!("last beat {} (pid {})", beat.beat_at, beat.pid),
+            )
+        }
+        None => (false, "no heartbeat recorded".to_string()),
+    };
+    match &registration {
+        Some(reg) => out.push(Check {
+            label: "continuity service".into(),
+            ok: running,
+            detail: if running {
+                format!("registered ({}), heartbeating", reg.kind)
+            } else {
+                format!("registered ({}) but not heartbeating — {stale_detail}", reg.kind)
+            },
+            hard: false,
+        }),
+        None => out.push(Check {
+            label: "continuity service".into(),
+            ok: false,
+            detail: "not registered — degraded background coverage (hooks/CLI reconcile on activity; `stateroot service install`)".into(),
+            hard: false,
+        }),
+    }
+
+    // Projection freshness (this project's machine-local projection).
+    if stateroot_core::local_store::is_stateroot_dir(&ctx.cwd) {
+        match stateroot_core::continuity::read_projection(&ctx.cwd) {
+            Some(assessment) => {
+                let fresh = !stateroot_core::continuity::service_beat_stale(
+                    &assessment.generated_at,
+                    &stateroot_core::local_store::now_rfc3339(),
+                    cfg.poll_interval_seconds,
+                );
+                out.push(Check {
+                    label: "continuity projection".into(),
+                    ok: fresh,
+                    detail: format!(
+                        "generated {} · {} attention item(s)",
+                        assessment.generated_at,
+                        assessment.attention.len()
+                    ),
+                    hard: false,
+                });
+                out.push(Check {
+                    label: "obligation events".into(),
+                    ok: assessment.corrupt_obligation_events == 0,
+                    detail: format!(
+                        "{} corrupt event line(s) preserved in obligations/events.jsonl",
+                        assessment.corrupt_obligation_events
+                    ),
+                    hard: false,
+                });
+                let contradictions = assessment
+                    .attention
+                    .iter()
+                    .filter(|item| {
+                        matches!(
+                            item.kind.as_str(),
+                            "plan_closure" | "plan_receipt_pending" | "handoff_stale"
+                        )
+                    })
+                    .count();
+                out.push(Check {
+                    label: "lifecycle contradictions".into(),
+                    ok: contradictions == 0,
+                    detail: if contradictions == 0 {
+                        "none unresolved".into()
+                    } else {
+                        format!("{contradictions} unresolved (see `stateroot status`)")
+                    },
+                    hard: false,
+                });
+            }
+            None => out.push(Check {
+                label: "continuity projection".into(),
+                ok: false,
+                detail: "no projection yet — run `stateroot status` or `stateroot service run`"
+                    .into(),
+                hard: false,
+            }),
+        }
+    }
+    out
 }
 
 /// Hidden test seam (mirrors `STATEROOT_TEST_HOME`): when

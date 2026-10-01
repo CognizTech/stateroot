@@ -294,6 +294,42 @@ export function activate(context: vscode.ExtensionContext) {
       });
       return;
     }
+    if (type === "planDoneEvidence" && typeof msg.id === "string") {
+      await withProject(async (root) => {
+        const evidence = await vscode.window.showInputBox({
+          prompt: "Completion evidence — gate results, release root, …",
+          ignoreFocusOut: true,
+        });
+        if (!evidence?.trim()) {
+          return;
+        }
+        await runCliReport(["plan", "done", String(msg.id), "--evidence", evidence.trim()], root, output);
+        push();
+      });
+      return;
+    }
+    if (type === "obligationDone" && typeof msg.id === "string") {
+      await withProject(async (root) => {
+        const evidence = await vscode.window.showInputBox({
+          prompt: "Evidence — what proves this obligation is done?",
+          ignoreFocusOut: true,
+        });
+        if (!evidence?.trim()) {
+          return;
+        }
+        await runCliReport(["obligation", "done", String(msg.id), "--evidence", evidence.trim()], root, output);
+        push();
+      });
+      return;
+    }
+    if (type === "obligationSnooze" && typeof msg.id === "string") {
+      await withProject(async (root) => {
+        const until = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+        await runCliReport(["obligation", "snooze", String(msg.id), "--until", until], root, output);
+        push();
+      });
+      return;
+    }
     if (type === "openPlan" && typeof msg.id === "string") {
       await withProject(async (root) => {
         const filePath = planBodyPath(root, msg.id as string);

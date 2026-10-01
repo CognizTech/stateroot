@@ -228,8 +228,8 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
                         for line in &report.updated {
                             hook_note(quirk, &format!("plan sync: updated {line}"));
                         }
-                        for line in &report.completed {
-                            hook_note(quirk, &format!("plan sync: completed {line}"));
+                        for line in &report.closure_obligations {
+                            hook_note(quirk, &format!("plan sync: closure-obligation {line}"));
                         }
                         for line in &report.notes {
                             hook_note(quirk, &format!("plan sync: {line}"));
@@ -632,6 +632,10 @@ pub fn hook_digest_with_identity(
     if let Some(section) = super::resume::latest_activity_section(project_dir) {
         work.push_str(&section);
     }
+    // Push before pull: derived obligations/attention outrank the work view.
+    if let Some(section) = super::resume::needs_attention_section(project_dir) {
+        work.push_str(&section);
+    }
     if let Some(section) = super::resume::central_plan_section(Some(project_dir)) {
         work.push_str(&section);
     }
@@ -765,6 +769,42 @@ fn hook_note(quirk: &registry::HarnessQuirk, msg: &str) {
     }
 }
 
+/// Deterministic continuity reconciliation at a hook boundary — cheap JSON
+/// reads + one atomic projection write, gated on `[continuity] enabled`.
+fn reconcile_boundary(ctx: &Ctx, project_dir: &Path) {
+    if !ctx.config.continuity.enabled {
+        return;
+    }
+    if let Err(err) =
+        stateroot_core::continuity::reconcile(project_dir, &ctx.config_dir, &ctx.config.continuity)
+    {
+        note!("continuity reconcile: {err}");
+    }
+}
+
+/// Record the verified session-to-plan binding when a harness receives a
+/// plan-bearing handoff: digest delivery IS the receipt. `record_binding`
+/// validates the plan is approved/active, so a stale packet never binds.
+pub(crate) fn bind_session_plan(project_dir: &Path, harness: &str, session_id: &str, source: &str) {
+    let Ok(Some(packet)) = stateroot_core::local_store::read_handoff_local(project_dir) else {
+        return;
+    };
+    let Some(plan_id) = packet
+        .get("plan_ref")
+        .and_then(|p| p.get("id"))
+        .and_then(|v| v.as_str())
+    else {
+        return;
+    };
+    let _ = stateroot_core::todo_federation::record_binding(
+        project_dir,
+        harness,
+        session_id,
+        plan_id,
+        source,
+    );
+}
+
 async fn resume_output(
     ctx: &Ctx,
     quirk: &registry::HarnessQuirk,
@@ -776,6 +816,9 @@ async fn resume_output(
         if let Err(err) = stateroot_core::learnings::record_first_session(project_dir, quirk.id) {
             note!("warning: could not record first-run harness: {err}");
         }
+        // Reconcile BEFORE the digest assembles so ## Needs Attention reads
+        // a fresh projection.
+        reconcile_boundary(ctx, project_dir);
     }
     // Empty check only — the scheduler decides the printable content below.
     if hook_digest(&ctx.config_dir, project_dir, quirk.id).is_none() {
@@ -822,6 +865,9 @@ async fn resume_output(
             payload,
             &content_fp,
         );
+        if let Some(session_id) = digest_delivery::session_id_from_payload(payload) {
+            bind_session_plan(project_dir, quirk.id, &session_id, "hook-delivery");
+        }
     }
     // Heavy session-boundary work runs AFTER the digest is printed: harnesses
     // kill slow hooks (cursor's default timeout), and a killed process must
@@ -1036,6 +1082,7 @@ async fn checkpoint_from_spool(
     if quirk.compact_injection && matches!(canonical, "pre_compact" | "post_compaction") {
         if canonical == "pre_compact" {
             let _ = super::compiler::try_ingest(&hook_ctx, false).await;
+            reconcile_boundary(&hook_ctx, project_dir);
         }
         if let Some(digest) = hook_digest(&hook_ctx.config_dir, project_dir, quirk.id) {
             print_hook_injection(quirk, canonical, &digest);
@@ -1065,6 +1112,7 @@ async fn checkpoint_from_spool(
             }
             Err(err) => note!("boundary enqueue skipped: {err}"),
         }
+        reconcile_boundary(&hook_ctx, project_dir);
         let path = spool_path(project_dir);
         if path.exists() {
             let _ = std::fs::write(&path, "");

@@ -368,6 +368,9 @@ pub fn run(ctx: &Ctx, purge: bool, yes: bool, msi_cleanup: bool) -> Result<()> {
         println!("  warning: could not remove the auto-update schedule ({err:#})");
     }
 
+    // 1c. The continuity service unregisters too — best-effort.
+    super::service::ensure_removed(ctx);
+
     // 2. Projects stay; say so.
     list_registered_projects(ctx);
 

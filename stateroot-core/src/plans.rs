@@ -87,6 +87,23 @@ impl PlanStatus {
     }
 }
 
+/// Additive evidence-bearing completion receipt, captured by
+/// `stateroot plan done --evidence`. Plans completed before receipts existed
+/// carry `None` and make no claim.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CompletionReceipt {
+    pub completed_at: String,
+    /// Harness/actor that recorded the completion.
+    pub completed_by: String,
+    /// What proves the work is done (tests green, release root, …).
+    pub evidence: String,
+    /// sha256 (hex) of the exact plan body at completion.
+    pub body_digest: String,
+    /// The root captured by the completion snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_root: Option<String>,
+}
+
 /// The `stateroot.plan.v1` sidecar.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanMeta {
@@ -105,6 +122,9 @@ pub struct PlanMeta {
     /// approved before this field existed — they make no drift claim.
     #[serde(default)]
     pub approved_digest: Option<String>,
+    /// Evidence-bearing completion receipt (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_receipt: Option<CompletionReceipt>,
     /// Lifecycle notes (demotions are recorded here).
     pub notes: String,
 }
@@ -208,6 +228,7 @@ pub fn record(
         root_ref: latest_root_ref(project_dir),
         source_path: source_path.map(str::to_string),
         approved_digest: None,
+        completion_receipt: None,
         notes: String::new(),
     };
     let body_file = body_path(project_dir, &id);
@@ -378,6 +399,56 @@ pub fn transition(
 pub fn body_digest(path: &Path) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
     Some(format!("{:x}", sha2::Sha256::digest(&bytes)))
+}
+
+/// Complete a plan with an explicit evidence-bearing receipt.
+///
+/// The caller creates/verifies the completion snapshot first and passes its
+/// root; any failure here leaves the plan in its prior state. Draft plans
+/// cannot complete — approve first (`can_transition_to` is the source of
+/// truth). Completion never resolves the plan-closure obligation implicitly;
+/// the CLI layer does that as a separate recorded step.
+pub fn complete(
+    project_dir: &Path,
+    id: &str,
+    evidence: &str,
+    actor: &str,
+    completion_root: Option<String>,
+) -> Result<PlanMeta, String> {
+    if evidence.trim().is_empty() {
+        return Err(
+            "completion evidence is empty — record what proves the work (`stateroot plan done <id> --evidence \"…\"`)"
+                .into(),
+        );
+    }
+    let Some((mut meta, _)) = load(project_dir, id) else {
+        return Err(format!("unknown plan `{id}` — run `stateroot plan list`"));
+    };
+    let from = meta.status();
+    if !from.can_transition_to(PlanStatus::Done) {
+        return Err(format!(
+            "plan {} is {} — cannot move to done (lifecycle: draft → approved → active → done; approved → done for plans finished while approved)",
+            meta.id,
+            from.as_str(),
+        ));
+    }
+    let digest = body_digest(&body_path(project_dir, &meta.id))
+        .ok_or_else(|| format!("cannot complete {}: plan body is unreadable", meta.id))?;
+    let now = now_rfc3339();
+    meta.status = PlanStatus::Done.as_str().into();
+    meta.updated_at = now.clone();
+    meta.root_ref = completion_root
+        .clone()
+        .or_else(|| latest_root_ref(project_dir));
+    meta.completion_receipt = Some(CompletionReceipt {
+        completed_at: now,
+        completed_by: actor.to_string(),
+        evidence: evidence.trim().to_string(),
+        body_digest: digest,
+        completion_root,
+    });
+    write_meta(project_dir, &meta)?;
+    Ok(meta)
 }
 
 /// True when the plan carries an `approved_digest` and the current body no

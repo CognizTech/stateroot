@@ -10,6 +10,7 @@
 pub mod canonical;
 pub mod config;
 pub mod context_pack;
+pub mod continuity;
 pub mod digest_delivery;
 pub mod error;
 pub mod extensions;
@@ -25,6 +26,7 @@ pub mod local_store;
 pub mod mcp_federation;
 pub mod memory_federation;
 pub mod memory_index;
+pub mod obligations;
 pub mod observations;
 pub mod openclaw_identity;
 pub mod path_identity;

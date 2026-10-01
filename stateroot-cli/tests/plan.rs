@@ -111,16 +111,18 @@ fn plan_lifecycle_walk_and_episodic_notes() {
         "list: {stdout}"
     );
 
-    // approve → activate → done.
+    // approve → activate → done (done requires evidence).
     for (action, status) in [
         ("approve", "approved"),
         ("activate", "active"),
         ("done", "done"),
     ] {
-        let out = stateroot(config_home.path(), user_home.path(), project.path())
-            .args(["plan", action, &id])
-            .assert()
-            .success();
+        let mut cmd = stateroot(config_home.path(), user_home.path(), project.path());
+        cmd.args(["plan", action, &id]);
+        if action == "done" {
+            cmd.args(["--evidence", "acceptance gate green"]);
+        }
+        let out = cmd.assert().success();
         let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
         assert!(
             stdout.contains(&format!("plan {id} → {status}")),
@@ -161,13 +163,18 @@ fn plan_one_active_demotes_with_note_and_illegal_transitions_error() {
         "# Second\n",
     );
 
-    // done on a draft is illegal; unknown id errors.
+    // done on a draft is illegal (even with evidence); unknown id errors.
     let out = stateroot(config_home.path(), user_home.path(), project.path())
-        .args(["plan", "done", &first])
+        .args(["plan", "done", &first, "--evidence", "premature"])
         .assert()
         .failure();
     let stderr = String::from_utf8(out.get_output().stderr.clone()).expect("utf8");
     assert!(stderr.contains("cannot move to done"), "stderr: {stderr}");
+    // done without evidence is a usage error at every status.
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["plan", "done", &first])
+        .assert()
+        .failure();
     stateroot(config_home.path(), user_home.path(), project.path())
         .args(["plan", "approve", "no-such-plan"])
         .assert()
@@ -256,7 +263,7 @@ fn plan_digest_directives_and_body_omission() {
         "digest: {stdout}"
     );
 
-    // Approved → executor directive.
+    // Approved with no executor → the assignment directive.
     stateroot(config_home.path(), user_home.path(), project.path())
         .args(["plan", "approve", &id])
         .assert()
@@ -267,7 +274,7 @@ fn plan_digest_directives_and_body_omission() {
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
     assert!(
-        stdout.contains("Execute it as written; do not re-plan or re-explore"),
+        stdout.contains("assign or claim execution"),
         "digest: {stdout}"
     );
     assert!(
@@ -281,6 +288,21 @@ fn plan_digest_directives_and_body_omission() {
     // The fallback transcript Plan State is suppressed while a central plan exists
     // (nothing seeds plan_state here, so it must simply stay absent).
     assert!(!stdout.contains("## Plan State"), "digest: {stdout}");
+
+    // Activated → the executor directive.
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["plan", "activate", &id])
+        .assert()
+        .success();
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["resume", "--force"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains("Execute it as written; do not re-plan or re-explore"),
+        "digest: {stdout}"
+    );
 }
 
 #[test]
@@ -442,7 +464,7 @@ fn plan_list_is_newest_first_with_active_pinned() {
 
     // Done with the active plan: the remaining list is strictly newest-first.
     stateroot(config_home.path(), user_home.path(), project.path())
-        .args(["plan", "done", &first])
+        .args(["plan", "done", &first, "--evidence", "work verified"])
         .assert()
         .success();
     let out = stateroot(config_home.path(), user_home.path(), project.path())

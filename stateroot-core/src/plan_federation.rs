@@ -192,8 +192,10 @@ pub struct PlanSyncReport {
     pub ingested: Vec<String>,
     pub updated: Vec<String>,
     pub notes: Vec<String>,
-    /// Plan ids auto-completed because plan-bound todos are all done.
-    pub completed: Vec<String>,
+    /// Plan ids whose all-completed todos opened a plan-closure obligation.
+    /// Plans are never auto-completed — completion requires explicit evidence
+    /// (`stateroot plan done <id> --evidence`).
+    pub closure_obligations: Vec<String>,
 }
 
 impl PlanSyncReport {
@@ -201,7 +203,7 @@ impl PlanSyncReport {
         self.ingested.is_empty()
             && self.updated.is_empty()
             && self.notes.is_empty()
-            && self.completed.is_empty()
+            && self.closure_obligations.is_empty()
     }
 }
 
@@ -468,10 +470,25 @@ fn apply_cursor_plan_todos(
     if !complete {
         return;
     }
-    match crate::todo_federation::complete_plan(project_dir, plan_id) {
-        Ok(true) => report.completed.push(plan_id.to_string()),
-        Ok(false) => {}
-        Err(err) => report.notes.push(err),
+    // Never auto-complete a plan: structurally completed todos open a
+    // plan-closure obligation; completion requires explicit evidence via
+    // `stateroot plan done <id> --evidence "…"`.
+    match crate::plans::load(project_dir, plan_id) {
+        Some((meta, _)) => {
+            match crate::obligations::ensure_plan_closure(
+                project_dir,
+                plan_id,
+                &meta.title,
+                "plan-federation",
+            ) {
+                Ok((_, true)) => report.closure_obligations.push(plan_id.to_string()),
+                Ok((_, false)) => {}
+                Err(err) => report.notes.push(err),
+            }
+        }
+        None => report
+            .notes
+            .push(format!("plan {plan_id} not found for closure obligation")),
     }
 }
 

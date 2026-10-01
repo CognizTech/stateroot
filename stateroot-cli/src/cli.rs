@@ -82,8 +82,14 @@ pub enum Command {
         /// Transition id or prefix.
         id: String,
     },
-    /// Project status (manifest, handoff, counts) — local only.
-    Status,
+    /// Project status — the single decision-ready brief: checkout/root state,
+    /// handoff freshness, plan state, due obligations, unresolved attention,
+    /// service health, boundary-journal health.
+    Status {
+        /// Machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// List every initialized project on this machine (the global registry
     /// window) with live state hints. For fixed-workspace agents and
     /// cross-project work: discover here, then move into the project.
@@ -160,6 +166,12 @@ pub enum Command {
     Memory(MemoryArgs),
     /// Read-only observation spool audit (hook capture evidence).
     Observations(ObservationsArgs),
+    /// Durable, federated obligations (future work items shared across
+    /// harnesses, e.g. campaign reviews and plan-closure receipts).
+    Obligation(ObligationArgs),
+    /// Manage the per-user background continuity service (deterministic
+    /// reconciliation of every registered project).
+    Service(ServiceArgs),
     /// Append-only adoption of session evidence between initialized projects.
     Transplant(TransplantArgs),
     /// Compiled wiki catalog (show / lint / compile).
@@ -317,10 +329,18 @@ pub enum PlanAction {
         /// Plan id (prefix allowed).
         id: String,
     },
-    /// Mark the active plan done.
+    /// Mark a plan done with an explicit evidence-bearing completion
+    /// receipt. Creates/verifies the completion snapshot first; any failure
+    /// leaves the plan in its prior state.
     Done {
         /// Plan id (prefix allowed).
         id: String,
+        /// What proves the work is done (gate results, release root, …).
+        #[arg(long)]
+        evidence: String,
+        /// Completing harness (defaults to the active local marker or `cli`).
+        #[arg(long)]
+        from: Option<String>,
     },
     /// Abandon a plan (any non-terminal state).
     Abandon {
@@ -347,6 +367,119 @@ pub enum TodoAction {
         #[arg(long)]
         harness: Option<String>,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct ObligationArgs {
+    #[command(subcommand)]
+    pub action: ObligationAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ObligationAction {
+    /// Add an obligation. One-shot due dates only (`--due` RFC3339 or
+    /// `--in` a relative duration like 24h/7d); milestone series use
+    /// multiple obligations.
+    Add {
+        /// What must happen, in one imperative sentence.
+        #[arg(long)]
+        task: String,
+        /// RFC3339 due instant (normalized to UTC).
+        #[arg(long, conflicts_with = "in_duration")]
+        due: Option<String>,
+        /// Relative due duration: 30m, 24h, 7d, 2w (compounds like 1h30m).
+        #[arg(long = "in", value_name = "DURATION")]
+        in_duration: Option<String>,
+        /// Harness the work is routed to.
+        #[arg(long)]
+        assign: Option<String>,
+        /// Bind to a plan id.
+        #[arg(long)]
+        plan: Option<String>,
+        /// Idempotency key — retries with the same key return the existing
+        /// obligation instead of duplicating it.
+        #[arg(long)]
+        operation_id: Option<String>,
+    },
+    /// List obligations (open first; `--all` includes terminal).
+    List {
+        /// Include done/cancelled obligations.
+        #[arg(long)]
+        all: bool,
+        /// Machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one obligation in full (state, evidence, event count).
+    Show {
+        /// Obligation id (prefix allowed).
+        id: String,
+    },
+    /// Complete an obligation with explicit evidence.
+    Done {
+        /// Obligation id (prefix allowed).
+        id: String,
+        /// What proves the work is done.
+        #[arg(long)]
+        evidence: String,
+        /// Idempotency key for this mutation.
+        #[arg(long)]
+        operation_id: Option<String>,
+    },
+    /// Suppress an obligation until a future instant.
+    Snooze {
+        /// Obligation id (prefix allowed).
+        id: String,
+        /// RFC3339 instant until which the obligation is suppressed.
+        #[arg(long)]
+        until: String,
+        /// Idempotency key for this mutation.
+        #[arg(long)]
+        operation_id: Option<String>,
+    },
+    /// Cancel an obligation with a recorded reason.
+    Cancel {
+        /// Obligation id (prefix allowed).
+        id: String,
+        /// Why this work is dropped.
+        #[arg(long)]
+        reason: String,
+        /// Idempotency key for this mutation.
+        #[arg(long)]
+        operation_id: Option<String>,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct ServiceArgs {
+    #[command(subcommand)]
+    pub action: ServiceAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ServiceAction {
+    /// Register the continuity service with the OS (systemd user unit /
+    /// LaunchAgent / logon Scheduled Task; WSL registers a Windows-host task
+    /// when user-systemd is unavailable) and start it.
+    Install,
+    /// Unregister the continuity service from the OS and stop it.
+    Remove,
+    /// Start the service (OS manager when registered, else a detached
+    /// self-spawn).
+    Start,
+    /// Stop the running service.
+    Stop,
+    /// Restart the service.
+    Restart,
+    /// Report registration, liveness, and last heartbeat.
+    Status {
+        /// Machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run the resident reconciliation loop in the foreground (what the OS
+    /// service descriptor executes).
+    Run,
 }
 
 #[derive(Debug, Args)]

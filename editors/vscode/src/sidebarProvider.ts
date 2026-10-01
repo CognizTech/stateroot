@@ -20,6 +20,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   }
 
   post(state: (Snapshot | { initialized: false }) & { setup?: SetupState }): void {
+    const needs = "initialized" in state && state.initialized ? state.inbox.length : 0;
+    if (this.view) {
+      this.view.badge = needs
+        ? { value: needs, tooltip: `${needs} ${needs === 1 ? "item needs" : "items need"} attention` }
+        : undefined;
+    }
     this.view?.webview.postMessage(state);
   }
 }

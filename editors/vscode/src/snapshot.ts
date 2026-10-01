@@ -13,6 +13,8 @@ import {
   planBoundIndex,
   planExcerpt,
   projectRoot,
+  readContinuity,
+  readContinuityAdvisory,
   readHandoff,
   readLatestActivity,
   readManifest,
@@ -29,6 +31,7 @@ import {
   type WikiPage,
 } from "./store";
 import { assembleInbox, delegationTargetsClosedPlan, type InboxItem } from "./inbox";
+import { advisoryTextFor, type ContinuityProjection } from "./continuity";
 import { handoffBoundary, handoffIsStale, staleHandoffNote } from "./freshness";
 import { deriveParallelWork, type LineageProjection, type ParallelWorkCard } from "./parallelWork";
 import type { MergeAttempt } from "./mergeAttempt";
@@ -47,6 +50,10 @@ export interface Snapshot {
   };
   emptyProject: boolean;
   inbox: InboxItem[];
+  /** CLI continuity projection, when the installed CLI writes one. */
+  continuity?: ContinuityProjection;
+  /** Hash-current synthesized advisory for the projection. Never instructions. */
+  advisory?: string;
   latestRoot: string;
   plans: PlanMeta[];
   selectedPlanId?: string;
@@ -135,12 +142,17 @@ export function snapshot(opts?: {
   const memory = listMemory(root);
   const wikiPages = listWikiPages(root);
   const latestActivity = readLatestActivity(root);
+  const continuity = readContinuity(root);
+  const advisory = continuity
+    ? advisoryTextFor(continuity, readContinuityAdvisory(root))
+    : undefined;
   const inbox = assembleInbox({
     plans,
     delegations,
     handoff,
     thisHarness: opts?.thisHarness || "vscode-copilot",
     dismissed: opts?.dismissedInbox,
+    continuity,
   });
   const writtenAt = handoff ? handoffBoundary(handoff) : undefined;
   const objective =
@@ -178,6 +190,8 @@ export function snapshot(opts?: {
     now,
     emptyProject: !handoff && roots.length === 0 && !latestActivity,
     inbox,
+    continuity,
+    advisory,
     latestRoot: opts?.lineage?.trunk.tip
       ? shortHash(opts.lineage.trunk.tip)
       : roots[0]

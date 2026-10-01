@@ -135,6 +135,36 @@ impl Default for UpdateConfig {
     }
 }
 
+/// Active-continuity configuration (`[continuity]` in config.toml).
+///
+/// Local StateRoot is an active but NON-agentic continuity framework: it
+/// deterministically observes, reconciles, schedules, and pushes obligations.
+/// The optional synthesis pass may only add labeled advisory text; it never
+/// mutates lifecycle state and is disabled by default.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ContinuityConfig {
+    /// Master switch for the continuity runtime (reconciliation, service,
+    /// digest attention section). When false, hooks/CLI skip reconciliation.
+    pub enabled: bool,
+    /// Seconds between resident-service registry scans.
+    pub poll_interval_seconds: u64,
+    /// Optional advisory synthesis for continuity snapshots. Requires the
+    /// existing `[synthesis]` configuration and credentials; failure or
+    /// absence always falls back to deterministic reconciliation.
+    pub synthesis: bool,
+}
+
+impl Default for ContinuityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            poll_interval_seconds: 30,
+            synthesis: false,
+        }
+    }
+}
+
 /// Local-first service configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -155,6 +185,9 @@ pub struct AppConfig {
     /// Auto-update (`[update]`).
     #[serde(default)]
     pub update: UpdateConfig,
+    /// Active continuity (`[continuity]`).
+    #[serde(default)]
+    pub continuity: ContinuityConfig,
 }
 
 impl Default for AppConfig {
@@ -166,6 +199,7 @@ impl Default for AppConfig {
             fire_drill: None,
             synthesis: SynthesisConfig::default(),
             update: UpdateConfig::default(),
+            continuity: ContinuityConfig::default(),
         }
     }
 }

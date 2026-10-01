@@ -1,6 +1,12 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
+import {
+  parseContinuityAdvisory,
+  parseContinuityProjection,
+  type ContinuityAdvisory,
+  type ContinuityProjection,
+} from "./continuity";
 import { tsNewer } from "./freshness";
 
 export const STORE = ".stateroot";
@@ -311,6 +317,20 @@ export function readState(root: string): Record<string, unknown> | undefined {
 
 export function readHandoff(root: string): HandoffPacket | undefined {
   return readJson<HandoffPacket>(path.join(root, STORE, "handoffs", "current.json"));
+}
+
+/** Machine-local continuity projection written by CLI reconciles. Missing,
+ * unreadable, or foreign-schema files mean "no items", never an error. */
+export function readContinuity(root: string): ContinuityProjection | undefined {
+  return parseContinuityProjection(
+    readJson(path.join(root, STORE, "local", "projections", "continuity.v1.json"))
+  );
+}
+
+export function readContinuityAdvisory(root: string): ContinuityAdvisory | undefined {
+  return parseContinuityAdvisory(
+    readJson(path.join(root, STORE, "local", "projections", "continuity-advisory.v1.json"))
+  );
 }
 
 export function readLatestActivity(root: string): LatestActivity | undefined {
