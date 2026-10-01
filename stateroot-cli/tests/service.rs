@@ -176,12 +176,15 @@ fn install_without_os_registration_degrades_gracefully() {
         .expect("registration file"),
     )
     .expect("registration json");
-    // Probes are disabled: registration calls are skipped everywhere. On
-    // native Linux/macOS/Windows CI that degrades to "detached"; under WSL
-    // the Windows-host task path is chosen (its schtasks call is skipped
-    // too). Either way the file exists and nothing actually ran.
+    // Probes are disabled: registration calls are skipped everywhere. The
+    // descriptor chosen is platform-shaped — detached (native Linux/macOS),
+    // wsl-schtasks (WSL), schtasks (native Windows) — and none of them
+    // actually ran anything.
     let kind = registration["kind"].as_str().expect("kind");
-    assert!(matches!(kind, "detached" | "wsl-schtasks"), "kind: {kind}");
+    assert!(
+        matches!(kind, "detached" | "wsl-schtasks" | "schtasks"),
+        "kind: {kind}"
+    );
     if kind == "detached" {
         assert!(registration["detail"]
             .as_str()

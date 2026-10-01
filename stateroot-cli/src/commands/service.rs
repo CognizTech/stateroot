@@ -70,6 +70,7 @@ fn run_output(program: &str, args: &[&str]) -> Option<String> {
 // registration descriptors (pure — unit-tested on every OS)
 // ---------------------------------------------------------------------
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn systemd_unit_text(exe: &Path) -> String {
     format!(
         "[Unit]\n\
@@ -134,6 +135,7 @@ fn schtasks_create_args(exe: &Path) -> Vec<String> {
 
 /// WSL fallback: a Windows-host logon task that launches the service inside
 /// the current WSL distribution.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn wsl_schtasks_create_args(distro: &str, exe: &Path) -> Vec<String> {
     vec![
         "/create".into(),
@@ -324,6 +326,7 @@ fn log_line(path: &Path, line: &str) {
 // install / remove / lifecycle
 // ---------------------------------------------------------------------
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn systemd_user_available() -> bool {
     if probes_disabled() {
         return false;
@@ -333,6 +336,7 @@ fn systemd_user_available() -> bool {
         .unwrap_or(false)
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn install_systemd(ctx: &Ctx, exe: &Path) -> anyhow::Result<()> {
     let dir = dirs_systemd_user();
     std::fs::create_dir_all(&dir)?;
@@ -386,6 +390,7 @@ fn install_launchd(ctx: &Ctx, exe: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 fn install_schtasks(exe: &Path, args: Vec<String>) -> anyhow::Result<()> {
     if probes_disabled() {
         return Ok(());
