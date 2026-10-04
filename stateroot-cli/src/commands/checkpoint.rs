@@ -9,23 +9,28 @@ use super::Ctx;
 pub(crate) const LOCAL_HARNESS: &str = "cli";
 
 /// Run `stateroot checkpoint`.
-pub fn run(ctx: &Ctx, note_text: &str, files: &[String]) -> anyhow::Result<()> {
+pub fn run_with_actor(
+    ctx: &Ctx,
+    note_text: &str,
+    files: &[String],
+    actor: &str,
+) -> anyhow::Result<()> {
     ctx.require_project()?;
     let record = json!({
         "ts": now_rfc3339(),
-        "harness": LOCAL_HARNESS,
+        "harness": actor,
         "note": note_text,
         "files": files,
     });
     local_store::append_episodic(&ctx.cwd, &record)?;
     // The next harness should see who worked last even when no formal
     // handoff exists — stamp the current packet (additive, in place).
-    local_store::stamp_handoff_activity(&ctx.cwd, LOCAL_HARNESS, "checkpoint");
+    local_store::stamp_handoff_activity(&ctx.cwd, actor, "checkpoint");
     // Lineage is automatic, not agent-remembered: real work that moved the
     // project tree becomes a root here, carrying this note as its reason.
     // `.stateroot/` bookkeeping never creates one.
     let reason = super::truncate(note_text, 160);
-    match stateroot_core::roots::snap_if_changed(&ctx.cwd, LOCAL_HARNESS, &reason, None) {
+    match stateroot_core::roots::snap_if_changed(&ctx.cwd, actor, &reason, None) {
         Ok(stateroot_core::roots::SnapOutcome::Created(manifest, _)) => {
             println!("checkpoint recorded · root {}", &manifest.id[..12]);
         }

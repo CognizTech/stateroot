@@ -1,4 +1,4 @@
-//! Explicit project-only dot boundary. Never invokes host federation/readers.
+//! Dot dispatcher with an explicit portable compatibility boundary.
 use crate::cli::{DotAction, DotArgs};
 use anyhow::{bail, Context, Result};
 use serde_json::json;
@@ -18,6 +18,9 @@ pub fn run(args: &DotArgs) -> Result<()> {
     if matches!(args.action, DotAction::Skill) {
         print!("{SKILL}");
         return Ok(());
+    }
+    if !args.portable && args.shared_state.is_none() {
+        return super::dot_integration::run(&project, &args.action);
     }
     validate_store_paths(&store::root(&project))?;
     if matches!(args.action, DotAction::Init) {
@@ -59,7 +62,7 @@ pub fn run(args: &DotArgs) -> Result<()> {
             bail!("handoff project_id does not match the selected project");
         }
         if packet["fork_id"].as_str().is_some_and(|s| !s.is_empty()) {
-            bail!("dot POC does not support fork-bound handoffs; use ordinary StateRoot in the registered worktree");
+            bail!("portable mode does not support fork-bound handoffs; use the native dot workflow in the registered worktree");
         }
     }
     let shared = args
@@ -184,6 +187,7 @@ pub fn run(args: &DotArgs) -> Result<()> {
             );
         }
         DotAction::Init | DotAction::Skill => unreachable!(),
+        DotAction::Install | DotAction::Uninstall | DotAction::Run { .. } | DotAction::Native(_) => bail!("portable compatibility mode supports only the original store commands; omit --portable for the full workflow"),
     }
     Ok(())
 }

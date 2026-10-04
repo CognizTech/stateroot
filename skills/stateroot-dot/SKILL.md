@@ -1,49 +1,71 @@
 ---
 name: stateroot-dot
-description: Explicit project continuity in a shared cloud dot environment using StateRoot. Use when the user provides a StateRoot project path and asks to resume, checkpoint or hand off work in that environment.
+description: Use the full StateRoot continuity workflow from a ChatGPT dot through an accessible computer or execution environment. Resume project context, preserve progress, and share personality, plans, tools, skills, memory and learnings with other registered harnesses.
 ---
 
-# StateRoot dot proof of concept
+# StateRoot for ChatGPT dots
 
-Use only the explicitly supplied project directory. Do not infer it from host
-sessions, registry entries or other projects. Ask for the project path if missing.
-Do not run global setup/install or the normal host-integrating resume/import/sync.
+Use the project's existing StateRoot CLI and guidance. Select the actual project
+path on the computer executing the command; a dot's cloud computer and connected
+personal computer are different environments. If the path or CLI is unavailable,
+resolve that execution prerequisite before claiming continuity is loaded.
 
-1. Read `stateroot dot --project /path/to/project resume` in full at task start.
-2. After meaningful progress, run `stateroot dot --project /path/to/project checkpoint "Progress, evidence, blockers and next steps"`.
-3. Recall supplied facts with `stateroot dot --project /path/to/project recall "query"`.
-4. Before stopping or handing off, pipe a JSON input on stdin with nonempty `objective`,
-   `task`, `context_summary`, and `next_actions` (array of strings), then run
-   `stateroot dot --project /path/to/project handoff --input -`.
-5. When a working-tree snapshot is needed, explicitly run
-   `stateroot dot --project /path/to/project snap --reason "milestone"`.
+Run `stateroot dot --project PROJECT resume` at task start and consume the complete
+digest, unpiped and untruncated. This uses the normal registered project, canonical
+user state and fork binding. Follow the inherited product intent, personality,
+active plan, learnings, skill router and tool availability guidance. Never read
+`.stateroot/` storage files as a substitute for the CLI.
 
-Initialize only if authorized: `stateroot dot --project /path/to/project init`.
-No hooks, compaction callbacks, automatic transcript capture
-are provided. Checkpoints snapshot changed project files automatically. Never fabricate missing context. CLI availability and a supported
-skill loader are required; arbitrary local skills do not automatically load in dots.
-Repo skills can be used by supported cloud coding tasks, which are distinct from
-the root dot. If no loader is available, have the agent read this file explicitly.
+Before attempting an approach, run
+`stateroot dot --project PROJECT recall "failed approach TOPIC"`.
+After meaningful changes, decisions or blockers, run
+`stateroot dot --project PROJECT checkpoint "what changed and why"`.
+Changed project files enter automatic lineage; explicit milestones can use
+`stateroot dot --project PROJECT snap --reason "milestone"`.
+After compaction explicitly run resume again in full. Cloud orchestration does
+not load ordinary local command hooks: these calls are the supported lifecycle.
 
-Different devices accessing the same environment share its on-disk project state.
-This is not cross-machine synchronization or a cloud durability guarantee. Preserve
-`.stateroot/` explicitly before losing the VM; Git snapshots additionally require
-Git objects and `refs/stateroot/*`. Ordinary Git commits omit personal continuity
-files by default. Do not upload private state without the user's authorization.
+All normal CLI commands are available, with dot provenance:
 
-Use an unbound project store without symlinks/reparse points. Dot rejects foreign
-project packets and fork-bound handoffs; use ordinary StateRoot for registered
-fork workflows. Handoff input accepts only the existing author-controlled content
-fields; do not supply provenance, plan refs or timestamps. Use ordinary
-`stateroot handoff repair` if current JSON is corrupt. Avoid concurrent ordinary
-and dot handoff writers. Existing snapshot restore commands remain explicit.
+- Facts: `stateroot dot --project PROJECT memory add "fact"` and `memory recall QUERY`.
+- Judgments: `stateroot dot --project PROJECT learn record "prefer X when Y"`;
+  use the normal user/workspace/domain scopes when appropriate.
+- Personality: pipe the requested persona to
+  `stateroot dot --project PROJECT soul propose --stdin`, then use `soul sync`.
+- Plans: pipe the plan to `stateroot dot --project PROJECT plan record --stdin --title TITLE`;
+  use `plan show`, `approve`, `activate`, `done` and `todo list` normally.
+- Shared rules: `rules list`, `rules show SLUG` and `rules sync`.
+- Skills and tools: `stateroot dot --project PROJECT run -- skill list`,
+  `run -- skill show SLUG`, `mcp status`, `mcp sync` and `mcp-stdio`.
+  Stored capabilities are not proof of runtime connection or authorization.
+- Work lineage: normal `log`, `show`, `compare`, `fork` and `revert` commands;
+  inspect the selected root and preserve unrelated work before restoring.
 
-Resume includes stored personality, rules, active learnings, current plan guidance
-and catalogs of plans, skill packages, tools and memory. Read catalog entries with
-`stateroot dot --project /path/to/project read plans/PLAN_ID.md` (or the listed
-store-relative path). A stored tool or skill is not evidence of runtime availability.
-If the canonical user store is already available and authorized in this environment,
-add `--shared-state /path/to/.stateroot` before the action; use `read --shared`
-for its catalog entries. This reads shared intelligence without host integration
-or synchronization. Missing shared data stays missing. Before choosing an approach,
-recall failed approaches. After compaction, explicitly run resume again in full.
+`run -- COMMAND ...` is the escape hatch for the complete normal CLI, including
+commands whose names overlap the dot convenience commands. The equivalent native
+form is `stateroot --project PROJECT --actor dot COMMAND ...`.
+
+At a session boundary run the normal handoff writer, for example:
+`stateroot dot --project PROJECT run -- handoff write --from dot --objective "..." --task "..." --context-summary "..." --next "..."`.
+Omit `--to` for continuity, or name the registered destination for a transfer.
+For a large packet use `handoff --input -` with JSON on stdin. Never stage the
+payload in the project tree. Normal handoff acceptance, plan refs, fork routing,
+repair, provenance and history remain available.
+
+For an authorized new project use `stateroot dot --project PROJECT init`.
+`install` installs/refreshes the bundled skill through canonical federation;
+`uninstall` removes dot skill delivery while retaining project intelligence.
+Normal setup/install/self-update also deliver the bundled dot skill.
+Discover it through the connected computer's supported local skill loader, or
+explicitly read `stateroot dot --project PROJECT skill` when no loader is available.
+A repo skill in a delegated coding task does not prove root-dot skill discovery.
+
+There is no dot transcript reader or verified automatic cloud callback. Explicit
+checkpoints and handoffs capture the agent's evidence. Devices using the same
+computer/project share that state; independent computers need an authorized
+transfer of state and lineage through existing mechanisms. This integration adds
+no sync service, cloud durability promise, accounts or billing.
+
+`--portable` retains the previous isolated project-store compatibility mode;
+`--shared-state DIR` selects its read-only explicit user pool. Those modes have
+narrower capabilities and are not the normal registered-harness workflow.

@@ -17,6 +17,8 @@ use super::{note, stdin_is_tty, Ctx};
 const HOME_LEFTOVERS: &[&str] = &[
     ".agents/skills/stateroot",
     ".agents/skills/stateroot-skill-router",
+    ".agents/skills/stateroot-dot",
+    ".stateroot/skills/stateroot-dot",
     ".stateroot/skills/stateroot",
     // Legacy monorepo-CLI debris (pre-extensions openclaw plugin path).
     ".openclaw/plugins/stateroot",

@@ -108,8 +108,10 @@ pub fn product_skill_files() -> Vec<(String, Vec<u8>)> {
 /// Seed/update `~/.stateroot/skills/stateroot` from the embedded product bundle.
 pub fn seed_product_skill(home: &Path) -> Result<stateroot_core::skill_federation::SyncAction> {
     let files = product_skill_files();
-    stateroot_core::skill_federation::ensure_product_skill_package(home, &files)
-        .map_err(|err| anyhow::anyhow!(err))
+    let action = stateroot_core::skill_federation::ensure_product_skill_package(home, &files)
+        .map_err(|err| anyhow::anyhow!(err))?;
+    super::dot_integration::seed_skill(home)?;
+    Ok(action)
 }
 
 /// Install one harness spec with the CLI's embedded bundle (signature kept
@@ -170,6 +172,12 @@ pub async fn install(ctx: &Ctx) -> Result<()> {
     if let Err(err) = stateroot_core::skill_federation::refresh_product_projections(&home, None) {
         note!("warning: product projection refresh failed ({err})");
     }
+    if home.join(".agents/skills/stateroot-dot/SKILL.md").is_file()
+        && !installed.iter().any(|id| id == "dot")
+    {
+        installed.push("dot".into());
+        println!("  dot: local skill configured; connected computer required; resume/handoff explicitly (no cloud command hooks)");
+    }
     match stateroot_core::rules::sync(&ctx.cwd, &home) {
         Ok(report) => println!(
             "  rules: product-intent {} · imported {}",
@@ -189,6 +197,18 @@ pub async fn install(ctx: &Ctx) -> Result<()> {
             let dir = Path::new(path);
             if !dir.is_dir() {
                 continue;
+            }
+            if dir
+                .join(".stateroot/skills/stateroot-dot/SKILL.md")
+                .is_file()
+            {
+                if let Err(err) = super::dot_integration::seed_skill(dir).and_then(|_| {
+                    stateroot_core::skill_federation::refresh_product_projections(&home, Some(dir))
+                        .map(|_| ())
+                        .map_err(anyhow::Error::msg)
+                }) {
+                    note!("warning: dot product refresh failed ({err:#})");
+                }
             }
             let actions = super::skill::ensure_convenience_layer(dir, &block);
             for action in actions {
@@ -238,7 +258,8 @@ pub async fn install(ctx: &Ctx) -> Result<()> {
     }
     // integration_completed claims at least one harness was actually
     // integrated — an empty run ("no agents detected") must not emit it.
-    if !installed.is_empty() {
+    // A bundled dot skill alone is not evidence of a connected dot runtime.
+    if installed.iter().any(|id| id != "dot") {
         crate::telemetry::integration_completed(&ctx.config_dir);
         if std::env::var("STATEROOT_INSTALL_VIA").ok().as_deref() == Some("extension") {
             crate::telemetry::editor_reconcile_result(&ctx.config_dir);

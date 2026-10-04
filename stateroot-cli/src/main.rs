@@ -57,12 +57,29 @@ async fn main() -> anyhow::Result<()> {
             err.exit();
         }
     };
-    // Dot commands deliberately bypass host config, telemetry, update checks,
-    // federation and detached workers. Keep this before Ctx::load().
+    // Dot selects its project before dispatch; the native integration uses the
+    // ordinary workflow, while explicit portable mode remains isolated.
     if let Command::Dot(args) = &cli.command {
         return commands::dot::run(args);
     }
-    let ctx = Ctx::load()?;
+    if let Some(project) = &cli.project {
+        std::env::set_current_dir(project)
+            .map_err(|err| anyhow::anyhow!("cannot select project {}: {err}", project.display()))?;
+    }
+    let mut ctx = Ctx::load()?;
+    if cli.project.is_some() {
+        ctx.cwd = std::env::current_dir()?;
+    }
+    let actor = cli
+        .actor
+        .as_deref()
+        .map(commands::active_harness::canonical_id)
+        .transpose()?;
+    if let Some(actor) = &actor {
+        if stateroot_core::local_store::is_stateroot_dir(&ctx.cwd) {
+            commands::active_harness::record(&ctx.cwd, actor)?;
+        }
+    }
 
     // Anonymous acquisition telemetry: one `install_observed` spooled per
     // version change per machine — local-only append, detached drain kicks
@@ -127,14 +144,14 @@ async fn main() -> anyhow::Result<()> {
                 file.as_deref(),
                 stdin,
                 title.as_deref(),
-                from.as_deref(),
+                from.as_deref().or(actor.as_deref()),
             )?,
             PlanAction::List => commands::plan::list(&ctx)?,
             PlanAction::Show { id } => commands::plan::show(&ctx, &id)?,
             PlanAction::Approve { id } => commands::plan::approve(&ctx, &id)?,
             PlanAction::Activate { id } => commands::plan::activate(&ctx, &id)?,
             PlanAction::Done { id, evidence, from } => {
-                commands::plan::done(&ctx, &id, &evidence, from.as_deref())?
+                commands::plan::done(&ctx, &id, &evidence, from.as_deref().or(actor.as_deref()))?
             }
             PlanAction::Abandon { id } => commands::plan::abandon(&ctx, &id)?,
             PlanAction::Sync => commands::plan::sync(&ctx)?,
@@ -145,14 +162,21 @@ async fn main() -> anyhow::Result<()> {
         Command::Resume(args) => {
             commands::resume::run(
                 &ctx,
-                args.harness.as_deref(),
+                args.harness.as_deref().or(actor.as_deref()),
                 args.no_accept,
                 args.force,
                 args.deterministic,
             )
             .await?
         }
-        Command::Checkpoint(args) => commands::checkpoint::run(&ctx, &args.note, &args.files)?,
+        Command::Checkpoint(args) => commands::checkpoint::run_with_actor(
+            &ctx,
+            &args.note,
+            &args.files,
+            actor
+                .as_deref()
+                .unwrap_or(commands::checkpoint::LOCAL_HARNESS),
+        )?,
         Command::Handoff(args) => match args.action {
             HandoffAction::Write(args) => {
                 let flags = commands::handoff::HandoffWriteFlags {
@@ -168,7 +192,7 @@ async fn main() -> anyhow::Result<()> {
                 };
                 commands::handoff::write(
                     &ctx,
-                    args.from.as_deref(),
+                    args.from.as_deref().or(actor.as_deref()),
                     args.to.as_deref(),
                     args.note.as_deref(),
                     args.input.as_deref(),
@@ -184,13 +208,15 @@ async fn main() -> anyhow::Result<()> {
                 force,
             } => commands::handoff::accept(&ctx, &by, operation_id.as_deref(), force).await?,
             HandoffAction::Finalize { from } => {
-                commands::handoff::finalize(&ctx, from.as_deref()).await?
+                commands::handoff::finalize(&ctx, from.as_deref().or(actor.as_deref())).await?
             }
             HandoffAction::Repair => commands::handoff::repair(&ctx).await?,
         },
-        Command::Snap(args) => {
-            commands::roots::snap(&ctx, args.reason.as_deref(), args.harness.as_deref())?
-        }
+        Command::Snap(args) => commands::roots::snap(
+            &ctx,
+            args.reason.as_deref(),
+            args.harness.as_deref().or(actor.as_deref()),
+        )?,
         Command::Log(args) => commands::roots::log(&ctx, args.json)?,
         Command::Show { hash } => commands::roots::show(&ctx, &hash)?,
         Command::Diff(args) => commands::roots::diff(&ctx, &args.from, &args.to, args.content)?,

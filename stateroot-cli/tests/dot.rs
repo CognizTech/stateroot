@@ -9,6 +9,7 @@ fn dot(project: &Path, home: &Path) -> Command {
         .env("HOME", home)
         .env("USERPROFILE", home)
         .arg("dot")
+        .arg("--portable")
         .arg("--project")
         .arg(project);
     cmd
@@ -587,4 +588,271 @@ fn checkpoints_preserve_automatic_lineage_without_bookkeeping_churn() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Work State Lineage"));
+}
+
+fn full_dot(project: &Path, home: &Path) -> Command {
+    let mut cmd = ordinary(project, home);
+    cmd.env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("STATEROOT_NO_AUTO_UPDATE", "1")
+        .args(["dot", "--project"])
+        .arg(project);
+    cmd
+}
+
+#[test]
+fn registered_dot_uses_native_intelligence_and_owned_skill_lifecycle() {
+    let project = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    full_dot(project.path(), home.path())
+        .arg("init")
+        .assert()
+        .success();
+    let entry = stateroot_core::config::lookup_project(&home.path().join("config"), project.path())
+        .unwrap()
+        .unwrap();
+    assert!(entry.harnesses_installed.iter().any(|id| id == "dot"));
+    let skill = project.path().join(".agents/skills/stateroot-dot/SKILL.md");
+    assert_eq!(
+        fs::read_to_string(&skill).unwrap(),
+        include_str!("../../skills/stateroot-dot/SKILL.md")
+    );
+    full_dot(project.path(), home.path())
+        .args(["memory", "add", "Native dot continuity fact"])
+        .assert()
+        .success();
+    full_dot(project.path(), home.path())
+        .args([
+            "learn",
+            "record",
+            "Prefer explicit resume after dot compaction",
+        ])
+        .assert()
+        .success();
+    full_dot(project.path(), home.path())
+        .args(["soul", "propose", "--stdin"])
+        .write_stdin("# Identity\nName: Dot test persona\n")
+        .assert()
+        .success();
+    full_dot(project.path(), home.path())
+        .args(["plan", "record", "--stdin", "--title", "Dot native plan"])
+        .write_stdin("Implement a verified dot workflow.\n")
+        .assert()
+        .success();
+    full_dot(project.path(), home.path())
+        .args(["run", "--", "skill", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("stateroot-dot"));
+    full_dot(project.path(), home.path())
+        .args(["mcp", "status"])
+        .assert()
+        .success();
+    full_dot(project.path(), home.path())
+        .args(["rules", "show", "product-intent"])
+        .assert()
+        .success();
+    full_dot(project.path(), home.path())
+        .args(["checkpoint", "native dot progress"])
+        .assert()
+        .success();
+    full_dot(project.path(), home.path())
+        .args([
+            "run",
+            "--",
+            "handoff",
+            "write",
+            "--objective",
+            "Native dot goal",
+            "--task",
+            "Continue",
+            "--context-summary",
+            "Native evidence",
+        ])
+        .assert()
+        .success();
+    let packet: serde_json::Value = serde_json::from_slice(
+        &fs::read(project.path().join(".stateroot/handoffs/current.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(packet["created_by_harness"], "dot");
+    full_dot(project.path(), home.path())
+        .arg("resume")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Native dot goal"))
+        .stdout(predicate::str::contains("Dot test persona"))
+        .stdout(predicate::str::contains("Native dot continuity fact"))
+        .stdout(predicate::str::contains("Prefer explicit resume"))
+        .stdout(predicate::str::contains("Dot native plan"));
+    // A normal refresh restores the authoritative bundled product package.
+    fs::write(&skill, "old product skill").unwrap();
+    full_dot(project.path(), home.path())
+        .arg("install")
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(&skill).unwrap(),
+        include_str!("../../skills/stateroot-dot/SKILL.md")
+    );
+    full_dot(project.path(), home.path())
+        .arg("uninstall")
+        .assert()
+        .success();
+    assert!(!skill.exists());
+    assert!(!home.path().join(".agents/skills/stateroot-dot").exists());
+    let entry = stateroot_core::config::lookup_project(&home.path().join("config"), project.path())
+        .unwrap()
+        .unwrap();
+    assert!(!entry.harnesses_installed.iter().any(|id| id == "dot"));
+    assert!(project
+        .path()
+        .join(".stateroot/memories/MEMORY.md")
+        .exists());
+    assert!(home
+        .path()
+        .join(".stateroot/skills/stateroot/SKILL.md")
+        .exists());
+    assert!(
+        fs::read_to_string(project.path().join(".stateroot/memories/MEMORY.md"))
+            .unwrap()
+            .contains("Native dot continuity fact")
+    );
+}
+
+#[test]
+fn native_project_and_alias_selection_preserve_errors_and_unmanaged_skills() {
+    let project = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    full_dot(project.path(), home.path())
+        .arg("init")
+        .assert()
+        .success();
+    ordinary(home.path(), home.path())
+        .env("STATEROOT_NO_AUTO_UPDATE", "1")
+        .arg("--project")
+        .arg(project.path())
+        .args([
+            "--actor",
+            "chatgpt-dot",
+            "checkpoint",
+            "--note",
+            "Alias selected project",
+        ])
+        .assert()
+        .success();
+    full_dot(project.path(), home.path())
+        .args(["run", "--", "nonexistent-command"])
+        .assert()
+        .code(2);
+    let skill = project.path().join(".agents/skills/stateroot-dot");
+    for meta in ["skill.federation.json", ".stateroot-projection.json"] {
+        let path = skill.join(meta);
+        if path.exists() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+    fs::write(skill.join("SKILL.md"), "user skill").unwrap();
+    full_dot(project.path(), home.path())
+        .arg("uninstall")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unmanaged dot skill"));
+    assert_eq!(
+        fs::read_to_string(skill.join("SKILL.md")).unwrap(),
+        "user skill"
+    );
+}
+
+#[test]
+fn native_dot_retains_registered_fork_routing_and_root_actor() {
+    let parent = tempfile::tempdir().unwrap();
+    let project = parent.path().join("trunk");
+    let worktree = parent.path().join("fork");
+    fs::create_dir(&project).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    full_dot(&project, home.path())
+        .arg("init")
+        .assert()
+        .success();
+    fs::write(project.join("work.txt"), "trunk work").unwrap();
+    let snap = full_dot(&project, home.path())
+        .args(["snap", "--reason", "dot milestone"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(snap).unwrap();
+    let hash = text
+        .lines()
+        .find_map(|line| line.strip_prefix("root "))
+        .unwrap()
+        .trim();
+    full_dot(&project, home.path())
+        .args(["show", hash])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("created_by: dot"));
+    full_dot(&project, home.path())
+        .args(["fork", hash, "--name", "dot-work", "--worktree"])
+        .arg(&worktree)
+        .assert()
+        .success();
+    full_dot(&worktree, home.path())
+        .args([
+            "run",
+            "--",
+            "handoff",
+            "write",
+            "--objective",
+            "Bound dot fork",
+            "--task",
+            "Fork task",
+            "--context-summary",
+            "Fork evidence",
+        ])
+        .assert()
+        .success();
+    full_dot(&worktree, home.path())
+        .arg("resume")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Bound dot fork"));
+    full_dot(&project, home.path())
+        .args(["run", "--", "handoff", "show"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no current handoff found"));
+}
+
+#[test]
+fn explicit_dot_project_never_falls_back_to_an_initialized_parent() {
+    let parent = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    full_dot(parent.path(), home.path())
+        .arg("init")
+        .assert()
+        .success();
+    let manifest = fs::read(parent.path().join(".stateroot/manifest.json")).unwrap();
+    let nested = parent.path().join("independent");
+    fs::create_dir(&nested).unwrap();
+    full_dot(&nested, home.path())
+        .arg("init")
+        .assert()
+        .success();
+    assert!(nested.join(".stateroot/manifest.json").is_file());
+    assert_eq!(
+        manifest,
+        fs::read(parent.path().join(".stateroot/manifest.json")).unwrap()
+    );
+    full_dot(&nested, home.path())
+        .args(["memory", "add", "Nested project fact"])
+        .assert()
+        .success();
+    full_dot(parent.path(), home.path())
+        .args(["memory", "show"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Nested project fact").not());
 }

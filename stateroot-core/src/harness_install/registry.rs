@@ -191,6 +191,11 @@ impl DigestDeliveryPolicy {
                 tier: DeliveryTier::Automatic,
                 note: "session-start inject via additionalContext; one ~/.copilot/hooks file serves VS Code + Copilot CLI",
             },
+            "dot" => Self {
+                primary_event: "", session_start_prints: false, session_start_marks: false,
+                prompt_submit_injects: false, tier: DeliveryTier::Degraded,
+                note: "full CLI and local skill via connected computer; explicit resume/handoff; cloud orchestration does not load local command hooks",
+            },
             "crush" => Self {
                 primary_event: "",
                 session_start_prints: false,
@@ -261,7 +266,7 @@ pub enum Tier {
     A,
     /// Registry row now; generated TS plugin installer in P2.
     B,
-    /// MCP-only or managed-only placeholder.
+    /// Explicit CLI/skill integration or managed-only platform.
     C,
 }
 
@@ -443,6 +448,22 @@ const PI_EVENTS: &[(&str, &str)] = &[
 /// Native hook/MCP adapters. This is deliberately not the harness registry;
 /// see `skill_federation::load_registry()` for the shared contract.
 pub const ADAPTERS: &[HarnessQuirk] = &[
+    HarnessQuirk {
+        id: "dot",
+        display: "ChatGPT Dot",
+        tier: Tier::C,
+        // Evidence of configured local skill delivery, not a claim of a running dot.
+        detect: &[".agents/skills/stateroot-dot"],
+        detect_cmds: &[],
+        instruction_file: None,
+        mcp: None,
+        hooks: None,
+        injection: Injection::None,
+        compact_injection: false,
+        events: 0,
+        legacy_id: None,
+        event_map: &[],
+    },
     HarnessQuirk {
         id: "claude-code",
         display: "Claude Code",
@@ -901,16 +922,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_has_17_unique_rows() {
-        assert_eq!(ADAPTERS.len(), 17);
+    fn dot_declares_explicit_delivery_without_fabricated_hooks() {
+        let dot = quirk("dot").unwrap();
+        assert_eq!(dot.tier, Tier::C);
+        assert!(dot.detect_cmds.is_empty());
+        assert_eq!(dot.detect, &[".agents/skills/stateroot-dot"]);
+        assert!(dot.hooks.is_none());
+        assert!(dot.mcp.is_none());
+        assert!(dot.instruction_file.is_none());
+        assert_eq!(dot.events, 0);
+        assert!(dot.event_map.is_empty());
+        let delivery = DigestDeliveryPolicy::for_id("dot");
+        assert!(!delivery.session_start_prints);
+        assert!(!delivery.prompt_submit_injects);
+    }
+
+    #[test]
+    fn registry_has_18_unique_rows() {
+        assert_eq!(ADAPTERS.len(), 18);
         let mut ids: Vec<&str> = ADAPTERS.iter().map(|q| q.id).collect();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), 17, "duplicate ids in registry");
+        assert_eq!(ids.len(), ADAPTERS.len(), "duplicate ids in registry");
         for q in ADAPTERS {
             assert!(!q.display.is_empty(), "{}: empty display", q.id);
             assert!(!q.detect.is_empty(), "{}: no detect markers", q.id);
-            assert!(!q.detect_cmds.is_empty(), "{}: no detect commands", q.id);
+            assert!(
+                !q.detect_cmds.is_empty() || q.id == "dot",
+                "{}: no detect commands",
+                q.id
+            );
             match q.tier {
                 // hermes is the one Tier A row without hooks in v1 (its
                 // plugin system integration is a later item; it still has a
@@ -1080,7 +1121,7 @@ mod tests {
                         "pi note must name the verified injection event"
                     );
                 }
-                "hermes" | "crush" | "zero" => {
+                "dot" | "hermes" | "crush" | "zero" => {
                     assert_eq!(policy.tier, DeliveryTier::Degraded);
                     assert!(!policy.prompt_submit_injects);
                 }

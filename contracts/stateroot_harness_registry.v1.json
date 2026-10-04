@@ -3,7 +3,8 @@
   "native_harness_id": "statesmith",
   "product_skills": [
     "stateroot",
-    "stateroot-skill-router"
+    "stateroot-skill-router",
+    "stateroot-dot"
   ],
   "harnesses": [
     {
@@ -1282,6 +1283,61 @@
       "capabilities": [
         "skills",
         "delegation"
+      ],
+      "mcp_config": {
+        "global": [],
+        "project": []
+      }
+    },
+    {
+      "id": "dot",
+      "display": "ChatGPT Dot",
+      "aliases": [
+        "dot",
+        "chatgpt-dot",
+        "chatgpt-dots"
+      ],
+      "framing": "ChatGPT dot: use the full StateRoot CLI through the connected execution environment; resume and handoff explicitly because cloud orchestration does not load local command hooks.",
+      "tier": "C",
+      "detect": [
+        ".agents/skills/stateroot-dot"
+      ],
+      "detect_cmds": [],
+      "skill_source_roots": {
+        "global": [
+          ".agents/skills",
+          ".stateroot/skills"
+        ],
+        "project": [
+          ".agents/skills",
+          ".stateroot/skills"
+        ]
+      },
+      "builtin_policy": "none",
+      "builtin_roots": [],
+      "projection_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "delegation": {
+        "mode": "handoff_only",
+        "command": null,
+        "pty": false,
+        "print_mode": false,
+        "handoff_only": true
+      },
+      "reload": "skill rediscovery / next invocation",
+      "capabilities": [
+        "skills",
+        "cli",
+        "explicit_resume",
+        "explicit_handoff",
+        "connected_computer",
+        "cloud_vm"
       ],
       "mcp_config": {
         "global": [],

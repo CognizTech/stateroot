@@ -1314,7 +1314,12 @@ fn materialize_managed_projection(
     let mut reclaiming_product = false;
     if dst.exists() {
         match projection_digest(dst) {
-            Some(existing_digest) if existing_digest == skill.package_digest => {
+            Some(existing_digest)
+                if existing_digest == skill.package_digest
+                    && (!is_product_owned_slug(&skill.slug)
+                        || existing_package_digest(dst, &skill.scope).as_deref()
+                            == Some(skill.package_digest.as_str())) =>
+            {
                 return Ok("unchanged");
             }
             Some(_) => {}
@@ -1715,7 +1720,19 @@ pub fn ensure_product_skill_package(
     home: &Path,
     files: &[(String, Vec<u8>)],
 ) -> Result<SyncAction, String> {
-    let dest = home.join(".stateroot/skills/stateroot");
+    ensure_named_product_skill_package(home, "stateroot", files)
+}
+
+/// Seed a registered first-party package through the same authoritative writer.
+pub fn ensure_named_product_skill_package(
+    home: &Path,
+    slug: &str,
+    files: &[(String, Vec<u8>)],
+) -> Result<SyncAction, String> {
+    if !is_product_owned_slug(slug) {
+        return Err(format!("unregistered product skill {slug}"));
+    }
+    let dest = home.join(".stateroot/skills").join(slug);
     let mut file_digests = BTreeMap::new();
     for (rel, bytes) in files {
         let rel = rel.replace('\\', "/");
@@ -1729,14 +1746,14 @@ pub fn ensure_product_skill_package(
         return Err("product skill package has no files to seed".into());
     }
     let digest = package_digest(&file_digests);
-    let identity = product_identity_key("stateroot");
+    let identity = product_identity_key(slug);
     if dest.exists() && existing_package_digest(&dest, "global").as_deref() == Some(digest.as_str())
     {
         // Refresh ownership meta even when bytes match.
         let skill = DiscoveredSkill {
             identity_key: identity,
-            slug: "stateroot".into(),
-            name: "stateroot".into(),
+            slug: slug.into(),
+            name: slug.into(),
             description: String::new(),
             harness: "statesmith".into(),
             source_path: dest.display().to_string(),
@@ -1757,7 +1774,7 @@ pub fn ensure_product_skill_package(
             .map_err(|err| format!("update product package meta {}: {err}", dest.display()))?;
         return Ok(SyncAction {
             action: "unchanged".into(),
-            slug: "stateroot".into(),
+            slug: slug.into(),
             detail: dest.display().to_string(),
         });
     }
@@ -1765,7 +1782,7 @@ pub fn ensure_product_skill_package(
     fs::create_dir_all(home.join(".stateroot/skills"))
         .map_err(|err| format!("create product skill root: {err}"))?;
     let tmp = home.join(format!(
-        ".stateroot/skills/.stateroot-product-tmp-{}",
+        ".stateroot/skills/.{slug}-product-tmp-{}",
         std::process::id()
     ));
     if tmp.exists() {
@@ -1787,8 +1804,8 @@ pub fn ensure_product_skill_package(
     }
     let skill = DiscoveredSkill {
         identity_key: identity,
-        slug: "stateroot".into(),
-        name: "stateroot".into(),
+        slug: slug.into(),
+        name: slug.into(),
         description: String::new(),
         harness: "statesmith".into(),
         source_path: dest.display().to_string(),
@@ -1816,7 +1833,7 @@ pub fn ensure_product_skill_package(
     fs::rename(&tmp, &dest).map_err(|err| format!("activate product package: {err}"))?;
     Ok(SyncAction {
         action: action.into(),
-        slug: "stateroot".into(),
+        slug: slug.into(),
         detail: dest.display().to_string(),
     })
 }

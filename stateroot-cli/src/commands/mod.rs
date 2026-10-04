@@ -20,6 +20,7 @@ pub mod delegate;
 pub mod detached;
 pub mod doctor;
 pub mod dot;
+pub mod dot_integration;
 pub mod drain_finalize;
 pub mod editor_extensions;
 pub mod ext;

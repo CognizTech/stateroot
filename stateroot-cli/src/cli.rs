@@ -5,6 +5,7 @@
 //! is left out of M1 entirely, not stubbed.
 
 use clap::{Args, Parser, Subcommand};
+use std::ffi::OsString;
 
 /// Exact version embedded in this binary. Rolling CI previews append an
 /// automatically increasing `-dev.<run>` suffix without mutating Cargo.toml;
@@ -23,6 +24,12 @@ pub const BUILD_VERSION: &str = match option_env!("STATEROOT_BUILD_VERSION") {
     after_help = "External commands: any `stateroot-<name>` executable on PATH runs as `stateroot <name>`; see `stateroot ext list`."
 )]
 pub struct Cli {
+    /// Select a project explicitly (also useful for assistants with a fixed cwd).
+    #[arg(long, value_name = "DIR")]
+    pub project: Option<std::path::PathBuf>,
+    /// Explicit provenance for the calling harness; aliases use the shared registry.
+    #[arg(long, global = true)]
+    pub actor: Option<String>,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -41,7 +48,7 @@ pub fn subcommand_names() -> Vec<String> {
 pub enum Command {
     /// Initialize a project (creates `.stateroot/`, product skill, projections).
     Init(InitArgs),
-    /// Project-only continuity for a cloud dot (no host integration).
+    /// ChatGPT dot harness integration and the full StateRoot workflow.
     Dot(DotArgs),
     /// Remove a project (`.stateroot/`, registry entry, convenience layer,
     /// our git refs) — plan preview + confirmation.
@@ -1302,6 +1309,9 @@ pub struct RemoveArgs {
 
 #[derive(Debug, Args)]
 pub struct DotArgs {
+    /// Retain the previously shipped standalone project-store behavior.
+    #[arg(long)]
+    pub portable: bool,
     /// Optional canonical user StateRoot directory (for shared persona/rules/skills).
     /// Read only; no host discovery, copying or synchronization.
     #[arg(long, value_name = "DIR")]
@@ -1315,9 +1325,18 @@ pub struct DotArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum DotAction {
-    /// Create only the canonical project store; no setup or hooks.
+    /// Install/update dot skills through the canonical product projection lifecycle.
+    Install,
+    /// Remove only dot-owned skills; retain shared StateRoot state and other harnesses.
+    Uninstall,
+    /// Execute any normal StateRoot command with explicit dot provenance.
+    Run {
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+    /// Initialize through the normal project workflow and enroll dot skill delivery.
     Init,
-    /// Read explicitly stored project context, without transcript discovery.
+    /// Resume the normal registered project with dot identity.
     Resume,
     /// Record agent-supplied progress and snapshot changed project files.
     Checkpoint { note: String },
@@ -1326,7 +1345,7 @@ pub enum DotAction {
         #[arg(long)]
         input: std::path::PathBuf,
     },
-    /// Search project memory, wiki and episodic notes (literal substring).
+    /// Recall project intelligence through the normal memory search.
     Recall { query: String },
     /// Read a catalogued file relative to the selected StateRoot store.
     Read {
@@ -1340,6 +1359,9 @@ pub enum DotAction {
         #[arg(long, default_value = "dot snapshot")]
         reason: String,
     },
-    /// Print the portable dot skill for your supported skill loader.
+    /// Print the bundled dot workflow skill for a supported loader or explicit reading.
     Skill,
+    /// All other native subcommands (plan, memory, learnings, rules, mcp, fork...).
+    #[command(external_subcommand)]
+    Native(Vec<OsString>),
 }
