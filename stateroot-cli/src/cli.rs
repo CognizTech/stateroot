@@ -41,6 +41,8 @@ pub fn subcommand_names() -> Vec<String> {
 pub enum Command {
     /// Initialize a project (creates `.stateroot/`, product skill, projections).
     Init(InitArgs),
+    /// Project-only continuity for a cloud dot (no host integration).
+    Dot(DotArgs),
     /// Remove a project (`.stateroot/`, registry entry, convenience layer,
     /// our git refs) — plan preview + confirmation.
     Remove(RemoveArgs),
@@ -1296,4 +1298,48 @@ pub struct RemoveArgs {
     /// kimi-code/claude-code transcript sessions bound to this path.
     #[arg(long)]
     pub full: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct DotArgs {
+    /// Optional canonical user StateRoot directory (for shared persona/rules/skills).
+    /// Read only; no host discovery, copying or synchronization.
+    #[arg(long, value_name = "DIR")]
+    pub shared_state: Option<std::path::PathBuf>,
+    /// Exact project root; never inferred from host sessions or registry.
+    #[arg(long, value_name = "DIR")]
+    pub project: std::path::PathBuf,
+    #[command(subcommand)]
+    pub action: DotAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DotAction {
+    /// Create only the canonical project store; no setup or hooks.
+    Init,
+    /// Read explicitly stored project context, without transcript discovery.
+    Resume,
+    /// Record agent-supplied progress and snapshot changed project files.
+    Checkpoint { note: String },
+    /// Write an agent-supplied canonical handoff JSON file.
+    Handoff {
+        #[arg(long)]
+        input: std::path::PathBuf,
+    },
+    /// Search project memory, wiki and episodic notes (literal substring).
+    Recall { query: String },
+    /// Read a catalogued file relative to the selected StateRoot store.
+    Read {
+        path: std::path::PathBuf,
+        /// Read from the explicitly selected shared-state directory.
+        #[arg(long)]
+        shared: bool,
+    },
+    /// Explicit working-tree snapshot using existing Git plumbing.
+    Snap {
+        #[arg(long, default_value = "dot snapshot")]
+        reason: String,
+    },
+    /// Print the portable dot skill for your supported skill loader.
+    Skill,
 }

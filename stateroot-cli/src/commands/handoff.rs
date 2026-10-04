@@ -925,6 +925,74 @@ fn write_packet_history_durable(
     history_result
 }
 
+/// Explicit project-only POC: reuse the authoritative input validation, packet
+/// assembly/bounds and history-first writer, without host transcript discovery,
+/// routing, telemetry or continuity reconciliation.
+pub(crate) fn write_project_only(project_dir: &Path, input_path: &Path) -> anyhow::Result<()> {
+    let input = read_input(Some(
+        input_path
+            .to_str()
+            .context("handoff input path must be UTF-8")?,
+    ))?;
+    if input.worktree.is_some() {
+        anyhow::bail!("dot POC does not support worktree routing");
+    }
+    for (field, value) in [
+        ("objective", &input.objective),
+        ("task", &input.task),
+        ("context_summary", &input.context_summary),
+    ] {
+        if value.as_deref().unwrap_or_default().trim().is_empty() {
+            anyhow::bail!("handoff requires nonempty {field}");
+        }
+    }
+    if input.next_actions.is_none() {
+        anyhow::bail!("handoff requires next_actions as an array of strings");
+    }
+    let _lock = stateroot_core::safe_io::ResourceLock::acquire(
+        local_store::root(project_dir).join("local/locks/dot-handoff.lock"),
+    )?;
+    let manifest = local_store::read_manifest(project_dir)?.context("missing manifest")?;
+    let project_id = manifest["project_id"]
+        .as_str()
+        .context("manifest requires project_id")?;
+    // Include immutable history so restored/repaired current never reuses a seq.
+    let current_seq = local_store::read_handoff_local(project_dir)?
+        .into_iter()
+        .chain(local_store::list_handoffs_local(project_dir)?)
+        .filter_map(|packet| packet["seq"].as_i64())
+        .max()
+        .unwrap_or(0);
+    let seq = current_seq
+        .checked_add(1)
+        .context("handoff sequence exhausted")?;
+    let (state_objective, state_phase) = local_state_fields(project_dir)?;
+    let packet = assemble_packet(
+        input,
+        None,
+        PacketContext {
+            project_dir,
+            project_id,
+            seq,
+            source: "dot",
+            routing_dest: None,
+            note_text: None,
+            objective_override: None,
+            state_objective,
+            state_phase,
+            handing_to_another: false,
+        },
+    )?;
+    write_packet_durable(project_dir, &packet)?;
+    handoff_continuity::write_explicit_marker(
+        project_dir,
+        "dot",
+        seq,
+        packet["written_at"].as_str().unwrap_or_default(),
+    )?;
+    Ok(())
+}
+
 /// `stateroot handoff write [--from H] [--to H] [--task …] [--next …] [--input PATH]`.
 ///
 /// Explicit origin replaces the current structured handoff. Automatic origin

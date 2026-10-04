@@ -19,6 +19,7 @@ pub mod continuity_synthesis;
 pub mod delegate;
 pub mod detached;
 pub mod doctor;
+pub mod dot;
 pub mod drain_finalize;
 pub mod editor_extensions;
 pub mod ext;

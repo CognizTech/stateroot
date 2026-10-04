@@ -34,6 +34,7 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
+    let dot_request = std::env::args_os().nth(1).is_some_and(|arg| arg == "dot");
     let cli = match cli::Cli::try_parse() {
         Ok(cli) => cli,
         Err(err) => {
@@ -42,10 +43,12 @@ async fn main() -> anyhow::Result<()> {
             // the first (and only) command run, so the install acquisition
             // event must be spooled on this path too or those installs never
             // count. The detached drain delivers it (durable, retried).
-            if matches!(
-                err.kind(),
-                clap::error::ErrorKind::DisplayVersion | clap::error::ErrorKind::DisplayHelp
-            ) {
+            if !dot_request
+                && matches!(
+                    err.kind(),
+                    clap::error::ErrorKind::DisplayVersion | clap::error::ErrorKind::DisplayHelp
+                )
+            {
                 if let Ok(ctx) = Ctx::load() {
                     telemetry::observe_install(&ctx.config_dir, cli::BUILD_VERSION);
                     telemetry::kick_drain(&ctx);
@@ -54,6 +57,11 @@ async fn main() -> anyhow::Result<()> {
             err.exit();
         }
     };
+    // Dot commands deliberately bypass host config, telemetry, update checks,
+    // federation and detached workers. Keep this before Ctx::load().
+    if let Command::Dot(args) = &cli.command {
+        return commands::dot::run(args);
+    }
     let ctx = Ctx::load()?;
 
     // Anonymous acquisition telemetry: one `install_observed` spooled per
@@ -80,6 +88,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     match cli.command {
+        Command::Dot(_) => unreachable!("dot dispatched before host context"),
         Command::Init(args) => commands::init::run(&ctx, args).await?,
         Command::Remove(args) => {
             commands::remove::run(&ctx, args.yes, args.dry_run, args.full).await?
