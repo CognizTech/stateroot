@@ -867,7 +867,7 @@ fn audit_writes(
                 let path = delta.new_file().path();
                 let Some(p) = path else { continue };
                 let rel = p.to_string_lossy().replace('\\', "/");
-                if !(rel.starts_with(".stateroot/") && !rel.starts_with(".stateroot/local/")) {
+                if !rel.starts_with(".stateroot/") || rel.starts_with(".stateroot/local/") {
                     continue;
                 }
                 let blob_id = delta.new_file().id();

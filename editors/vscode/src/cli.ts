@@ -12,6 +12,23 @@ const DOCS_URL = "https://stateroot.dev/docs/getting-started/installation";
 /** Auto-installed path for this extension-host session (never overwrites settings). */
 let sessionCliPath: string | undefined;
 let lastProbeAvailable: boolean | undefined;
+const backgroundFailures = new Map<string, string>();
+
+export function cliFailureMessage(
+  error: cp.ExecFileException,
+  stdout: string,
+  stderr: string,
+  timeoutMs: number
+): string {
+  const reason = error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"
+    ? "Command output exceeded the configured buffer."
+    : error.killed
+      ? `Command timed out after ${timeoutMs / 1000}s${error.signal ? ` (${error.signal})` : ""}.`
+      : typeof error.code === "number"
+        ? `Command exited with code ${error.code}.`
+        : error.message;
+  return [reason, stderr.trim() || stdout.trim()].filter(Boolean).join("\n");
+}
 
 export function useCli(binary: string): void {
   sessionCliPath = binary;
@@ -100,7 +117,9 @@ export function runCli(
             reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
             return;
           }
-          reject(new Error((stderr || err.message || String(err)).trim()));
+          reject(Object.assign(new Error(cliFailureMessage(err, stdout, stderr, timeoutMs)), {
+            code: err.code, killed: err.killed, signal: err.signal,
+          }));
           return;
         }
         resolve(stdout);
@@ -127,7 +146,7 @@ export async function runCliReport(
   cwd: string,
   output: vscode.OutputChannel,
   timeoutMs?: number,
-  options?: { allowInstall?: boolean }
+  options?: { allowInstall?: boolean; notifyOnError?: boolean }
 ): Promise<string | undefined> {
   const allowInstall = options?.allowInstall !== false;
   const installAttempted = { value: false };
@@ -139,8 +158,22 @@ export async function runCliReport(
     return undefined;
   }
 
+  const failureKey = `${cwd}\0${binary}\0${args.join("\0")}`;
+  const reportFailure = (message: string) => {
+    if (options?.notifyOnError !== false) {
+      void vscode.window.showErrorMessage(`stateroot ${args[0]} failed: ${message}`);
+    } else if (backgroundFailures.get(failureKey) === message) {
+      return;
+    }
+    backgroundFailures.set(failureKey, message);
+    output.appendLine(`$ stateroot ${args.join(" ")}`);
+    output.appendLine(`Binary: ${binary}; working directory: ${cwd}`);
+    output.appendLine(message);
+  };
+
   try {
     const out = await runCli(args, cwd, timeoutMs, binary);
+    backgroundFailures.delete(failureKey);
     output.appendLine(`$ stateroot ${args.join(" ")}`);
     if (out.trim()) {
       output.appendLine(out.trimEnd());
@@ -155,6 +188,7 @@ export async function runCliReport(
       if (retried) {
         try {
           const out = await runCli(args, cwd, timeoutMs, retried);
+          backgroundFailures.delete(failureKey);
           output.appendLine(`$ stateroot ${args.join(" ")}`);
           if (out.trim()) {
             output.appendLine(out.trimEnd());
@@ -162,18 +196,14 @@ export async function runCliReport(
           return out;
         } catch (retryErr: unknown) {
           const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
-          vscode.window.showErrorMessage(`stateroot ${args[0]} failed: ${retryMsg}`);
-          output.appendLine(`$ stateroot ${args.join(" ")}`);
-          output.appendLine(retryMsg);
+          reportFailure(retryMsg);
           return undefined;
         }
       }
       await offerDocsOnly();
       return undefined;
     }
-    vscode.window.showErrorMessage(`stateroot ${args[0]} failed: ${message}`);
-    output.appendLine(`$ stateroot ${args.join(" ")}`);
-    output.appendLine(message);
+    reportFailure(message);
     return undefined;
   }
 }

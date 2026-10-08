@@ -264,6 +264,16 @@ fn stdio_round_trips_all_six_tools() {
     );
     let listed = McpClient::tool_text(&listed);
     assert_eq!(listed["gates"], json!("all"), "{listed}");
+    let id = listed["learnings"].as_array().unwrap().first().unwrap()["id"]
+        .as_str()
+        .unwrap();
+    let shown = client.call(
+        "tools/call",
+        json!({"name":"learnings_show", "arguments":{"id":id,"scope":"project"}}),
+    );
+    let shown = McpClient::tool_text(&shown);
+    assert_eq!(shown["id"], id);
+    assert!(shown["sources"].is_string());
 }
 
 #[test]

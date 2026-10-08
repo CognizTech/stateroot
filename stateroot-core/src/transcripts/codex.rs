@@ -186,7 +186,7 @@ fn opener_of(text: &str) -> String {
         .to_lowercase()
 }
 
-fn parse_rollout(file: &Path, project_dir: &Path) -> Option<TranscriptSession> {
+pub(crate) fn parse_rollout(file: &Path, project_dir: &Path) -> Option<TranscriptSession> {
     let text = std::fs::read_to_string(file).ok()?;
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
 
@@ -214,6 +214,7 @@ fn parse_rollout(file: &Path, project_dir: &Path) -> Option<TranscriptSession> {
 
     let mut session = TranscriptSession {
         harness: "codex",
+        source_path: file.to_string_lossy().into_owned(),
         session_id,
         cwd,
         started_at: payload
@@ -251,11 +252,12 @@ fn parse_rollout(file: &Path, project_dir: &Path) -> Option<TranscriptSession> {
                 let text = message_text(&payload);
                 match role {
                     "user" => {
-                        if !is_injected(&text) {
-                            let prompt = clean(&text, PROMPT_MAX);
+                        let text = user_assertion(&text).unwrap_or_default();
+                        if !is_injected(text) {
+                            let prompt = clean(text, PROMPT_MAX);
                             if !prompt.is_empty() {
                                 if session.objective.is_empty() {
-                                    session.objective = clean(&text, OBJECTIVE_MAX);
+                                    session.objective = clean(text, OBJECTIVE_MAX);
                                 }
                                 push_unique(&mut session.user_prompts, prompt.clone());
                                 push_tail(&mut session, "user", prompt);
@@ -426,10 +428,69 @@ fn message_text(payload: &Value) -> String {
 }
 
 pub(crate) fn is_injected(text: &str) -> bool {
+    if let Some(remainder) = user_assertion(text) {
+        if remainder != text.trim() {
+            return remainder.trim().is_empty();
+        }
+    } else {
+        return true;
+    }
     let trimmed = text.trim_start();
     INJECTED_PREFIXES
         .iter()
         .any(|prefix| trimmed.starts_with(prefix))
+}
+
+/// Peel only complete harness envelopes at message start. Quoted wrappers
+/// and real text following a host envelope remain user evidence.
+pub fn user_assertion(text: &str) -> Option<&str> {
+    let mut remaining = text.trim();
+    const FOOTER: &str = "This content IS the handoff — do NOT re-fetch it via tools";
+    if remaining.starts_with("**Active identity (apply from your first message")
+        || remaining.starts_with("# StateRoot Resume — ")
+    {
+        if let Some(end) = remaining.find(FOOTER) {
+            remaining = remaining[end + FOOTER.len()..].trim_start();
+        }
+    }
+    if remaining.starts_with("# Context from my IDE setup:")
+        || remaining.starts_with("# Files mentioned by the user:")
+    {
+        for marker in ["## My request:", "# My request:"] {
+            if let Some(start) = remaining.find(marker) {
+                remaining = remaining[start + marker.len()..].trim_start();
+                break;
+            }
+        }
+    }
+    loop {
+        let mut peeled = false;
+        for tag in [
+            "environment_context",
+            "permissions",
+            "recommended_plugins",
+            "turn_aborted",
+            "stateroot_context",
+            "stateroot_digest",
+        ] {
+            if remaining.starts_with(&format!("<{tag}")) {
+                let close = format!("</{tag}>");
+                if let Some(end) = remaining.find(&close) {
+                    remaining = remaining[end + close.len()..].trim_start();
+                    peeled = true;
+                    break;
+                }
+            }
+        }
+        if !peeled {
+            break;
+        }
+    }
+    if remaining.is_empty() {
+        None
+    } else {
+        Some(remaining)
+    }
 }
 
 /// Extract file paths from raw apply_patch text (shared by the

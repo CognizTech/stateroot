@@ -33,6 +33,31 @@ fn compact(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_default()
 }
 
+/// Canonical evidence keeps raw injected material as metadata. Mixed messages
+/// additionally retain their real user request as a normal message.
+pub(crate) fn separate_injected_context(entries: &mut Vec<CanonicalEntry>) {
+    let mut result = Vec::with_capacity(entries.len());
+    for mut e in entries.drain(..) {
+        if e.kind == "message" && e.role.as_deref() == Some("user") {
+            if let Some(raw) = e.content.as_deref() {
+                let assertion = codex::user_assertion(raw).unwrap_or_default();
+                if codex::is_injected(raw) || assertion != raw.trim() {
+                    let mut metadata = e.clone();
+                    metadata.kind = "meta".into();
+                    metadata.native_type = Some("injected context (raw evidence)".into());
+                    result.push(metadata);
+                    if assertion.is_empty() || codex::is_injected(assertion) {
+                        continue;
+                    }
+                    e.content = Some(assertion.to_string());
+                }
+            }
+        }
+        result.push(e);
+    }
+    *entries = result;
+}
+
 // ---------------------------------------------------------------------
 // claude — ~/.claude/projects/**/*.jsonl (one event per line)
 // ---------------------------------------------------------------------
@@ -93,7 +118,7 @@ pub(crate) fn canonical_from_claude(
                 let message = event.get("message").cloned().unwrap_or(Value::Null);
                 match message.get("content") {
                     Some(Value::String(text)) => {
-                        if is_command_wrapper(text) {
+                        if is_command_wrapper(text) || codex::is_injected(text) {
                             base.native_type = Some("local_command".into());
                             base.content = Some(text.clone());
                             entries.push(base);
@@ -287,6 +312,7 @@ pub(crate) fn canonical_from_codex(
                 e.role = Some(role.to_string());
                 let text = codex_message_text(&payload);
                 if role == "user" && codex::is_injected(&text) {
+                    e.kind = "meta".into();
                     e.native_type = Some("injected".into());
                 }
                 e.content = Some(text);
@@ -533,8 +559,10 @@ pub(crate) fn canonical_from_kimi(
                     .and_then(|v| v.as_str())
                     .filter(|kind| *kind != "user")
                 {
+                    e.kind = "meta".into();
                     e.native_type = Some(format!("origin:{kind}"));
                 } else if codex::is_injected(&text) {
+                    e.kind = "meta".into();
                     e.native_type = Some("injected".into());
                 }
                 entries.push(e);
@@ -969,6 +997,38 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn every_harness_keeps_raw_envelopes_without_reasserting_them() {
+        for harness in [
+            "codex", "claude", "cursor", "kimi", "openclaw", "hermes", "pi", "dsh",
+        ] {
+            let raw =
+                "<environment_context>host context</environment_context>\nActual user request";
+            let mut entries = vec![CanonicalEntry {
+                kind: "message".into(),
+                role: Some("user".into()),
+                content: Some(raw.into()),
+                ..Default::default()
+            }];
+            separate_injected_context(&mut entries);
+            assert_eq!(entries.len(), 2, "{harness}");
+            assert_eq!(entries[0].kind, "meta");
+            assert_eq!(entries[0].content.as_deref(), Some(raw));
+            assert_eq!(entries[1].content.as_deref(), Some("Actual user request"));
+            let quoted =
+                "> <environment_context>quote</environment_context>\nExplain this quotation";
+            let mut entries = vec![CanonicalEntry {
+                kind: "message".into(),
+                role: Some("user".into()),
+                content: Some(quoted.into()),
+                ..Default::default()
+            }];
+            separate_injected_context(&mut entries);
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].content.as_deref(), Some(quoted));
+        }
+    }
+
     fn kinds(session: &CanonicalSession) -> Vec<&str> {
         session.entries.iter().map(|e| e.kind.as_str()).collect()
     }
@@ -1057,7 +1117,7 @@ mod tests {
             kinds(&session),
             [
                 "meta",
-                "message",
+                "meta", // injected context kept as metadata
                 "message",
                 "meta",
                 "plan",
@@ -1119,7 +1179,7 @@ mod tests {
             [
                 "meta",    // metadata line
                 "message", // real prompt
-                "message", // origin-tagged (kept, marked)
+                "meta",    // origin-tagged context kept as metadata
                 // partial skipped entirely
                 "message",     // assistant text
                 "meta",        // thinking

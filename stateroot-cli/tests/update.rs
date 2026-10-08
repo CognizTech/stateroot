@@ -59,6 +59,35 @@ fn update_config_toml() -> String {
 }
 
 #[tokio::test]
+async fn polled_views_do_not_wait_for_release_network() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(4)))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let config_home = tempfile::tempdir().expect("config");
+    let user_home = tempfile::tempdir().expect("home");
+    let project = tempfile::tempdir().expect("project");
+    seed_config(config_home.path(), "[update]\nenabled = false\n");
+    init_project(config_home.path(), user_home.path(), project.path());
+    seed_config(config_home.path(), &update_config_toml());
+    // The detached worker has its own scheduling tests. Suppress it here
+    // so this test proves that no foreground request holds a poll open.
+    for args in [vec!["delegate", "list"], vec!["log", "--json"]] {
+        stateroot(config_home.path(), user_home.path(), project.path())
+            .env("STATEROOT_GITHUB_API_BASE", server.uri())
+            .env("STATEROOT_DISABLE_SCHEDULED_UPDATE", "1")
+            .env("STATEROOT_TEST_BUILD_VERSION", "0.1.12")
+            .timeout(std::time::Duration::from_secs(2))
+            .args(args)
+            .assert()
+            .success();
+    }
+    server.verify().await;
+}
+
+#[tokio::test]
 async fn version_check_caches_for_24h() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

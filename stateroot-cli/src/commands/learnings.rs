@@ -18,6 +18,7 @@ pub fn list(
     workspace: bool,
     domain: Option<&str>,
     status: Option<&str>,
+    json: bool,
 ) -> Result<()> {
     ctx.require_project()?;
     let home = home()?;
@@ -27,6 +28,10 @@ pub fn list(
         .iter()
         .filter(|l| status.map(|s| l.status == s).unwrap_or(true))
         .collect();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&filtered)?);
+        return Ok(());
+    }
     if filtered.is_empty() {
         println!(
             "no learnings ({scope} scope{})",
@@ -38,12 +43,43 @@ pub fn list(
     for l in filtered {
         println!(
             "  {} [{}; {:.2}; {}] {} — {}",
-            &l.id[..12.min(l.id.len())],
+            l.id,
             l.status,
             l.confidence,
             l.category,
             truncate(&l.statement, 80),
             l.sources
+        );
+    }
+    Ok(())
+}
+
+/// Read a full saved rule without requiring index availability.
+pub fn show(
+    ctx: &Ctx,
+    id: &str,
+    user: bool,
+    workspace: bool,
+    domain: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    ctx.require_project()?;
+    let scope = resolve_scope(user, workspace, domain)?;
+    let learning = core::read_scope(&ctx.cwd, &home()?, &scope)
+        .into_iter()
+        .find(|learning| learning.id == id)
+        .ok_or_else(|| anyhow::anyhow!("no learning '{id}' in {scope} scope"))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&learning)?);
+    } else {
+        println!(
+            "{} [{}; {}; {}]\n{}\nSources: {}",
+            learning.id,
+            learning.scope,
+            learning.status,
+            learning.label,
+            learning.statement,
+            learning.sources
         );
     }
     Ok(())

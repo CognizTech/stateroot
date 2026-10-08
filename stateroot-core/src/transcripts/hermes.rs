@@ -113,7 +113,10 @@ impl TranscriptReader for HermesReader {
             let Ok(db) = open_readonly(&db_path) else {
                 continue;
             };
-            out.extend(scan_db(&db, project_dir));
+            out.extend(scan_db(&db, project_dir).into_iter().map(|mut session| {
+                session.source_path = db_path.to_string_lossy().into_owned();
+                session
+            }));
         }
         out
     }
@@ -134,7 +137,7 @@ pub(crate) fn db_candidates(home: &Path) -> Vec<PathBuf> {
     paths
 }
 
-fn scan_db(db: &rusqlite::Connection, project_dir: &Path) -> Vec<TranscriptSession> {
+pub(crate) fn scan_db(db: &rusqlite::Connection, project_dir: &Path) -> Vec<TranscriptSession> {
     let mut out = Vec::new();
     let mut stmt = match db.prepare(
         "SELECT id, COALESCE(cwd,''), COALESCE(git_repo_root,''), \
@@ -227,14 +230,18 @@ fn load_session(
         }
         match role_l.as_str() {
             "user" | "human" => {
-                let cleaned = clean(&text, OBJECTIVE_MAX);
+                let text = super::codex::user_assertion(&text).unwrap_or_default();
+                if super::codex::is_injected(text) {
+                    continue;
+                }
+                let cleaned = clean(text, OBJECTIVE_MAX);
                 if cleaned.is_empty() {
                     continue;
                 }
                 if session.objective.is_empty() {
                     session.objective = cleaned.clone();
                 }
-                push_unique(&mut session.user_prompts, clean(&text, PROMPT_MAX));
+                push_unique(&mut session.user_prompts, clean(text, PROMPT_MAX));
                 push_tail(&mut session.conversation_tail, "user", &cleaned);
             }
             "assistant" | "model" => {

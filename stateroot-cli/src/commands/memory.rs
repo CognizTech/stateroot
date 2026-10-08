@@ -147,11 +147,23 @@ pub fn recall(ctx: &Ctx, query: &str, limit: usize) -> Result<()> {
     ctx.require_project()?;
     let home = home()?;
     hot_apex::ensure_migrated(&ctx.cwd, &home);
-    let hits = memory_index::search(&ctx.cwd, &home, query, limit, true)
-        .map_err(|e| anyhow::anyhow!(e))?;
+    let hits = match memory_index::search(&ctx.cwd, &home, query, limit, true) {
+        Ok(hits) => hits,
+        Err(error) => {
+            eprintln!("recall index stale/unavailable: {error}; bounded source fallback");
+            let hits = memory_index::source_fallback(&ctx.cwd, &home, query, limit);
+            if hits.is_empty() {
+                return Err(anyhow::anyhow!(error));
+            }
+            hits
+        }
+    };
     if hits.is_empty() {
         println!("no hits for {query:?}");
         return Ok(());
+    }
+    if hits.iter().any(|hit| hit.stale) {
+        eprintln!("recall index stale: using unchanged committed sources and current authored-source fallback");
     }
     for hit in hits {
         let priv_mark = if hit.private { " [private]" } else { "" };
@@ -159,12 +171,11 @@ pub fn recall(ctx: &Ctx, query: &str, limit: usize) -> Result<()> {
             "[{} | {} | score={:.3}]{priv_mark}",
             hit.kind, hit.path, hit.score
         );
-        let snippet = if hit.text.len() > 400 {
-            format!("{}…", &hit.text[..400])
-        } else {
-            hit.text.clone()
-        };
-        println!("  {snippet}\n");
+        if hit.kind == "transcript" {
+            println!("  source: {} · native session {}", hit.source, hit.path);
+        }
+        // Core already bounds around the match; another prefix cap can hide it.
+        println!("  {}\n", hit.text);
     }
     Ok(())
 }

@@ -104,6 +104,15 @@ async fn main() -> anyhow::Result<()> {
             | cli::Command::TelemetryIdentity { .. }
     );
 
+    let polled_view = match &cli.command {
+        Command::Delegate(args) => matches!(
+            args.action,
+            Some(cli::DelegateAction::List | cli::DelegateAction::Status { .. })
+        ),
+        Command::Log(_) => true,
+        _ => false,
+    };
+
     match cli.command {
         Command::Dot(_) => unreachable!("dot dispatched before host context"),
         Command::Init(args) => commands::init::run(&ctx, args).await?,
@@ -211,6 +220,9 @@ async fn main() -> anyhow::Result<()> {
                 commands::handoff::finalize(&ctx, from.as_deref().or(actor.as_deref())).await?
             }
             HandoffAction::Repair => commands::handoff::repair(&ctx).await?,
+            HandoffAction::Recover { job, transcript } => {
+                commands::handoff::recover(&ctx, &job, transcript.as_deref()).await?
+            }
         },
         Command::Snap(args) => commands::roots::snap(
             &ctx,
@@ -385,17 +397,26 @@ async fn main() -> anyhow::Result<()> {
             ProposalsAction::Reject { id } => commands::proposals::reject(&ctx, &id)?,
         },
         Command::Learnings(args) => match args.action {
+            LearningsAction::Show {
+                id,
+                user,
+                workspace,
+                domain,
+                json,
+            } => commands::learnings::show(&ctx, &id, user, workspace, domain.as_deref(), json)?,
             LearningsAction::List {
                 user,
                 workspace,
                 domain,
                 status,
+                json,
             } => commands::learnings::list(
                 &ctx,
                 user,
                 workspace,
                 domain.as_deref(),
                 status.as_deref(),
+                json,
             )?,
             LearningsAction::Accept {
                 id,
@@ -477,6 +498,7 @@ async fn main() -> anyhow::Result<()> {
                 limit,
             )?,
             ObservationsAction::Show { id } => commands::observations::show(&ctx, &id)?,
+            ObservationsAction::Health => commands::observations::health(&ctx)?,
             ObservationsAction::Search {
                 query,
                 kind,
@@ -566,7 +588,18 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     if update_allowed {
-        commands::update::maybe_auto_update(&ctx).await;
+        if polled_view {
+            // Editor refreshes must exit after producing their local result.
+            // Keep automatic maintenance, but run it in the detached worker.
+            if !commands::update::disabled(&ctx) {
+                commands::update::maybe_spawn_scheduled_update(
+                    &ctx.config_dir,
+                    ctx.config.update.check_interval_hours,
+                );
+            }
+        } else {
+            commands::update::maybe_auto_update(&ctx).await;
+        }
         // Telemetry: hooks append to the spool only; user-facing entrypoints
         // kick the detached single-flight drain (never blocks, never fails
         // the command).

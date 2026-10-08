@@ -367,6 +367,11 @@ fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
                 // A reservation whose spawn never landed: resubmit under the
                 // same key (recover-before-cancel pattern).
             } else {
+                if !owns_process_namespace(&existing) {
+                    anyhow::bail!(
+                        "delegation key `{record_id}` has unverified process ownership on this host; observe or retry it from its original runtime"
+                    );
+                }
                 let pid = existing.get("pid").and_then(Value::as_u64).unwrap_or(0) as u32;
                 if pid != 0 && pid_alive(pid) {
                     println!(
@@ -429,6 +434,7 @@ fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
         "attempt": attempt,
         "fingerprint": fingerprint,
         "log": log_rel,
+        "process_namespace": process_namespace(),
     });
     if !retries.is_empty() {
         record["retries"] = Value::Array(retries);
@@ -804,36 +810,89 @@ fn pid_alive(pid: u32) -> bool {
 #[cfg(windows)]
 fn pid_alive(pid: u32) -> bool {
     std::process::Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
         .map(|out| {
             let text = String::from_utf8_lossy(&out.stdout);
-            out.status.success() && !text.contains("No tasks are running")
+            out.status.success()
+                && text.lines().any(|line| {
+                    let Some(rest) = line.trim().strip_prefix('"') else {
+                        return false;
+                    };
+                    let Some((_, columns)) = rest.split_once("\",") else {
+                        return false;
+                    };
+                    columns
+                        .split(',')
+                        .next()
+                        .and_then(|value| value.trim_matches('"').parse::<u32>().ok())
+                        == Some(pid)
+                })
         })
         .unwrap_or(false)
 }
 
-/// The live status of one record: final outcome when written; `running` when
-/// the pid is alive; `lost` when the worker died before writing (reaped —
-/// the record is updated so the loss is recorded, never silent).
-pub(crate) fn live_status(path: &Path, record: &Value) -> String {
+/// An opaque identity for the host PID namespace. Windows and WSL can read
+/// the same project store, but cannot interpret each other's process IDs.
+fn process_namespace() -> Option<String> {
+    static ID: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        #[cfg(target_os = "linux")]
+        let identity = {
+            let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+            let namespace = std::fs::read_link("/proc/self/ns/pid").ok()?;
+            format!("linux:{}:{}", boot.trim(), namespace.display())
+        };
+        #[cfg(windows)]
+        let identity = format!("windows:{}", std::env::var("COMPUTERNAME").ok()?);
+        #[cfg(not(any(target_os = "linux", windows)))]
+        let identity = {
+            let host = std::process::Command::new("hostname").output().ok()?;
+            let boot = std::process::Command::new("sysctl")
+                .args(["-n", "kern.boottime"])
+                .output()
+                .ok()?;
+            if !host.status.success() || !boot.status.success() {
+                return None;
+            }
+            format!(
+                "{}:{:?}:{:?}",
+                std::env::consts::OS,
+                host.stdout,
+                boot.stdout
+            )
+        };
+        Some(format!("sha256:{:x}", Sha256::digest(identity.as_bytes())))
+    })
+    .clone()
+}
+
+fn owns_process_namespace(record: &Value) -> bool {
+    match (
+        record.get("process_namespace").and_then(Value::as_str),
+        process_namespace(),
+    ) {
+        (Some(recorded), Some(current)) => recorded == current,
+        _ => false,
+    }
+}
+
+/// Status reads never rewrite a worker record. A foreign or legacy PID has
+/// unknown liveness; only the worker's own final outcome is authoritative.
+pub(crate) fn live_status(_path: &Path, record: &Value) -> String {
     if let Some(outcome) = record.get("outcome").and_then(Value::as_str) {
         return outcome.to_string();
     }
     if record.get("status").and_then(Value::as_str) == Some("running") {
+        if !owns_process_namespace(record) {
+            return "unknown".to_string();
+        }
         let pid = record.get("pid").and_then(Value::as_u64).unwrap_or(0) as u32;
         if pid != 0 && pid_alive(pid) {
             return "running".to_string();
         }
-        // Reap: worker died before writing an outcome.
-        let mut reaped = record.clone();
-        let obj = reaped.as_object_mut().unwrap();
-        obj.remove("status");
-        obj.insert("outcome".into(), json!("lost"));
-        obj.insert("ended_at".into(), json!(now_rfc3339()));
-        let _ = stateroot_core::safe_io::atomic_replace_json(path, &reaped);
         return "lost".to_string();
     }
     "unknown".to_string()
@@ -953,6 +1012,10 @@ fn cancel(ctx: &Ctx, id: &str) -> Result<()> {
         }
     }
     let pid = record.get("pid").and_then(Value::as_u64).unwrap_or(0) as u32;
+
+    if !owns_process_namespace(&record) {
+        anyhow::bail!("cannot cancel delegation {record_id}: its process ownership is unverified on this host; use the original runtime");
+    }
 
     // Phase 1: persisted cancelling — observers see it immediately.
     {
@@ -1169,7 +1232,7 @@ mod tests {
     }
 
     #[test]
-    fn running_record_reaps_to_lost_on_a_dead_pid() {
+    fn dead_local_worker_is_reported_without_rewriting_its_record() {
         let dir = tempfile::tempdir().expect("dir");
         let project = dir.path().join("proj");
         std::fs::create_dir_all(project.join(".stateroot/delegations")).expect("mkdir");
@@ -1184,16 +1247,32 @@ mod tests {
             "status": "running",
             // A pid that cannot be alive (well past any real pid).
             "pid": 4_000_000u32,
+            "process_namespace": process_namespace(),
             "log": ".stateroot/delegations/2026-test-claude-d0.log",
         });
         let dir_path = project.join(".stateroot/delegations");
         write_record(&dir_path, &record).expect("write");
         let (path, loaded) = load_record(&project, "2026-test-claude").expect("record");
         assert_eq!(live_status(&path, &loaded), "lost");
-        // Reaped on disk: outcome recorded, never a silent running-forever.
-        let (_, reaped) = load_record(&project, "2026-test-claude").expect("record");
-        assert_eq!(reaped["outcome"], "lost");
-        assert!(reaped.get("status").is_none());
+        let (_, retained) = load_record(&project, "2026-test-claude").expect("record");
+        assert_eq!(
+            retained, loaded,
+            "a status read must preserve worker evidence"
+        );
+    }
+
+    #[test]
+    fn foreign_and_legacy_pids_are_unknown_even_if_the_pid_is_live() {
+        for namespace in [Value::Null, json!("other-host-pid-namespace")] {
+            let record = json!({"status": "running", "pid": std::process::id(), "process_namespace": namespace});
+            assert_eq!(live_status(Path::new("unused"), &record), "unknown");
+        }
+    }
+
+    #[test]
+    fn terminal_worker_outcome_survives_cross_host_reads() {
+        let record = json!({"outcome": "completed", "process_namespace": "another-host"});
+        assert_eq!(live_status(Path::new("unused"), &record), "completed");
     }
 
     /// The delegation log's fds must be O_APPEND end-to-end: a late worker

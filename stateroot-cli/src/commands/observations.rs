@@ -38,12 +38,103 @@ pub fn list(
 /// `stateroot observations show <id>`
 pub fn show(ctx: &Ctx, id: &str) -> anyhow::Result<()> {
     ctx.require_project()?;
-    let Some(row) = observations::get_observation(&ctx.cwd, id) else {
-        anyhow::bail!("observation not found: {id}");
-    };
-    print_row(&row);
-    if !row.text.is_empty() {
-        println!("\n---\n{}", row.text);
+    match observations::resolve(&ctx.cwd, id) {
+        observations::ObservationLookup::Found(row) => {
+            print_row(&row);
+            if let Some(conflict_with) = row.conflict_with.as_deref() {
+                println!(
+                    "  CONFLICT: same event identity as {conflict_with} with different content — both bodies retained"
+                );
+            }
+            if let Some(session) = row.session_id.as_deref() {
+                let identity = row.session_identity.as_deref().unwrap_or("unknown");
+                println!("  session: {session} ({identity})");
+            }
+            if let Some(digest) = row.text_digest.as_deref() {
+                println!("  text-digest: {digest}");
+            }
+            // The raw captured source is available for v2 records.
+            if let Some(capture_id) = row.capture_id.as_deref() {
+                if let Some(record) = observations::archive_lookup(&ctx.cwd, capture_id) {
+                    if let Some(source) = record.source.as_ref() {
+                        println!(
+                            "  source: {} bytes, digest {} ({})",
+                            source.bytes, source.digest, record.capture.source_status
+                        );
+                    } else {
+                        println!("  source: unavailable ({})", record.capture.source_status);
+                    }
+                }
+            }
+            if !row.text.is_empty() {
+                println!("\n---\n{}", row.text);
+            }
+        }
+        observations::ObservationLookup::Unavailable(reason) => {
+            anyhow::bail!("observation unavailable: {reason}");
+        }
+        observations::ObservationLookup::NotFound => {
+            anyhow::bail!("observation not found: {id}");
+        }
+    }
+    Ok(())
+}
+
+/// `stateroot observations health` — capture/retention/corruption facts.
+pub fn health(ctx: &Ctx) -> anyhow::Result<()> {
+    ctx.require_project()?;
+    let health = observations::health(&ctx.cwd);
+    println!(
+        "segments: {} ({} sealed, {} pending-seal)",
+        health.segments,
+        health.sealed,
+        health.pending_seal.len()
+    );
+    for name in &health.pending_seal {
+        println!("  pending-seal: {name}");
+    }
+    println!(
+        "records: {} captured/conflict · {} replay sighting(s) · {} conflict(s) · {} source-unavailable",
+        health.records, health.replays, health.conflicts, health.source_unavailable
+    );
+    println!("legacy rows: {}", health.legacy_rows);
+    if health.corrupt.is_empty() {
+        println!("corrupt/torn lines: none");
+    } else {
+        println!("corrupt/torn lines: {}", health.corrupt.len());
+        for line in &health.corrupt {
+            println!(
+                "  corrupt: {}:{} — {} ({} bytes preserved)",
+                line.file,
+                line.line_no,
+                line.reason,
+                line.raw.len()
+            );
+        }
+    }
+    if !health.read_failures.is_empty() {
+        println!("unreadable files: {}", health.read_failures.len());
+        for failure in &health.read_failures {
+            println!("  unreadable: {} — {}", failure.file, failure.error);
+        }
+    }
+    if !health.missing_frontier.is_empty() {
+        println!(
+            "segments missing frontier (recoverable): {}",
+            health.missing_frontier.len()
+        );
+        for name in &health.missing_frontier {
+            println!("  missing-frontier: {name}");
+        }
+    }
+    let watermark = &health.watermark;
+    match (&watermark.last_capture_id, &watermark.last_ts) {
+        (Some(id), Some(ts)) => println!(
+            "watermark: {} record(s), last {id} at {ts} ({})",
+            watermark.records,
+            watermark.segment.as_deref().unwrap_or("?")
+        ),
+        _ => println!("watermark: no durable records yet"),
     }
     Ok(())
 }
@@ -84,9 +175,13 @@ fn print_row(row: &stateroot_core::observations::Observation) {
         .as_deref()
         .map(|s| format!(" scope={s}"))
         .unwrap_or_default();
+    let status = match row.status.as_str() {
+        "captured" | "legacy" => String::new(),
+        other => format!(" status={other}"),
+    };
     println!(
-        "{}  {}  {}  {}{}",
-        row.id, row.ts, row.harness, row.event, scope
+        "{}  {}  {}  {}{}{}",
+        row.id, row.ts, row.harness, row.event, scope, status
     );
     if let Some(kind) = row.kind_hint.as_deref() {
         println!("  kind: {kind}");

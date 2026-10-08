@@ -1855,6 +1855,7 @@ dependencies = [
  "directories",
  "git2",
  "ignore",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",

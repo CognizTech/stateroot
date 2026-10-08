@@ -207,11 +207,12 @@ pub(crate) fn summarize(raw: &RawSession, project_dir: &Path) -> Option<Transcri
                 match role {
                     "user" => {
                         saw_conversation = true;
-                        if !super::codex::is_injected(&text) {
-                            let prompt = clean(&text, PROMPT_MAX);
+                        let text = super::codex::user_assertion(&text).unwrap_or_default();
+                        if !super::codex::is_injected(text) {
+                            let prompt = clean(text, PROMPT_MAX);
                             if !prompt.is_empty() {
                                 if session.objective.is_empty() {
-                                    session.objective = clean(&text, OBJECTIVE_MAX);
+                                    session.objective = clean(text, OBJECTIVE_MAX);
                                 }
                                 push_unique(&mut session.user_prompts, prompt.clone());
                                 super::codex::push_tail(&mut session, "user", prompt);
@@ -296,8 +297,11 @@ impl TranscriptReader for PiReader {
                 .unwrap_or(false)
         })
         .iter()
-        .filter_map(|file| parse_session_file(file))
-        .filter_map(|raw| summarize(&raw, project_dir))
+        .filter_map(|file| {
+            let mut session = summarize(&parse_session_file(file)?, project_dir)?;
+            session.source_path = file.to_string_lossy().into_owned();
+            Some(session)
+        })
         .collect()
     }
 }

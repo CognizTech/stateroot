@@ -37,10 +37,48 @@ pub fn latest_verified_session(
     project: &Path,
     harness: &str,
 ) -> Option<TranscriptSession> {
-    transcripts::readers()
-        .into_iter()
-        .find(|reader| reader.id() == harness)
+    transcripts::reader_for(harness)
         .and_then(|reader| reader.scan(home, project).into_iter().max_by(session_order))
+}
+
+/// Exact verified session: newer sessions never satisfy an old boundary.
+pub fn verified_session(
+    home: &Path,
+    project: &Path,
+    harness: &str,
+    session_id: &str,
+    locator: Option<&str>,
+) -> Option<TranscriptSession> {
+    if session_id.is_empty() || session_id == "unknown" {
+        return None;
+    }
+    let reader = transcripts::reader_for(harness)?;
+    let mut sessions = reader.scan(home, project);
+    if let Some(locator) = locator {
+        let path = Path::new(locator);
+        let located = match reader.id() {
+            "codex" => transcripts::codex::parse_rollout(path, project),
+            "claude" => transcripts::claude::parse_session(path, project),
+            "openclaw" => transcripts::openclaw::parse_session(path, project),
+            "pi" => transcripts::pi::parse_session_file(path)
+                .and_then(|raw| transcripts::pi::summarize(&raw, project)),
+            "dsh" => transcripts::dsh::parse_session_file(path)
+                .and_then(|raw| transcripts::dsh::summarize(&raw, project)),
+            _ => None,
+        };
+        if let Some(mut session) = located {
+            session.source_path = locator.to_string();
+            sessions.push(session);
+        }
+    }
+    sessions.into_iter().find(|session| {
+        session.session_id == session_id
+            && crate::transcripts::cwd_matches(&session.cwd, project)
+            && locator.is_none_or(|path| {
+                !session.source_path.is_empty()
+                    && transcripts::same_worktree(Path::new(&session.source_path), Path::new(path))
+            })
+    })
 }
 
 fn handoff_boundary_time(handoff: &Value) -> &str {
@@ -81,10 +119,7 @@ pub fn write_explicit_marker(
         "seq": seq,
         "written_at": written_at,
     });
-    std::fs::write(
-        path,
-        format!("{}\n", serde_json::to_string_pretty(&marker)?),
-    )
+    crate::safe_io::atomic_replace_json(&path, &marker)
 }
 
 fn read_explicit_marker(project_dir: &Path) -> Option<Value> {
@@ -97,8 +132,14 @@ pub fn explicit_blocks_finalize(project_dir: &Path, harness: &str, current_seq: 
     let Some(marker) = read_explicit_marker(project_dir) else {
         return false;
     };
-    marker.get("harness").and_then(Value::as_str) == Some(harness)
-        && marker.get("seq").and_then(Value::as_i64) == Some(current_seq)
+    marker.get("seq").and_then(Value::as_i64) == Some(current_seq)
+        && marker.get("harness").and_then(Value::as_str) == Some(harness)
+}
+
+/// Automatic boundary work must preserve authored decisions from any actor.
+pub fn any_explicit_blocks_finalize(project_dir: &Path, current_seq: i64) -> bool {
+    read_explicit_marker(project_dir)
+        .is_some_and(|marker| marker["seq"].as_i64() == Some(current_seq))
 }
 
 /// Newest verified session (any harness) strictly newer than the handoff boundary.
@@ -173,9 +214,7 @@ pub fn build_finalize_packet(
         .or_else(|| session.next_steps.first().cloned())
         .unwrap_or_else(|| format!("Continue from observed {} session", harness));
 
-    let objective = if !session.objective.trim().is_empty() {
-        session.objective.clone()
-    } else if !state_objective.trim().is_empty() {
+    let objective = if !state_objective.trim().is_empty() {
         state_objective.to_string()
     } else {
         task.clone()
@@ -195,7 +234,7 @@ pub fn build_finalize_packet(
 
     let mut warnings = vec![FINALIZE_WARNING.to_string()];
     warnings.push(format!(
-        "transcript enrichment is observed from latest matching {} session {}",
+        "transcript enrichment is observed from verified {} session {}",
         harness, session.session_id
     ));
 
@@ -227,6 +266,8 @@ pub fn build_finalize_packet(
         "created_at": now,
         "written_at": now,
         "created_by_harness": harness,
+        "evidence_ref": { "session_id": session.session_id, "harness": session.harness, "transcript": session.source_path },
+        "history_ref": { "session_id": session.session_id, "harness": session.harness, "transcript": session.source_path, "prompt_count": session.user_prompts.len(), "projection": "bounded reader summary; native source retains history" },
     });
 
     if !session.plan_state.is_empty() {
@@ -374,6 +415,72 @@ pub fn overlay_for_handoff(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registry_aliases_resolve_capability_without_borrowing_unknown_readers() {
+        for (alias, expected) in [
+            ("claude", "claude"),
+            ("claude-code", "claude"),
+            ("kimi", "kimi"),
+            ("kimi-code", "kimi"),
+            ("copilot", "copilot"),
+            ("vscode-copilot", "copilot"),
+            ("github-copilot", "copilot"),
+            ("dsh", "dsh"),
+        ] {
+            assert_eq!(transcripts::reader_for(alias).unwrap().id(), expected);
+        }
+        assert!(transcripts::reader_for("unsupported-harness").is_none());
+    }
+
+    #[test]
+    fn exact_native_identity_and_explicit_locator_never_choose_a_newer_session() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let sibling = tempfile::tempdir().unwrap();
+        let store = home.path().join(".claude/projects/example");
+        std::fs::create_dir_all(&store).unwrap();
+        let write = |id: &str, cwd: &Path, timestamp: &str| {
+            let file = store.join(format!("{id}.jsonl"));
+            std::fs::write(&file, serde_json::json!({"type":"user", "sessionId":id, "cwd":cwd, "timestamp":timestamp, "message":{"role":"user", "content":id}}).to_string()).unwrap();
+            file
+        };
+        let old = write("older", project.path(), "2026-10-08T01:00:00Z");
+        write("newer", project.path(), "2026-10-08T02:00:00Z");
+        write("sibling", sibling.path(), "2026-10-08T03:00:00Z");
+        let found = verified_session(
+            home.path(),
+            project.path(),
+            "claude-code",
+            "older",
+            Some(old.to_str().unwrap()),
+        )
+        .unwrap();
+        assert_eq!(found.session_id, "older");
+        assert!(verified_session(home.path(), project.path(), "claude", "missing", None).is_none());
+        assert!(verified_session(home.path(), project.path(), "claude", "sibling", None).is_none());
+        assert!(verified_session(home.path(), sibling.path(), "claude", "older", None).is_none());
+    }
+
+    #[test]
+    fn historical_first_prompt_does_not_replace_current_objective() {
+        let session = TranscriptSession {
+            objective: "Receive handoff 70".into(),
+            user_prompts: vec!["Review competitors".into()],
+            ..Default::default()
+        };
+        let packet = build_finalize_packet(
+            "p",
+            Path::new("/unavailable"),
+            "codex",
+            1,
+            &session,
+            "Current competitive review",
+            "working",
+        );
+        assert_eq!(packet["objective"], "Current competitive review");
+        assert_eq!(packet["task"], "Review competitors");
+    }
 
     #[test]
     fn session_newer_compares_rfc3339_strings() {

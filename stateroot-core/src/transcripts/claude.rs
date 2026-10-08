@@ -64,11 +64,12 @@ impl TranscriptReader for ClaudeReader {
     }
 }
 
-fn parse_session(file: &Path, project_dir: &Path) -> Option<TranscriptSession> {
+pub(crate) fn parse_session(file: &Path, project_dir: &Path) -> Option<TranscriptSession> {
     let text = std::fs::read_to_string(file).ok()?;
 
     let mut session = TranscriptSession {
         harness: "claude",
+        source_path: file.to_string_lossy().into_owned(),
         ..Default::default()
     };
     let mut cwd = String::new();
@@ -204,7 +205,12 @@ enum LastKind {
 }
 
 fn handle_prompt(session: &mut TranscriptSession, text: &str) {
-    let trimmed = text.trim_start();
+    let Some(trimmed) = super::codex::user_assertion(text) else {
+        return;
+    };
+    if super::codex::is_injected(trimmed) {
+        return;
+    }
     if trimmed.starts_with("<local-command-caveat") || trimmed.starts_with("<command-name") {
         return;
     }

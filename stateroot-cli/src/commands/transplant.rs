@@ -111,6 +111,9 @@ pub fn run(
     let handoff_exists = handoff_src.is_file();
     let spool_bytes = spool_lines.join("\n");
     let spool_hash = sha256_bytes(spool_bytes.as_bytes());
+    // Immutable per-session segments are part of the observation evidence —
+    // they travel too, or a transplant would silently lose captured bodies.
+    let segments = stateroot_core::observations::list_segments(&from_dir);
     let handoff_hash = if handoff_exists {
         sha256_bytes(&std::fs::read(&handoff_src).unwrap_or_default())
     } else {
@@ -121,6 +124,7 @@ pub fn run(
     println!("  from: {} ({})", from_dir.display(), project_id(&from_dir));
     println!("  to:   {} ({})", to_dir.display(), project_id(&to_dir));
     println!("  spool rows: {}", spool_lines.len());
+    println!("  segments: {}", segments.len());
     println!("  handoff: {}", if handoff_exists { "yes" } else { "no" });
     if let Some(harness) = harness {
         println!("  harness filter: {harness}");
@@ -150,6 +154,34 @@ pub fn run(
         for line in &spool_lines {
             writeln!(file, "{line}")?;
         }
+    }
+
+    // Adopt immutable session segments (append-only; an existing segment
+    // name is skipped and counted, never merged or overwritten). The
+    // per-session frontier travels with its segment, or the destination's
+    // session_watermark would report the adopted segment unrecoverable.
+    let mut segments_copied = 0usize;
+    let mut segments_skipped = 0usize;
+    for segment in &segments {
+        let dest = stateroot_core::observations::segments_dir(&to_dir).join(&segment.file);
+        if dest.exists() {
+            segments_skipped += 1;
+            continue;
+        }
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(&segment.path, &dest)?;
+        let frontier_src = segment.path.with_extension("frontier.json");
+        if frontier_src.is_file() {
+            if let Some(frontier_name) = frontier_src.file_name() {
+                std::fs::copy(
+                    &frontier_src,
+                    stateroot_core::observations::segments_dir(&to_dir).join(frontier_name),
+                )?;
+            }
+        }
+        segments_copied += 1;
     }
 
     if handoff_exists {
@@ -182,6 +214,8 @@ pub fn run(
         "counts": {
             "spool_rows": spool_lines.len(),
             "handoff_copied": handoff_exists,
+            "segments_copied": segments_copied,
+            "segments_skipped_existing": segments_skipped,
         },
     });
 

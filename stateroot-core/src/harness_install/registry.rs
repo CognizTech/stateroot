@@ -827,6 +827,22 @@ pub fn adapters() -> &'static [HarnessQuirk] {
     ADAPTERS
 }
 
+/// Verified transcript reader capability; integration adapter ids remain distinct.
+pub fn transcript_reader_id(id: &str) -> Option<&'static str> {
+    match crate::skill_federation::normalize_harness(id).as_str() {
+        "claude" => Some("claude"),
+        "kimi" => Some("kimi"),
+        "github_copilot" => Some("copilot"),
+        "codex" => Some("codex"),
+        "cursor" => Some("cursor"),
+        "openclaw" => Some("openclaw"),
+        "hermes" => Some("hermes"),
+        "pi" => Some("pi"),
+        "dsh" => Some("dsh"), // Verified historical format; not an alias for another adapter.
+        _ => None,
+    }
+}
+
 /// Harnesses that surface hook stderr as user-facing warning banners (VS Code
 /// Copilot): success-path housekeeping notes (checkpoint recorded, ingest
 /// summaries, auto-snap creations) are suppressed there. Failure notes always

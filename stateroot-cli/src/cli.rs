@@ -691,6 +691,13 @@ pub enum HandoffAction {
     /// Recover a malformed current handoff from the newest valid history
     /// packet, preserving the invalid bytes in local quarantine.
     Repair,
+    /// Retry a retained boundary job after its evidence becomes available.
+    Recover {
+        #[arg(long)]
+        job: String,
+        #[arg(long)]
+        transcript: Option<String>,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -1033,6 +1040,18 @@ pub struct LearningsArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum LearningsAction {
+    /// Read a complete saved learning by its exact id.
+    Show {
+        id: String,
+        #[arg(long, group = "scope")]
+        user: bool,
+        #[arg(long, group = "scope")]
+        workspace: bool,
+        #[arg(long, group = "scope")]
+        domain: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// List learnings (project scope by default).
     List {
         /// User-global scope (`~/.stateroot/learnings`).
@@ -1046,6 +1065,8 @@ pub enum LearningsAction {
         domain: Option<String>,
         #[arg(long)]
         status: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
     /// Promote a candidate to active (user approval).
     Accept {
@@ -1211,8 +1232,10 @@ pub enum ObservationsAction {
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
-    /// Show one observation by id (`obs_<line>`).
+    /// Show one observation by id (`obs_<line>` legacy or `cap_…` capture id).
     Show { id: String },
+    /// Capture/retention/corruption health of the observation store.
+    Health,
     /// Search observation text/excerpt/tool fields.
     Search {
         query: String,

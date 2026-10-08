@@ -103,10 +103,11 @@ impl TranscriptReader for OpenClawReader {
     }
 }
 
-fn parse_session(file: &Path, project_dir: &Path) -> Option<TranscriptSession> {
+pub(crate) fn parse_session(file: &Path, project_dir: &Path) -> Option<TranscriptSession> {
     let text = std::fs::read_to_string(file).ok()?;
     let mut session = TranscriptSession {
         harness: "openclaw",
+        source_path: file.to_string_lossy().into_owned(),
         ..Default::default()
     };
     let mut cwd = String::new();
@@ -151,14 +152,18 @@ fn parse_session(file: &Path, project_dir: &Path) -> Option<TranscriptSession> {
                 }
                 match role {
                     "user" => {
-                        let cleaned = clean(&content, OBJECTIVE_MAX);
+                        let content = super::codex::user_assertion(&content).unwrap_or_default();
+                        if super::codex::is_injected(content) {
+                            continue;
+                        }
+                        let cleaned = clean(content, OBJECTIVE_MAX);
                         if cleaned.is_empty() {
                             continue;
                         }
                         if session.objective.is_empty() {
                             session.objective = cleaned.clone();
                         }
-                        push_unique(&mut session.user_prompts, clean(&content, PROMPT_MAX));
+                        push_unique(&mut session.user_prompts, clean(content, PROMPT_MAX));
                         push_tail(&mut session.conversation_tail, "user", &cleaned);
                     }
                     "assistant" => {
@@ -211,11 +216,15 @@ fn parse_session(file: &Path, project_dir: &Path) -> Option<TranscriptSession> {
                     let role = message.get("role").and_then(|v| v.as_str()).unwrap_or("");
                     let content = extract_text(message.get("content"));
                     if role == "user" && !content.trim().is_empty() {
-                        let cleaned = clean(&content, OBJECTIVE_MAX);
+                        let content = super::codex::user_assertion(&content).unwrap_or_default();
+                        if super::codex::is_injected(content) {
+                            continue;
+                        }
+                        let cleaned = clean(content, OBJECTIVE_MAX);
                         if session.objective.is_empty() {
                             session.objective = cleaned.clone();
                         }
-                        push_unique(&mut session.user_prompts, clean(&content, PROMPT_MAX));
+                        push_unique(&mut session.user_prompts, clean(content, PROMPT_MAX));
                         push_tail(&mut session.conversation_tail, "user", &cleaned);
                     } else if role == "assistant" && !content.trim().is_empty() {
                         saw_assistant = true;

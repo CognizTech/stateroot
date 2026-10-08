@@ -123,7 +123,10 @@ impl TranscriptReader for CursorReader {
             let Ok(db) = open_readonly(&db_path) else {
                 continue;
             };
-            sessions.extend(scan_db(&db, project_dir));
+            sessions.extend(scan_db(&db, project_dir).into_iter().map(|mut session| {
+                session.source_path = db_path.to_string_lossy().into_owned();
+                session
+            }));
         }
         sessions
     }
@@ -242,6 +245,7 @@ fn scan_composer(
         match bubble_type {
             1 => {
                 // user
+                let text = super::codex::user_assertion(text).unwrap_or_default();
                 if !super::codex::is_injected(text) {
                     let prompt = clean(text, 2000);
                     if !prompt.is_empty() {

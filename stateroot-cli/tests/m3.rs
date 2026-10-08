@@ -48,6 +48,154 @@ fn canonical_soul(user_home: &Path) -> String {
 }
 
 #[test]
+fn full_learning_lookup_and_json_roundtrip_survive_index_unavailability() {
+    let config = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    init_project(config.path(), home.path(), project.path());
+    let statement = format!(
+        "Prefer complete saved evidence. {} End of rule.",
+        "Long rule detail. ".repeat(30)
+    );
+    for (scope, flags) in [
+        ("project", vec![]),
+        ("user", vec!["--user"]),
+        ("workspace", vec!["--workspace"]),
+        ("domain:testing", vec!["--domain", "testing"]),
+    ] {
+        let learning = stateroot_core::learnings::record_note(
+            project.path(),
+            home.path(),
+            &statement,
+            scope,
+            "full-rule-test",
+        )
+        .unwrap();
+        let output = stateroot(config.path(), home.path(), project.path())
+            .args(["learnings", "show", &learning.0, "--json"])
+            .args(&flags)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let shown: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(shown["statement"], statement);
+        assert_eq!(shown["sources"], "full-rule-test");
+        assert_eq!(shown["status"], "active");
+        let output = stateroot(config.path(), home.path(), project.path())
+            .args(["learnings", "list", "--json"])
+            .args(&flags)
+            .output()
+            .unwrap();
+        let listed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == learning.0 && row["statement"] == statement));
+    }
+}
+
+#[test]
+fn concurrent_process_recall_uses_a_committed_generation_or_labeled_source_fallback() {
+    let config = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    init_project(config.path(), home.path(), project.path());
+    stateroot_core::learnings::record_note(
+        project.path(),
+        home.path(),
+        "Prefer heliotropic continuity evidence",
+        "project",
+        "parallel-source",
+    )
+    .unwrap();
+    std::thread::scope(|scope| {
+        let run = || {
+            let output = stateroot(config.path(), home.path(), project.path())
+                .args(["memory", "recall", "heliotropic"])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("heliotropic"));
+        };
+        let first = scope.spawn(run);
+        let second = scope.spawn(run);
+        first.join().unwrap();
+        second.join().unwrap();
+    });
+}
+
+#[test]
+fn recall_process_reads_committed_rollback_generation_during_uncommitted_rebuild() {
+    let config = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    init_project(config.path(), home.path(), project.path());
+    let dir = home.path().join(".codex/sessions/test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let events = [
+        json!({"type":"session_meta","payload":{"id":"committed","cwd":project.path(),"timestamp":"2026-10-08T00:00:00Z"}}),
+        json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"committedcanary unchanged native evidence"}]}}),
+    ];
+    std::fs::write(
+        dir.join("rollout-committed.jsonl"),
+        events
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+    stateroot_core::memory_index::rebuild(project.path(), home.path()).unwrap();
+    stateroot_core::learnings::record_note(
+        project.path(),
+        home.path(),
+        "Prefer current authored evidence",
+        "project",
+        "reader-test",
+    )
+    .unwrap();
+    let _writer = stateroot_core::safe_io::ResourceLock::acquire(
+        project.path().join(".stateroot/local/memory-index.lock"),
+    )
+    .unwrap();
+    let conn = rusqlite::Connection::open(
+        project
+            .path()
+            .join(".stateroot")
+            .join(stateroot_core::memory_index::INDEX_DB_REL),
+    )
+    .unwrap();
+    assert_eq!(
+        conn.query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        "delete"
+    );
+    conn.execute_batch("PRAGMA cache_spill=OFF; BEGIN IMMEDIATE; DELETE FROM docs; INSERT INTO docs_fts(docs_fts) VALUES('delete-all');").unwrap();
+    let output = stateroot(config.path(), home.path(), project.path())
+        .args(["memory", "recall", "committedcanary"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("committedcanary"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("stale"));
+    conn.execute_batch("ROLLBACK").unwrap();
+}
+
+#[test]
 fn soul_generate_show_projection_and_history() {
     let config_home = tempfile::tempdir().expect("config home");
     seed_config_home(config_home.path(), "");

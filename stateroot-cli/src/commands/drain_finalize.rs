@@ -10,7 +10,6 @@
 use std::path::Path;
 
 use anyhow::Result;
-use serde_json::Value;
 use stateroot_core::finalize_journal::{self as journal, BoundaryJob, Phase};
 use stateroot_core::local_store::{self, now_rfc3339};
 
@@ -70,7 +69,6 @@ pub async fn run_drain(ctx: &Ctx) -> Result<()> {
     else {
         return Ok(());
     };
-    migrate_legacy_outbox(ctx)?;
     loop {
         let due = journal::due(&ctx.cwd);
         if due.is_empty() {
@@ -85,11 +83,59 @@ pub async fn run_drain(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
+/// Explicit recovery advances only the requested retained job.
+pub async fn recover_one(ctx: &Ctx, id: &str, transcript: Option<&str>) -> Result<()> {
+    let _lock = stateroot_core::safe_io::ResourceLock::acquire(lock_path(&ctx.cwd))?;
+    let mut job = journal::recover(&ctx.cwd, id, transcript)?;
+    if job
+        .capture_watermark
+        .as_ref()
+        .is_some_and(|capture| capture["status"] == "unreadable")
+    {
+        let recovered = stateroot_core::observations::recover_session_frontier(
+            &ctx.cwd,
+            &job.harness,
+            &job.session_id,
+        )?;
+        job.capture_watermark = Some(
+            serde_json::json!({"status":if recovered.is_some(){"recovered"}else{"absent"},"harness":job.harness,"session_id":job.session_id,"watermark":recovered,"observed_at":now_rfc3339(),"coverage":"frontier observed during explicit recovery; not proven boundary-time capture"}),
+        );
+        journal::save(&ctx.cwd, &job)?;
+    }
+    while job.state == "active" {
+        if let Err(error) = advance_one(ctx, &mut job).await {
+            journal::mark_error(&ctx.cwd, &mut job, &format!("{error:#}"))?;
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
 /// Advance one job through exactly one phase (the state machine persists
 /// the transition; a crash between phases resumes from disk).
 async fn advance_one(ctx: &Ctx, job: &mut BoundaryJob) -> Result<()> {
+    if let Some(capture) = &job.capture_watermark {
+        anyhow::ensure!(
+            capture["status"] != "unreadable",
+            "boundary capture frontier unavailable: {}; explicit handoff recover --job required",
+            capture["reason"].as_str().unwrap_or("unknown source error")
+        );
+    }
     match job.phase {
         Phase::Queued => {
+            anyhow::ensure!(
+                job.project_path.is_empty()
+                    || stateroot_core::transcripts::same_worktree(
+                        Path::new(&job.project_path),
+                        &ctx.cwd
+                    ),
+                "boundary checkout mismatch"
+            );
+            anyhow::ensure!(
+                job.lineage_ref == stateroot_core::roots::lineage_refname(&ctx.cwd),
+                "boundary lineage mismatch"
+            );
+            job.snapshot_timing = format!("delayed automatic snapshot at {}; may include post-boundary edits; boundary_source_root is the prior verified state", now_rfc3339());
             // 1. Snapshot FIRST — the boundary's handoff must reference the
             //    root produced for this boundary. Budget exhaustion skips
             //    only the automatic root (recorded by the engine and surfaced
@@ -104,6 +150,9 @@ async fn advance_one(ctx: &Ctx, job: &mut BoundaryJob) -> Result<()> {
                 Ok(stateroot_core::roots::SnapOutcome::Created(manifest, _)) => manifest.id,
                 Ok(stateroot_core::roots::SnapOutcome::Unchanged { root }) => root,
                 Err(stateroot_core::roots::RootsError::SnapshotBudget(_)) => {
+                    job.snapshot_timing.push_str(
+                        "; snapshot skipped: scan budget; root coverage excludes unsnapped edits",
+                    );
                     job.last_error = Some("automatic snapshot skipped: scan budget".to_string());
                     stateroot_core::roots::latest_root(&ctx.cwd)?
                         .unwrap_or_else(|| "none".to_string())
@@ -118,12 +167,31 @@ async fn advance_one(ctx: &Ctx, job: &mut BoundaryJob) -> Result<()> {
                 .root
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("snapped job without a root"))?;
-            let seq = super::handoff::finalize_for_boundary(ctx, &job.harness, &root)?;
+            let _ = root;
+            let seq = super::handoff::finalize_bound_job(ctx, job)?;
             journal::transition(&ctx.cwd, job, Phase::HandoffFinalized, None, Some(seq))?;
         }
         Phase::HandoffFinalized => {
             // 3. Ingest/index (wiki inbox + FTS rebuild-if-needed).
             super::compiler::try_ingest(ctx, false).await?;
+            if let Some(capture) = &job.capture_watermark {
+                if matches!(capture["status"].as_str(), Some("present" | "recovered")) {
+                    anyhow::ensure!(
+                        capture["harness"].as_str() == Some(job.harness.as_str())
+                            && capture["session_id"].as_str() == Some(job.session_id.as_str()),
+                        "capture frontier/session binding mismatch"
+                    );
+                    let watermark: stateroot_core::observations::CaptureWatermark =
+                        serde_json::from_value(capture["watermark"].clone())?;
+                    stateroot_core::observations::acknowledge_frontier(
+                        &ctx.cwd,
+                        &job.harness,
+                        &job.session_id,
+                        &job.ingest_key,
+                        &watermark,
+                    )?;
+                }
+            }
             journal::transition(&ctx.cwd, job, Phase::Ingested, None, None)?;
         }
         Phase::Ingested => {
@@ -136,70 +204,22 @@ async fn advance_one(ctx: &Ctx, job: &mut BoundaryJob) -> Result<()> {
     Ok(())
 }
 
-/// Migrate the WS2 outbox into composite journal jobs — explicitly, never
-/// consuming unknown kinds as malformed work. The legacy file is renamed
-/// aside (preserved), and unknown-kind ops are written back to it.
-fn migrate_legacy_outbox(ctx: &Ctx) -> Result<()> {
-    let path = local_store::root(&ctx.cwd).join(local_store::OUTBOX_PATH);
-    if !path.is_file() {
-        return Ok(());
-    }
-    let ops = local_store::outbox_pending(&ctx.cwd)?;
-    if ops.is_empty() {
-        // An empty outbox is just clutter; rename it aside anyway.
-        let aside = local_store::root(&ctx.cwd).join(format!(
-            "outbox.migrated-{}.jsonl",
-            now_rfc3339().replace([':', '.'], "-")
-        ));
-        std::fs::rename(&path, aside)?;
-        return Ok(());
-    }
-    let mut known: Vec<&Value> = Vec::new();
-    let mut unknown: Vec<&Value> = Vec::new();
-    for op in &ops {
-        let kind = op.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-        if local_store::FINALIZE_KINDS.contains(&kind) {
-            known.push(op);
-        } else {
-            unknown.push(op);
-        }
-    }
-    // One composite job per distinct (harness, enqueued_at) trio.
-    let mut seen: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
-    for op in known {
-        let harness = op
-            .get("harness")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
-        let enqueued_at = op.get("enqueued_at").and_then(|v| v.as_str()).unwrap_or("");
-        if seen.insert((harness.to_string(), enqueued_at.to_string())) {
-            journal::enqueue(
-                &ctx.cwd,
-                harness,
-                "legacy-outbox",
-                None,
-                "refs/stateroot/latest",
-            )?;
-        }
-    }
-    let aside = local_store::root(&ctx.cwd).join(format!(
-        "outbox.migrated-{}.jsonl",
-        now_rfc3339().replace([':', '.'], "-")
-    ));
-    std::fs::rename(&path, &aside)?;
-    // Unknown kinds are preserved in a fresh outbox — never consumed.
-    if !unknown.is_empty() {
-        for op in unknown {
-            local_store::outbox_append(&ctx.cwd, op)?;
-        }
-    }
-    Ok(())
-}
-
 /// The doctor-visible journal report: grouped by state, errors retained.
 pub fn report(project_dir: &Path) -> Vec<String> {
     let jobs = journal::load_all(project_dir);
     let mut lines = Vec::new();
+    if local_store::root(project_dir)
+        .join(local_store::OUTBOX_PATH)
+        .is_file()
+    {
+        lines.push("  legacy outbox retained in place; no native session binding inferred or silently migrated".into());
+    }
+    for path in journal::invalid_records(project_dir) {
+        lines.push(format!(
+            "  quarantined in place: corrupt/unsupported boundary record {}",
+            path.display()
+        ));
+    }
     let active: Vec<&BoundaryJob> = jobs.iter().filter(|j| j.state == "active").collect();
     let attention: Vec<&BoundaryJob> = jobs
         .iter()

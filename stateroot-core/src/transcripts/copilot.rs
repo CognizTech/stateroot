@@ -149,6 +149,7 @@ impl TranscriptReader for CopilotReader {
             for raw in raw_sessions(&db, project_dir) {
                 let mut session = TranscriptSession {
                     harness: "copilot",
+                    source_path: db_path.to_string_lossy().into_owned(),
                     session_id: raw.id.clone(),
                     cwd: raw.cwd.clone(),
                     started_at: raw.created_at.clone(),

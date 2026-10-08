@@ -12,7 +12,7 @@
 
 pub mod transfer;
 
-mod extract;
+pub(crate) mod extract;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -289,6 +289,7 @@ fn canonical_from_dsh(raw: &dsh::RawSession, source_path: &Path) -> Option<Canon
                 e.content = Some(dsh::blocks_text(data.get("content")));
                 let source = data.pointer("/source/kind").and_then(|v| v.as_str());
                 if source != Some("user") {
+                    e.kind = "meta".into();
                     e.native_type =
                         Some(format!("user/message source `{}`", source.unwrap_or("?")));
                 }
@@ -632,6 +633,8 @@ pub fn import_from_readers_filtered(
 
 /// Write one canonical session (rewrite whole — idempotent re-import).
 pub fn write_session(project_dir: &Path, session: &CanonicalSession) -> std::io::Result<PathBuf> {
+    let mut session = session.clone();
+    extract::separate_injected_context(&mut session.entries);
     let dir = store_dir(project_dir);
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!(
@@ -656,12 +659,12 @@ pub fn write_session(project_dir: &Path, session: &CanonicalSession) -> std::io:
         body.push_str(&serde_json::to_string(&entry)?);
         body.push('\n');
     }
-    std::fs::write(&path, body)?;
+    crate::safe_io::atomic_replace(&path, body.as_bytes())?;
     Ok(path)
 }
 
 /// Parse one canonical store file.
-fn read_store_file(path: &Path) -> Option<StoredSession> {
+pub(crate) fn read_store_file(path: &Path) -> Option<StoredSession> {
     let text = std::fs::read_to_string(path).ok()?;
     let mut lines = text.lines().filter(|l| !l.trim().is_empty());
     let header: Value = serde_json::from_str(lines.next()?).ok()?;

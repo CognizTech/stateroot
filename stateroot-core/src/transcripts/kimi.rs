@@ -118,7 +118,7 @@ fn epoch_ms(value: &Value, key: &str) -> Option<i64> {
 
 /// The session id from the wire path (`…/<session-dir>/agents/<n>/wire.jsonl`
 /// — the session dir is three components up from the file).
-fn session_id_for(file: &Path) -> String {
+pub(crate) fn session_id_for(file: &Path) -> String {
     file.parent() // …/main
         .and_then(|main| main.parent()) // …/agents
         .and_then(|agents| agents.parent()) // …/<session-dir>
@@ -148,6 +148,7 @@ fn parse_wire(
 
     let mut session = TranscriptSession {
         harness: "kimi",
+        source_path: file.to_string_lossy().into_owned(),
         session_id,
         cwd,
         started_at: epoch_ms(&meta, "created_at")
@@ -181,13 +182,14 @@ fn parse_wire(
                     .and_then(|o| o.get("kind"))
                     .and_then(|v| v.as_str())
                     .is_some_and(|kind| kind != "user");
-                if injected || is_injected(&text) {
+                let text = super::codex::user_assertion(&text).unwrap_or_default();
+                if injected || is_injected(text) {
                     continue;
                 }
-                let prompt = clean(&text, 2000);
+                let prompt = clean(text, 2000);
                 if !prompt.is_empty() {
                     if session.objective.is_empty() {
-                        session.objective = clean(&text, 8000);
+                        session.objective = clean(text, 8000);
                     }
                     push_unique(&mut session.user_prompts, prompt.clone());
                     super::codex::push_tail(&mut session, "user", prompt);

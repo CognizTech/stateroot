@@ -33,7 +33,7 @@ pub enum LearningsError {
 }
 
 /// One learning record (on-disk contract).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Learning {
     /// Stable id (`lrn_<hex>`).
     pub id: String,
@@ -198,7 +198,7 @@ pub fn bound_domain(project_dir: &Path) -> Option<String> {
 }
 
 /// Scope root for `user` | `workspace` | `domain:<slug>` | `project`.
-fn scope_root(project_dir: &Path, home: &Path, scope: &str) -> PathBuf {
+pub(crate) fn scope_root(project_dir: &Path, home: &Path, scope: &str) -> PathBuf {
     if scope == "user" {
         return home.join(".stateroot").join(LEARNINGS_DIR);
     }
@@ -579,12 +579,23 @@ pub fn distill_statements(project_dir: &Path, home: &Path) -> Vec<(String, Strin
             .unwrap_or_default();
     for line in spool.lines() {
         if let Ok(record) = serde_json::from_str::<serde_json::Value>(line) {
+            if record
+                .pointer("/origin/kind")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|origin| origin != "user")
+            {
+                continue;
+            }
             if let Some(note) = record
                 .get("note")
                 .or_else(|| record.get("content"))
                 .and_then(|v| v.as_str())
             {
-                statements.push((note.to_string(), "spool".into()));
+                if let Some(assertion) = crate::transcripts::codex::user_assertion(note) {
+                    if !crate::transcripts::codex::is_injected(assertion) {
+                        statements.push((assertion.to_string(), "spool".into()));
+                    }
+                }
             }
         }
     }

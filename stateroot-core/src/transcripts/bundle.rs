@@ -31,6 +31,255 @@ pub const DEFAULT_MAX_BUNDLE_CHARS: usize = 3_500_000;
 /// Chars of message text that are never elided (measured from the end).
 const TAIL_PROTECT_CHARS: usize = 200_000;
 
+#[cfg(test)]
+thread_local! { static SOURCE_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+#[cfg(test)]
+pub(crate) fn source_parse_count() -> usize {
+    SOURCE_PARSES.with(|count| count.get())
+}
+
+/// Parse one changed native source for local recall; other histories stay unopened.
+pub(crate) fn source_bundles(
+    home: &Path,
+    project: &Path,
+    harness: &str,
+    path: &Path,
+) -> std::io::Result<Vec<Value>> {
+    #[cfg(test)]
+    SOURCE_PARSES.with(|count| count.set(count.get() + 1));
+    if matches!(harness, "codex" | "claude" | "kimi" | "openclaw") {
+        return Ok(recent_file_bundle(home, project, harness, path)?
+            .into_iter()
+            .collect());
+    }
+    std::fs::File::open(path)?;
+    let one = match harness {
+        "pi" => {
+            let raw = super::pi::parse_session_file(path).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Pi native session unavailable",
+                )
+            })?;
+            super::pi::summarize(&raw, project)
+                .map(|session| bundle_from_transcript_session(&session))
+        }
+        "dsh" => {
+            let raw = super::dsh::parse_session_file(path).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "DSH native session unavailable",
+                )
+            })?;
+            super::dsh::summarize(&raw, project)
+                .map(|session| bundle_from_transcript_session(&session))
+        }
+        _ => None,
+    };
+    let mut bundles = if let Some(bundle) = one {
+        vec![bundle]
+    } else if matches!(harness, "cursor" | "hermes" | "copilot") {
+        let db = super::cursor::open_readonly(path).map_err(std::io::Error::other)?;
+        let query = match harness {
+            "cursor" => "SELECT composerId,value FROM composerHeaders",
+            "hermes" => "SELECT id,cwd,started_at FROM sessions",
+            _ => "SELECT id,cwd FROM sessions",
+        };
+        db.prepare(query).map_err(std::io::Error::other)?;
+        match harness {
+            "cursor" => bundle_cursor_sessions(&db, project),
+            "hermes" => super::hermes::scan_db(&db, project)
+                .iter()
+                .map(bundle_from_transcript_session)
+                .collect(),
+            "copilot" => {
+                db.prepare("SELECT session_id,user_message,assistant_response FROM turns")
+                    .map_err(std::io::Error::other)?;
+                super::copilot::raw_sessions(&db,project).iter().map(|raw|json!({"session_id":raw.id,"harness":"copilot","messages":raw.turns.iter().flat_map(|(_,user,assistant,_)|[json!({"role":"user","text":user}),json!({"role":"assistant","text":assistant})]).collect::<Vec<_>>() })).collect()
+            }
+            _ => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+    for bundle in &mut bundles {
+        bundle["source_path"] = json!(path);
+    }
+    Ok(bundles)
+}
+
+/// Local recall needs a bounded recent window, not the entire synthesis corpus.
+pub(crate) fn recent_jsonl(path: &Path) -> std::io::Result<Vec<Value>> {
+    use std::io::{Read, Seek, SeekFrom};
+    const PREFIX: u64 = 64 * 1024;
+    const TAIL: u64 = 512 * 1024;
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let mut prefix = Vec::new();
+    (&mut file).take(PREFIX).read_to_end(&mut prefix)?;
+    let mut lines: Vec<String> = String::from_utf8_lossy(&prefix)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    if len > PREFIX {
+        if prefix.last() != Some(&b'\n') {
+            lines.pop();
+        }
+        let offset = len.saturating_sub(TAIL).max(PREFIX);
+        file.seek(SeekFrom::Start(offset - 1))?;
+        let mut previous = [0];
+        file.read_exact(&mut previous)?;
+        let mut tail = Vec::new();
+        file.take(TAIL).read_to_end(&mut tail)?;
+        let tail = String::from_utf8_lossy(&tail);
+        let complete = if previous[0] == b'\n' {
+            tail.as_ref()
+        } else {
+            tail.find('\n')
+                .map(|start| &tail[start + 1..])
+                .unwrap_or("")
+        };
+        lines.extend(complete.lines().map(str::to_string));
+    }
+    lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str(line).map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("native/canonical recall window malformed: {error}"),
+                )
+            })
+        })
+        .collect()
+}
+
+fn recent_file_bundle(
+    home: &Path,
+    project: &Path,
+    harness: &str,
+    path: &Path,
+) -> std::io::Result<Option<Value>> {
+    let invalid = |reason: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, reason);
+    let events = recent_jsonl(path)?;
+    let first = events
+        .first()
+        .ok_or_else(|| invalid("native recall source empty/unavailable"))?;
+    let cwd = match harness {
+        "codex" => {
+            if first["type"].as_str() != Some("session_meta") {
+                return Err(invalid("Codex native header unavailable"));
+            }
+            first["payload"]["cwd"].as_str()
+        }
+        "kimi" => {
+            if first["type"].as_str() != Some("metadata") {
+                return Err(invalid("Kimi native header unavailable"));
+            }
+            None
+        }
+        _ => events.iter().find_map(|event| event["cwd"].as_str()),
+    };
+    let index;
+    let id;
+    let cwd = if harness == "kimi" {
+        std::fs::File::open(home.join(".kimi-code/session_index.jsonl"))?;
+        index = super::kimi::read_session_index(home);
+        id = super::kimi::session_id_for(path);
+        index.get(&id).map(String::as_str)
+    } else {
+        cwd
+    };
+    let cwd =
+        cwd.ok_or_else(|| invalid("native project binding unavailable in bounded source prefix"))?;
+    if !super::cwd_matches(cwd, project) {
+        return Ok(None);
+    }
+    let mut canonical = match harness {
+        "codex" => {
+            crate::sessions::extract::canonical_from_codex(first, &events[1..], path, project)
+        }
+        "claude" => crate::sessions::extract::canonical_from_claude(&events, path, project),
+        "kimi" => crate::sessions::extract::canonical_from_kimi(
+            first,
+            &events[1..],
+            &super::kimi::session_id_for(path),
+            cwd,
+            path,
+            project,
+        ),
+        "openclaw" => crate::sessions::extract::canonical_from_openclaw(&events, path, project),
+        _ => None,
+    }
+    .ok_or_else(|| invalid("native session identity/format unavailable in bounded source"))?;
+    crate::sessions::extract::separate_injected_context(&mut canonical.entries);
+    Ok(Some(
+        json!({"session_id":canonical.session_id,"harness":canonical.harness,"source_path":path,
+        "windowing":"native prefix 64KiB plus recent tail 512KiB; partial boundary records excluded; full evidence remains at source",
+        "messages":canonical.entries.iter().filter(|entry|matches!(entry.kind.as_str(),"message"|"tool_result")).map(|entry|json!({"role":entry.role,"text":entry.content})).collect::<Vec<_>>() }),
+    ))
+}
+
+/// Native source discovery uses filesystem metadata only, never transcript parsing.
+pub(crate) fn source_files(
+    home: &Path,
+    visited: &mut usize,
+    deadline: std::time::Instant,
+) -> std::io::Result<Vec<(String, std::path::PathBuf)>> {
+    let mut out = Vec::new();
+    let (active, archived) = paths::codex_transcript_roots(home);
+    let mut roots = vec![
+        ("codex", active),
+        ("codex", archived),
+        ("claude", home.join(".claude/projects")),
+        ("kimi", home.join(".kimi-code/sessions")),
+        ("pi", paths::pi_agent_root(home).join("sessions")),
+        ("dsh", paths::dsh_root(home).join("sessions")),
+    ];
+    for root in super::openclaw::store_roots(home) {
+        roots.push(("openclaw", root.join("agents")));
+    }
+    for (harness, root) in roots {
+        let selected = |path: &Path| {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            match harness {
+                "codex" => name.starts_with("rollout-") && name.ends_with(".jsonl"),
+                "kimi" => name == "wire.jsonl",
+                "openclaw" => name.ends_with(".jsonl") && !name.contains(".deleted."),
+                _ => name.ends_with(".jsonl"),
+            }
+        };
+        out.extend(
+            super::metadata_files(&root, &selected, visited, deadline)?
+                .into_iter()
+                .map(|path| (harness.into(), path)),
+        );
+    }
+    out.extend(
+        super::cursor::db_candidates(home)
+            .into_iter()
+            .map(|path| ("cursor".into(), path)),
+    );
+    out.extend(
+        super::hermes::db_candidates(home)
+            .into_iter()
+            .map(|path| ("hermes".into(), path)),
+    );
+    out.extend(
+        super::copilot::db_candidates(home)
+            .into_iter()
+            .map(|path| ("copilot".into(), path)),
+    );
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
 /// Build synthesis bundles for the project from the harness transcript
 /// stores. `session_ids`: restrict to those sessions when given.
 pub fn build_bundles(
@@ -100,6 +349,14 @@ pub fn build_bundles(
     // Copilot Chat session store (observed format; defensive parse).
     for session in super::copilot::CopilotReader.scan(home, project_dir) {
         sessions.push(bundle_from_transcript_session(&session));
+    }
+    for reader in [
+        Box::new(super::pi::PiReader) as Box<dyn TranscriptReader>,
+        Box::new(super::dsh::DshReader),
+    ] {
+        for session in reader.scan(home, project_dir) {
+            sessions.push(bundle_from_transcript_session(&session));
+        }
     }
 
     if let Some(ids) = session_ids {
@@ -330,7 +587,12 @@ fn clean_event_message(event: &Value, messages: &mut Vec<Value>) {
             if role == "user" && is_injected(&text) {
                 return;
             }
-            let text = text.trim().to_string();
+            let text = if role == "user" {
+                super::codex::user_assertion(&text).unwrap_or_default()
+            } else {
+                text.trim()
+            }
+            .to_string();
             if !text.is_empty() {
                 messages.push(json!({"role": role, "text": text}));
             }
@@ -470,7 +732,9 @@ fn bundle_claude_session(file: &Path, project_dir: &Path) -> Option<Value> {
                 match message.get("content") {
                     Some(Value::String(text)) => {
                         if !is_injected(text) {
-                            let text = text.trim().to_string();
+                            let text = super::codex::user_assertion(text)
+                                .unwrap_or_default()
+                                .to_string();
                             if !text.is_empty() {
                                 messages.push(json!({"role": "user", "text": text}));
                             }
@@ -491,7 +755,9 @@ fn bundle_claude_session(file: &Path, project_dir: &Path) -> Option<Value> {
                                 }
                             } else if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
                                 if !is_injected(text) {
-                                    let text = text.trim().to_string();
+                                    let text = super::codex::user_assertion(text)
+                                        .unwrap_or_default()
+                                        .to_string();
                                     if !text.is_empty() {
                                         messages.push(json!({"role": "user", "text": text}));
                                     }
@@ -626,7 +892,9 @@ fn bundle_kimi_wire(
                 }
                 let text = parts.join("\n");
                 if !injected && !is_injected(&text) {
-                    let text = text.trim().to_string();
+                    let text = super::codex::user_assertion(&text)
+                        .unwrap_or_default()
+                        .to_string();
                     if !text.is_empty() {
                         messages.push(json!({"role": "user", "text": text}));
                     }
@@ -812,6 +1080,7 @@ fn bundle_from_transcript_session(session: &TranscriptSession) -> Value {
         "started_at": session.started_at,
         "ended_at": session.ended_at,
         "cwd": session.cwd,
+        "source_path": session.source_path,
         "outcome": session.outcome.as_str(),
         "tool_events": session.tool_events,
         "windowing": "conversation_tail",

@@ -854,36 +854,8 @@ fn write_packet_durable(project_dir: &Path, packet: &Value) -> anyhow::Result<()
     let text = format!("{}\n", serde_json::to_string_pretty(packet)?);
     write_packet_history_durable(project_dir, packet, &text)?;
 
-    #[cfg(windows)]
-    {
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&current)?;
-        file.write_all(text.as_bytes())?;
-        file.sync_all()?;
-        Ok(())
-    }
-
-    #[cfg(not(windows))]
-    {
-        let temporary = parent.join(format!(".current-{}.tmp", uuid::Uuid::now_v7()));
-        let current_result = (|| -> anyhow::Result<()> {
-            let mut file = std::fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&temporary)?;
-            file.write_all(text.as_bytes())?;
-            file.sync_all()?;
-            std::fs::rename(&temporary, &current)?;
-            Ok(())
-        })();
-        if current_result.is_err() {
-            let _ = std::fs::remove_file(&temporary);
-        }
-        current_result
-    }
+    stateroot_core::safe_io::atomic_replace(&current, text.as_bytes())?;
+    Ok(())
 }
 
 /// Append immutable handoff history without replacing this checkout's local
@@ -950,7 +922,7 @@ pub(crate) fn write_project_only(project_dir: &Path, input_path: &Path) -> anyho
         anyhow::bail!("handoff requires next_actions as an array of strings");
     }
     let _lock = stateroot_core::safe_io::ResourceLock::acquire(
-        local_store::root(project_dir).join("local/locks/dot-handoff.lock"),
+        local_store::root(project_dir).join("local/locks/handoff-write.lock"),
     )?;
     let manifest = local_store::read_manifest(project_dir)?.context("missing manifest")?;
     let project_id = manifest["project_id"]
@@ -1035,6 +1007,9 @@ pub async fn write_with_origin(
     }
 
     let project = ctx.require_project()?;
+    let _handoff_lock = stateroot_core::safe_io::ResourceLock::acquire(
+        local_store::root(&ctx.cwd).join("local/locks/handoff-write.lock"),
+    )?;
     let source = match from {
         Some(explicit) => super::active_harness::canonical_id(explicit)
             .map_err(|_| anyhow::anyhow!("unknown handoff source '{explicit}'; pass --from <harness> with a known harness id"))?,
@@ -1167,10 +1142,173 @@ pub fn try_auto_finalize(ctx: &Ctx, harness: &str) -> anyhow::Result<bool> {
 /// - A missing verified session is an ERROR (retryable), never a quiet
 ///   success — the journal backs off and parks as manual_attention with
 ///   the error retained if the transcript never appears.
-pub fn finalize_for_boundary(ctx: &Ctx, harness: &str, boundary_root: &str) -> anyhow::Result<i64> {
-    ctx.require_project()?;
+///
+/// Replayable exact-session finalization. The journal key binds the immutable
+/// intent and history packet, including a crash between packet and phase commit.
+pub fn finalize_bound_job(
+    ctx: &Ctx,
+    job: &stateroot_core::finalize_journal::BoundaryJob,
+) -> anyhow::Result<i64> {
+    let _lock = stateroot_core::safe_io::ResourceLock::acquire(
+        local_store::root(&ctx.cwd).join("local/locks/handoff-write.lock"),
+    )?;
+    let history = local_store::list_handoffs_local(&ctx.cwd)?;
+    if let Some(packet) = history
+        .iter()
+        .find(|packet| packet["boundary_ingest_key"].as_str() == Some(job.ingest_key.as_str()))
+    {
+        let current = local_store::read_handoff_local(&ctx.cwd)?;
+        if packet["boundary_publish_current"].as_bool() == Some(true)
+            && current.as_ref().is_none_or(|current| {
+                current["seq"].as_i64().unwrap_or(0) < packet["seq"].as_i64().unwrap_or(0)
+                    && can_publish_boundary(&ctx.cwd, job, current)
+            })
+        {
+            stateroot_core::safe_io::atomic_replace_json(
+                &local_store::root(&ctx.cwd).join(local_store::HANDOFF_CURRENT_PATH),
+                packet,
+            )?;
+        }
+        return packet["seq"]
+            .as_i64()
+            .context("boundary result missing seq");
+    }
+    anyhow::ensure!(
+        job.project_path.is_empty()
+            || stateroot_core::transcripts::same_worktree(Path::new(&job.project_path), &ctx.cwd),
+        "boundary belongs to another checkout"
+    );
+    anyhow::ensure!(
+        stateroot_core::roots::lineage_refname(&ctx.cwd) == job.lineage_ref,
+        "boundary lineage no longer matches checkout"
+    );
+    let home = super::install::home_dir()?;
+    let session = handoff_continuity::verified_session(
+        &home,
+        &ctx.cwd,
+        &job.harness,
+        &job.session_id,
+        job.transcript.as_deref(),
+    )
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "no verified exact native session {} for {}; boundary retained",
+            job.session_id,
+            job.harness
+        )
+    })?;
     let current = local_store::read_handoff_local(&ctx.cwd)?;
-    finalize_current(ctx, harness, current.as_ref(), Some(boundary_root))
+    let seq = history
+        .iter()
+        .chain(current.iter())
+        .filter_map(|packet| packet["seq"].as_i64())
+        .max()
+        .unwrap_or(0);
+    let (objective, phase) = local_state_fields(&ctx.cwd)?;
+    let project = ctx.require_project()?;
+    let intent_path =
+        local_store::root(&ctx.cwd).join(format!("local/finalize-intents/{}.json", job.ingest_key));
+    let mut packet: Value = if intent_path.is_file() {
+        let intent: Value = serde_json::from_slice(&std::fs::read(&intent_path)?)?;
+        anyhow::ensure!(
+            intent["schema_version"].as_str()
+                == Some(stateroot_core::local_store::SCHEMA_HANDOFF_V1)
+                && intent["boundary_ingest_key"].as_str() == Some(job.ingest_key.as_str())
+                && intent["evidence_ref"]["session_id"].as_str() == Some(job.session_id.as_str()),
+            "corrupt or unsupported finalization intent retained in place"
+        );
+        intent
+    } else {
+        let mut packet = handoff_continuity::build_finalize_packet(
+            &project.project_id,
+            &ctx.cwd,
+            &job.harness,
+            seq,
+            &session,
+            &objective,
+            &phase,
+        );
+        packet["latest_root"] = serde_json::json!(job.root);
+        packet["boundary_ingest_key"] = serde_json::json!(job.ingest_key);
+        packet["boundary_at"] = serde_json::json!(job.enqueued_at);
+        packet["boundary_job_id"] = serde_json::json!(job.id);
+        packet["snapshot_timing"] = serde_json::json!(job.snapshot_timing);
+        packet["boundary_source_root"] = serde_json::json!(job.boundary_source_root);
+        packet["warnings"]
+            .as_array_mut()
+            .expect("packet warnings")
+            .push(serde_json::json!(job.snapshot_timing));
+        packet["capture_watermark"] = serde_json::json!(job.capture_watermark);
+        if let Some(plan_ref) = &job.plan_ref {
+            packet["plan_ref"] = plan_ref.clone();
+        }
+        let packet = bound_packet(packet);
+        stateroot_core::safe_io::atomic_replace_json(&intent_path, &packet)?;
+        packet
+    };
+    // A saved intent can be older than another writer's committed sequence.
+    packet["seq"] = serde_json::json!(seq + 1);
+    let publish = current
+        .as_ref()
+        .is_none_or(|current| can_publish_boundary(&ctx.cwd, job, current));
+    packet["boundary_publish_current"] = serde_json::json!(publish);
+    validate_packet(&packet, false)?;
+    if publish {
+        write_packet_durable(&ctx.cwd, &packet)?;
+    } else {
+        write_packet_history_durable(
+            &ctx.cwd,
+            &packet,
+            &format!("{}\n", serde_json::to_string_pretty(&packet)?),
+        )?;
+    }
+    Ok(seq + 1)
+}
+
+fn can_publish_boundary(
+    project: &Path,
+    job: &stateroot_core::finalize_journal::BoundaryJob,
+    current: &Value,
+) -> bool {
+    let authored = current["seq"].as_i64().is_some_and(|current_seq| {
+        handoff_continuity::any_explicit_blocks_finalize(project, current_seq)
+    }) || !current["recommended_next_harness"].is_null();
+    let time = current["boundary_at"]
+        .as_str()
+        .or_else(|| current["written_at"].as_str())
+        .unwrap_or("");
+    !authored
+        && (time < job.enqueued_at.as_str()
+            || time == job.enqueued_at.as_str()
+                && current["boundary_job_id"]
+                    .as_str()
+                    .is_none_or(|id| id <= job.id.as_str()))
+}
+
+/// Explicit retry preserves original identity and validates any supplied locator.
+pub async fn recover(ctx: &Ctx, id: &str, transcript: Option<&str>) -> anyhow::Result<()> {
+    let job = stateroot_core::finalize_journal::load_all(&ctx.cwd)
+        .into_iter()
+        .find(|job| job.id == id)
+        .ok_or_else(|| anyhow::anyhow!("boundary job unavailable or quarantined: {id}"))?;
+    if let Some(locator) = transcript {
+        anyhow::ensure!(
+            handoff_continuity::verified_session(
+                &super::install::home_dir()?,
+                &ctx.cwd,
+                &job.harness,
+                &job.session_id,
+                Some(locator)
+            )
+            .is_some(),
+            "locator does not verify this job's native session and project"
+        );
+    }
+    super::drain_finalize::recover_one(ctx, id, transcript).await?;
+    println!(
+        "boundary job {id}: recovery attempted; original evidence and recovery history retained"
+    );
+    Ok(())
 }
 
 fn finalize_current(
@@ -1179,6 +1317,21 @@ fn finalize_current(
     current: Option<&Value>,
     boundary_root: Option<&str>,
 ) -> anyhow::Result<i64> {
+    let _lock = stateroot_core::safe_io::ResourceLock::acquire(
+        local_store::root(&ctx.cwd).join("local/locks/handoff-write.lock"),
+    )?;
+    let fresh = local_store::read_handoff_local(&ctx.cwd)?;
+    let current = fresh.as_ref().or(current);
+    if let Some(packet) = current {
+        anyhow::ensure!(
+            !handoff_continuity::explicit_blocks_finalize(
+                &ctx.cwd,
+                harness,
+                packet["seq"].as_i64().unwrap_or(0)
+            ),
+            "explicit authored handoff takes precedence"
+        );
+    }
     let home = super::install::home_dir()?;
     let session = handoff_continuity::latest_verified_session(&home, &ctx.cwd, harness)
         .ok_or_else(|| anyhow::anyhow!("no verified {harness} transcript to finalize"))?;

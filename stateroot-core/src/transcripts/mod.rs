@@ -77,6 +77,8 @@ pub struct LossNote {
 /// One normalized harness session.
 #[derive(Debug, Clone, Default)]
 pub struct TranscriptSession {
+    /// Verified native transcript locator, when the reader exposes one.
+    pub source_path: String,
     /// Harness id (`codex`, `claude`).
     pub harness: &'static str,
     /// Harness-native session id.
@@ -151,6 +153,17 @@ pub fn readers() -> Vec<Box<dyn TranscriptReader>> {
     ]
 }
 
+/// Resolve reader capability through the authoritative adapter registry.
+pub fn reader_for(harness: &str) -> Option<Box<dyn TranscriptReader>> {
+    let id = crate::harness_install::registry::transcript_reader_id(harness)?;
+    readers().into_iter().find(|reader| reader.id() == id)
+}
+
+/// Compare exact checkout paths across native Windows and WSL path spellings.
+pub fn same_worktree(left: &Path, right: &Path) -> bool {
+    normalize_path(&left.to_string_lossy()) == normalize_path(&right.to_string_lossy())
+}
+
 /// Harnesses whose transcript format is not yet implemented, with the honest
 /// note to surface. All four current harnesses have verified readers now —
 /// this stays as the seam for future additions.
@@ -177,6 +190,41 @@ pub(crate) fn walk_files(root: &Path, pred: &dyn Fn(&Path) -> bool) -> Vec<PathB
     let mut out = Vec::new();
     walk_into(root, pred, &mut out);
     out
+}
+
+/// Metadata-only discovery with one shared budget across recall source roots.
+pub(crate) fn metadata_files(
+    root: &Path,
+    pred: &dyn Fn(&Path) -> bool,
+    visited: &mut usize,
+    deadline: std::time::Instant,
+) -> std::io::Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            *visited += 1;
+            if *visited > 20_000 || std::time::Instant::now() > deadline {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "recall source metadata discovery budget exceeded; committed index retained",
+                ));
+            }
+            let entry = entry?;
+            let path = entry.path();
+            if entry.file_type()?.is_dir() {
+                stack.push(path);
+            } else if pred(&path) {
+                out.push(path);
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn walk_into(dir: &Path, pred: &dyn Fn(&Path) -> bool, out: &mut Vec<PathBuf>) {

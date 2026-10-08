@@ -310,7 +310,7 @@ fn failed_children_record_failed_and_the_spawn_still_exits_zero() {
 
 #[cfg(unix)]
 #[test]
-fn list_marks_a_dead_worker_lost() {
+fn list_does_not_reap_an_unqualified_legacy_pid() {
     let (config_home, user_home) = homes();
     let project = tempfile::tempdir().expect("project");
     init_project(config_home.path(), user_home.path(), project.path());
@@ -341,11 +341,11 @@ fn list_marks_a_dead_worker_lost() {
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-    assert!(stdout.contains("· lost ·"), "stdout: {stdout}");
-    // Reaped on disk — never a silent running-forever.
+    assert!(stdout.contains("· unknown ·"), "stdout: {stdout}");
+    // A legacy PID may belong to Windows while this reader is on WSL.
     let records = read_records(project.path());
-    assert_eq!(records[0]["outcome"], "lost");
-    assert!(records[0].get("status").is_none());
+    assert!(records[0].get("outcome").is_none());
+    assert_eq!(records[0]["status"], "running");
 }
 
 #[cfg(unix)]

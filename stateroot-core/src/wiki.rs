@@ -922,6 +922,10 @@ pub fn lint(project_dir: &Path) -> Result<Vec<LintFinding>, WikiError> {
 }
 
 /// Content hash of inbox + episodic + spool for skip-if-unchanged.
+///
+/// The observation store's contribution is the small current projection
+/// (`spool/current.json`), which changes on every capture; the legacy spool
+/// file is still hashed for pre-segment projects and import rows.
 pub fn compile_input_hash(project_dir: &Path) -> String {
     use sha2::{Digest, Sha256};
     let root = local_store::root(project_dir);
@@ -929,6 +933,7 @@ pub fn compile_input_hash(project_dir: &Path) -> String {
     for rel in [
         local_store::EPISODIC_PATH,
         "spool/observations.jsonl",
+        "spool/current.json",
         &format!("{PAGES_DIR}/{INBOX_PAGE}"),
     ] {
         let text = fs::read_to_string(root.join(rel)).unwrap_or_default();

@@ -39,6 +39,7 @@ import { snapshot, type Snapshot } from "./snapshot";
 import { readParallelWork, type LineageProjection } from "./parallelWork";
 import { isStaleIntegrationCli, parseMergeAttempt, type MergeAttempt } from "./mergeAttempt";
 import { WorkbenchPanel } from "./workbench";
+import { singleFlight } from "./refresh";
 import { terminalPathUpdater } from "./terminalPath";
 import { MARKER_KEY, previousVersion } from "./installPing";
 import {
@@ -172,18 +173,20 @@ export function activate(context: vscode.ExtensionContext) {
     }
   };
 
-  const refreshLive = async () => {
+  const refreshLive = singleFlight(async () => {
     const root = projectRoot();
     if (!root) {
       return;
     }
     const text = await runCliReport(["delegate", "list"], root, output, 20_000, {
       allowInstall: false,
+      notifyOnError: false,
     });
-    liveDelegations = text ? parseDelegateList(text) : undefined;
-    lineage = await readParallelWork(root, output);
+    if (text !== undefined) liveDelegations = parseDelegateList(text);
+    const currentLineage = await readParallelWork(root, output);
+    if (currentLineage) lineage = currentLineage;
     push();
-  };
+  });
 
   const withProject = async (fn: (root: string) => Promise<void>) => {
     const root = projectRoot();

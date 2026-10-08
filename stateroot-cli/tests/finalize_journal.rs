@@ -199,3 +199,263 @@ fn unavailable_transcript_is_retryable_error_never_success() {
     assert_eq!(jobs[0]["phase"], "complete", "job: {jobs:?}");
     assert_eq!(jobs[0]["state"], "terminal");
 }
+
+#[test]
+fn exact_session_replay_keeps_authored_routing_and_boundary_tree() {
+    let (config, home) = homes();
+    let project = tempfile::tempdir().unwrap();
+    init_project(config.path(), home.path(), project.path());
+    write_pi_session(home.path(), project.path(), "old", "old session evidence");
+    write_pi_session(
+        home.path(),
+        project.path(),
+        "new",
+        "new session must not satisfy old boundary",
+    );
+    std::fs::write(project.path().join("work.txt"), "boundary tree").unwrap();
+    let payload =
+        serde_json::json!({"session_id":"old", "event_id":"boundary-one", "cwd":project.path()})
+            .to_string();
+    hook_event(
+        config.path(),
+        home.path(),
+        project.path(),
+        "session_end",
+        &payload,
+    )
+    .success();
+    let frozen = journal_files(project.path())[0]["boundary_source_root"].clone();
+    std::fs::write(project.path().join("work.txt"), "later edits").unwrap();
+    stateroot(config.path(), home.path(), project.path())
+        .args([
+            "handoff",
+            "write",
+            "--from",
+            "kimi",
+            "--to",
+            "codex",
+            "--objective",
+            "Owner current objective",
+            "--task",
+            "Authored current task",
+            "--context-summary",
+            "Preserve this explicit authored handoff and routing",
+            "--next",
+            "Implement the owner task",
+        ])
+        .assert()
+        .success();
+    let authored: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(project.path().join(".stateroot/handoffs/current.json")).unwrap(),
+    )
+    .unwrap();
+    stateroot(config.path(), home.path(), project.path())
+        .arg("_drain-finalize")
+        .assert()
+        .success();
+    let current: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(project.path().join(".stateroot/handoffs/current.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(current["seq"], authored["seq"]);
+    assert_eq!(current["task"], "Authored current task");
+    let jobs = journal_files(project.path());
+    assert_eq!(jobs[0]["boundary_source_root"], frozen);
+    assert!(jobs[0]["snapshot_timing"]
+        .as_str()
+        .unwrap()
+        .contains("post-boundary edits"));
+    assert_eq!(jobs[0]["state"], "terminal");
+    let history: Vec<serde_json::Value> =
+        std::fs::read_dir(project.path().join(".stateroot/handoffs/history"))
+            .unwrap()
+            .flatten()
+            .filter_map(|entry| serde_json::from_slice(&std::fs::read(entry.path()).ok()?).ok())
+            .collect();
+    let boundary = history
+        .iter()
+        .find(|packet| packet["boundary_ingest_key"] == jobs[0]["ingest_key"])
+        .unwrap();
+    assert_eq!(boundary["evidence_ref"]["session_id"], "old");
+    assert_eq!(boundary["boundary_source_root"], frozen);
+    assert_eq!(boundary["latest_root"], jobs[0]["root"]);
+    // Simulate crash after the immutable packet commit but before journal phase commit.
+    let mut replay: stateroot_core::finalize_journal::BoundaryJob =
+        serde_json::from_value(jobs[0].clone()).unwrap();
+    replay.phase = stateroot_core::finalize_journal::Phase::Snapped;
+    replay.state = "active".into();
+    stateroot_core::finalize_journal::save(project.path(), &replay).unwrap();
+    stateroot(config.path(), home.path(), project.path())
+        .arg("_drain-finalize")
+        .assert()
+        .success();
+    assert_eq!(
+        journal_files(project.path())[0]["handoff_seq"],
+        jobs[0]["handoff_seq"]
+    );
+    let keyed = std::fs::read_dir(project.path().join(".stateroot/handoffs/history"))
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| {
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(entry.path()).ok()?).ok()
+        })
+        .filter(|packet| packet["boundary_ingest_key"] == jobs[0]["ingest_key"])
+        .count();
+    assert_eq!(keyed, 1);
+    // Same verified event occurrence after completion cannot make a second job/result.
+    hook_event(
+        config.path(),
+        home.path(),
+        project.path(),
+        "session_end",
+        &payload,
+    )
+    .success();
+    assert_eq!(journal_files(project.path()).len(), 1);
+}
+
+#[test]
+fn recover_validates_relocated_identity_and_advances_only_named_job() {
+    let (config, home) = homes();
+    let project = tempfile::tempdir().unwrap();
+    init_project(config.path(), home.path(), project.path());
+    let mut chosen = stateroot_core::finalize_journal::enqueue_occurrence(
+        project.path(),
+        "pi",
+        "relocated",
+        None,
+        "refs/stateroot/latest",
+        "chosen",
+    )
+    .unwrap();
+    let untouched = stateroot_core::finalize_journal::enqueue_occurrence(
+        project.path(),
+        "pi",
+        "still-missing",
+        None,
+        "refs/stateroot/latest",
+        "other",
+    )
+    .unwrap();
+    for _ in 0..stateroot_core::finalize_journal::MAX_ATTEMPTS {
+        stateroot_core::finalize_journal::mark_error(
+            project.path(),
+            &mut chosen,
+            "original missing evidence",
+        )
+        .unwrap();
+    }
+    write_pi_session(
+        home.path(),
+        project.path(),
+        "relocated",
+        "relocated verified request",
+    );
+    let moved = home.path().join("relocated-evidence.jsonl");
+    std::fs::rename(
+        home.path()
+            .join(".pi/agent/sessions/--tmp-demo--/relocated.jsonl"),
+        &moved,
+    )
+    .unwrap();
+    stateroot(config.path(), home.path(), project.path())
+        .args(["handoff", "recover", "--job", &untouched.id, "--transcript"])
+        .arg(&moved)
+        .assert()
+        .failure();
+    stateroot(config.path(), home.path(), project.path())
+        .args(["handoff", "recover", "--job", &chosen.id, "--transcript"])
+        .arg(&moved)
+        .assert()
+        .success();
+    let all = stateroot_core::finalize_journal::load_all(project.path());
+    let completed = all.iter().find(|job| job.id == chosen.id).unwrap();
+    assert_eq!(completed.state, "terminal");
+    assert_eq!(completed.recoveries.len(), 1);
+    assert_eq!(
+        completed.recoveries[0]["last_error"],
+        "original missing evidence"
+    );
+    let other = all.iter().find(|job| job.id == untouched.id).unwrap();
+    assert_eq!(other.phase, untouched.phase);
+    assert_eq!(other.attempt, untouched.attempt);
+    assert!(other.root.is_none());
+}
+
+#[test]
+fn boundary_freezes_one_session_frontier_and_acknowledges_only_that_prefix() {
+    let (config, home) = homes();
+    let project = tempfile::tempdir().unwrap();
+    init_project(config.path(), home.path(), project.path());
+    write_pi_session(
+        home.path(),
+        project.path(),
+        "bound",
+        "native boundary request",
+    );
+    let payload = |session: &str, text: &str| {
+        serde_json::json!({"cwd":project.path(),"session_id":session,"prompt":text}).to_string()
+    };
+    hook_event(
+        config.path(),
+        home.path(),
+        project.path(),
+        "user_prompt_submit",
+        &payload("bound", "captured before boundary"),
+    )
+    .success();
+    hook_event(
+        config.path(),
+        home.path(),
+        project.path(),
+        "session_end",
+        &serde_json::json!({"cwd":project.path(),"session_id":"bound","event_id":"end-bound"})
+            .to_string(),
+    )
+    .success();
+    let jobs = journal_files(project.path());
+    assert_eq!(jobs[0]["capture_watermark"]["status"], "present");
+    let frozen = jobs[0]["capture_watermark"]["watermark"].clone();
+    hook_event(
+        config.path(),
+        home.path(),
+        project.path(),
+        "user_prompt_submit",
+        &payload("other", "other session capture"),
+    )
+    .success();
+    hook_event(
+        config.path(),
+        home.path(),
+        project.path(),
+        "user_prompt_submit",
+        &payload("bound", "captured after boundary"),
+    )
+    .success();
+    stateroot(config.path(), home.path(), project.path())
+        .arg("_drain-finalize")
+        .assert()
+        .success();
+    let completed = journal_files(project.path());
+    assert_eq!(completed[0]["state"], "terminal");
+    let key = completed[0]["ingest_key"].as_str().unwrap();
+    let receipt: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            project
+                .path()
+                .join(".stateroot/spool/acknowledgements")
+                .join(format!("{key}.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(receipt["watermark"], frozen);
+    let segments = stateroot_core::observations::list_segments(project.path());
+    assert!(
+        segments.iter().all(|segment| !segment.sealed),
+        "later and other-session captures remain unacknowledged"
+    );
+    assert!(stateroot_core::observations::load_spool(project.path())
+        .iter()
+        .any(|record| record.text.contains("captured after boundary")));
+}

@@ -14,13 +14,17 @@
 //!   when session-start stdout was discarded or never marked delivered.
 //!   Output shape follows the harness's injection channel.
 //! - capture (`post_tool_use`, `notification`, `subagent_*`, `pre_tool_use`):
-//!   append one observation verbatim to `.stateroot/spool/observations.jsonl`
-//!   (256KB rotation), fire-and-forget.
+//!   durably append one observation to the session's immutable segment under
+//!   `.stateroot/spool/segments/` (locked append + sync before ack; dedup by
+//!   verified native event identity; full body + raw payload retained).
 //! - checkpoint (`tool_failure`, `pre_compact`, `post_compaction`, `stop`,
-//!   `session_end`): checkpoint from the spool tail into the local episodic
-//!   log; `stop`/`session_end` enqueue transcript finalize + snap + ingest
-//!   onto the outbox and return (a detached `_drain-finalize` worker finishes
-//!   the heavy work). The spool is then rotated.
+//!   `session_end`): checkpoint from the observation tail into the local
+//!   episodic log; `stop`/`session_end` enqueue transcript finalize + snap +
+//!   ingest onto the outbox and return (a detached `_drain-finalize` worker
+//!   finishes the heavy work, including post-ingest segment sealing). Stop
+//!   never scans or seals segments synchronously — stop latency stays
+//!   bounded on long segments. Evidence is never rotated, cleared, or
+//!   truncated.
 
 use std::path::{Path, PathBuf};
 
@@ -34,16 +38,8 @@ use stateroot_core::local_store::now_rfc3339;
 
 use super::{note, truncate, Ctx};
 
-/// Spool rotation threshold.
-const SPOOL_ROTATE_BYTES: u64 = 256 * 1024;
-/// Bytes kept after rotation (tail of the spool).
-const SPOOL_KEEP_BYTES: usize = 128 * 1024;
 /// Observations included in a checkpoint note.
 const CHECKPOINT_TAIL: usize = 10;
-
-fn spool_path(project_dir: &Path) -> PathBuf {
-    local_store::root(project_dir).join("spool/observations.jsonl")
-}
 
 /// Walk up from `start` looking for `.stateroot/manifest.json`.
 fn find_project_root(start: &Path) -> Option<PathBuf> {
@@ -85,12 +81,14 @@ fn kimi_session_project(quirk: &registry::HarnessQuirk, payload: &Value) -> Opti
     find_project_root(&dir)
 }
 
-/// Lenient stdin payload parse (tolerates empty or non-JSON input).
+/// Lenient stdin payload parse (tolerates empty or non-JSON input). A failed
+/// stdin read is surfaced as `_transport_error` so capture never acknowledges
+/// complete evidence it never received.
 fn read_payload() -> Value {
     use std::io::Read;
     let mut text = String::new();
     if std::io::stdin().read_to_string(&mut text).is_err() {
-        return json!({});
+        return json!({"_transport_error": "stdin read failed"});
     }
     let text = text.trim();
     if text.is_empty() {
@@ -947,42 +945,148 @@ fn capture_observation(
     let kind_hint = infer_kind_hint(canonical, &text);
     let tool = payload_tool(payload);
     let excerpt = payload_excerpt(payload, &text);
-    let record = json!({
-        "ts": now_rfc3339(),
-        "event": canonical,
-        "harness": quirk.id,
-        "text": text,
-        "kind_hint": kind_hint,
-        "tool": tool,
-        "excerpt": excerpt,
-    });
-    let path = spool_path(project_dir);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    // Rotation: over threshold → keep the last KEEP bytes.
-    if let Ok(meta) = std::fs::metadata(&path) {
-        if meta.len() > SPOOL_ROTATE_BYTES {
-            let bytes = std::fs::read(&path).unwrap_or_default();
-            let start = bytes.len().saturating_sub(SPOOL_KEEP_BYTES);
-            let start = (start..=bytes.len())
-                .find(|&i| i == bytes.len() || bytes[i] == b'\n')
-                .map(|i| (i + 1).min(bytes.len()))
-                .unwrap_or(bytes.len());
-            std::fs::write(&path, &bytes[start.min(bytes.len())..])?;
+    let session_id = digest_delivery::session_id_from_payload(payload);
+    // `anon-*` ids are StateRoot-minted (session_identity::tag_payload) — the
+    // host harness never carried one; label the provenance, never confuse it
+    // with a verified native session.
+    let session_identity = match session_id.as_deref() {
+        Some(id) if id.starts_with("anon-") => "minted",
+        Some(_) => "native",
+        None => "unavailable",
+    };
+    let source_status = if payload.get("_transport_error").is_some() {
+        // The stdin read failed: surface the loss instead of acknowledging
+        // complete evidence (A3).
+        "transport_read_error"
+    } else {
+        "complete"
+    };
+    let outcome = stateroot_core::observations::capture(
+        project_dir,
+        stateroot_core::observations::CaptureRequest {
+            ts: now_rfc3339(),
+            event: canonical.to_string(),
+            harness: quirk.id.to_string(),
+            session_id,
+            session_identity: session_identity.to_string(),
+            event_identity: native_event_identity(payload),
+            text,
+            kind_hint: kind_hint.map(str::to_string),
+            tool,
+            excerpt,
+            source: Some(payload.clone()),
+            source_status: source_status.to_string(),
+            meta: payload_meta(payload),
+        },
+    )?;
+    match outcome.status {
+        stateroot_core::observations::CaptureStatus::Replay => {}
+        stateroot_core::observations::CaptureStatus::Captured => {}
+        stateroot_core::observations::CaptureStatus::Conflict => {
+            hook_note(
+                quirk,
+                &format!(
+                    "observation conflict on reused event identity — both bodies retained (earlier: {})",
+                    outcome.related.as_deref().unwrap_or("unknown")
+                ),
+            );
         }
     }
-    let mut line = serde_json::to_string(&record)?;
-    line.push('\n');
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)?;
-    file.write_all(line.as_bytes())?;
+    if !outcome.projection_synced {
+        note!(
+            "observation durable but projection update failed (rebuildable): {}",
+            outcome.projection_error.as_deref().unwrap_or("unknown")
+        );
+    }
+    if !outcome.frontier_synced {
+        note!(
+            "observation durable but session frontier update failed (recover with observations health): {}",
+            outcome.frontier_error.as_deref().unwrap_or("unknown")
+        );
+    }
     Ok(0)
 }
 
+/// Payload fields consumed into first-class record slots; everything else is
+/// kept as observed metadata (unknown fields are never dropped).
+const CONSUMED_PAYLOAD_KEYS: &[&str] = &[
+    "prompt",
+    "text",
+    "message",
+    "content",
+    "summary",
+    "note",
+    "_raw",
+    "tool",
+    "tool_name",
+    "name",
+    "command",
+    "cwd",
+    "project_dir",
+    "projectDir",
+    "workspace_dir",
+    "workspace_roots",
+    "session_id",
+    "conversation_id",
+    "generation_id",
+    "sessionId",
+    "conversationId",
+    "generationId",
+    "messageID",
+    "composerId",
+    "session",
+    "hook_event_name",
+    "_transport_error",
+    // Native event identity fields (see native_event_identity).
+    "tool_use_id",
+    "tool_call_id",
+    "event_id",
+    "hook_event_id",
+    "request_id",
+    "message_id",
+];
+
+/// Verified native event identity from the payload, when the harness sends
+/// one. Verified per adapter payloads: `tool_use_id` (claude/codex),
+/// `tool_call_id` (kimi), then generic id fields. None means the host has no
+/// event identity — capture must mint one and never dedup by content.
+fn native_event_identity(payload: &Value) -> Option<(String, String)> {
+    for key in [
+        "tool_use_id",
+        "tool_call_id",
+        "event_id",
+        "hook_event_id",
+        "request_id",
+        "message_id",
+    ] {
+        if let Some(value) = payload.get(key).and_then(|v| v.as_str()) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some((key.to_string(), value.to_string()));
+            }
+        }
+    }
+    None
+}
+
+/// Unknown top-level payload fields, kept as observed metadata.
+fn payload_meta(payload: &Value) -> Option<Value> {
+    let obj = payload.as_object()?;
+    let rest: serde_json::Map<String, Value> = obj
+        .iter()
+        .filter(|(key, _)| !CONSUMED_PAYLOAD_KEYS.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    if rest.is_empty() {
+        None
+    } else {
+        Some(Value::Object(rest))
+    }
+}
+
+/// The captured text is the authorized evidence: retained in full, never
+/// truncated at capture. Bounded excerpts are produced for digests and list
+/// views only (`payload_excerpt`).
 fn payload_text(payload: &Value) -> String {
     for key in [
         "prompt", "text", "message", "content", "summary", "note", "_raw",
@@ -990,12 +1094,11 @@ fn payload_text(payload: &Value) -> String {
         if let Some(value) = payload.get(key).and_then(|v| v.as_str()) {
             let trimmed = value.trim();
             if !trimmed.is_empty() {
-                return truncate(trimmed, 1000);
+                return trimmed.to_string();
             }
         }
     }
-    let raw = serde_json::to_string(payload).unwrap_or_default();
-    truncate(&raw, 1000)
+    serde_json::to_string(payload).unwrap_or_default()
 }
 
 fn payload_tool(payload: &Value) -> Option<String> {
@@ -1053,7 +1156,13 @@ async fn checkpoint_from_spool(
     project_dir: &Path,
     payload: &Value,
 ) -> anyhow::Result<u8> {
-    let tail = spool_tail(project_dir, CHECKPOINT_TAIL);
+    let native_session = stateroot_core::digest_delivery::session_id_from_payload(payload);
+    let tail = spool_tail(
+        project_dir,
+        quirk.id,
+        native_session.as_deref(),
+        CHECKPOINT_TAIL,
+    );
     let mut note_text = format!("{canonical} via {} hook", quirk.id);
     if let Some(raw) = payload.get("_raw").and_then(|v| v.as_str()) {
         note_text.push_str(&format!(": {}", truncate(raw, 200)));
@@ -1099,12 +1208,41 @@ async fn checkpoint_from_spool(
         let session_id = stateroot_core::digest_delivery::session_id_from_payload(payload)
             .unwrap_or_else(|| "unknown".to_string());
         let lineage_ref = stateroot_core::roots::lineage_refname(project_dir);
-        match stateroot_core::finalize_journal::enqueue(
+        let locator = payload
+            .get("transcript_path")
+            .or_else(|| payload.get("transcript"))
+            .and_then(Value::as_str)
+            .filter(|locator| !locator.is_empty());
+        let occurrence = payload
+            .get("event_id")
+            .or_else(|| payload.get("boundary_id"))
+            .or_else(|| payload.get("turn_id"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{canonical}:{}", uuid::Uuid::now_v7()));
+        let capture_watermark = match stateroot_core::observations::session_watermark(
             project_dir,
             quirk.id,
             &session_id,
-            None,
+        ) {
+            stateroot_core::observations::SessionWatermark::Absent => {
+                json!({"status":"absent","harness":quirk.id,"session_id":session_id})
+            }
+            stateroot_core::observations::SessionWatermark::Present(watermark) => {
+                json!({"status":"present","harness":quirk.id,"session_id":session_id,"watermark":watermark})
+            }
+            stateroot_core::observations::SessionWatermark::Unreadable(reason) => {
+                json!({"status":"unreadable","harness":quirk.id,"session_id":session_id,"reason":reason})
+            }
+        };
+        match stateroot_core::finalize_journal::enqueue_with_capture(
+            project_dir,
+            quirk.id,
+            &session_id,
+            locator,
             &lineage_ref,
+            &occurrence,
+            Some(capture_watermark),
         ) {
             Ok(_) => {
                 hook_note(quirk, "boundary job queued (durable journal)");
@@ -1113,37 +1251,28 @@ async fn checkpoint_from_spool(
             Err(err) => note!("boundary enqueue skipped: {err}"),
         }
         reconcile_boundary(&hook_ctx, project_dir);
-        let path = spool_path(project_dir);
-        if path.exists() {
-            let _ = std::fs::write(&path, "");
-        }
+        // No synchronous segment sealing here: sealing is the WS2 drainer's
+        // non-destructive post-ingest step. Stop stays bounded on long
+        // segments and capture history is never deleted or truncated.
     }
     Ok(0)
 }
 
-fn spool_tail(project_dir: &Path, count: usize) -> Vec<String> {
-    let path = spool_path(project_dir);
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return Vec::new();
-    };
-    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
-    lines
-        .iter()
-        .rev()
-        .take(count)
-        .rev()
-        .map(|line| {
-            serde_json::from_str::<Value>(line)
-                .ok()
-                .and_then(|v| {
-                    v.get("text")
-                        .and_then(|t| t.as_str())
-                        .map(|s| s.to_string())
-                })
-                .map(|text| format!("- {}", truncate(&text, 160)))
-                .unwrap_or_else(|| format!("- {}", truncate(line, 160)))
-        })
-        .collect()
+fn spool_tail(
+    project_dir: &Path,
+    harness: &str,
+    session_id: Option<&str>,
+    count: usize,
+) -> Vec<String> {
+    match stateroot_core::observations::recent_brief(project_dir, harness, session_id, count) {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|row| format!("- {}", truncate(&row, 240)))
+            .collect(),
+        Err(error) => vec![format!(
+            "- current capture brief unavailable: {error}; retained evidence is intact"
+        )],
+    }
 }
 
 #[cfg(test)]

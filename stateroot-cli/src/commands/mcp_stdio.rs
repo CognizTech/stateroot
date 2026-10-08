@@ -50,6 +50,11 @@ pub const TOOL_DEFS: &[(&str, &str, &str)] = &[
         r#"{"type":"object","properties":{"scope":{"type":"string"},"status":{"type":"string"},"limit":{"type":"integer"}}}"#,
     ),
     (
+        "learnings_show",
+        "Read a full saved learning with its scope, provenance, and lifecycle state.",
+        r#"{"type":"object","properties":{"id":{"type":"string"},"scope":{"type":"string"}},"required":["id"]}"#,
+    ),
+    (
         "observations_list",
         "Read-only audit of raw hook-captured observations from .stateroot/spool/observations.jsonl. Provenance/debug only — not primary memory.",
         r#"{"type":"object","properties":{"kind":{"type":"string"},"harness":{"type":"string"},"query":{"type":"string"},"limit":{"type":"integer"}}}"#,
@@ -193,6 +198,20 @@ fn call_tool(
         "skill_propose" => skill_propose(ctx, home, caller, args),
         "soul_read" => soul_read(home, caller),
         "learnings_list" => learnings_list(ctx, home, external, args),
+        "learnings_show" => {
+            let scope = args["scope"].as_str().unwrap_or("project");
+            let id = args["id"].as_str().unwrap_or("");
+            match stateroot_core::learnings::read_scope(&ctx.cwd, home, scope)
+                .into_iter()
+                .find(|learning| learning.id == id)
+            {
+                Some(learning) => serde_json::to_string(&learning)
+                    .unwrap_or_else(|error| json!({"error": error.to_string()}).to_string()),
+                None => {
+                    json!({"error": "learning unavailable", "id": id, "scope": scope}).to_string()
+                }
+            }
+        }
         "observations_list" => observations_list(ctx, args),
         "projects_list" => super::projects::collect(ctx)
             .map(|v| v.to_string())
@@ -332,6 +351,8 @@ fn memory_recall(ctx: &Ctx, home: &std::path::Path, external: bool, args: &Value
                         },
                         "visibility": if h.private { "private" } else { "shared" },
                         "score": h.score,
+                        "source": h.source,
+                        "stale": h.stale,
                     })
                 })
                 .collect();
@@ -501,6 +522,10 @@ fn learnings_list(ctx: &Ctx, home: &std::path::Path, _external: bool, args: &Val
                 "confidence": l.confidence,
                 "status": l.status,
                 "scope": l.scope,
+                "sources": l.sources,
+                "label": l.label,
+                "active_at_root": l.active_at_root,
+                "superseded_by": l.superseded_by,
             })
         })
         .collect();
