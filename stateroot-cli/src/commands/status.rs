@@ -124,6 +124,17 @@ pub fn run(ctx: &Ctx, json_out: bool) -> anyhow::Result<()> {
     let advisory = assessment
         .as_ref()
         .and_then(|a| stateroot_core::continuity::current_advisory(&ctx.cwd, a));
+    // WS2 typed health: memory index freshness (read-only) and per-harness
+    // capture evidence from the durable WS1 observation store (never the
+    // authored episodic journal). The human brief stays compact; the JSON
+    // carries the full typed facts for tooling and the WS4 fidelity renderer.
+    let home = super::install::home_dir().ok();
+    let index_health = home
+        .as_deref()
+        .map(|h| stateroot_core::memory_index::health(&ctx.cwd, h));
+    let capture_trail = stateroot_core::observations::capture_trail(&ctx.cwd);
+    let captures = &capture_trail.last_by_harness;
+    let capture_diagnosed = &capture_trail.diagnosed;
 
     if json_out {
         let payload = json!({
@@ -135,7 +146,15 @@ pub fn run(ctx: &Ctx, json_out: bool) -> anyhow::Result<()> {
             "plan": { "summary": brief.plan_line, "directive": brief.plan_directive },
             "continuity": assessment,
             "advisory": advisory,
-            "boundary_journal": { "active": jobs_active, "manual_attention": jobs_manual },
+            "boundary_journal": {
+                "active": jobs_active,
+                "manual_attention": jobs_manual,
+                "job_ids": jobs.iter().map(|job| &job.id).collect::<Vec<_>>(),
+                "inspect": "stateroot handoff inspect --job <id>",
+            },
+            "memory_index": index_health,
+            "last_capture_by_harness": captures,
+            "capture_evidence_diagnosed": capture_diagnosed,
             "counts": { "checkpoints": episodic, "federated_skills": skills },
             "persona_cached": persona,
         });
@@ -170,6 +189,8 @@ pub fn run(ctx: &Ctx, json_out: bool) -> anyhow::Result<()> {
                 "service: {}",
                 if a.service_running {
                     "running".to_string()
+                } else if a.service_identity_status == "unknown" {
+                    format!("ownership unknown — {}", a.service_identity_detail)
                 } else if a.service_registered {
                     format!(
                         "registered ({}) but not heartbeating",
@@ -185,7 +206,27 @@ pub fn run(ctx: &Ctx, json_out: bool) -> anyhow::Result<()> {
         println!(
             "boundary journal: {jobs_active} active · {jobs_manual} parked for manual attention"
         );
+        match &index_health {
+            Some(h) if h.error.is_some() && h.fingerprint.is_none() => {
+                println!("memory index: not built yet — first `stateroot memory recall` builds it")
+            }
+            Some(h) if h.error.is_some() => println!(
+                "memory index: unreadable ({}) — `stateroot memory recall` rebuilds on demand",
+                h.error.as_deref().unwrap_or("?")
+            ),
+            Some(h) if !h.fresh => {
+                println!("memory index: stale — search re-indexes on next recall")
+            }
+            _ => {}
+        }
         println!("checkpoints: {episodic}");
+        if !capture_diagnosed.is_empty() {
+            println!(
+                "capture evidence: {} diagnosed problem(s) ({}…) — evidence is unreadable, not absent",
+                capture_diagnosed.len(),
+                capture_diagnosed[0]
+            );
+        }
         println!("federated skills: {skills}");
         println!("persona cached: {}", if persona { "yes" } else { "no" });
     }

@@ -11,16 +11,23 @@ use stateroot_core::local_store;
 
 use super::Ctx;
 
-#[derive(Debug)]
+/// Budget for one hook binary's `--version` probe — a hung custom binary
+/// must never block `stateroot doctor` (the row reports not-runnable).
+const HOOK_VERSION_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[derive(Debug, serde::Serialize)]
 struct Check {
     label: String,
     ok: bool,
     detail: String,
     hard: bool,
+    /// Recommended repair command, when one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repair: Option<String>,
 }
 
-/// Run `stateroot doctor`. Returns a process exit code (0 ok, 1 hard failure).
-pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
+/// Run `stateroot doctor [--json]`. Returns a process exit code (0 ok, 1 hard failure).
+pub async fn run(ctx: &Ctx, json_out: bool) -> anyhow::Result<i32> {
     let mut checks: Vec<Check> = Vec::new();
 
     // Config dir + file.
@@ -29,6 +36,7 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
         ok: true,
         detail: ctx.config_dir.display().to_string(),
         hard: false,
+        repair: None,
     });
 
     // Self-update crash journal (global config home, not the project store —
@@ -44,12 +52,14 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
             ok: true,
             detail: format!("{} harnesses", reg.harnesses.len()),
             hard: false,
+            repair: None,
         }),
         Err(err) => checks.push(Check {
             label: "harness registry".into(),
             ok: false,
             detail: err,
             hard: true,
+            repair: None,
         }),
     }
 
@@ -62,6 +72,7 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
             ok: manifest,
             detail: root.display().to_string(),
             hard: true,
+            repair: None,
         });
         let handoff_path = root.join(local_store::HANDOFF_CURRENT_PATH);
         let handoff = handoff_path.is_file();
@@ -79,6 +90,7 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
                 "none yet".into()
             },
             hard: false,
+            repair: (!handoff_valid).then(|| "stateroot handoff repair".to_string()),
         });
         let auto_skip = root.join("local/automatic-snapshot-skip.json");
         if let Ok(text) = std::fs::read_to_string(&auto_skip) {
@@ -93,6 +105,7 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
                     ok: false,
                     detail: format!("{detail} (skipped at {at}; clears after the next successful automatic snapshot)"),
                     hard: false,
+                    repair: None,
                 });
             }
         }
@@ -165,6 +178,7 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
                         if capped { "+ (capped)".into() } else { String::new() }
                     ),
                     hard: false,
+                    repair: None,
                 });
             }
         }
@@ -184,6 +198,7 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
                     ok: true,
                     detail: "WSL-mounted working copy — automatic snapshots run with bounded scans; keep generated trees ignored".into(),
                     hard: false,
+                    repair: None,
                 });
             }
         }
@@ -193,6 +208,7 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
             ok: true,
             detail: "not in a stateroot project (init to create one)".into(),
             hard: false,
+            repair: None,
         });
     }
 
@@ -207,6 +223,7 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
             "none (M3 soul service)".into()
         },
         hard: false,
+        repair: None,
     });
 
     // Honest identity-delivery tier for detected harnesses (soft).
@@ -235,6 +252,7 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
                 ok: true,
                 detail: format!("{tier} — {}", policy.note),
                 hard: false,
+                repair: None,
             });
             if quirk.id == "pi" {
                 checks.push(Check {
@@ -242,6 +260,7 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
                     ok: true,
                     detail: "StateRoot launches use `stateroot harness run pi` with ambient .agents skill discovery disabled; pass --ambient-skills to opt in".into(),
                     hard: false,
+                    repair: None,
                 });
             }
         }
@@ -251,6 +270,7 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
                 ok: true,
                 detail: "no harnesses detected on this machine".into(),
                 hard: false,
+                repair: None,
             });
         }
         // Hook-binary health: the binary each installed hook config points
@@ -278,9 +298,12 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
                         format!("{} issue(s)", issues.len())
                     },
                     hard: false,
+                    repair: None,
                 });
                 for issue in issues {
-                    println!("  {issue}");
+                    if !json_out {
+                        println!("  {issue}");
+                    }
                 }
             }
             Err(err) => checks.push(Check {
@@ -288,6 +311,7 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
                 ok: false,
                 detail: err,
                 hard: false,
+                repair: None,
             }),
         }
         let home = super::install::home_dir()?;
@@ -307,6 +331,7 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
                 format!("{issues} issue(s) — `stateroot mcp doctor`")
             },
             hard: false,
+            repair: None,
         });
         match stateroot_core::rules::ensure_product_intent(&home) {
             Ok(_) => {
@@ -316,6 +341,7 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
                     ok: true,
                     detail: format!("{n} rule(s); product-intent always on"),
                     hard: false,
+                    repair: None,
                 });
             }
             Err(err) => checks.push(Check {
@@ -323,6 +349,7 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
                 ok: false,
                 detail: err.to_string(),
                 hard: false,
+                repair: None,
             }),
         }
         // Continuity chain: not "is it installed" but "is anything flowing"
@@ -341,14 +368,27 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
             ok,
             detail,
             hard: false,
+            repair: None,
         });
     }
+
+    // C1: the typed per-harness integration health document (also the WS4
+    // seam). Best-effort: home resolution failure never fails doctor.
+    let integrations = super::install::home_dir().ok().map(|home| {
+        let probes = test_cmd_probes();
+        let probe = stateroot_core::skill_federation::binary_probe(probes.as_deref());
+        let project = local_store::is_stateroot_dir(&ctx.cwd).then(|| ctx.cwd.clone());
+        stateroot_core::harness_install::health::integration_health(
+            &home,
+            project.as_deref(),
+            &probe,
+            &ctx.config.installed_harnesses,
+        )
+    });
 
     let mut hard_failures = 0;
     let mut soft_warnings = 0;
     for check in &checks {
-        let mark = if check.ok { "ok" } else { "!!" };
-        println!("  [{mark}] {} — {}", check.label, check.detail);
         if !check.ok {
             if check.hard {
                 hard_failures += 1;
@@ -357,11 +397,80 @@ pub async fn run(ctx: &Ctx) -> anyhow::Result<i32> {
             }
         }
     }
+    if json_out {
+        // Base checks (config/store/registry/hooks/...) and detected
+        // integration readiness are SEPARATE verdicts: `ok` covers base hard
+        // failures only; integration rows are a readiness report, and a
+        // missing-but-undetected harness is never a hard failure.
+        let integrations_summary = integrations.as_ref().map(|health| {
+            let (working, configured, missing, unknown) = health.counts();
+            serde_json::json!({
+                "summary": health.summary_line(),
+                "observed_working": working,
+                "configured": configured,
+                "missing": missing,
+                "unknown": unknown,
+                // Degraded = degraded identity-delivery tier (registry
+                // policy). Rows with open problems are listed separately —
+                // the two never blur.
+                "degraded": health
+                    .harnesses
+                    .iter()
+                    .filter(|row| row.degraded.is_some())
+                    .map(|row| row.harness.clone())
+                    .collect::<Vec<_>>(),
+                "with_problems": health
+                    .harnesses
+                    .iter()
+                    .filter(|row| !row.problems.is_empty())
+                    .map(|row| row.harness.clone())
+                    .collect::<Vec<_>>(),
+                "evidence_problems": health.evidence_problems,
+            })
+        });
+        let payload = serde_json::json!({
+            "schema_version": "stateroot.doctor.v1",
+            "generated_at": local_store::now_rfc3339(),
+            "ok": hard_failures == 0,
+            "hard_failures": hard_failures,
+            "warnings": soft_warnings,
+            "checks": checks,
+            "integrations": integrations,
+            "integrations_summary": integrations_summary,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(if hard_failures > 0 { 1 } else { 0 });
+    }
+    for check in &checks {
+        let mark = if check.ok { "ok" } else { "!!" };
+        print!("  [{mark}] {} — {}", check.label, check.detail);
+        if let Some(repair) = &check.repair {
+            print!(" → `{repair}`");
+        }
+        println!();
+    }
+    if let Some(integrations) = &integrations {
+        if !integrations.harnesses.is_empty() {
+            println!("integrations: {}", integrations.summary_line());
+            for row in integrations
+                .harnesses
+                .iter()
+                .filter(|r| !r.problems.is_empty())
+            {
+                println!(
+                    "  {}: {} → {}",
+                    row.harness,
+                    row.problems.join("; "),
+                    row.repair.join(", ")
+                );
+            }
+        }
+    }
     if hard_failures > 0 {
-        println!("{hard_failures} hard failure(s), {soft_warnings} warning(s)");
+        println!("base checks: {hard_failures} hard failure(s), {soft_warnings} warning(s)");
         Ok(1)
     } else if soft_warnings > 0 {
-        println!("doctor: checks pass with {soft_warnings} warning(s)");
+        println!("doctor: base checks pass with {soft_warnings} warning(s)");
         Ok(0)
     } else {
         println!("doctor: all local checks pass");
@@ -381,25 +490,19 @@ fn continuity_runtime_checks(ctx: &Ctx) -> Vec<Check> {
             ok: true,
             detail: "disabled in config ([continuity] enabled = false)".into(),
             hard: false,
+            repair: None,
         });
         return out;
     }
     let registration = stateroot_core::continuity::read_service_registration(&ctx.config_dir);
     let heartbeat = stateroot_core::continuity::read_service_heartbeat(&ctx.config_dir);
-    let (running, stale_detail) = match &heartbeat {
-        Some(beat) => {
-            let pid_live = beat.pid > 0 && stateroot_core::safe_io::pid_alive(beat.pid);
-            let stale = stateroot_core::continuity::service_beat_stale(
-                &beat.beat_at,
-                &stateroot_core::local_store::now_rfc3339(),
-                cfg.poll_interval_seconds,
-            );
-            (
-                pid_live && !stale,
-                format!("last beat {} (pid {})", beat.beat_at, beat.pid),
-            )
-        }
-        None => (false, "no heartbeat recorded".to_string()),
+    // Verified liveness only: a fresh beat whose pid fails identity
+    // verification (wrong binary/args/namespace/start token/config) is NOT
+    // a running service — it reads as degraded, never claimed live.
+    let running = super::service::service_live_for(&ctx.config_dir, cfg.poll_interval_seconds).0;
+    let stale_detail = match &heartbeat {
+        Some(beat) => format!("last beat {} (pid {})", beat.beat_at, beat.pid),
+        None => "no heartbeat recorded".to_string(),
     };
     match &registration {
         Some(reg) => out.push(Check {
@@ -408,15 +511,22 @@ fn continuity_runtime_checks(ctx: &Ctx) -> Vec<Check> {
             detail: if running {
                 format!("registered ({}), heartbeating", reg.kind)
             } else {
-                format!("registered ({}) but not heartbeating — {stale_detail}", reg.kind)
+                format!(
+                    "registered ({}) but not heartbeating — {stale_detail}",
+                    reg.kind
+                )
             },
             hard: false,
+            repair: (!running).then(|| "stateroot service restart".to_string()),
         }),
         None => out.push(Check {
             label: "continuity service".into(),
             ok: false,
-            detail: "not registered — degraded background coverage (hooks/CLI reconcile on activity; `stateroot service install`)".into(),
+            detail:
+                "not registered — degraded background coverage (hooks/CLI reconcile on activity)"
+                    .into(),
             hard: false,
+            repair: Some("stateroot service install".to_string()),
         }),
     }
 
@@ -438,6 +548,7 @@ fn continuity_runtime_checks(ctx: &Ctx) -> Vec<Check> {
                         assessment.attention.len()
                     ),
                     hard: false,
+                    repair: None,
                 });
                 out.push(Check {
                     label: "obligation events".into(),
@@ -447,6 +558,7 @@ fn continuity_runtime_checks(ctx: &Ctx) -> Vec<Check> {
                         assessment.corrupt_obligation_events
                     ),
                     hard: false,
+                    repair: None,
                 });
                 let contradictions = assessment
                     .attention
@@ -467,6 +579,7 @@ fn continuity_runtime_checks(ctx: &Ctx) -> Vec<Check> {
                         format!("{contradictions} unresolved (see `stateroot status`)")
                     },
                     hard: false,
+                    repair: None,
                 });
             }
             None => out.push(Check {
@@ -475,6 +588,7 @@ fn continuity_runtime_checks(ctx: &Ctx) -> Vec<Check> {
                 detail: "no projection yet — run `stateroot status` or `stateroot service run`"
                     .into(),
                 hard: false,
+                repair: None,
             }),
         }
     }
@@ -484,7 +598,7 @@ fn continuity_runtime_checks(ctx: &Ctx) -> Vec<Check> {
 /// Hidden test seam (mirrors `STATEROOT_TEST_HOME`): when
 /// `STATEROOT_TEST_CMD_PROBES` is set, bare-binary detection answers from
 /// this comma-separated allowlist instead of probing the host PATH.
-fn test_cmd_probes() -> Option<Vec<String>> {
+pub(crate) fn test_cmd_probes() -> Option<Vec<String>> {
     std::env::var("STATEROOT_TEST_CMD_PROBES").ok().map(|raw| {
         raw.split(',')
             .map(|s| s.trim().to_string())
@@ -493,113 +607,13 @@ fn test_cmd_probes() -> Option<Vec<String>> {
     })
 }
 
-/// Every stateroot hook command found in `path` (the installer's
-/// `hook_target_candidates` output for one harness).
-fn extract_hook_commands(path: &Path, format: HookFormat) -> Vec<String> {
-    match format {
-        HookFormat::TomlHooks => {
-            let Ok(text) = std::fs::read_to_string(path) else {
-                return Vec::new();
-            };
-            text.lines()
-                .filter_map(|line| {
-                    let line = line.trim();
-                    let rest = line.strip_prefix("command")?;
-                    let command = rest.trim().trim_start_matches('=').trim().trim_matches('"');
-                    command
-                        .contains("stateroot hook")
-                        .then(|| command.to_string())
-                })
-                .collect()
-        }
-        HookFormat::ZeroExecJson => {
-            let Ok(text) = std::fs::read_to_string(path) else {
-                return Vec::new();
-            };
-            let Ok(doc) = serde_json::from_str::<Value>(&text) else {
-                return Vec::new();
-            };
-            doc.get("hooks")
-                .and_then(Value::as_array)
-                .map(|hooks| {
-                    hooks
-                        .iter()
-                        .filter(|entry| {
-                            entry.get("command").and_then(Value::as_str) == Some("stateroot")
-                                && entry
-                                    .get("args")
-                                    .and_then(Value::as_array)
-                                    .and_then(|args| args.first())
-                                    .and_then(Value::as_str)
-                                    == Some("hook")
-                        })
-                        .map(|_| "stateroot".to_string())
-                        .collect()
-                })
-                .unwrap_or_default()
-        }
-        HookFormat::NativePlugin => {
-            // The generated extension invokes bare `stateroot` via execFile.
-            let Ok(text) = std::fs::read_to_string(path.join("index.ts")) else {
-                return Vec::new();
-            };
-            if text.contains("\"stateroot\"") {
-                vec!["stateroot".to_string()]
-            } else {
-                Vec::new()
-            }
-        }
-        _ => {
-            // NestedJson / FlatJson / NamedGroupsJson (and devin's
-            // whole-object file): collect every string containing a
-            // stateroot hook invocation.
-            let Ok(text) = std::fs::read_to_string(path) else {
-                return Vec::new();
-            };
-            let Ok(doc) = serde_json::from_str::<Value>(&text) else {
-                return Vec::new();
-            };
-            let mut out = Vec::new();
-            collect_hook_commands(&doc, &mut out);
-            out
-        }
-    }
-}
-
-fn collect_hook_commands(value: &Value, out: &mut Vec<String>) {
-    match value {
-        Value::String(s) if s.contains("stateroot hook") || s.contains("stateroot.exe hook") => {
-            out.push(s.clone())
-        }
-        Value::Array(items) => items
-            .iter()
-            .for_each(|item| collect_hook_commands(item, out)),
-        Value::Object(map) => map
-            .values()
-            .for_each(|item| collect_hook_commands(item, out)),
-        _ => {}
-    }
-}
-
-/// The binary a stateroot hook command invokes: bare `stateroot`, or the
-/// (possibly quoted) path before the ` hook <event> --harness <id>` suffix
-/// the installer writes.
-fn binary_of_command(command: &str) -> Option<String> {
-    let command = command.trim().trim_matches('"');
-    if command == "stateroot" {
-        return Some("stateroot".to_string());
-    }
-    let (binary, _) = command.split_once(" hook ")?;
-    let binary = binary.trim().trim_matches('"');
-    if binary == "stateroot" || binary.ends_with("/stateroot") || binary.ends_with("stateroot.exe")
-    {
-        Some(binary.to_string())
-    } else {
-        None
-    }
-}
+/// Every stateroot hook command found in `path` — the shared core
+/// implementation lives in the integration-health module so doctor and the
+/// health seam read configs identically.
+use stateroot_core::harness_install::health::{binary_of_command, extract_hook_commands};
 
 /// Run one hook binary's `--version` and grade it against this cli.
+/// The probe is BOUNDED: a hung custom binary must never block doctor.
 fn check_one_binary(harness_id: &str, binary: &str, probe: &dyn Fn(&str) -> bool) -> Check {
     let label = format!("hook binary ({harness_id})");
     if binary == "stateroot" && !probe("stateroot") {
@@ -608,6 +622,7 @@ fn check_one_binary(harness_id: &str, binary: &str, probe: &dyn Fn(&str) -> bool
             ok: false,
             detail: "hook command `stateroot` not found on PATH".into(),
             hard: false,
+            repair: None,
         };
     }
     if binary != "stateroot" && !Path::new(binary).is_file() {
@@ -616,11 +631,12 @@ fn check_one_binary(harness_id: &str, binary: &str, probe: &dyn Fn(&str) -> bool
             ok: false,
             detail: format!("hook command not runnable: {binary}"),
             hard: false,
+            repair: None,
         };
     }
-    match std::process::Command::new(binary).arg("--version").output() {
-        Ok(output) if output.status.success() => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
+    match super::bounded_run(binary, &["--version"], HOOK_VERSION_PROBE_TIMEOUT, true) {
+        Some(run) if run.success => {
+            let stdout = run.stdout;
             let version = stdout
                 .lines()
                 .next()
@@ -633,6 +649,7 @@ fn check_one_binary(harness_id: &str, binary: &str, probe: &dyn Fn(&str) -> bool
                     ok: true,
                     detail: format!("{binary} · {version}"),
                     hard: false,
+                    repair: None,
                 }
             } else {
                 Check {
@@ -642,6 +659,7 @@ fn check_one_binary(harness_id: &str, binary: &str, probe: &dyn Fn(&str) -> bool
                         "{harness_id} hook binary is stateroot {version} — run `stateroot self-update` on this machine"
                     ),
                     hard: false,
+                    repair: Some("stateroot self-update".to_string()),
                 }
             }
         }
@@ -650,6 +668,7 @@ fn check_one_binary(harness_id: &str, binary: &str, probe: &dyn Fn(&str) -> bool
             ok: false,
             detail: format!("hook command not runnable: {binary}"),
             hard: false,
+            repair: None,
         },
     }
 }
@@ -701,6 +720,7 @@ fn update_journal_check(config_dir: &Path) -> Option<Check> {
             ok: false,
             detail: format!("update journal is unreadable — delete {}", path.display()),
             hard: false,
+            repair: None,
         });
     };
     let from = journal
@@ -725,6 +745,7 @@ fn update_journal_check(config_dir: &Path) -> Option<Check> {
                 "last update (from {from} to {to} at {at}) failed; previous binary restored"
             ),
             hard: false,
+            repair: None,
         });
     }
     Some(Check {
@@ -734,6 +755,7 @@ fn update_journal_check(config_dir: &Path) -> Option<Check> {
             "update interrupted (from {from} to {to} at {at}) — rerun `stateroot self-update`"
         ),
         hard: false,
+        repair: Some("stateroot self-update".to_string()),
     })
 }
 
@@ -802,6 +824,7 @@ fn continuity_chain_checks(home: &Path, project_dir: &Path) -> Vec<Check> {
                 human_size(spool)
             ),
             hard: false,
+            repair: None,
         });
     }
 
@@ -833,6 +856,7 @@ fn continuity_chain_checks(home: &Path, project_dir: &Path) -> Vec<Check> {
                     "{finalize} op(s) queued for `_drain-finalize` (snap/finalize/ingest)"
                 ),
                 hard: false,
+                repair: None,
             });
         }
         if legacy > 0 {
@@ -844,6 +868,7 @@ fn continuity_chain_checks(home: &Path, project_dir: &Path) -> Vec<Check> {
                     outbox.display()
                 ),
                 hard: false,
+                repair: None,
             });
         }
     }
@@ -858,6 +883,7 @@ fn continuity_chain_checks(home: &Path, project_dir: &Path) -> Vec<Check> {
             ok: !journal_lines.iter().any(|l| l.contains("manual_attention")),
             detail: journal_lines.join("\n"),
             hard: false,
+            repair: None,
         });
     }
 
@@ -892,44 +918,17 @@ fn continuity_chain_checks(home: &Path, project_dir: &Path) -> Vec<Check> {
                         tracked.first().copied().unwrap_or("")
                     ),
                     hard: false,
+                    repair: None,
                 });
             }
         }
     }
 
-    // Last captured checkpoint per harness (episodic carries a harness
-    // field; older records said only "cli", so fall back to the note's
-    // "<event> via <harness> hook" attribution).
-    let mut last_by_harness: std::collections::BTreeMap<String, String> = Default::default();
-    for rec in stateroot_core::local_store::recent_episodic(project_dir, 100) {
-        let mut harness = rec
-            .get("harness")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        if harness.is_empty() || harness == "cli" {
-            if let Some(note) = rec.get("note").and_then(|v| v.as_str()) {
-                if let Some(id) = note
-                    .split(" via ")
-                    .nth(1)
-                    .and_then(|s| s.split_whitespace().next())
-                    .map(|s| s.to_string())
-                {
-                    if registry::quirk_any(&id).is_some() {
-                        harness = id;
-                    }
-                }
-            }
-        }
-        let ts = rec
-            .get("ts")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        if !harness.is_empty() && !ts.is_empty() {
-            last_by_harness.entry(harness).or_insert(ts);
-        }
-    }
+    // Last durable capture per harness — the WS1 observation store only
+    // (never the authored episodic journal), with unreadable evidence
+    // surfaced as diagnosed, distinct from absent.
+    let trail = stateroot_core::observations::capture_trail(project_dir);
+    let last_by_harness = &trail.last_by_harness;
 
     for quirk in registry::ADAPTERS {
         let Some(target) = quirk.hooks else {
@@ -938,35 +937,54 @@ fn continuity_chain_checks(home: &Path, project_dir: &Path) -> Vec<Check> {
         if !registry::quirk_detected(home, quirk) {
             continue;
         }
-        let config = home.join(target.path);
-        if !config.exists() {
+        let config = paths::hook_target_candidates(home, quirk)
+            .into_iter()
+            .find(|path| {
+                if target.format == HookFormat::NativePlugin {
+                    path.is_dir()
+                } else {
+                    path.is_file()
+                }
+            });
+        let Some(config) = config else {
             continue;
-        }
+        };
         let mut ok = true;
         let mut detail: Vec<String> = Vec::new();
-        if let Ok(text) = std::fs::read_to_string(&config) {
-            let blocks = text.matches("stateroot hook ").count()
-                + text.matches("stateroot.exe hook ").count();
-            if blocks > quirk.event_map.len() {
-                ok = false;
-                detail.push(format!(
-                    "{blocks} stateroot hook entries (> {} events — duplicates; run `stateroot install`)",
-                    quirk.event_map.len()
-                ));
-            } else if blocks == 0 && target.format == HookFormat::TomlHooks {
-                ok = false;
-                detail.push("no stateroot hook blocks found".to_string());
-            }
+        // Count registrations with the SAME parser health/doctor use — real
+        // TOML/JSON decoding, never raw text matching.
+        let commands =
+            stateroot_core::harness_install::health::extract_hook_commands(&config, target.format);
+        let blocks = commands.len();
+        if blocks > quirk.event_map.len() && !quirk.event_map.is_empty() {
+            ok = false;
+            detail.push(format!(
+                "{blocks} stateroot hook entries (> {} events — duplicates; run `stateroot install`)",
+                quirk.event_map.len()
+            ));
+        } else if blocks == 0 && target.format == HookFormat::TomlHooks {
+            ok = false;
+            detail.push("no stateroot hook blocks found".to_string());
         }
         match last_by_harness.get(quirk.id) {
             Some(ts) => detail.push(format!("last captured {ts}")),
             None => detail.push("no checkpoints captured yet".into()),
+        }
+        for diagnosed in &trail.diagnosed {
+            if diagnosed
+                .strip_prefix("spool/segments/")
+                .and_then(|rest| rest.split("__").next())
+                == Some(quirk.id)
+            {
+                detail.push(format!("capture evidence diagnosed: {diagnosed}"));
+            }
         }
         checks.push(Check {
             label: format!("chain ({})", quirk.id),
             ok,
             detail: detail.join(" · "),
             hard: false,
+            repair: (!ok).then(|| "stateroot install".to_string()),
         });
     }
     checks
@@ -1052,7 +1070,7 @@ mod tests {
         let toml = dir.path().join(".kimi-code/config.toml");
         write(
             &toml,
-            "[hooks]\ncommand = \"stateroot hook session_start --harness kimi-code\"\nevent = \"SessionStart\"\n",
+            "[[hooks]]\ncommand = \"stateroot hook session_start --harness kimi-code\"\nevent = \"SessionStart\"\n",
         );
         let commands = extract_hook_commands(&toml, HookFormat::TomlHooks);
         assert_eq!(commands.len(), 1);

@@ -343,6 +343,8 @@ pub fn ensure_collab_files(root: &Path, created: &mut Vec<String>) -> Result<(),
 
 /// Append one JSON record to `memories/episodic.jsonl`.
 pub fn append_episodic(project_dir: &Path, record: &Value) -> Result<(), LocalStoreError> {
+    let _guard =
+        episodic_guard(project_dir).map_err(io_err(&root(project_dir).join(EPISODIC_PATH)))?;
     let path = root(project_dir).join(EPISODIC_PATH);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(io_err(parent))?;
@@ -358,6 +360,12 @@ pub fn append_episodic(project_dir: &Path, record: &Value) -> Result<(), LocalSt
     file.write_all(line.as_bytes()).map_err(io_err(&path))?;
     report_written(project_dir, EPISODIC_PATH);
     Ok(())
+}
+
+/// Append and materialization serialize, preserving complete raw records.
+pub fn episodic_guard(project_dir: &Path) -> std::io::Result<crate::safe_io::ResourceLock> {
+    crate::safe_io::ResourceLock::acquire(root(project_dir).join("local/locks/episodic.lock"))
+        .map_err(std::io::Error::other)
 }
 
 // ---------------------------------------------------------------------------

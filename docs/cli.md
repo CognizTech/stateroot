@@ -324,9 +324,33 @@ runs an AI agent.
 
 - `service install|remove|start|stop|restart|status [--json]|run` —
   registration is a per-user systemd service (Linux), LaunchAgent (macOS),
-  or logon Scheduled Task (native Windows); under WSL a functional
-  user-systemd wins, otherwise a Windows-host task launches the service
-  through the current WSL distribution. `stateroot install`, self-update
+  or logon Scheduled Task (native Windows, hidden wscript launcher with
+  persistent log); under WSL a functional user-systemd wins, otherwise a
+  Windows-host task launches the service through the current WSL
+  distribution. Scheduled-task names are scoped to the owning user, config
+  home AND WSL distribution (`StateRoot Continuity (<user>-<hash8>)`), so
+  the same path/user in two distros never collides; install/remove repair
+  the pre-scoping global task name only when its descriptor verifiably
+  references a stateroot launcher. Every descriptor pins the config home it
+  was registered for (systemd `Environment=`, launchd
+  `EnvironmentVariables`, the Windows launchers via `set STATEROOT_HOME` /
+  `WSLENV`). Descriptors quote spaced / ampersand / Unicode paths (systemd
+  `%`/quote escaping, launchd XML escaping, Windows command-line quoting).
+  Registration records the exact binary + config home; a registration is
+  "current" only while the on-disk descriptor CONTENT matches what this
+  binary + config home would generate (and the manager still runs it), and
+  `install` re-registers and replaces the verified running instance when
+  the binary drifts (self-update rearm). `stop` signals only a pid verified
+  end-to-end as ours — exact recorded binary running exactly `service run`,
+  same host namespace, the recorded process-start token (a reused pid
+  fails), and the pinned config home; a legacy or unverifiable identity is
+  never killed. A signalled service that does not exit within the shutdown
+  bound is a FAILED stop (nonzero exit, records preserved) — never a
+  printed "stopped" that a restart/remove would build on. The resident loop
+  distinguishes live-lock contention ("already running (pid N)"), an
+  unverifiable lock owner (held, not started, honestly worded), and lock
+  I/O failures (a hard error, never already-running). All OS manager
+  operations run with a wall-clock budget. `stateroot install`, self-update
   rearm, and uninstall manage it automatically. When OS registration is
   unavailable the service runs detached, hooks/CLI keep reconciling on
   activity, and `doctor` reports degraded background coverage.
@@ -463,10 +487,42 @@ never a hard failure.
 
 ## `stateroot doctor` — hook-binary health
 
+`stateroot doctor [--json]` — the `--json` document
+(`stateroot.doctor.v1`) carries every check as a typed
+`{label, ok, hard, detail, repair}` row plus an `integrations` section with
+the per-harness integration-health document (`stateroot.integration-health.v1`:
+per harness — detection evidence, hook/instruction/MCP/skill projection
+state, identity-delivery tier, last digest delivery/capture, problems and
+repair commands) and an `integrations_summary` section. Base checks and
+integration readiness are separate verdicts: `ok` covers base hard failures
+only, and a missing-but-undetected harness is never a hard failure. Status
+is truthful: `configured` never reads as `observed_working` without a
+delivered digest or a durable captured observation (the WS1 store — an
+authored checkpoint or a prose "via hook" note is never capture evidence),
+and unreadable/corrupt capture or delivery evidence is diagnosed in
+`evidence_problems`/per-row `problems`, never silently absent. Hook configs
+are read with each format's real grammar (TOML is TOML-decoded, so escaped
+quoted `stateroot.exe` paths with spaces/Unicode resolve correctly).
+`stateroot install --json` prints the same integration document plus an
+`install` outcome (`configured` / `failed` / `cli_only`) — the actual
+result of the pass; human progress moves to stderr, and a partial install
+is explicit in the document rather than a prose summary. `stateroot init`
+closes with the one-line integration summary. The editor setup flow
+consumes `install --json`: a partial integration fails without a Ready
+receipt, a no-agent machine is an explicit CLI-only success, and the
+human `Installed for:` summary fallback runs only when the CLI provably
+rejected the `--json` flag (never on timeout/failure/malformed output). A
+cached receipt's health probe consumes `doctor --json` the same way: base
+`ok` AND no detected integration row reading `missing` — base-ok alone
+never counts as integration readiness, a timeout or malformed document is
+not proof of health, and the human doctor exit-code fallback runs only on
+a proven parse-time `--json` rejection.
+
 Doctor inspects the binary every installed hook config actually points at
 (all harness hook formats: nested/flat JSON, TOML, exec-form, named groups,
 and the generated OpenClaw plugin). For each distinct stateroot hook binary
-it runs `--version`: a match with the running CLI reports `[ok]`; a
+it runs `--version` with a wall-clock budget (a hung custom binary reports
+not-runnable, never blocks doctor): a match with the running CLI reports `[ok]`; a
 mismatched or unrunnable binary is a soft `[!!]` warning (never a hard
 failure) — e.g. `cursor hook binary is stateroot 0.1.1 — run \`stateroot
 self-update\` on this machine`. This is the check for fail-open staleness:

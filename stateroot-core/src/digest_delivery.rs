@@ -328,6 +328,48 @@ fn ledger_path(project_dir: &Path) -> std::path::PathBuf {
     local_store::root(project_dir).join(local_store::DIGEST_DELIVERY_PATH)
 }
 
+/// Read-only projection for health surfaces: latest `delivered_at` per
+/// harness. Never migrates or writes — a store holding only legacy markers
+/// simply reports no deliveries (unknown stays unknown).
+pub fn last_delivery_by_harness(project_dir: &Path) -> std::collections::BTreeMap<String, String> {
+    delivery_evidence(project_dir).0
+}
+
+/// Read-only delivery evidence for health surfaces (WS3 C1): the per-harness
+/// projection plus a diagnosis when the ledger EXISTS but cannot be read or
+/// parsed. Absent (no ledger file) is honest "no deliveries"; unreadable or
+/// corrupt is diagnosed — never silently collapsed into absent. A ledger
+/// with an unrecognized schema version is a legacy/future store: readable
+/// but not evidence here, so it reports absent without a corruption claim.
+pub fn delivery_evidence(
+    project_dir: &Path,
+) -> (std::collections::BTreeMap<String, String>, Option<String>) {
+    let mut out: std::collections::BTreeMap<String, String> = Default::default();
+    let path = ledger_path(project_dir);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return (out, None),
+        Err(err) => return (out, Some(format!("{} unreadable: {err}", path.display()))),
+    };
+    let ledger = match serde_json::from_str::<Ledger>(&text) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            return (
+                out,
+                Some(format!("{} is not parseable ({err})", path.display())),
+            )
+        }
+    };
+    if ledger.schema_version != SCHEMA_VERSION {
+        return (out, None);
+    }
+    for entry in &ledger.entries {
+        // Entries are append-ordered; the last write per harness wins.
+        out.insert(entry.harness.clone(), entry.delivered_at.clone());
+    }
+    (out, None)
+}
+
 fn load_or_migrate(project_dir: &Path) -> Ledger {
     let path = ledger_path(project_dir);
     if let Ok(text) = fs::read_to_string(&path) {

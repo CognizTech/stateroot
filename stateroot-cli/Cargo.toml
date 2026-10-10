@@ -14,7 +14,12 @@ path = "src/main.rs"
 name = "observations_durable"
 path = "tests/observations_durable.rs"
 
+[[test]]
+name = "install_smoke"
+path = "tests/install_smoke.rs"
+
 [dependencies]
+tempfile.workspace = true
 stateroot-core = { path = "../stateroot-core" }
 serde.workspace = true
 serde_json.workspace = true
@@ -41,7 +46,6 @@ tokio.workspace = true
 libc = "0.2"
 
 [dev-dependencies]
-tempfile.workspace = true
 assert_cmd.workspace = true
 predicates.workspace = true
 wiremock.workspace = true

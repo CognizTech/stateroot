@@ -87,6 +87,52 @@ fn hook_event(
 }
 
 #[test]
+fn inspection_lists_every_retained_job_without_advancing_or_rewriting() {
+    use stateroot_core::finalize_journal as journal;
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().unwrap();
+    init_project(config_home.path(), user_home.path(), project.path());
+    let mut retained = Vec::new();
+    for index in 0..6 {
+        let mut job = journal::enqueue(
+            project.path(),
+            "codex",
+            &format!("inspect-{index}"),
+            None,
+            "refs/stateroot/latest",
+        )
+        .unwrap();
+        job.state = "manual_attention".into();
+        job.attempt = journal::MAX_ATTEMPTS;
+        job.last_error = Some("retained fixture error".into());
+        journal::save(project.path(), &job).unwrap();
+        let path = project
+            .path()
+            .join(".stateroot")
+            .join(journal::JOURNAL_DIR)
+            .join(format!("{}.json", job.id));
+        retained.push((job.id, std::fs::read(&path).unwrap(), path));
+    }
+    let output = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["handoff", "inspect"])
+        .assert()
+        .success();
+    let document: serde_json::Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
+    assert_eq!(document["read_only"], true);
+    assert_eq!(document["jobs"].as_array().unwrap().len(), retained.len());
+    let output = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["handoff", "inspect", "--job", &retained[0].0])
+        .assert()
+        .success();
+    let selected: serde_json::Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
+    assert_eq!(selected["jobs"].as_array().unwrap().len(), 1);
+    assert_eq!(selected["jobs"][0]["id"], retained[0].0);
+    for (_, bytes, path) in retained {
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+}
+
+#[test]
 fn boundary_job_flows_to_one_snap_one_bound_handoff_one_ingest() {
     let (config_home, user_home) = homes();
     let project = tempfile::tempdir().expect("project");

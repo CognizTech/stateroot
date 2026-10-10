@@ -102,6 +102,12 @@ pub struct ContinuityAssessment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_kind: Option<String>,
     pub service_running: bool,
+    /// verified | unknown | stale | absent. The compatibility bool above
+    /// is true only with actual process identity proof, not a fresh PID.
+    #[serde(default)]
+    pub service_identity_status: String,
+    #[serde(default)]
+    pub service_identity_detail: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_last_beat_at: Option<String>,
 }
@@ -242,6 +248,18 @@ pub struct ServiceRegistration {
     pub installed_at: String,
     #[serde(default)]
     pub detail: String,
+    /// The exact binary the manager descriptor points at (empty in
+    /// pre-WS3 records). `service install` rewrites the descriptor when
+    /// the current exe drifts from this (self-update rearm).
+    #[serde(default)]
+    pub exe: String,
+    /// The config home the service was registered against.
+    #[serde(default)]
+    pub config_home: String,
+    #[serde(default)]
+    pub exe_identity: String,
+    #[serde(default)]
+    pub build_version: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -250,6 +268,26 @@ pub struct ServiceHeartbeat {
     pub pid: u32,
     pub beat_at: String,
     pub version: String,
+    /// The binary that wrote the beat (empty in pre-WS3 records) — stop
+    /// verifies ownership against this before signalling the pid.
+    #[serde(default)]
+    pub exe: String,
+    /// Host/PID namespace of the writer (`safe_io::host_namespace`; empty in
+    /// records that predate it). A pid is only meaningful inside the
+    /// namespace that wrote it — cross-runtime liveness is never assumed.
+    #[serde(default)]
+    pub namespace: String,
+    /// Process-start token of the writer (unix: /proc starttime jiffies;
+    /// Windows: creation FILETIME). Binds the recorded pid to THIS process
+    /// instance — a reused pid fails the comparison. 0 in legacy records.
+    #[serde(default)]
+    pub pid_start: u64,
+    /// Actual config selected by the writer; copied/legacy beats cannot
+    /// authorize operations against a different installation.
+    #[serde(default)]
+    pub config_home: String,
+    #[serde(default)]
+    pub exe_identity: String,
     #[serde(default)]
     pub projects_scanned: usize,
 }
@@ -270,6 +308,90 @@ pub fn read_service_registration(config_dir: &Path) -> Option<ServiceRegistratio
 pub fn read_service_heartbeat(config_dir: &Path) -> Option<ServiceHeartbeat> {
     let text = std::fs::read_to_string(service_heartbeat_path(config_dir)).ok()?;
     serde_json::from_str(&text).ok()
+}
+
+/// Read-only Linux observation for the core projection. No manager queries
+/// or signals; unsupported platforms defer to authoritative CLI status.
+fn heartbeat_identity_observed(beat: &ServiceHeartbeat, home: &Path) -> bool {
+    if beat.pid == 0
+        || beat.namespace.is_empty()
+        || Some(beat.namespace.as_str()) != safe_io::host_namespace()
+        || beat.config_home.is_empty()
+        || Path::new(&beat.config_home) != home
+        || beat.pid_start == 0
+        || beat.exe.is_empty()
+    {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::io::Read as _;
+        use std::os::unix::fs::MetadataExt as _;
+        let bounded = |name: &str| -> Option<Vec<u8>> {
+            let mut bytes = Vec::new();
+            std::fs::File::open(format!("/proc/{}/{name}", beat.pid))
+                .ok()?
+                .take(65537)
+                .read_to_end(&mut bytes)
+                .ok()?;
+            (bytes.len() <= 65536).then_some(bytes)
+        };
+        let birth = || -> Option<u64> {
+            let raw = bounded("stat")?;
+            let s = std::str::from_utf8(&raw).ok()?;
+            s.rsplit(')')
+                .next()?
+                .split_whitespace()
+                .nth(19)?
+                .parse()
+                .ok()
+        };
+        if birth() != Some(beat.pid_start) {
+            return false;
+        }
+        let Some(args) = bounded("cmdline") else {
+            return false;
+        };
+        let argv: Vec<&[u8]> = args.split(|b| *b == 0).filter(|a| !a.is_empty()).collect();
+        let exe = beat.exe.strip_suffix(" (deleted)").unwrap_or(&beat.exe);
+        if argv.as_slice() != [exe.as_bytes(), b"service".as_slice(), b"run".as_slice()] {
+            return false;
+        }
+        let image_path = format!("/proc/{}/exe", beat.pid);
+        let Ok(image) = std::fs::read_link(&image_path) else {
+            return false;
+        };
+        let image = image.display().to_string();
+        if image.strip_suffix(" (deleted)").unwrap_or(&image) != exe {
+            return false;
+        }
+        let Ok(m) = std::fs::metadata(&image_path) else {
+            return false;
+        };
+        if beat.exe_identity
+            != format!(
+                "{}:{}:{}:{}:{}",
+                m.dev(),
+                m.ino(),
+                m.len(),
+                m.mtime(),
+                m.mtime_nsec()
+            )
+        {
+            return false;
+        }
+        let Some(env) = bounded("environ") else {
+            return false;
+        };
+        let pin = format!("STATEROOT_HOME={}", home.display());
+        env.split(|b| *b == 0).any(|v| v == pin.as_bytes())
+            && birth() == Some(beat.pid_start)
+            && safe_io::pid_alive(beat.pid)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
 }
 
 /// Heartbeat is stale past three poll intervals (floor 90s) or a dead pid.
@@ -613,19 +735,26 @@ pub fn assess(
     let registration = read_service_registration(config_dir);
     let heartbeat = read_service_heartbeat(config_dir);
     let mut service_running = false;
+    let mut service_identity_status = "absent".to_string();
+    let mut service_identity_detail = "no heartbeat recorded".to_string();
     let mut service_last_beat: Option<String> = None;
     if continuity_cfg.enabled && registration.is_some() {
         let unhealthy = match &heartbeat {
             None => true,
             Some(beat) => {
                 service_last_beat = Some(beat.beat_at.clone());
-                let pid_live = beat.pid > 0 && safe_io::pid_alive(beat.pid);
-                service_running = pid_live
-                    && !service_beat_stale(
-                        &beat.beat_at,
-                        &now,
-                        continuity_cfg.poll_interval_seconds,
-                    );
+                let fresh =
+                    !service_beat_stale(&beat.beat_at, &now, continuity_cfg.poll_interval_seconds);
+                service_running = fresh && heartbeat_identity_observed(beat, config_dir);
+                service_identity_status = if !fresh {
+                    "stale"
+                } else if service_running {
+                    "verified"
+                } else {
+                    "unknown"
+                }
+                .into();
+                service_identity_detail=if service_running {"read-only Linux image/args/birth/namespace/config verified"} else {"heartbeat observed; process ownership not established here; inspect stateroot service status"}.into();
                 !service_running
             }
         };
@@ -634,20 +763,32 @@ pub fn assess(
                 KIND_SERVICE_UNHEALTHY,
                 50,
                 "continuity-service",
-                "Continuity service is registered but not heartbeating".into(),
+                "Continuity service liveness is stale or unverified".into(),
             );
             item.detail = match &heartbeat {
                 None => "no heartbeat recorded yet".into(),
-                Some(beat) => format!("last beat {} (pid {})", beat.beat_at, beat.pid),
+                Some(beat) => format!(
+                    "last beat {} (pid {}); {}: {}",
+                    beat.beat_at, beat.pid, service_identity_status, service_identity_detail
+                ),
             };
             item.action = "stateroot service status (then `stateroot service restart`)".into();
             attention.push(item);
         }
     } else if let Some(beat) = &heartbeat {
         service_last_beat = Some(beat.beat_at.clone());
-        service_running = beat.pid > 0
-            && safe_io::pid_alive(beat.pid)
-            && !service_beat_stale(&beat.beat_at, &now, continuity_cfg.poll_interval_seconds);
+        let fresh = !service_beat_stale(&beat.beat_at, &now, continuity_cfg.poll_interval_seconds);
+        service_running = fresh && heartbeat_identity_observed(beat, config_dir);
+        service_identity_status = if !fresh {
+            "stale"
+        } else if service_running {
+            "verified"
+        } else {
+            "unknown"
+        }
+        .into();
+        service_identity_detail =
+            "heartbeat observed; authoritative ownership/readout: stateroot service status".into();
     }
 
     // 9. Registered projects that vanished produce attention, not silence.
@@ -701,6 +842,8 @@ pub fn assess(
         service_registered: registration.is_some(),
         service_kind: registration.map(|r| r.kind),
         service_running,
+        service_identity_status,
+        service_identity_detail,
         service_last_beat_at: service_last_beat,
     }
 }
@@ -809,8 +952,30 @@ pub fn needs_attention_markdown(
         return None;
     }
     let mut out = String::from("## Needs Attention\n\n");
-    for item in assessment.attention.iter().take(DIGEST_ATTENTION_MAX) {
+    // Presentation-only grouping (WS3): identical rows (same kind, title and
+    // action — e.g. one row per parked boundary job of the same class)
+    // collapse to a counted row. Every underlying item keeps its stable id
+    // in the projection; nothing is dropped from the stored assessment.
+    let mut groups: Vec<(&AttentionItem, usize)> = Vec::new();
+    for item in &assessment.attention {
+        if let Some((_, count)) = groups.iter_mut().find(|(first, _)| {
+            first.kind == item.kind && first.title == item.title && first.action == item.action
+        }) {
+            *count += 1;
+        } else {
+            groups.push((item, 1));
+        }
+    }
+    let mut rendered = 0usize;
+    for (item, count) in groups.iter() {
+        if rendered >= DIGEST_ATTENTION_MAX {
+            break;
+        }
+        rendered += 1;
         out.push_str(&format!("- **{}**", item.title));
+        if *count > 1 {
+            out.push_str(&format!(" ×{count}"));
+        }
         if !item.detail.is_empty() {
             let capped: String = item.detail.chars().take(160).collect();
             out.push_str(&format!(" — {capped}"));
@@ -820,10 +985,7 @@ pub fn needs_attention_markdown(
         }
         out.push('\n');
     }
-    let overflow = assessment
-        .attention
-        .len()
-        .saturating_sub(DIGEST_ATTENTION_MAX);
+    let overflow = groups.len().saturating_sub(rendered);
     if overflow > 0 {
         out.push_str(&format!("- … +{overflow} more (`stateroot status`)\n"));
     }
@@ -835,4 +997,125 @@ pub fn needs_attention_markdown(
     }
     out.push('\n');
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fresh_heartbeat_without_process_identity_stays_explicitly_unknown() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(service_registration_path(home.path()),serde_json::to_vec(&serde_json::json!({"schema_version":"stateroot.continuity-registration.v1","kind":"detached","installed_at":now_rfc3339(),"config_home":home.path()})).unwrap()).unwrap();
+        std::fs::write(service_heartbeat_path(home.path()),serde_json::to_vec(&serde_json::json!({"schema_version":"stateroot.continuity-heartbeat.v1","pid":std::process::id(),"beat_at":now_rfc3339(),"version":"fixture","config_home":home.path()})).unwrap()).unwrap();
+        let result = assess(
+            project.path(),
+            home.path(),
+            &ContinuityConfig::default(),
+            None,
+        );
+        assert!(!result.service_running);
+        assert_eq!(result.service_identity_status, "unknown");
+        assert!(result
+            .service_identity_detail
+            .contains("heartbeat observed"));
+        let item = result
+            .attention
+            .iter()
+            .find(|item| item.kind == KIND_SERVICE_UNHEALTHY)
+            .unwrap();
+        assert!(!item.title.contains("not heartbeating"));
+        assert!(item.detail.contains("unknown"));
+        assert!(item.action.contains("service status"));
+    }
+
+    fn item(kind: &str, entity: &str, title: &str, action: &str) -> AttentionItem {
+        let mut item = AttentionItem {
+            id: format!("{kind}:{entity}"),
+            kind: kind.into(),
+            rank: 5,
+            title: title.into(),
+            detail: String::new(),
+            action: action.into(),
+            plan_id: None,
+            obligation_id: None,
+            handoff_seq: None,
+            delegation_id: None,
+        };
+        item.detail = String::new();
+        item
+    }
+
+    fn assessment(attention: Vec<AttentionItem>) -> ContinuityAssessment {
+        ContinuityAssessment {
+            schema_version: "test".into(),
+            generated_at: "2026-10-09T00:00:00Z".into(),
+            inputs_hash: "sha256:test".into(),
+            attention,
+            open_obligations: 0,
+            corrupt_obligation_events: 0,
+            current_plan_id: None,
+            current_plan_status: None,
+            plan_directive: String::new(),
+            service_registered: false,
+            service_kind: None,
+            service_running: false,
+            service_identity_status: "absent".into(),
+            service_identity_detail: "no heartbeat recorded".into(),
+            service_last_beat_at: None,
+        }
+    }
+
+    #[test]
+    fn needs_attention_groups_identical_rows_presentation_only() {
+        // 62 identical parked-job rows + 2 distinct: the digest stays
+        // bounded and counted, ids survive in the stored assessment.
+        let mut attention: Vec<AttentionItem> = (0..62)
+            .map(|i| {
+                item(
+                    "boundary_job",
+                    &format!("job-{i}"),
+                    "Parked boundary job",
+                    "stateroot status",
+                )
+            })
+            .collect();
+        attention.push(item(
+            "handoff_stale",
+            "h1",
+            "Handoff is stale",
+            "stateroot handoff accept",
+        ));
+        attention.push(item(
+            "plan_closure",
+            "p1",
+            "Plan awaits closure",
+            "stateroot plan done",
+        ));
+        let a = assessment(attention);
+        let md = needs_attention_markdown(&a, None).expect("section");
+        assert!(md.contains("**Parked boundary job** ×62"), "{md}");
+        assert!(md.contains("**Handoff is stale**"), "{md}");
+        assert!(md.contains("**Plan awaits closure**"), "{md}");
+        // Three grouped rows fit under the cap without an overflow line.
+        assert!(!md.contains("+"), "{md}");
+        // The stored assessment keeps every item — grouping is display-only.
+        assert_eq!(a.attention.len(), 64);
+    }
+
+    #[test]
+    fn needs_attention_overflow_counts_distinct_groups() {
+        let mut attention: Vec<AttentionItem> = (0..4)
+            .map(|i| item("boundary_job", &format!("job-{i}"), "Parked job", "x"))
+            .collect();
+        for i in 0..5 {
+            attention.push(item("kind", &format!("e{i}"), &format!("Distinct {i}"), ""));
+        }
+        let a = assessment(attention);
+        let md = needs_attention_markdown(&a, None).expect("section");
+        assert!(md.contains("×4"), "{md}");
+        // 6 groups > 5 cap → one overflow line naming the remaining groups.
+        assert!(md.contains("+1 more"), "{md}");
+    }
 }

@@ -399,6 +399,39 @@ export function activate(context: vscode.ExtensionContext) {
       });
       return;
     }
+    if (["openOriginal", "openSession", "openEvent"].includes(type)) {
+      const id = typeof msg.id === "string" ? msg.id : rootA;
+      if (!id) { return; }
+      await withProject(async (root) => {
+        const result = await runCliReport(["receipt", id, "--json"], root, output, 60_000);
+        if (result === undefined) { return; }
+        const source = JSON.parse(result).source as { native_locator?: string; session_id?: string; event_id?: string; native_status?: string };
+        if (type === "openOriginal" && source.native_locator) {
+          const document = await vscode.workspace.openTextDocument(vscode.Uri.file(source.native_locator));
+          await vscode.window.showTextDocument(document); return;
+        }
+        const reference = type === "openEvent" ? source.event_id : source.session_id;
+        if (!reference || type === "openOriginal") {
+          compareText = source.native_status || "No exact source recorded; legacy evidence is unknown."; push(); return;
+        }
+        const text = await runCliReport([type === "openEvent" ? "observations" : "session", "show", reference], root, output, 60_000, { notifyOnError: false });
+        compareText = text === undefined ? "Exact source unavailable on this host. Project Git content remains inspectable; native history is not guaranteed by restoration." : text;
+        push();
+      });
+      return;
+    }
+    if (type === "receipt" || type === "fidelity") {
+      const id = typeof msg.id === "string" ? msg.id : rootA;
+      if (!id) { return; }
+      rootA = id;
+      selectedTab = "lineage";
+      await withProject(async (root) => {
+        const args = type === "receipt" ? ["receipt", id, "--json"] : ["show", id, "--fidelity", "--json"];
+        const result = await runCliReport(args, root, output, 60_000);
+        if (result !== undefined) { compareText = result; push(); }
+      });
+      return;
+    }
     if (type === "selectRoot" && typeof msg.id === "string") {
       const id = String(msg.id);
       if (!rootA || (rootA && rootB)) {
@@ -654,7 +687,7 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
       const ok = await vscode.window.showWarningMessage(
-        `Restore creates a NEW root whose tree equals ${shortHash(hash)}. Existing roots are never rewritten.`,
+        `Restore materializes historical project files and intelligence from ${shortHash(hash)} in a NEW root. Append-only history is retained; existing roots are never rewritten.`,
         { modal: true },
         "Restore"
       );

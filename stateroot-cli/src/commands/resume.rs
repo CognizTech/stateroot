@@ -71,7 +71,14 @@ pub fn render_handoff_digest_with(packet: &Value, deterministic: bool) -> String
 /// a planner/executor split must surface even before any handoff exists.
 pub(crate) fn central_plan_section(project_dir: Option<&Path>) -> Option<String> {
     let (plan, _path) = project_dir.and_then(stateroot_core::plans::current)?;
-    let mut section = String::from("## Active Plan\n\n");
+    let mut section = format!(
+        "## {} Plan\n\n",
+        if plan.status == "active" {
+            "Active"
+        } else {
+            "Pending"
+        }
+    );
     section.push_str(&format!(
         "**{}** ({}) — planned by {}",
         plan.title, plan.status, plan.created_by_harness
@@ -381,22 +388,26 @@ pub fn render_handoff_digest_full(
                         .map(|dir| stateroot_core::continuity::plan_directive(dir, &meta))
                         .unwrap_or(stateroot_core::continuity::PlanDirective::Execute)
                 });
-            let instruction = match directive {
-                Some(stateroot_core::continuity::PlanDirective::Close) => {
+            let instruction = match (status, directive) {
+                ("done" | "abandoned", _) => "Reference only — this plan is closed; do not restart it.".to_string(),
+                (_, Some(stateroot_core::continuity::PlanDirective::Close)) => {
                     "It is structurally complete — do not restart implementation; record completion evidence (`stateroot plan done <id> --evidence \"…\"`) or state concrete remaining work."
                         .to_string()
                 }
-                Some(stateroot_core::continuity::PlanDirective::Assign) => {
+                (_, Some(stateroot_core::continuity::PlanDirective::Assign)) => {
                     "It has no executor — assign or claim execution.".to_string()
                 }
-                Some(stateroot_core::continuity::PlanDirective::Plan) => {
+                (_, Some(stateroot_core::continuity::PlanDirective::Plan)) => {
                     "It is still a draft — refine the plan file; do not implement yet.".to_string()
                 }
                 _ => "Execute it as written; do not re-plan or re-explore.".to_string(),
             };
-            out.push_str(&format!(
-                "## Assigned Plan\n\n**{title}** ({status}) at `.stateroot/plans/{id}.md`. {instruction}\n\n"
-            ));
+            let heading = if matches!(status, "done" | "abandoned") {
+                "Referenced Plan"
+            } else {
+                "Assigned Plan"
+            };
+            out.push_str(&format!("## {heading}\n\n**{title}** ({status}) at `.stateroot/plans/{id}.md`. {instruction}\n\n"));
         }
     }
     let lineage = project_dir
@@ -436,7 +447,12 @@ pub fn render_handoff_digest_full(
     // razor stays). The packet's transcript-derived Plan State below is the
     // fallback tier and is suppressed whenever a central plan exists (the
     // dedup rule: the store section wins).
-    let central_plan = central_plan_section(project_dir);
+    let central_plan = if packet["plan_intent"] == "none" {
+        project_dir.and_then(stateroot_core::plans::current).map(|(plan,_)|
+            format!("## Pending Plan (not assigned by this handoff)\n\n**{}** ({}) remains in the store. This handoff explicitly selects no plan; this pointer is status, not an execution instruction.\n\n",plan.title,plan.status))
+    } else {
+        central_plan_section(project_dir)
+    };
     if let Some(section) = &central_plan {
         out.push_str(section);
     }
@@ -1485,7 +1501,7 @@ mod tests {
         )
         .expect("approve");
         let out = render_handoff_digest_full(&packet, true, &[], None, Some(dir.path()));
-        assert!(out.contains("## Active Plan"), "out: {out}");
+        assert!(out.contains("## Pending Plan"), "out: {out}");
         assert!(
             out.contains("**Ship It** (approved) — planned by claude"),
             "out: {out}"

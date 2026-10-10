@@ -9,6 +9,86 @@ use super::{note, truncate, Ctx};
 
 const LOCAL_HARNESS: &str = "cli";
 
+/// Compact WS3 read-model adapter. PATH presence is looked up as files,
+/// never by executing a project's binary/version/help command. Exhausted
+/// lookup coverage stays unknown; details/config contents/host paths stay
+/// out of the pinned facts. Availability never claims delivery or use.
+pub(crate) fn integration_environment(
+    ctx: &Ctx,
+    home: &Path,
+) -> Vec<stateroot_core::fidelity::EnvironmentComponent> {
+    use std::cell::Cell;
+    let test_probes = super::doctor::test_cmd_probes();
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    let paths: Vec<_> = std::env::split_paths(&path_var).take(129).collect();
+    let incomplete = Cell::new(paths.len() > 128);
+    let lookups = Cell::new(0usize);
+    let probe = |cmd: &str| {
+        if let Some(probes) = &test_probes {
+            return probes.iter().any(|p| p == cmd);
+        }
+        for dir in paths.iter().take(128) {
+            let extensions: &[&str] = if cfg!(windows) {
+                &["", ".exe", ".cmd", ".bat", ".com"]
+            } else {
+                &[""]
+            };
+            for suffix in extensions {
+                if lookups.get() >= 4096 {
+                    incomplete.set(true);
+                    return false;
+                }
+                lookups.set(lookups.get() + 1);
+                let path = dir.join(format!("{cmd}{suffix}"));
+                if let Ok(meta) = std::fs::metadata(path) {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt as _;
+                        if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
+                            return true;
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    if meta.is_file() {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    };
+    let health = stateroot_core::harness_install::health::integration_health(
+        home,
+        Some(&ctx.cwd),
+        &probe,
+        &ctx.config.installed_harnesses,
+    );
+    health_environment_facts(&health, incomplete.get())
+}
+
+fn health_environment_facts(
+    health: &stateroot_core::harness_install::health::IntegrationHealth,
+    incomplete: bool,
+) -> Vec<stateroot_core::fidelity::EnvironmentComponent> {
+    let mut facts = vec![stateroot_core::fidelity::EnvironmentComponent {
+        name: "stateroot-cli".into(),
+        status: "available (compiled executable; not project usage)".into(),
+        observed_version: Some(crate::cli::BUILD_VERSION.into()),
+    }];
+    facts.extend(health.harnesses.iter().take(128).map(|row| {
+        stateroot_core::fidelity::EnvironmentComponent {
+            name: format!("harness:{}", row.harness),
+            status: if incomplete {
+                "unknown".into()
+            } else {
+                row.status.as_str().into()
+            },
+            observed_version: row.version.clone(),
+        }
+    }));
+    facts
+}
+
 /// `stateroot snap [--reason R] [--harness H]`
 pub fn snap(ctx: &Ctx, reason: Option<&str>, harness: Option<&str>) -> anyhow::Result<()> {
     ctx.require_project()?;
@@ -20,9 +100,15 @@ pub fn snap(ctx: &Ctx, reason: Option<&str>, harness: Option<&str>) -> anyhow::R
         LOCAL_HARNESS.to_string()
     };
     let home = stateroot_core::harness_install::home_dir().map_err(|e| anyhow::anyhow!(e))?;
+    let artifact_refs = stateroot_core::local_store::read_handoff_local(&ctx.cwd)?
+        .map(|packet| stateroot_core::fidelity::boundary_references(&ctx.cwd, &home, &packet))
+        .unwrap_or_default();
     let snap_ctx = stateroot_core::snap_context::SnapContext {
+        components: integration_environment(ctx, &home),
         home,
         harness: Some(resolved_harness.clone()),
+        artifact_refs,
+        ..Default::default()
     };
     let (manifest, transition) = engine::create_root(
         &ctx.cwd,
@@ -134,9 +220,24 @@ pub fn log(ctx: &Ctx, json_output: bool) -> anyhow::Result<()> {
 }
 
 /// `stateroot show <hash>`
-pub fn show(ctx: &Ctx, hash: &str) -> anyhow::Result<()> {
+pub fn show(ctx: &Ctx, hash: &str, fidelity: bool, json: bool) -> anyhow::Result<()> {
     ctx.require_project()?;
+    if fidelity {
+        let home = stateroot_core::harness_install::home_dir().map_err(anyhow::Error::msg)?;
+        let report = stateroot_core::fidelity::report_with_components(
+            &ctx.cwd,
+            hash,
+            &home,
+            &integration_environment(ctx, &home),
+        )?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
     let m = engine::get_root(&ctx.cwd, hash).map_err(|e| anyhow::anyhow!(e))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&m)?);
+        return Ok(());
+    }
     println!("root {}", m.id);
     if !m.parents.is_empty() {
         let parents: Vec<String> = m.parents.iter().map(|p| short(p)).collect();
@@ -217,7 +318,7 @@ pub fn revert(ctx: &Ctx, hash: &str, yes: bool) -> anyhow::Result<()> {
         let manifest = engine::get_root(&ctx.cwd, hash).map_err(|e| anyhow::anyhow!(e))?;
         println!("stateroot revert — plan");
         println!(
-            "  action  : NEW root whose tree equals {}",
+            "  action  : materialize historical project state from {} in a NEW root (append-only history retained)",
             short(&manifest.id)
         );
         println!("  coverage: files: {} pinned", manifest.files_pinned);
@@ -244,6 +345,13 @@ pub fn revert(ctx: &Ctx, hash: &str, yes: bool) -> anyhow::Result<()> {
         short(&manifest.id)
     );
     println!("transition {}", short(&transition.id));
+    println!(
+        "pre-restore recovery root: {}",
+        transition.evidence["recovery_root"]
+            .as_str()
+            .unwrap_or("unavailable")
+    );
+    println!("fidelity: stateroot show {} --fidelity (software, credentials and native history are not restored)", manifest.id);
     Ok(())
 }
 
@@ -272,6 +380,9 @@ pub fn fork(
     } else {
         println!("materialize with: stateroot fork {hash} --worktree <path>");
     }
+    println!(
+        "fidelity: stateroot show {hash} --fidelity (environment compatibility is not guaranteed)"
+    );
     Ok(())
 }
 
@@ -283,9 +394,11 @@ pub fn merge(
     forks: &[String],
     json_output: bool,
     resolve_ours: &[String],
+    keep_main: &[String],
     cleanup: bool,
     prepare: bool,
     continue_attempt: Option<&str>,
+    stage: Option<&str>,
     status: Option<&str>,
     abort: Option<&str>,
     evidence: &[String],
@@ -301,6 +414,16 @@ pub fn merge(
                 println!("fork {}: {}", fork.name, fork.tip);
             }
             if attempt.conflicts.is_empty() {
+                if attempt.state == "staged" {
+                    println!(
+                        "sealed candidate tree: {}",
+                        attempt.staged_tree.as_deref().unwrap_or("unavailable")
+                    );
+                    if let Some(worktree) = &attempt.worktree {
+                        println!("gate this reconciliation worktree: {worktree}");
+                    }
+                    println!("after any candidate edits, stage again before rerunning gates");
+                }
                 println!(
                     "clean — publish with: stateroot merge --continue {}",
                     attempt.id
@@ -314,7 +437,7 @@ pub fn merge(
                 if let Some(worktree) = &attempt.worktree {
                     println!("reconciliation worktree: {worktree}");
                     println!(
-                        "edit and test there, then: stateroot merge --continue {} --evidence \"<tests run>\"",
+                        "resolve there, then stage remaining forks without publishing: stateroot merge --stage {}",
                         attempt.id
                     );
                 }
@@ -324,6 +447,14 @@ pub fn merge(
     };
     if let Some(id) = status {
         return print_attempt(&engine::merge_attempt(&ctx.cwd, id)?);
+    }
+    if let Some(id) = stage {
+        return print_attempt(&engine::stage_merge_attempt_retaining_main(
+            &ctx.cwd,
+            id,
+            resolve_ours,
+            keep_main,
+        )?);
     }
     if let Some(id) = abort {
         let attempt = engine::abort_merge_attempt(&ctx.cwd, id)?;
@@ -452,8 +583,15 @@ pub fn merge(
 }
 
 /// `stateroot receipt <transition>` — markdown from transition + git delta.
-pub fn receipt(ctx: &Ctx, id_prefix: &str) -> anyhow::Result<()> {
+pub fn receipt(ctx: &Ctx, id_prefix: &str, json: bool) -> anyhow::Result<()> {
     ctx.require_project()?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&engine::receipt_projection(&ctx.cwd, id_prefix)?)?
+        );
+        return Ok(());
+    }
     let md = engine::render_receipt(&ctx.cwd, id_prefix).map_err(|e| anyhow::anyhow!(e))?;
     print!("{md}");
     Ok(())

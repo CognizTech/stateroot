@@ -677,6 +677,8 @@ document.getElementById('panel').addEventListener('click', (event) => {
   else if (act === 'planDoneEvidence') vscode.postMessage({ type: 'planDoneEvidence', id });
   else if (act === 'log') vscode.postMessage({ type: 'log', id });
   else if (act === 'showRoot') vscode.postMessage({ type: 'showRoot', id });
+  else if (act === 'receipt' || act === 'fidelity') vscode.postMessage({ type: act, id });
+  else if (act === 'openOriginal' || act === 'openSession' || act === 'openEvent') vscode.postMessage({ type: act, id });
   else if (act === 'selectRoot') vscode.postMessage({ type: 'selectRoot', id });
   else if (act === 'compare') vscode.postMessage({ type: 'compare' });
   else if (act === 'diff') vscode.postMessage({ type: 'diff' });
@@ -864,7 +866,8 @@ function work() {
       const log = card.attempts[0] ? '<button class="secondary" data-act="log" data-id="' + esc(card.attempts[0].id) + '">View log</button>' : '';
       const cleanup = card.phase === 'cleanup_pending' && f.cleanup && f.cleanup.pending ? '<div class="muted">' + esc(String(f.cleanup.pending)) + '</div>' : '';
       const cleanupCmd = card.cleanupCommand ? '<div class="row cmd-row"><code class="cmd">' + esc(card.cleanupCommand) + '</code><button class="secondary" data-act="copyCmd" data-cmd="' + esc(card.cleanupCommand) + '">Copy</button></div>' : '';
-      return '<div class="card"><div><code>' + esc(f.name) + '</code> <span class="muted">' + esc(card.phase) + '</span></div><div class="muted">' + esc((f.tip || '').slice(0, 12) || 'no tip') + plan + outcome + '</div>' + cleanup + cleanupCmd + '<div class="row" style="margin-top:8px">' + open + log + running + select + '</div></div>';
+      const inspection = f.tip ? '<button class="secondary" data-act="receipt" data-id="' + esc(f.tip) + '">Receipt</button><button class="secondary" data-act="fidelity" data-id="' + esc(f.tip) + '">Fidelity</button>' : '';
+      return '<div class="card"><div><code>' + esc(f.name) + '</code> <span class="muted">' + esc(card.phase) + '</span></div><div class="muted">' + esc((f.tip || '').slice(0, 12) || 'no tip') + plan + outcome + '</div>' + cleanup + cleanupCmd + '<div class="row" style="margin-top:8px">' + open + log + running + select + inspection + '</div></div>';
     }).join('')
     : '<div class="muted">No parallel lineages yet.</div>';
   const merge = ready.length ? '<div class="row"><button data-act="prepareMerge"' + (selected.length ? '' : ' disabled') + '>Prepare integration (' + selected.length + ')</button></div><div class="muted">A coordinating agent reviews conflicts and continues a prepared merge; this panel never chooses source resolutions.</div>' : '';
@@ -930,7 +933,7 @@ function lineage() {
       (meta ? '<div class="muted">' + esc(meta) + '</div>' : '') +
       '</span></button>';
   }).join('') || '<div class="muted">No roots yet.</div>';
-  return '<div class="split"><div class="list">' + left + '</div><div class="col"><div class="muted">Select two roots (click twice).</div><div>A: <code>' + esc((a||'').slice(0,12) || '—') + '</code> · B: <code>' + esc((b||'').slice(0,12) || '—') + '</code></div><div class="row"><button data-act="compare">Compare</button><button class="secondary" data-act="diff">Open native diff</button><button class="secondary" data-act="revert">Restore</button><button class="secondary" data-act="startParallel">Start parallel work</button></div><pre class="pre">' + esc(state.compareText || '') + '</pre></div></div>';
+  return '<div class="split"><div class="list">' + left + '</div><div class="col"><div class="muted">Select two roots (click twice). Receipt and fidelity inspect A without changing it.</div><div>A: <code title="' + esc(a||'') + '">' + esc((a||'').slice(0,12) || '—') + '</code> · B: <code title="' + esc(b||'') + '">' + esc((b||'').slice(0,12) || '—') + '</code></div><div class="row"><button data-act="compare">Compare</button><button class="secondary" data-act="receipt">Receipt</button><button class="secondary" data-act="fidelity">Fidelity</button><button class="secondary" data-act="openOriginal">Open original</button><button class="secondary" data-act="openSession">Session</button><button class="secondary" data-act="openEvent">Event</button><button class="secondary" data-act="diff">Open native diff</button><button class="secondary" data-act="revert">Restore</button><button class="secondary" data-act="startParallel">Start parallel work</button></div><pre class="pre">' + esc(state.compareText || '') + '</pre></div></div>';
 }
 `;
   return shell(nonceVal, body, script);

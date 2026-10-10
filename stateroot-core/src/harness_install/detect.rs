@@ -56,6 +56,13 @@ pub trait Prober {
     fn probe(&self, cmd: &str) -> bool;
 }
 
+/// Any `Fn(&str) -> bool` is a prober (test allowlists, scripted probes).
+impl<F: Fn(&str) -> bool> Prober for F {
+    fn probe(&self, cmd: &str) -> bool {
+        self(cmd)
+    }
+}
+
 /// Real prober: `where.exe <cmd>` on Windows, `which <cmd>` elsewhere.
 /// Spawns with argument arrays only — never a shell string.
 pub struct SystemProber;

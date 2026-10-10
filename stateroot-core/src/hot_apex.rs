@@ -192,6 +192,14 @@ pub fn path_for(project_dir: &Path, home: &Path, target: &str) -> Result<PathBuf
     }
 }
 
+/// Project memory RMW shares the root materializer's checkout-local lock.
+pub fn write_guard(project_dir: &Path) -> std::io::Result<crate::safe_io::ResourceLock> {
+    crate::safe_io::ResourceLock::acquire(
+        local_store::root(project_dir).join("local/locks/memory.lock"),
+    )
+    .map_err(std::io::Error::other)
+}
+
 /// Read raw text for a target (empty if missing).
 pub fn read_text(project_dir: &Path, home: &Path, target: &str) -> Result<String, HotApexError> {
     let path = path_for(project_dir, home, target)?;
@@ -259,6 +267,28 @@ pub fn add(
     content: &str,
     private: bool,
 ) -> Result<MutationResult, HotApexError> {
+    let _guard = if target == "memory" {
+        Some(write_guard(project_dir)?)
+    } else if target == "global_memory" {
+        Some(
+            crate::safe_io::ResourceLock::acquire(
+                home.join(".stateroot/local/locks/global-memory.lock"),
+            )
+            .map_err(std::io::Error::other)?,
+        )
+    } else {
+        None
+    };
+    add_locked(project_dir, home, target, content, private)
+}
+
+fn add_locked(
+    project_dir: &Path,
+    home: &Path,
+    target: &str,
+    content: &str,
+    private: bool,
+) -> Result<MutationResult, HotApexError> {
     let limit = limit_for(target)?;
     let path = path_for(project_dir, home, target)?;
     let entry = normalize_entry(content, private);
@@ -291,7 +321,7 @@ pub fn add(
         // wiki archive, then retry the add once. The cap errors only when
         // nothing more can be freed — never as the first answer.
         let needed = candidate.len() - limit;
-        if let Ok(report) = compact_for_capacity(project_dir, home, target, needed, false) {
+        if let Ok(report) = compact_for_capacity_locked(project_dir, home, target, needed, false) {
             if report.freed_chars >= needed {
                 let after = fs::read_to_string(&path).unwrap_or_default();
                 let mut entries = split_entries(&after);
@@ -430,6 +460,28 @@ pub fn compact_for_capacity(
     needed_chars: usize,
     dry_run: bool,
 ) -> Result<CompactReport, HotApexError> {
+    let _guard = if target == "memory" {
+        Some(write_guard(project_dir)?)
+    } else if target == "global_memory" {
+        Some(
+            crate::safe_io::ResourceLock::acquire(
+                home.join(".stateroot/local/locks/global-memory.lock"),
+            )
+            .map_err(std::io::Error::other)?,
+        )
+    } else {
+        None
+    };
+    compact_for_capacity_locked(project_dir, home, target, needed_chars, dry_run)
+}
+
+fn compact_for_capacity_locked(
+    project_dir: &Path,
+    home: &Path,
+    target: &str,
+    needed_chars: usize,
+    dry_run: bool,
+) -> Result<CompactReport, HotApexError> {
     if !matches!(target, "memory" | "global_memory") {
         return Err(HotApexError::InvalidTarget(target.into()));
     }
@@ -554,10 +606,32 @@ pub fn compact_to_percent(
     pct: usize,
     dry_run: bool,
 ) -> Result<CompactReport, HotApexError> {
+    let _guard = if target == "memory" {
+        Some(write_guard(project_dir)?)
+    } else if target == "global_memory" {
+        Some(
+            crate::safe_io::ResourceLock::acquire(
+                home.join(".stateroot/local/locks/global-memory.lock"),
+            )
+            .map_err(std::io::Error::other)?,
+        )
+    } else {
+        None
+    };
+    compact_to_percent_locked(project_dir, home, target, pct, dry_run)
+}
+
+fn compact_to_percent_locked(
+    project_dir: &Path,
+    home: &Path,
+    target: &str,
+    pct: usize,
+    dry_run: bool,
+) -> Result<CompactReport, HotApexError> {
     let limit = limit_for(target)?;
     let watermark = limit * pct.min(100) / 100;
     let needed = limit.saturating_sub(COMPACT_HEADROOM + watermark);
-    compact_for_capacity(project_dir, home, target, needed, dry_run)
+    compact_for_capacity_locked(project_dir, home, target, needed, dry_run)
 }
 
 /// Threshold auto-compact after a successful write: at or above
@@ -578,7 +652,7 @@ fn auto_compact_if_hot(
     if current * 100 < limit * AUTO_COMPACT_TRIGGER_PCT {
         return false;
     }
-    compact_to_percent(project_dir, home, target, AUTO_COMPACT_TARGET_PCT, false)
+    compact_to_percent_locked(project_dir, home, target, AUTO_COMPACT_TARGET_PCT, false)
         .map(|report| !report.demoted_entries.is_empty())
         .unwrap_or(false)
 }
@@ -628,6 +702,29 @@ pub fn append_synthesized_summary(project_dir: &Path, summary: &str) -> Result<(
 
 /// Replace the first entry (or substring) matching `old_text`.
 pub fn replace(
+    project_dir: &Path,
+    home: &Path,
+    target: &str,
+    old_text: &str,
+    content: &str,
+    private: bool,
+) -> Result<MutationResult, HotApexError> {
+    let _guard = if target == "memory" {
+        Some(write_guard(project_dir)?)
+    } else if target == "global_memory" {
+        Some(
+            crate::safe_io::ResourceLock::acquire(
+                home.join(".stateroot/local/locks/global-memory.lock"),
+            )
+            .map_err(std::io::Error::other)?,
+        )
+    } else {
+        None
+    };
+    replace_locked(project_dir, home, target, old_text, content, private)
+}
+
+fn replace_locked(
     project_dir: &Path,
     home: &Path,
     target: &str,
@@ -734,6 +831,27 @@ pub fn replace(
 
 /// Remove the first entry (or substring) matching `old_text`.
 pub fn remove(
+    project_dir: &Path,
+    home: &Path,
+    target: &str,
+    old_text: &str,
+) -> Result<MutationResult, HotApexError> {
+    let _guard = if target == "memory" {
+        Some(write_guard(project_dir)?)
+    } else if target == "global_memory" {
+        Some(
+            crate::safe_io::ResourceLock::acquire(
+                home.join(".stateroot/local/locks/global-memory.lock"),
+            )
+            .map_err(std::io::Error::other)?,
+        )
+    } else {
+        None
+    };
+    remove_locked(project_dir, home, target, old_text)
+}
+
+fn remove_locked(
     project_dir: &Path,
     home: &Path,
     target: &str,

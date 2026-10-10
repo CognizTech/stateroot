@@ -74,6 +74,8 @@ fn validate_packet(packet: &Value, handing_to_another: bool) -> anyhow::Result<(
 /// CLI flag overrides for `handoff write` (authoritative over `--input`).
 #[derive(Debug, Default, Clone)]
 pub struct HandoffWriteFlags<'a> {
+    pub plan: Option<&'a str>,
+    pub no_plan: bool,
     pub objective: Option<&'a str>,
     pub task: Option<&'a str>,
     pub context_summary: Option<&'a str>,
@@ -86,6 +88,7 @@ pub struct HandoffWriteFlags<'a> {
 }
 
 const HANDOFF_INPUT_KEYS: &[&str] = &[
+    "artifact_refs",
     "task",
     "objective",
     "current_phase",
@@ -146,6 +149,10 @@ struct FailedApproachInput {
 /// them instead of allowing the input file to impersonate the CLI.
 #[derive(Debug, Default, Deserialize)]
 struct HandoffInput {
+    artifact_refs: Option<Vec<stateroot_core::fidelity::ArtifactRef>>,
+    plan: Option<String>,
+    #[serde(default)]
+    no_plan: bool,
     task: Option<String>,
     objective: Option<String>,
     current_phase: Option<String>,
@@ -371,6 +378,8 @@ fn apply_write_flags(
     if let Some(worktree) = flags.worktree.filter(|text| !text.trim().is_empty()) {
         input.worktree = Some(worktree.to_string());
     }
+    input.plan = flags.plan.map(str::to_owned);
+    input.no_plan = flags.no_plan;
     Ok(input)
 }
 
@@ -823,16 +832,32 @@ fn assemble_packet(
     // The central plan store is authoritative for ordinary handoffs.  A
     // fork-bound handoff instead names that fork's active plan, which is
     // independently activated in its own checkout.
-    if let Some((plan, _)) =
+    let selected_plan = if input.no_plan {
+        None
+    } else if let Some(id) = input.plan.as_deref() {
+        Some(
+            stateroot_core::plans::load(context.project_dir, id)
+                .ok_or_else(|| anyhow::anyhow!("unknown explicit plan {id}"))?,
+        )
+    } else {
         bound_plan.or_else(|| stateroot_core::plans::active_or_approved(context.project_dir))
-    {
+    };
+    if let Some((plan, _)) = selected_plan {
         packet["plan_ref"] = json!({
             "id": plan.id,
             "title": plan.title,
             "status": plan.status,
         });
     }
+    if input.no_plan {
+        packet["plan_intent"] = json!("none");
+    } else if input.plan.is_some() {
+        packet["plan_intent"] = json!("explicit");
+    }
 
+    if let Some(references) = input.artifact_refs {
+        packet["artifact_refs"] = json!(references);
+    }
     packet = bound_packet(packet);
     validate_packet(&packet, context.handing_to_another)?;
     Ok(packet)
@@ -1285,7 +1310,31 @@ fn can_publish_boundary(
                     .is_none_or(|id| id <= job.id.as_str()))
 }
 
-/// Explicit retry preserves original identity and validates any supplied locator.
+/// Inspect retained jobs without recovering, advancing, or rewriting them.
+pub fn inspect(ctx: &Ctx, id: Option<&str>) -> anyhow::Result<()> {
+    ctx.require_project()?;
+    let mut jobs = stateroot_core::finalize_journal::load_all(&ctx.cwd);
+    if let Some(id) = id {
+        jobs.retain(|job| job.id == id);
+        anyhow::ensure!(
+            !jobs.is_empty(),
+            "boundary job unavailable or unsupported; original bytes retained: {id}"
+        );
+    }
+    let invalid = stateroot_core::finalize_journal::invalid_records(&ctx.cwd);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "schema_version": "stateroot.boundary-inspection.v1",
+            "read_only": true,
+            "jobs": jobs,
+            "unsupported_records_retained": invalid,
+        }))?
+    );
+    Ok(())
+}
+
+/// Explicit recovery advances the selected retained job, unlike inspection.
 pub async fn recover(ctx: &Ctx, id: &str, transcript: Option<&str>) -> anyhow::Result<()> {
     let job = stateroot_core::finalize_journal::load_all(&ctx.cwd)
         .into_iter()
@@ -1675,6 +1724,68 @@ pub async fn show(ctx: &Ctx, seq: Option<i64>) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use stateroot_core::transcripts::{PlanStep, TailEntry};
+
+    #[test]
+    fn explicit_plan_and_no_plan_preserve_automatic_behavior_without_unrelated_assignment() {
+        let fixture = tempfile::tempdir().unwrap();
+        let plan = stateroot_core::plans::record(
+            fixture.path(),
+            "unrelated approved",
+            "codex",
+            None,
+            "# Other\n- [ ] work",
+        )
+        .unwrap();
+        stateroot_core::plans::transition(
+            fixture.path(),
+            &plan.id,
+            stateroot_core::plans::PlanStatus::Approved,
+        )
+        .unwrap();
+        let assemble = |input| {
+            assemble_packet(
+                input,
+                None,
+                PacketContext {
+                    project_dir: fixture.path(),
+                    project_id: "fixture",
+                    seq: 1,
+                    source: "codex",
+                    routing_dest: None,
+                    note_text: None,
+                    objective_override: None,
+                    state_objective: String::new(),
+                    state_phase: String::new(),
+                    handing_to_another: false,
+                },
+            )
+            .unwrap()
+        };
+        assert_eq!(assemble(HandoffInput::default())["plan_ref"]["id"], plan.id);
+        assert!(assemble(HandoffInput {
+            no_plan: true,
+            ..Default::default()
+        })
+        .get("plan_ref")
+        .is_none());
+        stateroot_core::plans::complete(
+            fixture.path(),
+            &plan.id,
+            "explicit fixture completion",
+            "codex",
+            None,
+        )
+        .unwrap();
+        let completed = assemble(HandoffInput {
+            plan: Some(plan.id.clone()),
+            ..Default::default()
+        });
+        assert_eq!(completed["plan_ref"]["status"], "done");
+        let digest = render_handoff_digest_full(&completed, true, &[], None, Some(fixture.path()));
+        assert!(digest.contains("## Referenced Plan"));
+        assert!(digest.contains("Reference only"));
+        assert!(!digest.contains("Execute it as written"));
+    }
 
     #[test]
     fn bounds_preserve_full_content() {

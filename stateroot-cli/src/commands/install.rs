@@ -126,7 +126,19 @@ pub(crate) fn install_spec(
 }
 
 /// `stateroot install` — machine-level integration.
-pub async fn install(ctx: &Ctx) -> Result<()> {
+///
+/// `json` switches stdout to the typed integration-health document
+/// (`stateroot.integration-health.v1`) computed AFTER the install pass;
+/// human progress moves to stderr. Machine mode never bails on partial
+/// integration failure — the document carries per-harness status, problems
+/// and repair commands — while the human path keeps the historical bail.
+pub async fn install(ctx: &Ctx, json_out: bool) -> Result<()> {
+    // Human progress channel: stdout normally, stderr in machine mode.
+    macro_rules! line {
+        ($($arg:tt)*) => {
+            if json_out { eprintln!($($arg)*); } else { println!($($arg)*); }
+        };
+    }
     let home = home_dir()?;
     let specs: Vec<HarnessSpec> = all_specs(&home)
         .into_iter()
@@ -140,20 +152,20 @@ pub async fn install(ctx: &Ctx) -> Result<()> {
 
     let mut installed: Vec<String> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
-    println!("Installing stateroot globally (home: {}):", home.display());
+    line!("Installing stateroot globally (home: {}):", home.display());
     for spec in &specs {
         // Wave-2: each harness gets its own projection of the same soul.
         let persona_h = super::persona::for_harness(ctx, spec.id, persona.as_deref()).await;
         let block = render_one_agent_block(persona_h.as_deref(), spec.id);
         let actions = install_spec(&home, spec, &block, InstallToggles::default());
         for action in &actions {
-            println!("  {}: {action}", spec.id);
+            line!("  {}: {action}", spec.id);
         }
         if actions.is_empty() {
-            println!("  {}: detected", spec.id);
+            line!("  {}: detected", spec.id);
         }
         if let Some(guidance) = spec.guidance {
-            println!("  note: {guidance}");
+            line!("  note: {guidance}");
         }
         if actions.iter().any(|action| action.starts_with("ERROR:")) {
             failed.push(spec.id.to_string());
@@ -163,10 +175,18 @@ pub async fn install(ctx: &Ctx) -> Result<()> {
     }
 
     // Second pass: non-legacy registry rows, grouped by tier.
-    install_registry_tiers(ctx, &home, persona.as_deref(), &mut installed, &mut failed).await;
+    install_registry_tiers(
+        ctx,
+        &home,
+        persona.as_deref(),
+        &mut installed,
+        &mut failed,
+        json_out,
+    )
+    .await;
 
     match seed_product_skill(&home) {
-        Ok(action) => println!("  product skill: {} — {}", action.action, action.detail),
+        Ok(action) => line!("  product skill: {} — {}", action.action, action.detail),
         Err(err) => note!("warning: product skill seed failed ({err:#})"),
     }
     if let Err(err) = stateroot_core::skill_federation::refresh_product_projections(&home, None) {
@@ -176,10 +196,10 @@ pub async fn install(ctx: &Ctx) -> Result<()> {
         && !installed.iter().any(|id| id == "dot")
     {
         installed.push("dot".into());
-        println!("  dot: local skill configured; connected computer required; resume/handoff explicitly (no cloud command hooks)");
+        line!("  dot: local skill configured; connected computer required; resume/handoff explicitly (no cloud command hooks)");
     }
     match stateroot_core::rules::sync(&ctx.cwd, &home) {
-        Ok(report) => println!(
+        Ok(report) => line!(
             "  rules: product-intent {} · imported {}",
             if report.seeded { "seeded" } else { "current" },
             report.imported
@@ -212,7 +232,7 @@ pub async fn install(ctx: &Ctx) -> Result<()> {
             }
             let actions = super::skill::ensure_convenience_layer(dir, &block);
             for action in actions {
-                println!("  {}: {action}", path);
+                line!("  {}: {action}", path);
             }
             // Collaboration defaults reach existing projects too
             // (write-if-absent; user edits win).
@@ -223,7 +243,7 @@ pub async fn install(ctx: &Ctx) -> Result<()> {
                 note!("warning: collab files failed for {}: {err}", root.display());
             }
             for item in created {
-                println!("  {}: {item}", path);
+                line!("  {}: {item}", path);
             }
         }
     }
@@ -235,8 +255,9 @@ pub async fn install(ctx: &Ctx) -> Result<()> {
 
     // The per-user continuity service keeps every registered project
     // reconciled between harness sessions. Best-effort: hooks/CLI
-    // reconciliation covers a registration failure.
-    super::service::ensure_installed(ctx);
+    // reconciliation covers a registration failure. Quiet when stdout is
+    // the machine channel (`--json`).
+    super::service::ensure_installed(ctx, json_out);
 
     super::editor_extensions::reconcile_after_install(ctx).await;
 
@@ -244,26 +265,67 @@ pub async fn install(ctx: &Ctx) -> Result<()> {
     let mut config = ctx.config.clone();
     config.installed_harnesses = installed.clone();
     stateroot_core::config::save_config(&ctx.config_dir, &config)?;
-    println!();
-    println!("Installed for: {}", installed.join(", "));
-    if installed.is_empty() && failed.is_empty() {
-        println!("No agents detected. Install an agent, then run `stateroot install` again.");
+    // integration_completed claims the install COMPLETED: it fires only when
+    // every detected harness integrated (success-only — a partial/failed
+    // pass is not a success event), and only when at least one real harness
+    // was integrated (an empty "no agents detected" run, or a bundled dot
+    // skill alone, is not evidence of a connected runtime). The editor
+    // reconciliation ping rides the same condition.
+    let install_succeeded = failed.is_empty() && installed.iter().any(|id| id != "dot");
+    if install_succeeded {
+        crate::telemetry::integration_completed(&ctx.config_dir);
+        if std::env::var("STATEROOT_INSTALL_VIA").ok().as_deref() == Some("extension") {
+            crate::telemetry::editor_reconcile_result(&ctx.config_dir);
+        }
     }
-    println!("These are configured integrations; a fresh agent session confirms continuity.");
+    if json_out {
+        // Machine mode (C3): the typed post-install integration health is
+        // the stdout contract, and it carries the ACTUAL install outcome —
+        // failures ride inside the document, never prose. A partial install
+        // is explicit (`install.failed` non-empty); a no-agent machine is an
+        // honest CLI-only outcome, distinct from configured agent readiness.
+        let mut health = stateroot_core::harness_install::health::integration_health(
+            &home,
+            if stateroot_core::local_store::is_stateroot_dir(&ctx.cwd) {
+                Some(ctx.cwd.as_path())
+            } else {
+                None
+            },
+            &stateroot_core::skill_federation::binary_probe(
+                super::doctor::test_cmd_probes().as_deref(),
+            ),
+            &installed,
+        );
+        health.install = Some(stateroot_core::harness_install::health::InstallOutcome {
+            configured: installed.clone(),
+            failed: failed.clone(),
+            cli_only: failed.is_empty() && !installed.iter().any(|id| id != "dot"),
+        });
+        line!();
+        line!("Installed for: {}", installed.join(", "));
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&health).map_err(anyhow::Error::from)?
+        );
+        if !failed.is_empty() {
+            note!(
+                "integration setup incomplete for: {} — see the JSON document",
+                failed.join(", ")
+            );
+        }
+        return Ok(());
+    }
+    line!();
+    line!("Installed for: {}", installed.join(", "));
+    if installed.is_empty() && failed.is_empty() {
+        line!("No agents detected. Install an agent, then run `stateroot install` again.");
+    }
+    line!("These are configured integrations; a fresh agent session confirms continuity.");
     if !failed.is_empty() {
         anyhow::bail!(
             "Integration setup incomplete for: {}. Run `stateroot install` to retry.",
             failed.join(", ")
         );
-    }
-    // integration_completed claims at least one harness was actually
-    // integrated — an empty run ("no agents detected") must not emit it.
-    // A bundled dot skill alone is not evidence of a connected dot runtime.
-    if installed.iter().any(|id| id != "dot") {
-        crate::telemetry::integration_completed(&ctx.config_dir);
-        if std::env::var("STATEROOT_INSTALL_VIA").ok().as_deref() == Some("extension") {
-            crate::telemetry::editor_reconcile_result(&ctx.config_dir);
-        }
     }
     Ok(())
 }
@@ -302,6 +364,7 @@ async fn install_registry_tiers(
     persona: Option<&str>,
     installed: &mut Vec<String>,
     failed: &mut Vec<String>,
+    json_out: bool,
 ) {
     use stateroot_core::harness_install::registry::{adapters, quirk_detected, Tier};
 
@@ -323,18 +386,16 @@ async fn install_registry_tiers(
         if group.is_empty() {
             continue;
         }
-        println!("  {label}:");
+        progress(json_out, &format!("  {label}:"));
         for quirk in group {
             let persona_h = super::persona::for_harness(ctx, quirk.id, persona).await;
             let block = render_one_agent_block(persona_h.as_deref(), quirk.id);
             let actions = stateroot_core::harness_install::install_quirk_full(home, quirk, &block);
             for action in &actions {
-                println!("    {}: {action}", quirk.id);
+                progress(json_out, &format!("    {}: {action}", quirk.id));
             }
             if quirk.id == "pi" {
-                println!(
-                    "    pi: launch with `stateroot harness run pi` to isolate it from shared .agents skills"
-                );
+                progress(json_out, "    pi: launch with `stateroot harness run pi` to isolate it from shared .agents skills");
             }
             if actions.iter().any(|action| action.starts_with("ERROR:")) {
                 failed.push(quirk.id.to_string());
@@ -342,6 +403,16 @@ async fn install_registry_tiers(
                 installed.push(quirk.id.to_string());
             }
         }
+    }
+}
+
+/// Human progress line: stdout normally, stderr when stdout is the machine
+/// channel (`--json`).
+fn progress(json_out: bool, line: &str) {
+    if json_out {
+        eprintln!("{line}");
+    } else {
+        println!("{line}");
     }
 }
 

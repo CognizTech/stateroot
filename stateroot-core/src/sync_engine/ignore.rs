@@ -90,6 +90,13 @@ impl IgnoreRules {
         if rel == ".stateroot/local" || rel.starts_with(".stateroot/local/") {
             return true;
         }
+        // Capture's existing locks live beside its durable segments, not in
+        // the evidence itself. Never pin/transport ownership tokens.
+        if rel == ".stateroot/spool/current.lock"
+            || (rel.starts_with(".stateroot/spool/segments/") && rel.ends_with(".lock"))
+        {
+            return true;
+        }
         // Hardcoded: .stateroot/worktrees/ stays out of trees — a fork
         // materialized inside the project is a machine-local checkout;
         // pinning it would snapshot the fork's whole tree into the trunk

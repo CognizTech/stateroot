@@ -12,6 +12,7 @@
 //! projection from it so older `installed_harnesses` values keep working.
 
 pub mod detect;
+pub mod health;
 pub mod hooks;
 pub mod paths;
 pub mod plugins;

@@ -187,8 +187,11 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or(commands::checkpoint::LOCAL_HARNESS),
         )?,
         Command::Handoff(args) => match args.action {
+            HandoffAction::Inspect { job } => commands::handoff::inspect(&ctx, job.as_deref())?,
             HandoffAction::Write(args) => {
                 let flags = commands::handoff::HandoffWriteFlags {
+                    plan: args.plan.as_deref(),
+                    no_plan: args.no_plan,
                     objective: args.objective.as_deref(),
                     task: args.task.as_deref(),
                     context_summary: args.context_summary.as_deref(),
@@ -230,7 +233,11 @@ async fn main() -> anyhow::Result<()> {
             args.harness.as_deref().or(actor.as_deref()),
         )?,
         Command::Log(args) => commands::roots::log(&ctx, args.json)?,
-        Command::Show { hash } => commands::roots::show(&ctx, &hash)?,
+        Command::Show {
+            hash,
+            fidelity,
+            json,
+        } => commands::roots::show(&ctx, &hash, fidelity, json)?,
         Command::Diff(args) => commands::roots::diff(&ctx, &args.from, &args.to, args.content)?,
         Command::Compare(args) => commands::roots::compare(&ctx, &args.a, &args.b)?,
         Command::Revert(args) => commands::roots::revert(&ctx, &args.root, args.yes)?,
@@ -246,14 +253,16 @@ async fn main() -> anyhow::Result<()> {
             &args.forks,
             args.json,
             &args.resolve_ours,
+            &args.keep_main,
             args.cleanup,
             args.prepare,
             args.continue_attempt.as_deref(),
+            args.stage.as_deref(),
             args.status.as_deref(),
             args.abort.as_deref(),
             &args.evidence,
         )?,
-        Command::Receipt { id } => commands::roots::receipt(&ctx, &id)?,
+        Command::Receipt { id, json } => commands::roots::receipt(&ctx, &id, json)?,
         Command::Status { json } => commands::status::run(&ctx, json)?,
         Command::Obligation(args) => match args.action {
             ObligationAction::Add {
@@ -300,8 +309,8 @@ async fn main() -> anyhow::Result<()> {
             ServiceAction::Run => commands::service::run_resident(&ctx).await?,
         },
         Command::Projects { json, prune } => commands::projects::run(&ctx, json, prune)?,
-        Command::Doctor => {
-            let code = commands::doctor::run(&ctx).await?;
+        Command::Doctor { json } => {
+            let code = commands::doctor::run(&ctx, json).await?;
             if code != 0 {
                 std::process::exit(code);
             }
@@ -312,7 +321,7 @@ async fn main() -> anyhow::Result<()> {
                 std::process::exit(code as i32);
             }
         }
-        Command::Install => commands::install::install(&ctx).await?,
+        Command::Install { json } => commands::install::install(&ctx, json).await?,
         Command::Editor(args) => match args.action {
             EditorAction::Status => commands::editor_extensions::status(&ctx).await?,
             EditorAction::Reconcile => {

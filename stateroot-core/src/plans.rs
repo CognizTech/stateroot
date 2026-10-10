@@ -142,6 +142,14 @@ pub fn plans_dir(project_dir: &Path) -> PathBuf {
     local_store::root(project_dir).join(PLANS_REL)
 }
 
+/// One checkout's plan RMW span, including activation demotions/receipts.
+pub fn write_guard(project_dir: &Path) -> Result<crate::safe_io::ResourceLock, String> {
+    crate::safe_io::ResourceLock::acquire(
+        local_store::root(project_dir).join("local/locks/plans.lock"),
+    )
+    .map_err(|error| error.to_string())
+}
+
 /// A plan's markdown path.
 pub fn body_path(project_dir: &Path, id: &str) -> PathBuf {
     plans_dir(project_dir).join(format!("{id}.md"))
@@ -199,6 +207,7 @@ pub fn record(
     source_path: Option<&str>,
     body: &str,
 ) -> Result<PlanMeta, String> {
+    let _guard = write_guard(project_dir)?;
     if body.trim().is_empty() {
         return Err("plan body is empty — nothing to record".into());
     }
@@ -317,6 +326,7 @@ pub fn update_draft_body(
     body: &str,
     note: &str,
 ) -> Result<PlanMeta, String> {
+    let _guard = write_guard(project_dir)?;
     let Some((mut meta, path)) = load(project_dir, id) else {
         return Err(format!("unknown plan `{id}`"));
     };
@@ -347,6 +357,7 @@ pub fn transition(
     id: &str,
     to: PlanStatus,
 ) -> Result<(PlanMeta, Option<String>), String> {
+    let _guard = write_guard(project_dir)?;
     let Some((mut meta, _)) = load(project_dir, id) else {
         return Err(format!("unknown plan `{id}` — run `stateroot plan list`"));
     };
@@ -415,6 +426,7 @@ pub fn complete(
     actor: &str,
     completion_root: Option<String>,
 ) -> Result<PlanMeta, String> {
+    let _guard = write_guard(project_dir)?;
     if evidence.trim().is_empty() {
         return Err(
             "completion evidence is empty — record what proves the work (`stateroot plan done <id> --evidence \"…\"`)"
@@ -463,6 +475,7 @@ pub fn drifted_since_approval(project_dir: &Path, meta: &PlanMeta) -> bool {
 
 /// Append a lineage note without changing status.
 pub fn append_notes(project_dir: &Path, id: &str, note: &str) -> Result<PlanMeta, String> {
+    let _guard = write_guard(project_dir)?;
     let Some((mut meta, _)) = load(project_dir, id) else {
         return Err(format!("unknown plan `{id}` — run `stateroot plan list`"));
     };

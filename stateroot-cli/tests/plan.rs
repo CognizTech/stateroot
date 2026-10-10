@@ -249,7 +249,8 @@ fn plan_digest_directives_and_body_omission() {
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-    assert!(stdout.contains("## Active Plan"), "digest: {stdout}");
+    assert!(stdout.contains("## Pending Plan"), "digest: {stdout}");
+    assert!(!stdout.contains("## Active Plan"), "digest: {stdout}");
     assert!(
         stdout.contains("refine the plan file; do not implement yet"),
         "digest: {stdout}"
@@ -273,6 +274,8 @@ fn plan_digest_directives_and_body_omission() {
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(stdout.contains("## Pending Plan"), "digest: {stdout}");
+    assert!(!stdout.contains("## Active Plan"), "digest: {stdout}");
     assert!(
         stdout.contains("assign or claim execution"),
         "digest: {stdout}"
@@ -299,6 +302,7 @@ fn plan_digest_directives_and_body_omission() {
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(stdout.contains("## Active Plan"), "digest: {stdout}");
     assert!(
         stdout.contains("Execute it as written; do not re-plan or re-explore"),
         "digest: {stdout}"
@@ -525,7 +529,7 @@ fn plan_approval_pins_digest_and_body_drift_warns() {
     );
 
     // An edit after approval: show warns (stderr), the digest warns in the
-    // Active Plan section.
+    // Pending Plan section (approval does not claim execution).
     std::fs::write(&body_path, "# Pinned Plan\n\nEDITED AFTER APPROVAL\n").expect("edit");
     let out = stateroot(config_home.path(), user_home.path(), project.path())
         .args(["plan", "show", &id])
@@ -541,7 +545,8 @@ fn plan_approval_pins_digest_and_body_drift_warns() {
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-    assert!(stdout.contains("## Active Plan"), "digest: {stdout}");
+    assert!(stdout.contains("## Pending Plan"), "digest: {stdout}");
+    assert!(!stdout.contains("## Active Plan"), "digest: {stdout}");
     assert!(
         stdout.contains("plan body changed since approval"),
         "digest: {stdout}"

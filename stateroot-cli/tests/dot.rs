@@ -169,10 +169,10 @@ fn snapshot_reuses_git_lineage_without_moving_user_head_and_skill_matches_source
     let (restored, _) =
         stateroot_core::roots::revert_to_root(project.path(), &root_id, "cli").unwrap();
     assert_ne!(restored.id, root_id);
-    // Revert is lineage-only in the existing engine; it does not check out files.
+    // Append-only restore materializes the historical work, not only its ref.
     assert_eq!(
         fs::read_to_string(project.path().join("work.txt")).unwrap(),
-        "later edit"
+        "project work"
     );
     let (fork, _) =
         stateroot_core::roots::fork_root(project.path(), &root_id, Some("restore-check"), "cli")

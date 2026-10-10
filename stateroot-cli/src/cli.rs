@@ -75,6 +75,11 @@ pub enum Command {
     Show {
         /// Root hash or prefix.
         hash: String,
+        /// Read-only destination compatibility report.
+        #[arg(long)]
+        fidelity: bool,
+        #[arg(long)]
+        json: bool,
     },
     /// Diff two roots (names+status; --content for unified diffs).
     Diff(DiffArgs),
@@ -90,6 +95,8 @@ pub enum Command {
     Receipt {
         /// Transition id or prefix.
         id: String,
+        #[arg(long)]
+        json: bool,
     },
     /// Project status — the single decision-ready brief: checkout/root state,
     /// handoff freshness, plan state, due obligations, unresolved attention,
@@ -112,11 +119,21 @@ pub enum Command {
         prune: bool,
     },
     /// Diagnose the local setup (config, store, registry, hooks, federation).
-    Doctor,
+    Doctor {
+        /// Machine-readable JSON (typed checks + integration health).
+        #[arg(long)]
+        json: bool,
+    },
     /// Harness session hook (SessionStart/UserPromptSubmit/PreCompact/Stop).
     Hook(HookArgs),
     /// Install stateroot integration for detected harnesses (global).
-    Install,
+    Install {
+        /// Machine-readable integration health on stdout (human progress on
+        /// stderr). Older CLIs lack this flag — callers must fall back to
+        /// parsing the human `Installed for:` summary.
+        #[arg(long)]
+        json: bool,
+    },
     /// Discover and reconcile the VS Code / Cursor extensions.
     Editor(EditorArgs),
     /// Run a harness through StateRoot's portable integration policy.
@@ -613,6 +630,12 @@ pub struct HandoffArgs {
 
 #[derive(Debug, Args)]
 pub struct HandoffWriteArgs {
+    /// Explicit plan attachment, including a completed plan.
+    #[arg(long, conflicts_with = "no_plan")]
+    pub plan: Option<String>,
+    /// Continuity without any plan execution directive.
+    #[arg(long)]
+    pub no_plan: bool,
     /// Harness creating the handoff (falls back to the active local marker).
     #[arg(long)]
     pub from: Option<String>,
@@ -659,6 +682,12 @@ pub struct HandoffWriteArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum HandoffAction {
+    /// Inspect durable boundary job IDs/status as JSON without retrying,
+    /// changing journal bytes or running providers.
+    Inspect {
+        #[arg(long)]
+        job: Option<String>,
+    },
     /// Write a new handoff packet (local store).
     Write(Box<HandoffWriteArgs>),
     /// List known handoffs.
@@ -913,21 +942,26 @@ pub struct ForkArgs {
 #[derive(Debug, Args)]
 pub struct MergeArgs {
     /// Fork names to fold into the trunk (as shown by `stateroot fork`).
-    #[arg(required_unless_present_any = ["continue_attempt", "status", "abort"])]
+    #[arg(required_unless_present_any = ["continue_attempt", "stage", "status", "abort"])]
     pub forks: Vec<String>,
     /// Freeze the selected refs and report a local merge attempt. A
     /// coordinating agent uses `--continue` only after a clean preparation.
-    #[arg(long, conflicts_with_all = ["continue_attempt", "status", "abort", "cleanup", "resolve_ours"])]
+    #[arg(long, conflicts_with_all = ["continue_attempt", "stage", "status", "abort", "cleanup", "resolve_ours"])]
     pub prepare: bool,
     /// Publish a previously prepared attempt if every frozen ref is
     /// unchanged. Conflicted attempts publish the reconciled worktree.
-    #[arg(long = "continue", value_name = "ATTEMPT", conflicts_with_all = ["prepare", "status", "abort", "cleanup", "resolve_ours"])]
+    #[arg(long = "continue", value_name = "ATTEMPT", conflicts_with_all = ["prepare", "stage", "status", "abort", "cleanup", "resolve_ours"])]
     pub continue_attempt: Option<String>,
+    /// Fold into the local candidate without publishing. Resolve only
+    /// reported reviewed paths; repeat after source reconciliation. A fully
+    /// staged candidate is sealed for subsequent gates and exact continue.
+    #[arg(long, value_name = "ATTEMPT", conflicts_with_all = ["forks", "prepare", "continue_attempt", "status", "abort", "cleanup"])]
+    pub stage: Option<String>,
     /// Show a prepared attempt and its conflicts without changing refs.
-    #[arg(long, value_name = "ATTEMPT", conflicts_with_all = ["prepare", "continue_attempt", "abort", "cleanup", "resolve_ours"])]
+    #[arg(long, value_name = "ATTEMPT", conflicts_with_all = ["prepare", "continue_attempt", "stage", "abort", "cleanup", "resolve_ours"])]
     pub status: Option<String>,
     /// Remove only a prepared attempt's local state.
-    #[arg(long, value_name = "ATTEMPT", conflicts_with_all = ["prepare", "continue_attempt", "status", "cleanup", "resolve_ours"])]
+    #[arg(long, value_name = "ATTEMPT", conflicts_with_all = ["prepare", "continue_attempt", "stage", "status", "cleanup", "resolve_ours"])]
     pub abort: Option<String>,
     /// Record reconciliation evidence (tests run, review notes) into the
     /// merge transition. Repeatable; meaningful only with `--continue`.
@@ -937,6 +971,10 @@ pub struct MergeArgs {
     /// conflict. Repeat only after inspecting each conflict.
     #[arg(long = "resolve-ours", value_name = "PATH")]
     pub resolve_ours: Vec<String>,
+    /// Retain one reviewed live operational record that the fully staged
+    /// candidate would otherwise overwrite. Repeat for each exact path.
+    #[arg(long = "keep-main", value_name = "PATH", requires = "stage")]
+    pub keep_main: Vec<String>,
     /// Emit the stable merge-result projection for integrations.
     #[arg(long)]
     pub json: bool,

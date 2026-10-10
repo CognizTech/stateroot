@@ -224,6 +224,8 @@ mod tests {
             service_registered: true,
             service_kind: None,
             service_running: true,
+            service_identity_status: "verified".into(),
+            service_identity_detail: "owned fixture proof".into(),
             service_last_beat_at: None,
         };
         let snapshot = bounded_snapshot(&assessment);

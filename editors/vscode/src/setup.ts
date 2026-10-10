@@ -10,7 +10,16 @@ export interface SetupState {
 }
 
 export const SETUP_KEY = "stateroot.completedSetup";
-type Receipt = { extensionVersion: string; binary: string; version: string; configured: string[] };
+type Receipt = {
+  extensionVersion: string;
+  binary: string;
+  version: string;
+  configured: string[];
+  /** "cli_only" = no agent harness detected on this machine: the CLI is set
+   * up and nothing else exists to integrate — an honest label, never agent
+   * readiness. */
+  setupMode?: "cli_only";
+};
 type Run = (args: string[], binary: string, env?: NodeJS.ProcessEnv) => Promise<string>;
 
 export function classifyRecovery(input: {
@@ -110,13 +119,19 @@ export async function ensureSetup(options: {
       return binary;
     }
     report({ phase: "connecting", detail: "Repairing harness integration…" });
-    const integration = await run(["install"], binary, REARM_SKIP_ENV);
-    const configured = integration.match(/^Installed for:[ \t]*([^\r\n]*)/m)?.[1]
-      .split(",").map(s => s.trim()).filter(Boolean);
-    if (!configured) throw new Error("Integration repair was not confirmed. Retry setup.");
+    const repaired = await runIntegrationInstall(run, binary);
     const version = (await run(["--version"], binary)).trim();
-    await state.update(SETUP_KEY, { extensionVersion, binary, version, configured } satisfies Receipt);
-    report({ phase: "ready", detail: "Ready", version, configured });
+    await state.update(SETUP_KEY, {
+      extensionVersion, binary, version,
+      configured: repaired.configured,
+      ...(repaired.cliOnly ? { setupMode: "cli_only" as const } : {}),
+    } satisfies Receipt);
+    report({
+      phase: "ready",
+      detail: repaired.cliOnly ? "Ready (CLI only — no agents detected)" : "Ready",
+      version,
+      configured: repaired.configured,
+    });
     return binary;
   }
 
@@ -134,25 +149,149 @@ export async function ensureSetup(options: {
   report({ phase: "connecting", detail: "Connecting your agents…" });
   if (!binary) throw new Error("CLI is not runnable after recovery.");
   const recovered = binary;
-  const integration = await run(["install"], recovered, REARM_SKIP_ENV);
-  const configured = integration.match(/^Installed for:[ \t]*([^\r\n]*)/m)?.[1]
-    .split(",").map(s => s.trim()).filter(Boolean);
-  if (!configured) throw new Error("CLI installed, but integration setup was not confirmed. Retry setup.");
+  const outcome = await runIntegrationInstall(run, recovered);
   const version = (await run(["--version"], recovered)).trim();
-  await state.update(SETUP_KEY, { extensionVersion, binary: recovered, version, configured } satisfies Receipt);
-  report({ phase: "ready", detail: "Ready", version, configured });
+  await state.update(SETUP_KEY, {
+    extensionVersion, binary: recovered, version,
+    configured: outcome.configured,
+    ...(outcome.cliOnly ? { setupMode: "cli_only" as const } : {}),
+  } satisfies Receipt);
+  report({
+    phase: "ready",
+    detail: outcome.cliOnly ? "Ready (CLI only — no agents detected)" : "Ready",
+    version,
+    configured: outcome.configured,
+  });
   return recovered;
 }
 
-async function integrationHealthy(run: Run, binary: string): Promise<boolean> {
+interface IntegrationHealthDoc {
+  schema_version?: string;
+  harnesses?: { harness: string; status: string; detected?: boolean; problems?: string[] }[];
+  install?: { configured: string[]; failed: string[]; cli_only: boolean };
+}
+
+/** The `doctor --json` document (stateroot.doctor.v1): `ok` covers base
+ * checks only; integration readiness is the per-harness rows. */
+interface DoctorDoc {
+  schema_version?: string;
+  ok?: boolean;
+  integrations?: { harnesses?: { status?: string }[] } | null;
+}
+
+interface IntegrationOutcome {
+  configured: string[];
+  cliOnly: boolean;
+}
+
+/** True only when the CLI PROVABLY rejected `--json` at argument parsing —
+ * the parser's own rejection statement must name `--json` as the rejected
+ * token on the SAME line. The command we ran always contains `--json`, so a
+ * rejection naming some OTHER flag (or a failure message that merely echoes
+ * the command line) is never a flag rejection: no side-effectful retry.
+ * Timeouts, permission errors, real install failures and malformed typed
+ * output are never retried here. */
+function isUnsupportedJsonFlag(message: string): boolean {
+  return message.split(/\r?\n/).some((line) =>
+    /(?:unexpected|unrecognized|unknown)\s+(?:argument|option|flag|subcommand)\s+['"`]?--json\b/i.test(line)
+    || /found argument\s+['"`]?--json['"`]?\s+which wasn't expected/i.test(line)
+  );
+}
+
+/** Run `stateroot install` and return the actual outcome. New CLIs answer
+ * `--json` with the typed integration-health document whose `install`
+ * outcome is authoritative; a partial integration fails explicitly and can
+ * never write a Ready receipt, and a no-agent machine is an explicit
+ * CLI-only success. Older CLIs (proven unsupported flag, which means the
+ * rejected call ran no side effects) fall back to exactly one human-mode
+ * run parsed from the `Installed for:` summary. */
+async function runIntegrationInstall(run: Run, binary: string): Promise<IntegrationOutcome> {
+  let out: string;
   try {
-    // `stateroot doctor` exits nonzero on hard failures, including missing
-    // harness wiring — the actual drift this route exists to repair.
-    await run(["doctor"], binary, { STATEROOT_NO_AUTO_UPDATE: "1" });
-    return true;
+    out = await run(["install", "--json"], binary, REARM_SKIP_ENV);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!isUnsupportedJsonFlag(message)) throw err;
+    // Older CLI without --json (flag rejected BEFORE side effects) — one
+    // human-mode retry. This is also why a timeout/real failure is never
+    // retried: the first attempt may have wired half the integrations, and
+    // a blind rerun would double side effects and telemetry.
+    const human = await run(["install"], binary, REARM_SKIP_ENV);
+    const configured = parseInstalledFor(human);
+    return { configured, cliOnly: configured.every((c) => c === "dot") };
+  }
+  let doc: IntegrationHealthDoc;
+  try {
+    doc = JSON.parse(out) as IntegrationHealthDoc;
+  } catch {
+    throw new Error("Integration install returned malformed output — not recording a setup receipt. Retry setup.");
+  }
+  if (!doc || doc.schema_version !== "stateroot.integration-health.v1" || !Array.isArray(doc.harnesses)) {
+    throw new Error("Integration install returned an unrecognized document — not recording a setup receipt. Retry setup.");
+  }
+  // The authoritative outcome: what the install pass actually did. The
+  // typed schema always carries it — a typed document without a VALIDATED
+  // outcome (missing fields, wrong shapes, unknown rows derived from thin
+  // air) is not an install receipt and can never mint Ready. Unknown or
+  // partial outcomes fail explicitly; only a clean, fully-typed outcome
+  // writes the receipt.
+  const outcome = doc.install;
+  if (!outcome || !Array.isArray(outcome.configured) || !Array.isArray(outcome.failed)
+      || typeof outcome.cli_only !== "boolean"
+      || outcome.configured.some((c) => typeof c !== "string")
+      || outcome.failed.some((c) => typeof c !== "string")) {
+    throw new Error("Integration install returned an unrecognized outcome — not recording a setup receipt. Retry setup.");
+  }
+  if (outcome.failed.length > 0) {
+    throw new Error(
+      `Integration setup incomplete for: ${outcome.failed.join(", ")}. Run \`stateroot install\` to retry.`
+    );
+  }
+  return { configured: outcome.configured, cliOnly: outcome.cli_only };
+}
+
+function parseInstalledFor(integration: string): string[] {
+  const configured = integration.match(/^Installed for:[ \t]*([^\r\n]*)/m)?.[1]
+    .split(",").map(s => s.trim()).filter(Boolean);
+  if (!configured) throw new Error("Integration repair was not confirmed. Retry setup.");
+  return configured;
+}
+
+/** Integration readiness for a current receipt. Consumes the typed
+ * `doctor --json` document: base checks (`ok`) AND the detected integration
+ * readiness — a detected harness whose integration row reads `missing` is
+ * exactly the drift the repair pass exists to fix, and a cached receipt must
+ * never skip it. A no-agent machine (no rows) is healthy CLI-only. The
+ * legacy fallback (human doctor exit code) runs ONLY when the CLI provably
+ * rejected `--json` at parse time; a timeout, spawn failure, or malformed
+ * typed output is not proof of health and never triggers a second doctor
+ * run — it falls through to the single repair pass. */
+async function integrationHealthy(run: Run, binary: string): Promise<boolean> {
+  let out: string;
+  try {
+    out = await run(["doctor", "--json"], binary, { STATEROOT_NO_AUTO_UPDATE: "1" });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!isUnsupportedJsonFlag(message)) return false;
+    try {
+      await run(["doctor"], binary, { STATEROOT_NO_AUTO_UPDATE: "1" });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  let doc: DoctorDoc;
+  try {
+    doc = JSON.parse(out) as DoctorDoc;
   } catch {
     return false;
   }
+  if (!doc || doc.schema_version !== "stateroot.doctor.v1" || doc.ok !== true) return false;
+  const rows = doc.integrations?.harnesses;
+  if (!Array.isArray(rows)) return false;
+  // An unknown or malformed row is not proof that a cached integration
+  // remains ready. Empty rows still support a no-agent CLI-only machine.
+  return rows.every((row) => row && (row.status === "configured" || row.status === "observed_working"));
 }
 
 async function verifySelfUpdate(run: Run, binary: string, before: string): Promise<string> {

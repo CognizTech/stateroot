@@ -21,6 +21,14 @@ use serde_yaml::{Mapping, Value};
 use crate::local_store;
 use crate::safe_io::atomic_replace;
 
+/// Wiki RMW and root adoption share one checkout-local resource.
+pub fn write_guard(project_dir: &Path) -> std::io::Result<crate::safe_io::ResourceLock> {
+    crate::safe_io::ResourceLock::acquire(
+        local_store::root(project_dir).join("local/locks/wiki.lock"),
+    )
+    .map_err(std::io::Error::other)
+}
+
 /// Wiki directory relative to `.stateroot/` (the OKF bundle root).
 pub const WIKI_DIR: &str = "wiki";
 /// Compiled pages directory relative to `.stateroot/` (inside the bundle).
@@ -269,6 +277,11 @@ pub fn conform_page(
 
 /// Ensure wiki skeleton exists, migrating legacy layouts on the way.
 pub fn ensure_layout(project_dir: &Path) -> Result<(), WikiError> {
+    let _guard = write_guard(project_dir)?;
+    ensure_layout_locked(project_dir)
+}
+
+fn ensure_layout_locked(project_dir: &Path) -> Result<(), WikiError> {
     let root = local_store::root(project_dir);
     let wiki = root.join(WIKI_DIR);
     let pages = root.join(PAGES_DIR);
@@ -303,14 +316,14 @@ pub fn ensure_layout(project_dir: &Path) -> Result<(), WikiError> {
     let inbox = pages.join(INBOX_PAGE);
     if !inbox.exists() {
         atomic_replace(&inbox, DEFAULT_INBOX.as_bytes())?;
-        upsert_index(
+        upsert_index_locked(
             project_dir,
             &format!("{PAGES_DIR}/{INBOX_PAGE}"),
             "deterministic distill inbox",
             "inbox",
         )?;
     }
-    migrate_okf(project_dir)?;
+    migrate_okf_locked(project_dir)?;
     Ok(())
 }
 
@@ -409,6 +422,11 @@ fn index_declares_okf(raw: &str) -> bool {
 /// no-op. Provenance is never fabricated — pages of unknown origin get
 /// `type`/`title`/`description` only.
 pub fn migrate_okf(project_dir: &Path) -> Result<(), WikiError> {
+    let _guard = write_guard(project_dir)?;
+    migrate_okf_locked(project_dir)
+}
+
+fn migrate_okf_locked(project_dir: &Path) -> Result<(), WikiError> {
     let root = local_store::root(project_dir);
     let index_path = root.join(WIKI_DIR).join(INDEX_FILE);
     let raw = fs::read_to_string(&index_path).unwrap_or_default();
@@ -509,7 +527,17 @@ pub fn upsert_index(
     summary: &str,
     kind: &str,
 ) -> Result<(), WikiError> {
-    ensure_layout(project_dir)?;
+    let _guard = write_guard(project_dir)?;
+    upsert_index_locked(project_dir, path, summary, kind)
+}
+
+fn upsert_index_locked(
+    project_dir: &Path,
+    path: &str,
+    summary: &str,
+    kind: &str,
+) -> Result<(), WikiError> {
+    ensure_layout_locked(project_dir)?;
     let index_path = wiki_path(project_dir, INDEX_FILE);
     let bullet = render_index_entry(path, summary, kind);
     let existing = fs::read_to_string(&index_path).unwrap_or_else(|_| DEFAULT_INDEX.to_string());
@@ -552,7 +580,12 @@ fn line_path(line: &str) -> Option<String> {
 /// lands under today's `## YYYY-MM-DD` heading directly below the header;
 /// legacy flat lines remain below as history.
 pub fn append_log(project_dir: &Path, summary: &str) -> Result<(), WikiError> {
-    ensure_layout(project_dir)?;
+    let _guard = write_guard(project_dir)?;
+    append_log_locked(project_dir, summary)
+}
+
+fn append_log_locked(project_dir: &Path, summary: &str) -> Result<(), WikiError> {
+    ensure_layout_locked(project_dir)?;
     let path = wiki_path(project_dir, LOG_FILE);
     let body = fs::read_to_string(&path).unwrap_or_default();
     let now = local_store::now_rfc3339();
@@ -666,7 +699,19 @@ pub fn write_page(
     kind: &str,
     actor: Option<&str>,
 ) -> Result<PathBuf, WikiError> {
-    ensure_layout(project_dir)?;
+    let _guard = write_guard(project_dir)?;
+    write_page_locked(project_dir, slug, body, summary, kind, actor)
+}
+
+fn write_page_locked(
+    project_dir: &Path,
+    slug: &str,
+    body: &str,
+    summary: &str,
+    kind: &str,
+    actor: Option<&str>,
+) -> Result<PathBuf, WikiError> {
+    ensure_layout_locked(project_dir)?;
     let slug = slug.trim().trim_end_matches(".md");
     let file = format!("{slug}.md");
     let path = pages_dir(project_dir).join(&file);
@@ -698,14 +743,19 @@ pub fn write_page(
     );
     atomic_replace(&path, text.as_bytes())?;
     let rel = format!("{PAGES_DIR}/{file}");
-    upsert_index(project_dir, &rel, summary, kind)?;
+    upsert_index_locked(project_dir, &rel, summary, kind)?;
     Ok(path)
 }
 
 /// Append unique bullets into `_inbox.md` (deterministic distill floor).
 /// Returns how many new bullets were added. Frontmatter stays on top.
 pub fn append_inbox_bullets(project_dir: &Path, bullets: &[String]) -> Result<usize, WikiError> {
-    ensure_layout(project_dir)?;
+    let _guard = write_guard(project_dir)?;
+    append_inbox_bullets_locked(project_dir, bullets)
+}
+
+fn append_inbox_bullets_locked(project_dir: &Path, bullets: &[String]) -> Result<usize, WikiError> {
+    ensure_layout_locked(project_dir)?;
     let path = pages_dir(project_dir).join(INBOX_PAGE);
     let existing = fs::read_to_string(&path).unwrap_or_default();
     let mut seen: std::collections::BTreeSet<String> = existing
@@ -734,7 +784,7 @@ pub fn append_inbox_bullets(project_dir: &Path, bullets: &[String]) -> Result<us
     }
     if added > 0 {
         atomic_replace(&path, body.as_bytes())?;
-        upsert_index(
+        upsert_index_locked(
             project_dir,
             &format!("{PAGES_DIR}/{INBOX_PAGE}"),
             "deterministic distill inbox",

@@ -14,6 +14,7 @@ pub mod continuity;
 pub mod digest_delivery;
 pub mod error;
 pub mod extensions;
+pub mod fidelity;
 pub mod finalize_journal;
 pub mod fs_lock;
 pub mod handoff_bounds;

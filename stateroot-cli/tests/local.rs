@@ -195,6 +195,9 @@ fn checkpoint_handoff_resume_and_log_flow() {
 
     // duplicate resume is deduped; --force reprints
     let out = stateroot(config_home.path(), user_home.path(), project.path())
+        // Match the controlled retry window used by digest_delivery fixtures;
+        // process startup on slow native filesystems may exceed the default 5s.
+        .env("STATEROOT_TEST_RETRY_DEBOUNCE_MS", "120000")
         .arg("resume")
         .assert()
         .success();

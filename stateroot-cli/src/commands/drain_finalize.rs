@@ -141,11 +141,22 @@ async fn advance_one(ctx: &Ctx, job: &mut BoundaryJob) -> Result<()> {
             //    only the automatic root (recorded by the engine and surfaced
             //    by `doctor`): the boundary still finalizes against the
             //    current tip instead of failing the whole finalize job.
+            let home = stateroot_core::harness_install::home_dir().map_err(anyhow::Error::msg)?;
+            let components = super::roots::integration_environment(ctx, &home);
+            let snap_context = stateroot_core::snap_context::SnapContext {
+                home,
+                harness: Some(job.harness.clone()),
+                session_id: Some(job.session_id.clone()),
+                transcript: job.transcript.clone(),
+                capture_watermark: job.capture_watermark.clone(),
+                artifact_refs: job.artifact_refs.clone(),
+                components,
+            };
             let root = match stateroot_core::roots::snap_if_changed(
                 &ctx.cwd,
                 &job.harness,
                 "auto: session boundary",
-                None,
+                Some(&snap_context),
             ) {
                 Ok(stateroot_core::roots::SnapOutcome::Created(manifest, _)) => manifest.id,
                 Ok(stateroot_core::roots::SnapOutcome::Unchanged { root }) => root,
@@ -239,14 +250,50 @@ pub fn report(project_dir: &Path) -> Vec<String> {
                 .unwrap_or_default()
         ));
     }
+    // Presentation grouping only (WS3 C2): dozens of identical parked rows
+    // must not bury the report. Every underlying job stays loadable by id
+    // (`stateroot handoff inspect --job <id>`); nothing is reclassified or
+    // removed here.
+    let mut groups: std::collections::BTreeMap<(String, String), Vec<&BoundaryJob>> =
+        Default::default();
     for job in attention {
-        lines.push(format!(
-            "  manual_attention: {} {} · attempt {} · last error: {}",
-            job.harness,
-            job.session_id,
-            job.attempt,
-            job.last_error.as_deref().unwrap_or("(none retained)")
-        ));
+        groups
+            .entry((
+                job.harness.clone(),
+                job.last_error
+                    .clone()
+                    .unwrap_or_else(|| "(none retained)".into()),
+            ))
+            .or_default()
+            .push(job);
+    }
+    for ((harness, error), grouped) in &groups {
+        let ids: Vec<&str> = grouped.iter().map(|j| j.id.as_str()).collect();
+        let shown = ids.len().min(3);
+        let id_list = format!(
+            "{}{}",
+            ids[..shown].join(", "),
+            if ids.len() > shown {
+                format!(" · +{} more", ids.len() - shown)
+            } else {
+                String::new()
+            }
+        );
+        if grouped.len() == 1 {
+            let job = grouped[0];
+            lines.push(format!(
+                "  manual_attention: {} {} · attempt {} · last error: {} · job: {}",
+                job.harness, job.session_id, job.attempt, error, job.id
+            ));
+        } else {
+            lines.push(format!(
+                "  manual_attention: {} ×{} · last error: {} · jobs: {}",
+                harness,
+                grouped.len(),
+                error,
+                id_list
+            ));
+        }
     }
     if !terminal.is_empty() {
         lines.push(format!("  complete: {}", terminal.len()));
@@ -255,4 +302,55 @@ pub fn report(project_dir: &Path) -> Vec<String> {
         lines.push("  no boundary jobs".to_string());
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    /// WS3 C2: dozens of identical parked rows collapse to one grouped line
+    /// with ids navigable; distinct errors stay separate. Presentation only
+    /// — the journal files are untouched.
+    #[test]
+    fn report_groups_identical_manual_attention_rows() {
+        let project = tempfile::tempdir().expect("project");
+        let dir = stateroot_core::local_store::root(project.path()).join("local/finalize-journal");
+        std::fs::create_dir_all(&dir).expect("journal dir");
+        let job = |id: &str, session: &str, error: Option<&str>| {
+            serde_json::json!({
+                "schema": "stateroot.finalize-journal.v1",
+                "id": id,
+                "harness": "codex",
+                "session_id": session,
+                "lineage_ref": "refs/stateroot/main",
+                "ingest_key": format!("k-{id}"),
+                "enqueued_at": "2026-10-09T00:00:00Z",
+                "phase": "queued",
+                "next_attempt_at": "2026-10-09T00:00:00Z",
+                "state": "manual_attention",
+                "last_error": error,
+            })
+        };
+        // 62 identical rows (the owner's real pile shape) + one distinct.
+        for i in 0..62 {
+            let body = job(&format!("job-{i:03}"), "sess-a", Some("transcript missing"));
+            std::fs::write(dir.join(format!("job-{i:03}.json")), body.to_string()).expect("write");
+        }
+        let other = job("job-x", "sess-b", Some("root write failed"));
+        std::fs::write(dir.join("job-x.json"), other.to_string()).expect("write");
+
+        let lines = super::report(project.path());
+        let attention: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("manual_attention"))
+            .collect();
+        assert_eq!(attention.len(), 2, "grouped: {lines:?}");
+        let grouped = attention
+            .iter()
+            .find(|l| l.contains("×62"))
+            .expect("grouped row");
+        assert!(grouped.contains("codex"), "{grouped}");
+        assert!(grouped.contains("transcript missing"), "{grouped}");
+        assert!(grouped.contains("job-"), "{grouped}");
+        assert!(grouped.contains("+59 more"), "{grouped}");
+        assert!(attention.iter().any(|l| l.contains("root write failed")));
+    }
 }

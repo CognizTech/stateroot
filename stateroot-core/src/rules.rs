@@ -110,6 +110,14 @@ pub fn project_root(project_dir: &Path) -> PathBuf {
     local_store::root(project_dir).join(RULES_DIR)
 }
 
+/// Serialize project rule synchronization with root materialization.
+pub fn write_guard(project_dir: &Path) -> std::io::Result<crate::safe_io::ResourceLock> {
+    crate::safe_io::ResourceLock::acquire(
+        local_store::root(project_dir).join("local/locks/rules.lock"),
+    )
+    .map_err(std::io::Error::other)
+}
+
 fn file_for(root: &Path, rule: &Rule) -> PathBuf {
     if rule.product {
         root.join("product-intent.md")
@@ -483,6 +491,7 @@ fn prune_missing(
 
 /// Seed product-intent and pull live harness rule files into the shared store.
 pub fn sync(project_dir: &Path, home: &Path) -> Result<SyncReport, RulesError> {
+    let _guard = write_guard(project_dir)?;
     let mut report = SyncReport {
         seeded: ensure_product_intent(home)?,
         ..SyncReport::default()

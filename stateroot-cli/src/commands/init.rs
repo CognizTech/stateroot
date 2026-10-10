@@ -133,6 +133,34 @@ pub async fn run(ctx: &Ctx, args: crate::cli::InitArgs) -> Result<()> {
     println!("  2. Ask: Save our work and write a StateRoot handoff for another agent.");
     println!("  3. Open another agent here and ask: Receive the StateRoot handoff and continue.");
     println!("Check integration setup with `stateroot doctor`. Demo: https://stateroot.dev");
+    // C3: post-init integration visibility — one compact typed summary plus
+    // specific repairs, never a wizard. Read-only; failures stay silent.
+    if let Ok(home) = super::install::home_dir() {
+        let health = stateroot_core::harness_install::health::integration_health(
+            &home,
+            Some(&dir),
+            &stateroot_core::skill_federation::binary_probe(
+                super::doctor::test_cmd_probes().as_deref(),
+            ),
+            &ctx.config.installed_harnesses,
+        );
+        if !health.harnesses.is_empty() {
+            println!("integrations: {}", health.summary_line());
+            for row in health
+                .harnesses
+                .iter()
+                .filter(|r| !r.problems.is_empty() && !r.repair.is_empty())
+                .take(5)
+            {
+                println!(
+                    "  {}: {} → {}",
+                    row.harness,
+                    row.problems.join("; "),
+                    row.repair[0]
+                );
+            }
+        }
+    }
     Ok(())
 }
 

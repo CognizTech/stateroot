@@ -1788,6 +1788,334 @@ pub fn health(project_dir: &Path) -> SpoolHealth {
     health
 }
 
+/// Read-only per-harness durable capture evidence for health surfaces (WS3
+/// C1): the latest durable capture timestamp per harness from the immutable
+/// v2 segments and the legacy v1 spool, plus every evidence file/line that
+/// exists but could not be read or parsed.
+///
+/// This is the ONLY capture evidence health may promote on — the authored
+/// episodic journal (checkpoints, hand-written notes) is never capture
+/// evidence, so an ordinary `stateroot checkpoint` or a forged "via hook"
+/// note can never read as a working integration. Unreadable/corrupt sources
+/// are diagnosed here — an unreadable store is NOT the same as no captures.
+#[derive(Debug, Clone, Default)]
+pub struct CaptureTrail {
+    /// Last durable capture ts per harness (max RFC3339 across the store).
+    pub last_by_harness: std::collections::BTreeMap<String, String>,
+    /// Evidence problems (bounded list): files that could not be read and
+    /// lines that could not be parsed. Empty means the store read clean.
+    pub diagnosed: Vec<String>,
+}
+
+/// Cap on recorded evidence problems; the store stays inspectable without
+/// flooding a health document with one row per torn line.
+const TRAIL_DIAGNOSED_MAX: usize = 16;
+
+/// Compute the durable capture trail. Read-only and BOUNDED: per-session
+/// durable frontier files (never the raw segment bodies) plus a tail-bounded
+/// window of the legacy spool — health is a compact projection, not a raw
+/// full-history inventory. Never writes, never rebuilds missing frontiers
+/// (recovery is an explicit action elsewhere): evidence that cannot speak
+/// for itself — an unreadable directory, an unsupported schema, an invalid
+/// timestamp, omitted history — is DIAGNOSED, never repaired, migrated,
+/// pruned, or silently treated as absent. The raw full inventory remains
+/// available through the read-only spool health surface.
+pub fn capture_trail(project_dir: &Path) -> CaptureTrail {
+    let mut trail = CaptureTrail::default();
+    let mut diagnosed_overflow = 0usize;
+    let mut note = |trail: &mut CaptureTrail, msg: String| {
+        if trail.diagnosed.len() < TRAIL_DIAGNOSED_MAX {
+            trail.diagnosed.push(msg);
+        } else {
+            diagnosed_overflow += 1;
+        }
+    };
+    let record = |trail: &mut CaptureTrail, harness: &str, ts: &str| {
+        if harness.is_empty() || ts.is_empty() {
+            return;
+        }
+        let slot = trail
+            .last_by_harness
+            .entry(harness.to_string())
+            .or_default();
+        if ts > slot.as_str() {
+            *slot = ts.to_string();
+        }
+    };
+
+    // Legacy v1 spool: a bounded TAIL window. The spool is append-only
+    // history that is never rotated, so the recent rows are the evidence;
+    // anything beyond the window is explicitly omitted, never scanned.
+    match bounded_tail(&legacy_spool_path(project_dir), LEGACY_TRAIL_WINDOW) {
+        Ok((text, truncated)) => {
+            if truncated {
+                note(
+                    &mut trail,
+                    format!(
+                        "spool/observations.jsonl exceeds the {} KiB evidence window — only the most recent rows inspected; earlier history omitted (preserved on disk, never modified)",
+                        LEGACY_TRAIL_WINDOW / 1024
+                    ),
+                );
+            }
+            for (idx, line) in text.lines().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let window_line = || format!("spool/observations.jsonl line {}", idx + 1);
+                match serde_json::from_str::<Value>(trimmed) {
+                    Ok(value) => {
+                        // Typed recognition: a legacy row is capture evidence
+                        // only when it is an untagged observation row with a
+                        // harness, an event, and a valid RFC3339 timestamp.
+                        // Authored prose, v2 rows, and schema-tagged rows of
+                        // any other shape are diagnosed — never promoted.
+                        match value.get("schema").and_then(|v| v.as_str()) {
+                            None => {}
+                            Some(OBSERVATION_SCHEMA_V2) => {
+                                note(
+                                    &mut trail,
+                                    format!(
+                                        "{}: v2 record in the legacy spool — read through its segment",
+                                        window_line()
+                                    ),
+                                );
+                                continue;
+                            }
+                            Some(_) => {
+                                note(
+                                    &mut trail,
+                                    format!(
+                                        "{}: unsupported schema — unrecognized record",
+                                        window_line()
+                                    ),
+                                );
+                                continue;
+                            }
+                        }
+                        let harness = str_field(&value, "harness");
+                        let event = str_field(&value, "event");
+                        let ts = str_field(&value, "ts");
+                        if harness.is_empty() || event.is_empty() {
+                            note(
+                                &mut trail,
+                                format!(
+                                    "{}: unrecognized legacy record (no harness/event) — not capture evidence",
+                                    window_line()
+                                ),
+                            );
+                            continue;
+                        }
+                        if ts.is_empty() || chrono::DateTime::parse_from_rfc3339(&ts).is_err() {
+                            note(
+                                &mut trail,
+                                format!(
+                                    "{}: legacy record without a valid RFC3339 timestamp — not capture evidence",
+                                    window_line()
+                                ),
+                            );
+                            continue;
+                        }
+                        record(&mut trail, &harness, &ts);
+                    }
+                    Err(err) => note(
+                        &mut trail,
+                        format!("{}: invalid JSON ({err})", window_line()),
+                    ),
+                }
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => note(
+            &mut trail,
+            format!("spool/observations.jsonl unreadable: {err}"),
+        ),
+    }
+
+    // Immutable v2 segments: each segment's small durable frontier carries
+    // the record count and last captured ts. The raw segment body is NEVER
+    // read here — the frontier is the durable boundary, and anything it
+    // cannot vouch for is diagnosed instead of scanned.
+    let dir = segments_dir(project_dir);
+    match std::fs::read_dir(&dir) {
+        Ok(entries) => {
+            let mut files: Vec<PathBuf> = Vec::new();
+            for (index, entry) in entries.enumerate() {
+                if index >= TRAIL_DIRECTORY_ENTRY_MAX {
+                    note(
+                        &mut trail,
+                        format!(
+                            "spool/segments exceeds the {TRAIL_DIRECTORY_ENTRY_MAX} directory-entry budget — remaining entries omitted from compact health and preserved on disk"
+                        ),
+                    );
+                    break;
+                }
+                match entry {
+                    Ok(entry) => {
+                        let path = entry.path();
+                        if path.extension().is_some_and(|x| x == "jsonl") {
+                            files.push(path);
+                        }
+                    }
+                    Err(err) => note(
+                        &mut trail,
+                        format!("spool/segments directory entry unreadable: {err}"),
+                    ),
+                }
+            }
+            files.sort();
+            if files.len() > SEGMENT_FRONTIER_SCAN_MAX {
+                note(
+                    &mut trail,
+                    format!(
+                        "spool/segments holds {} segment(s) — only the first {SEGMENT_FRONTIER_SCAN_MAX} frontiers inspected; the rest are omitted from compact health (read-only full inventory: spool health)",
+                        files.len()
+                    ),
+                );
+                files.truncate(SEGMENT_FRONTIER_SCAN_MAX);
+            }
+            for path in files {
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                let Some((harness, _)) = name.split_once("__").filter(|(h, _)| !h.is_empty())
+                else {
+                    note(
+                        &mut trail,
+                        format!(
+                            "spool/segments/{name}: unrecognized segment name (expected <harness>__<session>.jsonl) — evidence omitted"
+                        ),
+                    );
+                    continue;
+                };
+                let frontier = match bounded_metadata(&frontier_path(&path), 16 * 1024) {
+                    Ok(bytes) => bytes,
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                        note(
+                            &mut trail,
+                            format!(
+                                "spool/segments/{name}: no durable frontier — capture evidence omitted (recoverable via recover_session_frontier)"
+                            ),
+                        );
+                        continue;
+                    }
+                    Err(err) => {
+                        note(
+                            &mut trail,
+                            format!("spool/segments/{name}: frontier unreadable: {err}"),
+                        );
+                        continue;
+                    }
+                };
+                let frontier: SessionFrontier = match serde_json::from_slice(&frontier) {
+                    Ok(frontier) => frontier,
+                    Err(err) => {
+                        note(
+                            &mut trail,
+                            format!("spool/segments/{name}: frontier not parseable ({err})"),
+                        );
+                        continue;
+                    }
+                };
+                if frontier.schema != FRONTIER_SCHEMA_V1 {
+                    note(
+                        &mut trail,
+                        format!(
+                            "spool/segments/{name}: unsupported frontier schema — evidence omitted"
+                        ),
+                    );
+                    continue;
+                }
+                let claimed = if frontier.segment.is_empty() {
+                    name.as_str()
+                } else {
+                    frontier.segment.as_str()
+                };
+                if claimed != name {
+                    note(
+                        &mut trail,
+                        format!(
+                            "spool/segments/{name}: frontier claims segment {claimed} — evidence omitted"
+                        ),
+                    );
+                    continue;
+                }
+                // A replay-only/empty session holds no event evidence.
+                if frontier.records == 0 {
+                    continue;
+                }
+                let Some(ts) = frontier.last_ts.as_deref().filter(|ts| !ts.is_empty()) else {
+                    note(
+                        &mut trail,
+                        format!(
+                            "spool/segments/{name}: frontier records {} event(s) but has no last timestamp — evidence omitted",
+                            frontier.records
+                        ),
+                    );
+                    continue;
+                };
+                if chrono::DateTime::parse_from_rfc3339(ts).is_err() {
+                    note(
+                        &mut trail,
+                        format!(
+                            "spool/segments/{name}: frontier timestamp is not valid RFC3339 — evidence omitted"
+                        ),
+                    );
+                    continue;
+                }
+                record(&mut trail, harness, ts);
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => note(&mut trail, format!("spool/segments unreadable: {err}")),
+    }
+    if diagnosed_overflow > 0 {
+        trail.diagnosed.push(format!(
+            "… and {diagnosed_overflow} more evidence problem(s)"
+        ));
+    }
+    trail
+}
+
+/// Bounded tail window inspected from the legacy v1 spool for health
+/// evidence — the full file is append-only history and is never scanned.
+const LEGACY_TRAIL_WINDOW: u64 = 256 * 1024;
+
+/// Cap on per-session frontier files inspected for one trail; overflow is
+/// explicitly diagnosed as omitted (compact health, not a full inventory).
+const SEGMENT_FRONTIER_SCAN_MAX: usize = 1024;
+/// Bound names inspected as well as frontier bytes; non-segment entries
+/// must not turn the compact health projection into an unlimited listing.
+const TRAIL_DIRECTORY_ENTRY_MAX: usize = SEGMENT_FRONTIER_SCAN_MAX * 4;
+
+/// Read at most the LAST `budget` bytes of `path` as UTF-8 text. When the
+/// file is larger, the first partial line of the window is dropped and the
+/// result is flagged truncated — the caller diagnoses the omitted history.
+fn bounded_tail(path: &Path, budget: u64) -> std::io::Result<(String, bool)> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let truncated = len > budget;
+    if truncated {
+        file.seek(SeekFrom::Start(len - budget))?;
+    }
+    let mut bytes = Vec::new();
+    file.take(budget).read_to_end(&mut bytes)?;
+    let mut text = String::from_utf8(bytes)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    if truncated {
+        match text.find('\n') {
+            Some(pos) => {
+                text.drain(..=pos);
+            }
+            None => text.clear(),
+        }
+    }
+    Ok((text, truncated))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1876,6 +2204,426 @@ mod tests {
             source_status: "complete".into(),
             meta: None,
         }
+    }
+
+    #[test]
+    fn capture_trail_reads_durable_evidence_not_prose() {
+        let dir = project();
+        // Empty store: absent, and nothing diagnosed.
+        let trail = capture_trail(dir.path());
+        assert!(trail.last_by_harness.is_empty());
+        assert!(trail.diagnosed.is_empty());
+
+        // A real durable capture lands per harness.
+        capture(dir.path(), request("hook payload")).unwrap();
+        let trail = capture_trail(dir.path());
+        assert_eq!(
+            trail.last_by_harness.get("cursor").map(String::as_str),
+            Some("2026-10-08T06:00:00Z"),
+            "{:?}",
+            trail.last_by_harness
+        );
+        assert!(trail.diagnosed.is_empty(), "{:?}", trail.diagnosed);
+
+        // The compact trail reads the durable frontier, never the raw
+        // segment body: a torn append BEYOND the frontier does not move the
+        // durable evidence and is not re-inventoried here (the read-only
+        // raw inventory is spool health's job — see `health`).
+        let segment = segments_dir(dir.path()).join("cursor__s-1.jsonl");
+        let mut text = std::fs::read_to_string(&segment).unwrap();
+        text.push_str("{torn\n");
+        std::fs::write(&segment, text).unwrap();
+        let trail = capture_trail(dir.path());
+        assert_eq!(
+            trail.last_by_harness.get("cursor").map(String::as_str),
+            Some("2026-10-08T06:00:00Z"),
+            "the durable frontier still carries the capture: {:?}",
+            trail.last_by_harness
+        );
+        // …while the read-only raw inventory still sees the tear.
+        let health = health(dir.path());
+        assert!(
+            health
+                .corrupt
+                .iter()
+                .any(|c| c.file.contains("cursor__s-1.jsonl")),
+            "{:?}",
+            health.corrupt
+        );
+    }
+
+    #[test]
+    fn capture_trail_counts_legacy_rows_and_skips_replays() {
+        let dir = project();
+        let spool = legacy_spool_path(dir.path());
+        std::fs::create_dir_all(spool.parent().unwrap()).unwrap();
+        std::fs::write(
+            &spool,
+            "{\"ts\":\"2026-01-01T00:00:00Z\",\"harness\":\"kimi-code\",\"event\":\"stop\",\"text\":\"legacy\"}\nnot json\n",
+        )
+        .unwrap();
+        let trail = capture_trail(dir.path());
+        assert_eq!(
+            trail.last_by_harness.get("kimi-code").map(String::as_str),
+            Some("2026-01-01T00:00:00Z")
+        );
+        assert!(
+            trail
+                .diagnosed
+                .iter()
+                .any(|d| d.contains("observations.jsonl")),
+            "{:?}",
+            trail.diagnosed
+        );
+
+        // A replay sighting never moves a harness's last capture.
+        let mut replay = request("dup");
+        replay.event_identity = Some(("tool_use_id".into(), "t-1".into()));
+        capture(dir.path(), replay.clone()).unwrap();
+        let mut again = replay.clone();
+        again.ts = "2026-10-08T07:00:00Z".into();
+        let outcome = capture(dir.path(), again).unwrap();
+        assert_eq!(outcome.status, CaptureStatus::Replay);
+        let trail = capture_trail(dir.path());
+        assert_eq!(
+            trail.last_by_harness.get("cursor").map(String::as_str),
+            Some("2026-10-08T06:00:00Z"),
+            "replay must not advance the trail: {:?}",
+            trail.last_by_harness
+        );
+    }
+
+    #[test]
+    fn capture_trail_never_reads_raw_segment_bodies() {
+        // The compact trail is a frontier read: raw segment bodies can be
+        // complete garbage and the durable frontier evidence still flows —
+        // proof there is no full-history scan left in this path.
+        let dir = project();
+        capture(dir.path(), request("durable")).unwrap();
+        let segment = segments_dir(dir.path()).join("cursor__s-1.jsonl");
+        std::fs::write(&segment, "{total garbage\n").unwrap();
+        let trail = capture_trail(dir.path());
+        assert_eq!(
+            trail.last_by_harness.get("cursor").map(String::as_str),
+            Some("2026-10-08T06:00:00Z"),
+            "{:?}",
+            trail.last_by_harness
+        );
+        assert!(
+            trail.diagnosed.is_empty(),
+            "frontier evidence is complete — nothing to diagnose: {:?}",
+            trail.diagnosed
+        );
+    }
+
+    #[test]
+    fn capture_trail_diagnoses_missing_and_broken_frontiers() {
+        let dir = project();
+        let segments = segments_dir(dir.path());
+        std::fs::create_dir_all(&segments).unwrap();
+        // A segment with NO frontier: evidence omitted, diagnosed, never
+        // repaired or scanned (recovery is recover_session_frontier).
+        std::fs::write(segments.join("kimi__s-7.jsonl"), "{}\n").unwrap();
+        let trail = capture_trail(dir.path());
+        assert!(!trail.last_by_harness.contains_key("kimi"));
+        assert!(
+            trail
+                .diagnosed
+                .iter()
+                .any(|d| d.contains("kimi__s-7.jsonl") && d.contains("no durable frontier")),
+            "{:?}",
+            trail.diagnosed
+        );
+
+        // A corrupt frontier: diagnosed, not evidence.
+        std::fs::write(segments.join("cursor__s-2.jsonl"), "{}\n").unwrap();
+        std::fs::write(segments.join("cursor__s-2.frontier.json"), "{not json").unwrap();
+        let trail = capture_trail(dir.path());
+        assert!(!trail.last_by_harness.contains_key("cursor"));
+        assert!(
+            trail
+                .diagnosed
+                .iter()
+                .any(|d| d.contains("cursor__s-2.jsonl") && d.contains("not parseable")),
+            "{:?}",
+            trail.diagnosed
+        );
+
+        // An unsupported frontier schema: diagnosed, not evidence.
+        std::fs::write(segments.join("pi__s-1.jsonl"), "{}\n").unwrap();
+        std::fs::write(
+            segments.join("pi__s-1.frontier.json"),
+            serde_json::to_string(&json!({
+                "schema": "stateroot.observations.frontier.v0",
+                "segment": "pi__s-1.jsonl",
+                "records": 3,
+                "last_ts": "2026-10-08T06:00:00Z"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let trail = capture_trail(dir.path());
+        assert!(!trail.last_by_harness.contains_key("pi"));
+        assert!(
+            trail
+                .diagnosed
+                .iter()
+                .any(|d| d.contains("pi__s-1.jsonl") && d.contains("unsupported frontier schema")),
+            "{:?}",
+            trail.diagnosed
+        );
+    }
+
+    #[test]
+    fn capture_trail_validates_frontier_identity_and_timestamps() {
+        let dir = project();
+        let segments = segments_dir(dir.path());
+        std::fs::create_dir_all(&segments).unwrap();
+        // Frontier claiming a different segment file: omitted.
+        std::fs::write(segments.join("cursor__s-3.jsonl"), "{}\n").unwrap();
+        std::fs::write(
+            segments.join("cursor__s-3.frontier.json"),
+            serde_json::to_string(&json!({
+                "schema": FRONTIER_SCHEMA_V1,
+                "segment": "cursor__other.jsonl",
+                "records": 1,
+                "last_ts": "2026-10-08T06:00:00Z"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        // Frontier with records but an invalid timestamp: omitted.
+        std::fs::write(segments.join("kimi__s-8.jsonl"), "{}\n").unwrap();
+        std::fs::write(
+            segments.join("kimi__s-8.frontier.json"),
+            serde_json::to_string(&json!({
+                "schema": FRONTIER_SCHEMA_V1,
+                "segment": "kimi__s-8.jsonl",
+                "records": 2,
+                "last_ts": "yesterday-ish"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        // Frontier with records but NO timestamp: omitted.
+        std::fs::write(segments.join("pi__s-2.jsonl"), "{}\n").unwrap();
+        std::fs::write(
+            segments.join("pi__s-2.frontier.json"),
+            serde_json::to_string(&json!({
+                "schema": FRONTIER_SCHEMA_V1,
+                "segment": "pi__s-2.jsonl",
+                "records": 1
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        // A replay-only frontier (records 0) is honest absence, not a problem.
+        std::fs::write(segments.join("codex__s-1.jsonl"), "{}\n").unwrap();
+        std::fs::write(
+            segments.join("codex__s-1.frontier.json"),
+            serde_json::to_string(&json!({
+                "schema": FRONTIER_SCHEMA_V1,
+                "segment": "codex__s-1.jsonl",
+                "records": 0
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let trail = capture_trail(dir.path());
+        assert!(
+            trail.last_by_harness.is_empty(),
+            "{:?}",
+            trail.last_by_harness
+        );
+        assert!(
+            trail
+                .diagnosed
+                .iter()
+                .any(|d| d.contains("cursor__s-3.jsonl") && d.contains("claims segment")),
+            "{:?}",
+            trail.diagnosed
+        );
+        assert!(
+            trail
+                .diagnosed
+                .iter()
+                .any(|d| d.contains("kimi__s-8.jsonl") && d.contains("not valid RFC3339")),
+            "{:?}",
+            trail.diagnosed
+        );
+        assert!(
+            trail
+                .diagnosed
+                .iter()
+                .any(|d| d.contains("pi__s-2.jsonl") && d.contains("no last timestamp")),
+            "{:?}",
+            trail.diagnosed
+        );
+        assert!(
+            !trail.diagnosed.iter().any(|d| d.contains("codex__s-1")),
+            "replay-only frontier is not a problem: {:?}",
+            trail.diagnosed
+        );
+    }
+
+    #[test]
+    fn capture_trail_diagnoses_an_unreadable_segments_directory() {
+        // `segments` existing as a FILE makes read_dir fail with
+        // NotADirectory — an unreadable directory is diagnosed, distinct
+        // from an absent one (no spool at all says nothing).
+        let dir = project();
+        let spool = dir.path().join(".stateroot/spool");
+        std::fs::create_dir_all(&spool).unwrap();
+        std::fs::write(spool.join("segments"), "not a directory").unwrap();
+        let trail = capture_trail(dir.path());
+        assert!(trail.last_by_harness.is_empty());
+        assert!(
+            trail
+                .diagnosed
+                .iter()
+                .any(|d| d.contains("spool/segments unreadable")),
+            "{:?}",
+            trail.diagnosed
+        );
+    }
+
+    #[test]
+    fn capture_trail_legacy_rows_are_typed_and_bounded() {
+        let dir = project();
+        let spool = legacy_spool_path(dir.path());
+        std::fs::create_dir_all(spool.parent().unwrap()).unwrap();
+        std::fs::write(
+            &spool,
+            concat!(
+                // Real legacy capture row: evidence.
+                "{\"ts\":\"2026-01-01T00:00:00Z\",\"harness\":\"kimi-code\",\"event\":\"stop\",\"text\":\"legacy\"}\n",
+                // Authored prose carrying harness/ts but no event: NOT
+                // capture evidence — diagnosed unrecognized.
+                "{\"ts\":\"2026-01-02T00:00:00Z\",\"harness\":\"cursor\",\"note\":\"checkpoint via cursor hook\"}\n",
+                // Invalid timestamp: NOT evidence.
+                "{\"ts\":\"last tuesday\",\"harness\":\"pi\",\"event\":\"stop\"}\n",
+                // A v2-tagged row in the legacy file: diagnosed, read via segments.
+                "{\"schema\":\"stateroot.observation.v2\",\"ts\":\"2026-01-03T00:00:00Z\",\"harness\":\"codex\",\"event\":\"stop\"}\n",
+                // Any other schema tag: unsupported.
+                "{\"schema\":\"something.else.v9\",\"ts\":\"2026-01-04T00:00:00Z\",\"harness\":\"zero\",\"event\":\"stop\"}\n",
+            ),
+        )
+        .unwrap();
+        let trail = capture_trail(dir.path());
+        assert_eq!(
+            trail.last_by_harness.len(),
+            1,
+            "only the typed legacy capture counts: {:?}",
+            trail.last_by_harness
+        );
+        assert_eq!(
+            trail.last_by_harness.get("kimi-code").map(String::as_str),
+            Some("2026-01-01T00:00:00Z")
+        );
+        for needle in [
+            "no harness/event",
+            "valid RFC3339",
+            "v2 record in the legacy spool",
+            "unsupported schema",
+        ] {
+            assert!(
+                trail.diagnosed.iter().any(|d| d.contains(needle)),
+                "missing diagnosis {needle}: {:?}",
+                trail.diagnosed
+            );
+        }
+    }
+
+    #[test]
+    fn capture_trail_legacy_spool_reads_a_bounded_tail_window() {
+        // Oversized legacy spool: the OLDEST rows (including an authored
+        // harness/ts pair) fall outside the evidence window — omitted with
+        // an explicit diagnosis, and the recent rows still produce evidence.
+        let dir = project();
+        let spool = legacy_spool_path(dir.path());
+        std::fs::create_dir_all(spool.parent().unwrap()).unwrap();
+        let mut body = String::new();
+        body.push_str(
+            "{\"ts\":\"2020-01-01T00:00:00Z\",\"harness\":\"ancient\",\"event\":\"stop\"}\n",
+        );
+        while body.len() < LEGACY_TRAIL_WINDOW as usize + 4096 {
+            body.push_str(&format!("{{\"ts\":\"2021-01-01T00:00:00Z\",\"harness\":\"filler\",\"event\":\"stop\",\"text\":\"{}\"}}\n", "x".repeat(900)));
+        }
+        body.push_str(
+            "{\"ts\":\"2026-02-02T00:00:00Z\",\"harness\":\"recent\",\"event\":\"stop\"}\n",
+        );
+        std::fs::write(&spool, body).unwrap();
+        let trail = capture_trail(dir.path());
+        assert_eq!(
+            trail.last_by_harness.get("recent").map(String::as_str),
+            Some("2026-02-02T00:00:00Z"),
+            "{:?}",
+            trail.last_by_harness
+        );
+        assert!(
+            !trail.last_by_harness.contains_key("ancient"),
+            "history beyond the bounded window is omitted: {:?}",
+            trail.last_by_harness
+        );
+        assert!(
+            trail
+                .diagnosed
+                .iter()
+                .any(|d| d.contains("evidence window") && d.contains("omitted")),
+            "{:?}",
+            trail.diagnosed
+        );
+    }
+
+    #[test]
+    fn capture_trail_diagnoses_segment_overflow_and_bad_names() {
+        let dir = project();
+        let segments = segments_dir(dir.path());
+        std::fs::create_dir_all(&segments).unwrap();
+        // A segment file whose name does not encode a harness.
+        std::fs::write(segments.join("stray.jsonl"), "{}\n").unwrap();
+        let trail = capture_trail(dir.path());
+        assert!(
+            trail
+                .diagnosed
+                .iter()
+                .any(|d| d.contains("stray.jsonl") && d.contains("unrecognized segment name")),
+            "{:?}",
+            trail.diagnosed
+        );
+        // More segments than the compact scan budget: the overflow is
+        // diagnosed as omitted, not silently dropped.
+        for i in 0..=SEGMENT_FRONTIER_SCAN_MAX {
+            std::fs::write(segments.join(format!("overflow__s-{i}.jsonl")), "{}\n").unwrap();
+        }
+        let trail = capture_trail(dir.path());
+        assert!(
+            trail
+                .diagnosed
+                .iter()
+                .any(|d| d.contains("frontiers inspected") && d.contains("omitted")),
+            "{:?}",
+            trail.diagnosed
+        );
+    }
+
+    #[test]
+    fn capture_trail_bounds_directory_entries_not_only_frontier_reads() {
+        let dir = project();
+        let segments = segments_dir(dir.path());
+        std::fs::create_dir_all(&segments).unwrap();
+        for index in 0..=TRAIL_DIRECTORY_ENTRY_MAX {
+            std::fs::write(segments.join(format!("unrelated-{index}.tmp")), []).unwrap();
+        }
+        let trail = capture_trail(dir.path());
+        assert!(trail.last_by_harness.is_empty());
+        assert!(trail.diagnosed.iter().any(|message| {
+            message.contains("directory-entry budget") && message.contains("omitted")
+        }));
+        assert_eq!(
+            std::fs::read_dir(&segments).unwrap().count(),
+            TRAIL_DIRECTORY_ENTRY_MAX + 1
+        );
     }
 
     #[test]

@@ -24,6 +24,17 @@ pub const CANDIDATES_DIR: &str = "_candidates";
 /// Rejected archive (audit trail, never deleted).
 pub const REJECTED_FILE: &str = "_rejected.md";
 
+/// Serialize this layer's read/modify/write with root materialization.
+pub fn write_guard(
+    project_dir: &Path,
+    home: &Path,
+    scope: &str,
+) -> std::io::Result<crate::safe_io::ResourceLock> {
+    let root = scope_root(project_dir, home, scope);
+    crate::safe_io::ResourceLock::acquire(root.parent().unwrap().join("local/locks/learnings.lock"))
+        .map_err(std::io::Error::other)
+}
+
 /// Errors from the learnings store.
 #[derive(Debug, thiserror::Error)]
 pub enum LearningsError {
@@ -279,6 +290,7 @@ pub fn append_candidate(
     scope: &str,
     learning: &Learning,
 ) -> Result<bool, LearningsError> {
+    let _guard = write_guard(project_dir, home, scope)?;
     let existing = read_scope(project_dir, home, scope);
     let normalized = normalize(&learning.statement);
     if existing
@@ -311,6 +323,7 @@ pub fn activate_learning(
     category: &str,
     sources: &str,
 ) -> Result<(String, bool), LearningsError> {
+    let _guard = write_guard(project_dir, home, scope)?;
     let normalized = normalize(statement);
     let existing = read_scope(project_dir, home, scope);
     if let Some(prior) = existing
@@ -318,7 +331,7 @@ pub fn activate_learning(
         .find(|learning| normalize(&learning.statement) == normalized)
     {
         if prior.status != "active" {
-            let _ = promote(project_dir, home, scope, &prior.id)?;
+            let _ = promote_locked(project_dir, home, scope, &prior.id)?;
         }
         return Ok((prior.id.clone(), false));
     }
@@ -344,6 +357,16 @@ pub fn activate_learning(
 /// Promote a candidate to active (proposal-approved): move the bullet from
 /// `_candidates/<cat>.md` into `<cat>.md` with `status: active`.
 pub fn promote(
+    project_dir: &Path,
+    home: &Path,
+    scope: &str,
+    id: &str,
+) -> Result<bool, LearningsError> {
+    let _guard = write_guard(project_dir, home, scope)?;
+    promote_locked(project_dir, home, scope, id)
+}
+
+fn promote_locked(
     project_dir: &Path,
     home: &Path,
     scope: &str,
@@ -401,6 +424,7 @@ pub fn reject(
     scope: &str,
     id: &str,
 ) -> Result<bool, LearningsError> {
+    let _guard = write_guard(project_dir, home, scope)?;
     let root = scope_root(project_dir, home, scope);
     let candidates = read_dir(&root.join(CANDIDATES_DIR), Some("candidate"));
     let Some(learning) = candidates
@@ -430,6 +454,7 @@ pub fn edit(
     id: &str,
     statement: &str,
 ) -> Result<bool, LearningsError> {
+    let _guard = write_guard(project_dir, home, scope)?;
     let root = scope_root(project_dir, home, scope);
     for (dir, status_override) in [
         (root.clone(), None),

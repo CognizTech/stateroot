@@ -621,20 +621,73 @@ fn capture_outcome_root(
     harness: &str,
     attempt: u64,
 ) {
-    let Some((path, mut record)) = load_record(record_root, record_id) else {
+    capture_outcome_root_with_guard(work_dir, record_root, record_id, harness, attempt, None);
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_AFTER_OUTCOME_SNAPSHOT: std::cell::RefCell<Option<OutcomeCaptureObserver>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+type OutcomeCaptureObserver = Box<dyn FnOnce(&Path)>;
+
+fn capture_outcome_root_with_guard(
+    work_dir: &Path,
+    record_root: &Path,
+    record_id: &str,
+    harness: &str,
+    attempt: u64,
+    held_key_guard: Option<&stateroot_core::safe_io::ResourceLock>,
+) {
+    let Some((_, captured)) = load_record(record_root, record_id) else {
         return;
     };
     // Attempt guard (see finalize): a re-reserved record belongs to a newer
     // attempt; the older attempt's root pointer must not clobber it.
-    if record.get("attempt").and_then(Value::as_u64) != Some(attempt) {
+    if captured.get("attempt").and_then(Value::as_u64) != Some(attempt) {
         return;
     }
-    match stateroot_core::roots::snap_if_changed(
-        work_dir,
-        harness,
-        "auto: delegation outcome",
-        None,
-    ) {
+    let result =
+        stateroot_core::roots::snap_if_changed(work_dir, harness, "auto: delegation outcome", None);
+    #[cfg(test)]
+    if let Some(observer) = TEST_AFTER_OUTCOME_SNAPSHOT.with(|slot| slot.borrow_mut().take()) {
+        observer(record_root);
+    }
+    // Snapshotting can be slow. Serialize only the final read/check/save with
+    // retry reservations; cancellation already owns this same key guard.
+    let _guard = if held_key_guard.is_none() {
+        match key_lock(&delegations_dir(record_root), record_id) {
+            Ok(guard) => Some(guard),
+            Err(error) => {
+                tracing::warn!("delegation {record_id} outcome capture was not attached: {error}");
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let Some((path, mut record)) = load_record(record_root, record_id) else {
+        return;
+    };
+    if [
+        "id",
+        "attempt",
+        "pid",
+        "process_namespace",
+        "fingerprint",
+        "ts",
+        "log",
+        "harness",
+        "command",
+        "outcome",
+        "status",
+    ]
+    .iter()
+    .any(|field| record.get(*field) != captured.get(*field))
+    {
+        return;
+    }
+    match result {
         Ok(stateroot_core::roots::SnapOutcome::Created(manifest, _)) => {
             record["outcome_root"] = json!(manifest.id);
             append_event(&mut record, "capture", "worktree captured to fork lineage");
@@ -706,6 +759,7 @@ fn finalize(
     duration_ms: u128,
     log_append: &str,
 ) -> Result<()> {
+    let _guard = key_lock(&delegations_dir(record_root), record_id)?;
     let Some((path, mut record)) = load_record(record_root, record_id) else {
         anyhow::bail!("worker record `{record_id}` is gone — cannot finalize");
     };
@@ -1071,7 +1125,14 @@ fn cancel(ctx: &Ctx, id: &str) -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| ctx.cwd.clone());
     let cancel_attempt = record.get("attempt").and_then(Value::as_u64).unwrap_or(1);
-    capture_outcome_root(&work_dir, &ctx.cwd, &record_id, &harness, cancel_attempt);
+    capture_outcome_root_with_guard(
+        &work_dir,
+        &ctx.cwd,
+        &record_id,
+        &harness,
+        cancel_attempt,
+        Some(&_guard),
+    );
     let Some((path, mut record)) = load_record(&ctx.cwd, &record_id) else {
         anyhow::bail!("delegation record `{record_id}` vanished mid-cancel");
     };
@@ -1169,6 +1230,155 @@ pub(crate) fn recent_delegations(
 mod tests {
     use super::*;
     use stateroot_core::skill_federation::build_launch_argv_from_spec;
+
+    #[test]
+    fn outcome_capture_never_overwrites_a_replaced_attempt_or_worker() {
+        for replacement in [
+            json!({"attempt": 2, "pid": 202, "outcome": "failed"}),
+            json!({"attempt": 1, "pid": 202, "outcome": "failed"}),
+            json!({"attempt": 1, "pid": 101, "process_namespace": "another-host", "outcome": "failed"}),
+        ] {
+            let project = tempfile::tempdir().unwrap();
+            let dir = delegations_dir(project.path());
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(project.path().join("work.txt"), "captured work").unwrap();
+            let record = json!({"id":"capture-race","attempt":1,"pid":101,"process_namespace":"fixture-host","fingerprint":{"task":"fixture"},"ts":"first","log":"old.log","harness":"codex","command":"codex","outcome":"failed","events":[]});
+            write_record(&dir, &record).unwrap();
+            let mut newer = record.clone();
+            for (key, value) in replacement.as_object().unwrap() {
+                newer[key] = value.clone();
+            }
+            append_event(&mut newer, "reserve", "newer record must survive");
+            let expected = newer.clone();
+            TEST_AFTER_OUTCOME_SNAPSHOT.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move |project| {
+                    let dir = delegations_dir(project);
+                    let _guard = key_lock(&dir, "capture-race").unwrap();
+                    write_record(&dir, &newer).unwrap();
+                }));
+            });
+            capture_outcome_root(project.path(), project.path(), "capture-race", "codex", 1);
+            assert_eq!(
+                load_record(project.path(), "capture-race").unwrap().1,
+                expected
+            );
+            if expected["attempt"] == 2 {
+                finalize(
+                    project.path(),
+                    "capture-race",
+                    1,
+                    "failed",
+                    Some(1),
+                    0,
+                    "old completion\n",
+                )
+                .unwrap();
+                assert_eq!(
+                    load_record(project.path(), "capture-race").unwrap().1,
+                    expected
+                );
+                assert!(
+                    !project.path().join("old.log").exists(),
+                    "superseded completion must not append to the old log"
+                );
+            }
+            assert!(stateroot_core::roots::latest_root(project.path()).unwrap().is_some(), "captured work must remain in immutable lineage even when its old record was superseded");
+        }
+    }
+
+    #[test]
+    fn outcome_capture_appends_to_fresh_history_for_the_same_worker() {
+        let project = tempfile::tempdir().unwrap();
+        let dir = delegations_dir(project.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(project.path().join("work.txt"), "captured work").unwrap();
+        let record = json!({"id":"capture-history","attempt":1,"pid":101,"process_namespace":"fixture-host","outcome":"failed","events":[]});
+        write_record(&dir, &record).unwrap();
+        TEST_AFTER_OUTCOME_SNAPSHOT.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move |project| {
+                let dir = delegations_dir(project);
+                let _guard = key_lock(&dir, "capture-history").unwrap();
+                let (_, mut fresh) = load_record(project, "capture-history").unwrap();
+                append_event(&mut fresh, "observation", "arrived while capturing");
+                fresh["retained_context"] = json!("preserve this");
+                write_record(&dir, &fresh).unwrap();
+            }));
+        });
+        capture_outcome_root(
+            project.path(),
+            project.path(),
+            "capture-history",
+            "codex",
+            1,
+        );
+        let (_, captured) = load_record(project.path(), "capture-history").unwrap();
+        assert_eq!(captured["outcome"], "failed");
+        assert_eq!(captured["retained_context"], "preserve this");
+        assert_eq!(captured["events"][0]["event"], "observation");
+        assert_eq!(captured["events"][1]["event"], "capture");
+        assert_eq!(
+            captured["outcome_root"].as_str(),
+            stateroot_core::roots::latest_root(project.path())
+                .unwrap()
+                .as_deref()
+        );
+        capture_outcome_root(
+            &project.path().join("work.txt"),
+            project.path(),
+            "capture-history",
+            "codex",
+            1,
+        );
+        let (_, failed_capture) = load_record(project.path(), "capture-history").unwrap();
+        assert_eq!(failed_capture["outcome"], "failed");
+        assert_eq!(failed_capture["outcome_root"], captured["outcome_root"]);
+        assert_eq!(
+            failed_capture["events"].as_array().unwrap().last().unwrap()["event"],
+            "capture-error"
+        );
+    }
+
+    #[test]
+    fn outcome_capture_reuses_cancel_guard_and_does_not_save_when_unlocked_capture_cannot_lock() {
+        let project = tempfile::tempdir().unwrap();
+        let dir = delegations_dir(project.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(project.path().join("work.txt"), "cancelled work").unwrap();
+        let record = json!({"id":"capture-locked","attempt":1,"pid":101,"process_namespace":"fixture-host","outcome":"cancelling","events":[]});
+        write_record(&dir, &record).unwrap();
+        let guard = key_lock(&dir, "capture-locked").unwrap();
+        assert!(finalize(
+            project.path(),
+            "capture-locked",
+            1,
+            "failed",
+            Some(1),
+            0,
+            "must not append\n"
+        )
+        .is_err());
+        assert_eq!(
+            load_record(project.path(), "capture-locked").unwrap().1,
+            record
+        );
+        capture_outcome_root(project.path(), project.path(), "capture-locked", "codex", 1);
+        assert_eq!(
+            load_record(project.path(), "capture-locked").unwrap().1,
+            record,
+            "lock failure must never save the stale record"
+        );
+        capture_outcome_root_with_guard(
+            project.path(),
+            project.path(),
+            "capture-locked",
+            "codex",
+            1,
+            Some(&guard),
+        );
+        let (_, captured) = load_record(project.path(), "capture-locked").unwrap();
+        assert_eq!(captured["outcome"], "cancelling");
+        assert!(captured["outcome_root"].is_string());
+    }
 
     #[test]
     fn depth_parsing_defaults_to_zero() {

@@ -36,6 +36,9 @@ pub const MAX_ATTEMPTS: u32 = 10;
 /// One session-boundary job.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BoundaryJob {
+    /// Explicit author-context references frozen at enqueue, not inventory.
+    #[serde(default)]
+    pub artifact_refs: Vec<crate::fidelity::ArtifactRef>,
     /// Boundary event occurrence identity (not merely session identity).
     #[serde(default)]
     pub occurrence: String,
@@ -202,6 +205,15 @@ pub fn enqueue_with_capture(
     }
     let now = now_rfc3339();
     let job = BoundaryJob {
+        artifact_refs: crate::harness_install::home_dir()
+            .ok()
+            .and_then(|home| {
+                local_store::read_handoff_local(project_dir)
+                    .ok()
+                    .flatten()
+                    .map(|packet| crate::fidelity::boundary_references(project_dir, &home, &packet))
+            })
+            .unwrap_or_default(),
         occurrence: occurrence.to_string(),
         project_path: project_dir.to_string_lossy().into_owned(),
         capture_watermark,

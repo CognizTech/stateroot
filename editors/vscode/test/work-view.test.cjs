@@ -67,6 +67,19 @@ const BASE = {
   integrationStale: false,
 };
 
+test("lineage receipt and fidelity actions preserve full IDs and render CLI provenance", () => {
+  const { panel, posted, push } = loadWorkbench();
+  const id = "a".repeat(40);
+  const html = push({ ...BASE, tab: "lineage", rootA: id, roots: [{ id }], compareText: '{"activity":{"provenance":"author_statement"},"coverage":"unknown"}' });
+  assert.ok(html.includes(id), "full root remains available in tooltip");
+  assert.ok(html.includes("author_statement"));
+  for (const act of ["receipt", "fidelity", "openOriginal", "openSession", "openEvent"]) {
+    assert.ok(html.includes(`data-act="${act}"`));
+    panel.listeners.click({ target: { nodeType: 1, closest: () => ({ getAttribute: (key) => key === "data-act" ? act : null }) } });
+    assert.equal(posted.at(-1).type, act);
+  }
+});
+
 const ATTENTION_ATTEMPT = {
   schema_version: "stateroot.merge-attempt.v1",
   id: "ma-attn-1",

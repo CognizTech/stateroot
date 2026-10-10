@@ -66,7 +66,8 @@ pub struct HookTarget {
 }
 
 /// Whether this harness can inject identity into the model automatically.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DeliveryTier {
     /// Session-start and/or first-prompt injects identity into model context.
     Automatic,

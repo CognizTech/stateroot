@@ -1963,7 +1963,16 @@ pub fn sync_project(
     options: &SyncOptions,
     home: Option<&Path>,
 ) -> Result<Vec<SyncAction>, String> {
+    let _guard = write_guard(project_dir)?;
     sync_scoped(Some(project_dir), options, home)
+}
+
+/// Project portable package/index RMW shares the root adoption resource.
+pub fn write_guard(project_dir: &Path) -> Result<crate::safe_io::ResourceLock, String> {
+    crate::safe_io::ResourceLock::acquire(
+        crate::local_store::root(project_dir).join("local/locks/skills.lock"),
+    )
+    .map_err(|error| error.to_string())
 }
 
 /// Synchronize only user-global skill roots.
@@ -2402,6 +2411,11 @@ pub fn activate_skill(
     scope: &str,
     slug: &str,
 ) -> Result<bool, String> {
+    let _guard = if scope == "user" {
+        None
+    } else {
+        Some(write_guard(project_dir)?)
+    };
     let root = if scope == "user" {
         home.join(".stateroot/skills")
     } else {

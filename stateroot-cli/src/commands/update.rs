@@ -714,10 +714,18 @@ pub async fn download_and_install(ctx: &Ctx, info: &ReleaseInfo) -> anyhow::Resu
 /// spawns it. (The red-green farce of 2026-09-03/04: auto-update ate the
 /// binary under test and every sweep measured a different build.)
 fn is_cargo_build_artifact(exe: &Path) -> bool {
-    exe.components().any(|c| c.as_os_str() == "target")
+    let conventional = exe.components().any(|c| c.as_os_str() == "target")
         && exe
             .components()
-            .any(|c| c.as_os_str() == "debug" || c.as_os_str() == "release")
+            .any(|c| c.as_os_str() == "debug" || c.as_os_str() == "release");
+    conventional
+        || exe.ancestors().any(|directory| {
+            directory
+                .file_name()
+                .is_some_and(|name| name == "debug" || name == "release")
+                && directory.join(".fingerprint").is_dir()
+                && directory.join("deps").is_dir()
+        })
 }
 
 /// [`download_and_install`] with a quiet switch for the background path
@@ -2050,6 +2058,18 @@ mod tests {
         assert!(!is_cargo_build_artifact(Path::new(
             "/home/dev/.local/bin/stateroot"
         )));
+        // CARGO_TARGET_DIR need not contain a directory named `target`.
+        let external = tempfile::tempdir().unwrap();
+        let profile = external.path().join("external-cache").join("debug");
+        std::fs::create_dir_all(profile.join(".fingerprint")).unwrap();
+        std::fs::create_dir_all(profile.join("deps")).unwrap();
+        assert!(is_cargo_build_artifact(&profile.join("stateroot")));
+        assert!(is_cargo_build_artifact(
+            &profile.join("deps").join("stateroot-test")
+        ));
+        assert!(!is_cargo_build_artifact(
+            &external.path().join("installed").join("stateroot")
+        ));
     }
 
     #[test]

@@ -696,6 +696,7 @@ pub fn sync(
     project_dir: Option<&Path>,
     options: &SyncOptions,
 ) -> Result<Vec<SyncAction>, String> {
+    let _guard = project_dir.map(write_guard).transpose()?;
     let home = match home {
         Some(path) => path.to_path_buf(),
         None => home_dir()?,
@@ -712,6 +713,14 @@ pub fn sync(
         )?);
     }
     Ok(actions)
+}
+
+/// Project tool declarations/projection ledger use a checkout-local lock.
+pub fn write_guard(project_dir: &Path) -> Result<crate::safe_io::ResourceLock, String> {
+    crate::safe_io::ResourceLock::acquire(
+        crate::local_store::root(project_dir).join("local/locks/tools.lock"),
+    )
+    .map_err(|error| error.to_string())
 }
 
 /// Scopes whose canonical stores participate for this invocation.
@@ -732,6 +741,7 @@ pub fn remove_server(
     project_dir: Option<&Path>,
     name: &str,
 ) -> Result<Vec<SyncAction>, String> {
+    let _guard = project_dir.map(write_guard).transpose()?;
     let home = match home {
         Some(path) => path.to_path_buf(),
         None => home_dir()?,
@@ -782,6 +792,7 @@ pub fn accept_theirs(
     name: &str,
     from: Option<&str>,
 ) -> Result<Vec<SyncAction>, String> {
+    let _guard = project_dir.map(write_guard).transpose()?;
     let home = match home {
         Some(path) => path.to_path_buf(),
         None => home_dir()?,
