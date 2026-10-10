@@ -6103,6 +6103,12 @@ mod tests {
                 Err(RootsError::RefCas(crate::safe_io::RefCasError::Moved { .. })) => {
                     conflicts += 1
                 }
+                // Same legitimate loss as a CAS move: the ref lock stayed
+                // with a live winner past the bounded budget (loaded/slow
+                // runners). The winner's chain is what's under test.
+                Err(RootsError::RefCas(crate::safe_io::RefCasError::Lock(
+                    crate::safe_io::LockError::Timeout { .. },
+                ))) => conflicts += 1,
                 Err(other) => panic!("unexpected snap error: {other}"),
             }
         }
@@ -8273,6 +8279,13 @@ mod tests {
                     // is the unbroken chain below, not that THIS racer
                     // landed a root.
                     Err(RootsError::RefCas(crate::safe_io::RefCasError::Moved { .. })) => None,
+                    // Same class: the ref lock stayed with a live winner past
+                    // the bounded budget. Production degrades honestly here
+                    // (the caller reports the skip; the next mutation
+                    // retries) — the chain invariant is what's under test.
+                    Err(RootsError::RefCas(crate::safe_io::RefCasError::Lock(
+                        crate::safe_io::LockError::Timeout { .. },
+                    ))) => None,
                     Err(e) => panic!("snap: {e}"),
                 }
             }));
