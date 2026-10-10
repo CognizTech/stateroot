@@ -375,6 +375,16 @@ calls. `stateroot status` renders the same projection (human or `--json`).
 
 ## `stateroot handoff` — write flags and accept gates
 
+`handoff list` shows each distinct packet's full body SHA256, with only the
+exact current packet pinned and marked. Identical copies from merged forks
+are collapsed in this read view; immutable history files are unchanged.
+`handoff show <seq>` works when that number identifies one distinct packet.
+If fork histories contain different packets with the same sequence, it
+refuses to guess and lists exact `handoff show --id <SHA256>` selectors with
+their provenance. The selector reuses the acceptance body hash below, works
+for legacy packets, and stays unchanged by acceptance/checkpoint bookkeeping.
+Omitting both selectors still shows the current packet.
+
 `handoff write` owns the packet envelope (schema, sequence, provenance,
 timestamps); the author owns the content. Beyond the core fields, two
 structured channels carry what prose blurs:

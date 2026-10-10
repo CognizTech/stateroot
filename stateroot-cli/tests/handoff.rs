@@ -207,6 +207,167 @@ fn successive_handoffs_advance_current_and_preserve_distinct_history() {
 }
 
 #[test]
+fn merged_history_requires_exact_identity_and_marks_only_the_current_packet() {
+    use sha2::Digest as _;
+
+    let (config, home, project) = project();
+    for task in ["original historical task", "unique newer task"] {
+        stateroot(config.path(), home.path(), project.path())
+            .args([
+                "handoff",
+                "write",
+                "--from",
+                "codex",
+                "--no-plan",
+                "--objective",
+                task,
+                "--task",
+                task,
+                "--context-summary",
+                "Historical fixture evidence retained for identity checks.",
+            ])
+            .assert()
+            .success();
+    }
+    let original = history_packets(project.path())
+        .into_iter()
+        .find(|packet| packet["seq"] == 1)
+        .expect("original packet");
+    let original_id = format!(
+        "{:x}",
+        sha2::Sha256::digest(serde_json::to_vec(&original).unwrap())
+    );
+    let mut fork = original.clone();
+    fork["objective"] = json!("different fork task");
+    fork["task"] = json!("different fork task");
+    fork["fork_id"] = json!("sibling-fork");
+    fork["created_at"] = json!("2099-01-01T00:00:00Z");
+    let fork_id = format!(
+        "{:x}",
+        sha2::Sha256::digest(serde_json::to_vec(&fork).unwrap())
+    );
+    write_json(
+        project.path(),
+        ".stateroot/handoffs/history/2099-fork.json",
+        &fork,
+    );
+    write_json(
+        project.path(),
+        ".stateroot/handoffs/history/2098-identical-copy.json",
+        &original,
+    );
+    let mut restored_current = original.clone();
+    restored_current["accepted_by"] = json!(["kimi"]);
+    restored_current["acceptances"] = json!([{"by":"kimi","body_sha256":original_id}]);
+    restored_current["last_activity"] = json!({"at":"later checkpoint"});
+    write_json(
+        project.path(),
+        ".stateroot/handoffs/current.json",
+        &restored_current,
+    );
+    let history_dir = project.path().join(".stateroot/handoffs/history");
+    let history_before: std::collections::BTreeMap<_, _> = std::fs::read_dir(&history_dir)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            let bytes = std::fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect();
+    let current_before =
+        std::fs::read(project.path().join(".stateroot/handoffs/current.json")).unwrap();
+
+    let list = stateroot(config.path(), home.path(), project.path())
+        .args(["handoff", "list"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list = String::from_utf8(list).unwrap();
+    assert_eq!(list.matches("← current").count(), 1, "{list}");
+    let first = list.lines().nth(1).unwrap();
+    assert!(
+        first.contains(&original_id) && first.contains("← current"),
+        "{list}"
+    );
+    assert_eq!(
+        list.lines()
+            .filter(|line| line.split_whitespace().next() == Some("1"))
+            .count(),
+        2
+    );
+    assert!(list.contains(&fork_id));
+
+    let ambiguous = stateroot(config.path(), home.path(), project.path())
+        .args(["handoff", "show", "1"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    assert!(
+        ambiguous.stdout.is_empty(),
+        "must not render a guessed packet"
+    );
+    let error = String::from_utf8(ambiguous.stderr).unwrap();
+    assert!(error.contains("ambiguous (2 distinct packets)"), "{error}");
+    assert!(error.contains(&original_id) && error.contains(&fork_id));
+    assert!(error.contains("fork=sibling-fork"));
+    for (id, expected, other) in [
+        (
+            &original_id,
+            "original historical task",
+            "different fork task",
+        ),
+        (&fork_id, "different fork task", "original historical task"),
+    ] {
+        let output = stateroot(config.path(), home.path(), project.path())
+            .args(["handoff", "show", "--id", id])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let output = String::from_utf8(output).unwrap();
+        assert!(
+            output.contains(expected) && !output.contains(other),
+            "{output}"
+        );
+    }
+    stateroot(config.path(), home.path(), project.path())
+        .args(["handoff", "show", "2"])
+        .assert()
+        .success();
+    stateroot(config.path(), home.path(), project.path())
+        .args(["handoff", "show"])
+        .assert()
+        .success();
+    for id in ["short", "../history", &"0".repeat(64), &"z".repeat(64)] {
+        stateroot(config.path(), home.path(), project.path())
+            .args(["handoff", "show", "--id", id])
+            .assert()
+            .failure();
+    }
+    stateroot(config.path(), home.path(), project.path())
+        .args(["handoff", "show", "1", "--id", &original_id])
+        .assert()
+        .failure();
+    let history_after: std::collections::BTreeMap<_, _> = std::fs::read_dir(history_dir)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            let bytes = std::fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect();
+    assert_eq!(history_before, history_after);
+    assert_eq!(
+        current_before,
+        std::fs::read(project.path().join(".stateroot/handoffs/current.json")).unwrap()
+    );
+}
+
+#[test]
 fn latest_matching_native_session_enriches_without_other_harness_or_invention() {
     let (config, home, project) = project();
     write_rollout(

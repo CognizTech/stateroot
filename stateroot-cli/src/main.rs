@@ -213,7 +213,9 @@ async fn main() -> anyhow::Result<()> {
                 .await?
             }
             HandoffAction::List => commands::handoff::list(&ctx).await?,
-            HandoffAction::Show { seq } => commands::handoff::show(&ctx, seq).await?,
+            HandoffAction::Show { seq, id } => {
+                commands::handoff::show(&ctx, seq, id.as_deref()).await?
+            }
             HandoffAction::Accept {
                 by,
                 operation_id,

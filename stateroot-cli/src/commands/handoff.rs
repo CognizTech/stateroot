@@ -1626,34 +1626,49 @@ pub async fn accept(
     Ok(())
 }
 
+/// Identical history copies can arrive through multiple forks. Collapse only
+/// the read view, using the existing acceptance hash; never rewrite history.
+fn distinct_history_packets(packets: Vec<Value>) -> Vec<(String, Value)> {
+    let mut seen = std::collections::BTreeSet::new();
+    packets
+        .into_iter()
+        .filter_map(|packet| {
+            let id = handoff_body_sha256(&packet);
+            seen.insert(id.clone()).then_some((id, packet))
+        })
+        .collect()
+}
+
 /// `stateroot handoff list`.
 pub async fn list(ctx: &Ctx) -> anyhow::Result<()> {
     ctx.require_project()?;
-    let mut packets = local_store::list_handoffs_local(&ctx.cwd)?;
+    let mut packets = distinct_history_packets(local_store::list_handoffs_local(&ctx.cwd)?);
     if packets.is_empty() {
         println!("no handoffs recorded yet (local)");
         return Ok(());
     }
     // The current packet stays pinned to the top even when a repair restored
     // an older history entry — it is the handoff `show` renders by default.
-    let current_seq = local_store::read_handoff_local(&ctx.cwd)
-        .ok()
-        .flatten()
-        .and_then(|packet| packet.get("seq")?.as_i64());
-    if let Some(seq) = current_seq {
-        if let Some(position) = packets
-            .iter()
-            .position(|packet| packet.get("seq").and_then(|v| v.as_i64()) == Some(seq))
-        {
+    let current_id = match local_store::read_handoff_local(&ctx.cwd) {
+        Ok(packet) => packet.as_ref().map(handoff_body_sha256),
+        Err(error) => {
+            note!("warning: current handoff is unreadable: {error}; no current marker shown");
+            None
+        }
+    };
+    if let Some(id) = &current_id {
+        if let Some(position) = packets.iter().position(|(packet_id, _)| packet_id == id) {
             let packet = packets.remove(position);
             packets.insert(0, packet);
+        } else {
+            note!("warning: current handoff has no matching history packet; use `stateroot handoff show` to inspect it");
         }
     }
     println!(
-        "{:<6} {:<22} {:<12} {:<12} PHASE",
-        "SEQ", "CREATED", "FROM", "TO"
+        "{:<6} {:<22} {:<12} {:<12} {:<64} PHASE",
+        "SEQ", "CREATED", "FROM", "TO", "PACKET ID"
     );
-    for packet in packets {
+    for (id, packet) in packets {
         let seq = packet.get("seq").and_then(|v| v.as_i64()).unwrap_or(0);
         let created = packet
             .get("created_at")
@@ -1672,19 +1687,34 @@ pub async fn list(ctx: &Ctx) -> anyhow::Result<()> {
             .get("current_phase")
             .and_then(|v| v.as_str())
             .unwrap_or("-");
-        let marker = if Some(seq) == current_seq {
+        let marker = if current_id.as_ref() == Some(&id) {
             " ← current"
         } else {
             ""
         };
-        println!("{seq:<6} {created:<22} {from:<12} {to:<12} {phase}{marker}");
+        println!("{seq:<6} {created:<22} {from:<12} {to:<12} {id} {phase}{marker}");
     }
     Ok(())
 }
 
-/// `stateroot handoff show [seq]`.
-pub async fn show(ctx: &Ctx, seq: Option<i64>) -> anyhow::Result<()> {
+/// `stateroot handoff show [seq]` / `show --id <body SHA256>`.
+pub async fn show(ctx: &Ctx, seq: Option<i64>, id: Option<&str>) -> anyhow::Result<()> {
     ctx.require_project()?;
+    if let Some(id) = id {
+        if seq.is_some() || id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            anyhow::bail!("use either a sequence number or --id with an exact 64-character packet SHA256 from `stateroot handoff list`");
+        }
+        let packets = distinct_history_packets(local_store::list_handoffs_local(&ctx.cwd)?);
+        let (_, packet) = packets
+            .iter()
+            .find(|(packet_id, _)| packet_id.eq_ignore_ascii_case(id))
+            .with_context(|| format!("handoff packet {id} not found in local history"))?;
+        print!(
+            "{}",
+            render_handoff_digest_full(packet, false, &[], None, Some(&ctx.cwd))
+        );
+        return Ok(());
+    }
     match seq {
         None => {
             let (packet, source) = fetch_handoff(&ctx.cwd);
@@ -1703,15 +1733,33 @@ pub async fn show(ctx: &Ctx, seq: Option<i64>) -> anyhow::Result<()> {
         Some(seq) => {
             // P1 REST exposes only the *current* handoff packet; older packets
             // are available from the local history directory.
-            let history = local_store::list_handoffs_local(&ctx.cwd)?;
-            for packet in history {
-                if packet.get("seq").and_then(|v| v.as_i64()) == Some(seq) {
-                    print!(
-                        "{}",
-                        render_handoff_digest_full(&packet, false, &[], None, Some(&ctx.cwd))
-                    );
-                    return Ok(());
-                }
+            let history = distinct_history_packets(local_store::list_handoffs_local(&ctx.cwd)?);
+            let matches: Vec<_> = history
+                .iter()
+                .filter(|(_, packet)| packet.get("seq").and_then(Value::as_i64) == Some(seq))
+                .collect();
+            if matches.len() > 1 {
+                let candidates = matches
+                    .iter()
+                    .map(|(id, packet)| {
+                        format!(
+                            "  stateroot handoff show --id {id} (created={}, from={}, to={}, fork={})",
+                            packet["created_at"].as_str().unwrap_or("unknown"),
+                            packet["created_by_harness"].as_str().unwrap_or("unknown"),
+                            packet["recommended_next_harness"].as_str().unwrap_or("-"),
+                            packet["fork_id"].as_str().unwrap_or("trunk")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                anyhow::bail!("handoff #{seq} is ambiguous ({} distinct packets); select an exact packet:\n{candidates}", matches.len());
+            }
+            if let Some((_, packet)) = matches.first() {
+                print!(
+                    "{}",
+                    render_handoff_digest_full(packet, false, &[], None, Some(&ctx.cwd))
+                );
+                return Ok(());
             }
             anyhow::bail!(
                 "handoff #{seq} not found (server REST exposes only the current handoff; checked local history too)"
@@ -1723,6 +1771,26 @@ pub async fn show(ctx: &Ctx, seq: Option<i64>) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_identity_ignores_bookkeeping_but_not_fork_or_authored_content() {
+        let packet = json!({"seq":110,"task":"same task","fork_id":"left"});
+        let mut accepted = packet.clone();
+        accepted["accepted_by"] = json!(["kimi"]);
+        accepted["acceptances"] = json!([{"by":"kimi","body_sha256":"recorded"}]);
+        accepted["last_activity"] = json!({"at":"later"});
+        assert_eq!(handoff_body_sha256(&packet), handoff_body_sha256(&accepted));
+        let mut other = packet.clone();
+        other["fork_id"] = json!("right");
+        assert_ne!(handoff_body_sha256(&packet), handoff_body_sha256(&other));
+        assert_eq!(
+            distinct_history_packets(vec![packet.clone(), accepted, other.clone()]),
+            vec![
+                (handoff_body_sha256(&packet), packet),
+                (handoff_body_sha256(&other), other)
+            ]
+        );
+    }
     use stateroot_core::transcripts::{PlanStep, TailEntry};
 
     #[test]

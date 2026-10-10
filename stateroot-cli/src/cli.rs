@@ -694,8 +694,11 @@ pub enum HandoffAction {
     List,
     /// Show a handoff packet (defaults to the current one).
     Show {
-        /// Sequence number of the handoff to show.
+        /// Sequence number of the handoff to show (must identify one packet).
         seq: Option<i64>,
+        /// Exact packet-body SHA256 from `handoff list` (also works for legacy history).
+        #[arg(long, value_name = "SHA256", conflicts_with = "seq")]
+        id: Option<String>,
     },
     /// Mark the current handoff as accepted by a harness.
     Accept {
