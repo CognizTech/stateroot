@@ -373,6 +373,35 @@ registry projects missing from disk. Attention IDs are stable
 (`<kind>:<entity>`); nothing is derived from keyword classifiers or model
 calls. `stateroot status` renders the same projection (human or `--json`).
 
+## Optional plan command observations and state compatibility
+
+`stateroot plan verify <id> -- <command> [args...]` explicitly runs a local
+command and records immutable started/finished observations. It does not
+complete a plan or certify semantic acceptance. Bindings cover project
+identity, exact plan body and eligible before/after project bytes using current
+ignore declarations. Raw stdout/stderr remains under excluded
+`.stateroot/local/verification/`; shared records contain digests and outcomes.
+Argument metadata is bounded; oversized metadata is rejected before execution.
+Snapshots and checkpoints never run verification commands automatically.
+
+`stateroot plan done <id> --evidence "..." --verification <v_id>` optionally
+attaches an observed successful command. Wrong-project/plan/attempt, unsupported
+records, failed outcomes and mismatched source/body are rejected before closure.
+Exact unchanged inputs can reuse observations; source capture/root bookkeeping
+changes do not by themselves invalidate them. This is before/after observation,
+not execution isolation, credential/environment reproduction or proof that every
+acceptance criterion was satisfied. Omitting `--verification` retains explicit
+author-declared completion; old completions are never retroactively verified.
+
+`doctor` adds a bounded read-only authoritative-state summary to human output
+and `authoritative_state` in its JSON document. Base health remains separate
+from retained root/direct-parent availability, metadata compatibility, capture
+facts, declared/command evidence and restoration limits. Unknown schemas remain
+visible; supported legacy bytes stay inspectable. Incompatible root/merge/plan
+operations refuse rather than silently migrating or overwriting state. Package
+downgrade is not historical state restoration. No-root, partial scans, unknown
+metadata and missing verification are not reported as verified acceptance.
+
 ## `stateroot handoff` — write flags and accept gates
 
 `handoff list` shows each distinct packet's full body SHA256, with only the

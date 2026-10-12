@@ -159,8 +159,34 @@ async fn main() -> anyhow::Result<()> {
             PlanAction::Show { id } => commands::plan::show(&ctx, &id)?,
             PlanAction::Approve { id } => commands::plan::approve(&ctx, &id)?,
             PlanAction::Activate { id } => commands::plan::activate(&ctx, &id)?,
-            PlanAction::Done { id, evidence, from } => {
-                commands::plan::done(&ctx, &id, &evidence, from.as_deref().or(actor.as_deref()))?
+            PlanAction::Verify { id, command } => {
+                let code = commands::plan::verify(&ctx, &id, &command, actor.as_deref())?;
+                if code != 0 {
+                    std::process::exit(code);
+                }
+            }
+            PlanAction::Done {
+                id,
+                evidence,
+                from,
+                verification,
+            } => {
+                if verification.is_empty() {
+                    commands::plan::done(
+                        &ctx,
+                        &id,
+                        &evidence,
+                        from.as_deref().or(actor.as_deref()),
+                    )?
+                } else {
+                    commands::plan::done_with_verification(
+                        &ctx,
+                        &id,
+                        &evidence,
+                        from.as_deref().or(actor.as_deref()),
+                        &verification,
+                    )?
+                }
             }
             PlanAction::Abandon { id } => commands::plan::abandon(&ctx, &id)?,
             PlanAction::Sync => commands::plan::sync(&ctx)?,

@@ -537,13 +537,13 @@ fn automatic_snapshot_entry_limit() -> u64 {
 /// Build the working tree without limits for an explicit user-requested
 /// snapshot. Automatic checkpoints use [`build_tree_automatic`] instead.
 fn build_tree(repo: &Repository, dir: &Path) -> Result<TreeBuild, RootsError> {
-    build_tree_with_budget(repo, dir, None)
+    build_tree_with_budget(repo, dir, None, false)
 }
 
 /// Build the working tree for checkpoint/finalization paths. It is allowed to
 /// skip the root but never to make a user-facing operation hang indefinitely.
 fn build_tree_automatic(repo: &Repository, dir: &Path) -> Result<TreeBuild, RootsError> {
-    build_tree_with_budget(repo, dir, Some(&mut ScanBudget::automatic()))
+    build_tree_with_budget(repo, dir, Some(&mut ScanBudget::automatic()), false)
 }
 
 fn record_automatic_snapshot_skip(project_dir: &Path, detail: &str) {
@@ -569,10 +569,15 @@ fn build_tree_with_budget(
     repo: &Repository,
     dir: &Path,
     mut budget: Option<&mut ScanBudget>,
+    read_all_bytes: bool,
 ) -> Result<TreeBuild, RootsError> {
     let rules = IgnoreRules::load(dir);
     let index_written_at = now_stamp();
-    let index = load_blob_index(dir);
+    let index = if read_all_bytes {
+        BlobIndex::default()
+    } else {
+        load_blob_index(dir)
+    };
     let mut next_index = BlobIndex {
         written_at: index_written_at,
         ..Default::default()
@@ -1059,6 +1064,121 @@ fn project_files_changed(
     }))
 }
 
+/// Eligible project bytes only: bookkeeping roots may move without changing
+/// the input a command checked. Uses the same declared exclusions as roots.
+pub fn current_product_tree(project: &Path) -> Result<String, RootsError> {
+    let repo = ensure_repo(project)?;
+    let tree = repo.find_tree(build_tree_with_budget(&repo, project, None, true)?.tree)?;
+    let mut builder = repo.treebuilder(Some(&tree))?;
+    if tree.get_name(".stateroot").is_some() {
+        builder.remove(".stateroot")?;
+    }
+    Ok(builder.write()?.to_string())
+}
+
+/// Read-only, bounded comparison against an already captured eligible tree.
+/// Missing objects or exhausted budgets are unavailable evidence, not a pass.
+pub fn product_tree_matches(project: &Path, id: &str) -> Result<bool, String> {
+    use std::io::Read;
+    let repo = Repository::open(project).map_err(|e| e.to_string())?;
+    let tree = repo
+        .find_tree(git2::Oid::from_str(id).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    let mut expected = std::collections::BTreeMap::new();
+    let mut visited = 0usize;
+    tree.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
+        visited += 1;
+        if visited > 4096 {
+            return git2::TreeWalkResult::Abort;
+        }
+        if entry.kind() == Some(git2::ObjectType::Blob) {
+            expected.insert(
+                format!("{dir}{}", entry.name().unwrap_or_default()),
+                entry.id(),
+            );
+        }
+        git2::TreeWalkResult::Ok
+    })
+    .map_err(|e| e.to_string())?;
+    if visited > 4096 {
+        return Err("source comparison entry budget exceeded".into());
+    }
+    let mut declarations = Vec::new();
+    for name in [".gitignore", ".staterootignore"] {
+        let mut bytes = Vec::new();
+        match std::fs::File::open(project.join(name)) {
+            Ok(file) => {
+                file.take(1024 * 1024 + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(|e| e.to_string())?;
+                if bytes.len() > 1024 * 1024 {
+                    return Err("ignore declaration diagnostic budget exceeded".into());
+                }
+                declarations.push(Some(String::from_utf8(bytes).map_err(|e| e.to_string())?));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => declarations.push(None),
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    let rules = crate::sync_engine::ignore::IgnoreRules::from_contents(
+        project,
+        declarations[0].as_deref(),
+        declarations[1].as_deref(),
+    );
+    let mut stack = vec![project.to_path_buf()];
+    let start = std::time::Instant::now();
+    let mut entries = 0usize;
+    let mut bytes = 0u64;
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
+            entries += 1;
+            if entries > 4096 || start.elapsed() > Duration::from_secs(2) {
+                return Err("source comparison budget exceeded".into());
+            }
+            let path = entry.map_err(|e| e.to_string())?.path();
+            if path.file_name().and_then(|name| name.to_str()).is_none() {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(project)
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if rel == ".stateroot" || rel == ".git" {
+                continue;
+            }
+            if rules.is_ignored(&rel, path.is_dir()) {
+                continue;
+            }
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.is_file() {
+                let Some(oid) = expected.remove(&rel) else {
+                    return Ok(false);
+                };
+                let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+                bytes += size;
+                if size > 8 * 1024 * 1024 || bytes > 64 * 1024 * 1024 {
+                    return Err("source comparison byte budget exceeded".into());
+                }
+                let mut content = Vec::new();
+                std::fs::File::open(path)
+                    .map_err(|e| e.to_string())?
+                    .take(8 * 1024 * 1024 + 1)
+                    .read_to_end(&mut content)
+                    .map_err(|e| e.to_string())?;
+                if content.len() > 8 * 1024 * 1024 {
+                    return Err("source comparison byte budget exceeded".into());
+                }
+                if content != repo.find_blob(oid).map_err(|e| e.to_string())?.content() {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    Ok(expected.is_empty())
+}
+
 // ---------------------------------------------------------------------------
 // Write audit (WS3.4)
 //
@@ -1322,6 +1442,21 @@ pub fn get_root(project_dir: &Path, hash_prefix: &str) -> Result<RootManifest, R
     let metadata_status = match std::fs::read_to_string(&path) {
         Ok(text) => match serde_json::from_str::<RootManifest>(&text) {
             Ok(mut manifest) if manifest.id == id && manifest.parents == parents => {
+                if manifest.schema_version != ROOT_SCHEMA {
+                    return Ok(RootManifest {
+                        id,
+                        parents,
+                        schema_version: manifest.schema_version.clone(),
+                        metadata_status: if manifest.schema_version.is_empty() {
+                            "legacy_unknown"
+                        } else {
+                            "unsupported"
+                        }
+                        .into(),
+                        coverage: "unknown".into(),
+                        ..Default::default()
+                    });
+                }
                 manifest.metadata_status = "recorded".into();
                 return Ok(manifest);
             }
@@ -1777,6 +1912,7 @@ pub fn revert_to_root(
     let repo = ensure_repo(project_dir)?;
     let target = commit_for(&repo, project_dir, hash_prefix)?;
     let target_id = target.id().to_string();
+    require_supported_root_metadata(project_dir, &target_id)?;
     // Capture the actual workspace for rollback, not merely the last root:
     // unpublished work and pooled intelligence may have arrived since it.
     let rollback_tree = build_tree(&repo, project_dir)?.tree;
@@ -1923,6 +2059,7 @@ pub fn fork_root(
 ) -> Result<(String, String), RootsError> {
     let repo = ensure_repo(project_dir)?;
     let commit = commit_for(&repo, project_dir, hash_prefix)?;
+    require_supported_root_metadata(project_dir, &commit.id().to_string())?;
     let name = branch
         .map(str::to_string)
         .unwrap_or_else(|| format!("f-{}", &uuid::Uuid::now_v7().to_string()[..8]));
@@ -1944,6 +2081,14 @@ pub fn fork_root(
         &record,
     )?;
     Ok((name, refname))
+}
+
+fn require_supported_root_metadata(project: &Path, id: &str) -> Result<(), RootsError> {
+    let status = get_root(project, id)?.metadata_status;
+    if !matches!(status.as_str(), "recorded" | "legacy_unknown") {
+        return Err(RootsError::Merge(format!("unsupported or invalid root metadata ({status}); use a compatible writer; retained Git content remains inspectable")));
+    }
+    Ok(())
 }
 
 /// Materialize a fork ref into a real worktree (WS5 / repair Phase 6A):
@@ -1976,6 +2121,7 @@ pub fn fork_materialize(
     let tip = repo
         .refname_to_id(&refname)
         .map_err(|_| RootsError::NotFound(format!("no fork named {name}")))?;
+    require_supported_root_metadata(project_dir, &tip.to_string())?;
     if worktree_path.exists() {
         return Err(RootsError::Merge(format!(
             "worktree destination {} already exists",
@@ -2389,6 +2535,7 @@ pub fn prepare_merge_attempt(
     let trunk_tip = repo
         .refname_to_id(LATEST_REF)
         .map_err(|_| RootsError::NotFound("no roots yet — nothing to merge into".into()))?;
+    require_supported_root_metadata(project_dir, &trunk_tip.to_string())?;
     let mut seen_names = BTreeSet::new();
     let mut seen_tips = BTreeSet::new();
     let mut frozen = Vec::with_capacity(forks.len());
@@ -2401,6 +2548,7 @@ pub fn prepare_merge_attempt(
         let tip = repo
             .refname_to_id(&format!("{FORKS_REF_PREFIX}{name}"))
             .map_err(|_| RootsError::NotFound(format!("no fork named {name}")))?;
+        require_supported_root_metadata(project_dir, &tip.to_string())?;
         if !seen_tips.insert(tip) {
             return Err(RootsError::Merge(format!(
                 "fork `{name}` duplicates another selected fork tip"
@@ -2717,7 +2865,11 @@ pub fn merge_attempt(project_dir: &Path, id_prefix: &str) -> Result<MergeAttempt
         ))),
         [id] => {
             let text = std::fs::read_to_string(merge_attempt_path(project_dir, id))?;
-            Ok(serde_json::from_str(&text)?)
+            let attempt: MergeAttempt = serde_json::from_str(&text)?;
+            if attempt.schema_version != MERGE_ATTEMPT_SCHEMA || attempt.id != *id {
+                return Err(RootsError::Merge("unsupported or mismatched merge-attempt schema/identity; no state or refs changed".into()));
+            }
+            Ok(attempt)
         }
         _ => Err(RootsError::Merge(format!(
             "merge attempt prefix `{id_prefix}` is ambiguous"
@@ -2752,6 +2904,10 @@ pub fn continue_merge_attempt(
 ) -> Result<(RootManifest, Transition, Vec<MergedFork>), RootsError> {
     let attempt = merge_attempt(project_dir, id_prefix)?;
     let repo = ensure_repo(project_dir)?;
+    require_supported_root_metadata(project_dir, &attempt.trunk_tip)?;
+    for fork in &attempt.forks {
+        require_supported_root_metadata(project_dir, &fork.tip)?;
+    }
     verify_attempt_inputs(&repo, &attempt)?;
     match attempt.state.as_str() {
         "staged" => continue_staged_attempt(project_dir, &repo, &attempt, evidence),
@@ -3502,6 +3658,7 @@ fn merge_forks_once(
     let base_oid = repo
         .refname_to_id(LATEST_REF)
         .map_err(|_| RootsError::NotFound("no roots yet — nothing to merge into".into()))?;
+    require_supported_root_metadata(project_dir, &base_oid.to_string())?;
     let analysis_start = Instant::now();
     // The accumulated fold: `current_tree` is the union so far, `head_oid`
     // is the line's head for the NEXT merge_base. After folding fork A the
@@ -3520,6 +3677,7 @@ fn merge_forks_once(
         let tip = repo
             .refname_to_id(&refname)
             .map_err(|_| RootsError::NotFound(format!("no fork named {name}")))?;
+        require_supported_root_metadata(project_dir, &tip.to_string())?;
         let fork_commit = repo.find_commit(tip)?;
         let ancestor_oid = repo.merge_base(head_oid, tip)?;
         if ancestor_oid == tip {
@@ -4714,6 +4872,11 @@ pub fn get_transition(project_dir: &Path, id_prefix: &str) -> Result<Transition,
                 if let Ok(bytes) = std::fs::read(dir.join(format!("{entry}.json"))) {
                     if let Ok(transition) = serde_json::from_slice::<Transition>(&bytes) {
                         if transition.to_root == root.id {
+                            if !transition.schema_version.is_empty()
+                                && transition.schema_version != TRANSITION_SCHEMA
+                            {
+                                return Err(RootsError::NotFound("unsupported transition schema; retained root content remains inspectable".into()));
+                            }
                             return Ok(transition);
                         }
                     }
@@ -4729,7 +4892,16 @@ pub fn get_transition(project_dir: &Path, id_prefix: &str) -> Result<Transition,
         }
         1 => {
             let text = std::fs::read_to_string(dir.join(format!("{}.json", matches[0])))?;
-            Ok(serde_json::from_str(&text)?)
+            let transition: Transition = serde_json::from_str(&text)?;
+            if !transition.schema_version.is_empty()
+                && transition.schema_version != TRANSITION_SCHEMA
+            {
+                return Err(RootsError::NotFound(
+                    "unsupported transition schema; retained root content remains inspectable"
+                        .into(),
+                ));
+            }
+            Ok(transition)
         }
         _ => Err(RootsError::NotFound(format!(
             "ambiguous transition prefix '{id_prefix}'"
@@ -5157,6 +5329,99 @@ fn short(hash: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verification_fingerprint_reads_bytes_even_when_stat_cache_matches() {
+        let (_tmp, dir) = project();
+        write(&dir, "code.txt", "before");
+        let path = dir.join("code.txt");
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        let old_time = std::time::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        file.set_times(std::fs::FileTimes::new().set_modified(old_time))
+            .unwrap();
+        let first = current_product_tree(&dir).unwrap();
+        write(&dir, "code.txt", "after!");
+        file.set_times(std::fs::FileTimes::new().set_modified(old_time))
+            .unwrap();
+        assert_ne!(current_product_tree(&dir).unwrap(), first);
+        assert!(!product_tree_matches(&dir, &first).unwrap());
+    }
+
+    #[test]
+    fn future_root_inspection_is_unknown_and_downgrade_mutation_preserves_later_work() {
+        let (_tmp, dir) = project();
+        write(&dir, "code.txt", "old work");
+        let (old, _) = create_root(&dir, "codex", "old", None).unwrap();
+        fork_root(&dir, &old.id, Some("existing-fork"), "codex").unwrap();
+        write(&dir, "code.txt", "new later work");
+        let (latest, _) = create_root(&dir, "codex", "later", None).unwrap();
+        let path = local_store::root(&dir)
+            .join(ROOTS_DIR)
+            .join(format!("{}.json", old.id));
+        let mut metadata = serde_json::to_value(&old).unwrap();
+        metadata["schema_version"] = json!("stateroot.root.local.v99");
+        let bytes = serde_json::to_vec(&metadata).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            get_root(&dir, &old.id).unwrap().metadata_status,
+            "unsupported"
+        );
+        let repo = ensure_repo(&dir).unwrap();
+        let before_index = std::fs::read(repo.path().join("index")).ok();
+        assert!(repo.find_commit(old.id.parse().unwrap()).is_ok());
+        assert!(revert_to_root(&dir, &old.id, "codex").is_err());
+        assert!(fork_root(&dir, &old.id, Some("future-root"), "codex").is_err());
+        let destination = dir.parent().unwrap().join("future-materialization");
+        assert!(fork_materialize(&dir, "existing-fork", &destination, None).is_err());
+        assert!(!destination.exists());
+        assert!(repo
+            .find_reference("refs/heads/stateroot-forktmp-existing-fork")
+            .is_err());
+        assert_eq!(latest_root(&dir).unwrap(), Some(latest.id.clone()));
+        assert_eq!(
+            std::fs::read(dir.join("code.txt")).unwrap(),
+            b"new later work"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(std::fs::read(repo.path().join("index")).ok(), before_index);
+        metadata["schema_version"] = json!(ROOT_SCHEMA);
+        metadata["id"] = json!("foreign-root");
+        std::fs::write(&path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        assert!(revert_to_root(&dir, &old.id, "codex").is_err());
+        assert!(fork_root(&dir, &old.id, Some("mismatched-root"), "codex").is_err());
+        std::fs::write(&path, b"corrupt metadata").unwrap();
+        assert!(revert_to_root(&dir, &old.id, "codex").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"corrupt metadata");
+        assert_eq!(latest_root(&dir).unwrap(), Some(latest.id));
+        assert_eq!(std::fs::read(repo.path().join("index")).ok(), before_index);
+        metadata["id"] = json!(old.id);
+        metadata.as_object_mut().unwrap().remove("schema_version");
+        std::fs::write(&path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        assert_eq!(
+            get_root(&dir, &old.id).unwrap().metadata_status,
+            "legacy_unknown"
+        );
+        assert!(fork_root(&dir, &old.id, Some("legacy-root"), "codex").is_ok());
+    }
+
+    #[test]
+    fn future_merge_attempt_cannot_continue_or_delete_its_original_records() {
+        let (_tmp, dir) = project();
+        write(&dir, "base.txt", "base");
+        let (base, _) = create_root(&dir, "codex", "base", None).unwrap();
+        let (_fork, _) = fork_with_change(&dir, &base.id, "schema-fork", "new.txt", "child");
+        let attempt = prepare_merge_attempt(&dir, &["schema-fork".into()], "codex").unwrap();
+        let path = merge_attempt_path(&dir, &attempt.id);
+        let mut value = serde_json::to_value(attempt).unwrap();
+        value["schema_version"] = json!("stateroot.merge-attempt.v99");
+        let bytes = serde_json::to_vec(&value).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let id = value["id"].as_str().unwrap();
+        assert!(continue_merge_attempt(&dir, id, &[]).is_err());
+        assert!(abort_merge_attempt(&dir, id).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+        assert_eq!(latest_root(&dir).unwrap(), Some(base.id));
+    }
 
     fn project() -> (tempfile::TempDir, PathBuf) {
         let tmp = tempfile::tempdir().expect("tmp");

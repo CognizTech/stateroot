@@ -93,8 +93,21 @@ pub fn record(
 pub fn list(ctx: &Ctx) -> anyhow::Result<()> {
     ctx.require_project()?;
     let mut all = plans::list(&ctx.cwd);
+    let compatibility = plans::compatibility_report(&ctx.cwd);
+    if compatibility["unsupported"].as_u64().unwrap_or(0) > 0
+        || compatibility["unreadable"].as_u64().unwrap_or(0) > 0
+        || compatibility["incomplete"] == true
+    {
+        note!("plan compatibility: {compatibility} — unsupported records remain on disk; use a compatible reader before changing them");
+    }
     if all.is_empty() {
-        println!("no plans recorded — `stateroot plan record --file <path>`");
+        if compatibility["unsupported"].as_u64().unwrap_or(0) > 0
+            || compatibility["unreadable"].as_u64().unwrap_or(0) > 0
+        {
+            println!("no supported plans available; incompatible records remain on disk");
+        } else {
+            println!("no plans recorded — `stateroot plan record --file <path>`");
+        }
         return Ok(());
     }
     // The active plan stays pinned to the top even when it is not the
@@ -183,8 +196,31 @@ pub fn activate(ctx: &Ctx, id: &str) -> anyhow::Result<()> {
 /// completion transaction: completion snapshot first, then receipt +
 /// lifecycle transition in one command; any failure leaves the plan active.
 pub fn done(ctx: &Ctx, id: &str, evidence: &str, from: Option<&str>) -> anyhow::Result<()> {
+    done_with_verification(ctx, id, evidence, from, &[])
+}
+
+pub fn done_with_verification(
+    ctx: &Ctx,
+    id: &str,
+    evidence: &str,
+    from: Option<&str>,
+    verification: &[String],
+) -> anyhow::Result<()> {
     ctx.require_project()?;
     let actor = harness(ctx, from);
+    // Reject unsupported/mismatched supplied evidence before creating a root.
+    let (meta, _) = plans::load(&ctx.cwd, id)
+        .ok_or_else(|| anyhow::anyhow!("unknown or unsupported plan `{id}`"))?;
+    if !meta.status().can_transition_to(PlanStatus::Done) {
+        anyhow::bail!("plan {} is {} — cannot move to done", meta.id, meta.status);
+    }
+    if evidence.trim().is_empty() {
+        anyhow::bail!("completion evidence is empty");
+    }
+    for record in verification {
+        stateroot_core::verification::validate(&ctx.cwd, &meta.id, record)
+            .map_err(anyhow::Error::msg)?;
+    }
     // 1. Completion snapshot: capture the state of the work being closed.
     //    Failure here (or an unreadable plan body later) aborts before any
     //    lifecycle mutation.
@@ -201,8 +237,15 @@ pub fn done(ctx: &Ctx, id: &str, evidence: &str, from: Option<&str>) -> anyhow::
         }
     };
     // 2. Receipt + transition.
-    let meta = plans::complete(&ctx.cwd, id, evidence, &actor, completion_root)
-        .map_err(|e| anyhow::anyhow!(e))?;
+    let meta = plans::complete_with_verification(
+        &ctx.cwd,
+        id,
+        evidence,
+        &actor,
+        completion_root,
+        verification,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
     println!("plan {} → done", meta.id);
     if let Some(receipt) = &meta.completion_receipt {
         println!(
@@ -220,6 +263,51 @@ pub fn done(ctx: &Ctx, id: &str, evidence: &str, from: Option<&str>) -> anyhow::
     episodic(ctx, &format!("plan {} done by {actor}", meta.id))?;
     super::reconcile_quiet(ctx);
     Ok(())
+}
+
+pub fn verify(ctx: &Ctx, id: &str, command: &[String], from: Option<&str>) -> anyhow::Result<i32> {
+    use stateroot_core::verification;
+    ctx.require_project()?;
+    let record = verification::start(&ctx.cwd, id, &harness(ctx, from), command)
+        .map_err(anyhow::Error::msg)?;
+    let logs = local_store::root(&ctx.cwd).join("local/verification");
+    std::fs::create_dir_all(&logs)?;
+    let stdout = logs.join(format!("{}.stdout", record.id));
+    let stderr = logs.join(format!("{}.stderr", record.id));
+    let open = |path: &std::path::Path| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+    };
+    let result = std::process::Command::new(&command[0])
+        .args(&command[1..])
+        .current_dir(&ctx.cwd)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(open(&stdout)?)
+        .stderr(open(&stderr)?)
+        .status();
+    let (code, error) = match result {
+        Ok(status) => (status.code(), None),
+        Err(error) => (None, Some(error.to_string())),
+    };
+    let digests = [&stdout, &stderr]
+        .into_iter()
+        .map(|path| verification::output_digest(path))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(anyhow::Error::msg)?;
+    let record =
+        verification::finish(&ctx.cwd, record, code, error, digests).map_err(anyhow::Error::msg)?;
+    println!("verification {}: {}", record.id, record.status);
+    println!("local command output: {}", logs.display());
+    println!("Eligible project bytes and plan body only; environment reproduction and semantic acceptance are not established.");
+    Ok(
+        if record.status == "observed exit zero; semantic acceptance not established" {
+            0
+        } else {
+            code.filter(|code| *code != 0).unwrap_or(1)
+        },
+    )
 }
 
 /// Run `stateroot plan abandon <id>`.

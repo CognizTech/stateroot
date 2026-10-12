@@ -52,4 +52,5 @@ pub mod todo_federation;
 pub mod tombstones;
 pub mod transcripts;
 pub mod user_profile;
+pub mod verification;
 pub mod wiki;

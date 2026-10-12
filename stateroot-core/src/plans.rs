@@ -71,7 +71,7 @@ impl PlanStatus {
 
     /// The legal move `self → to` per the lifecycle (abandoned is reachable
     /// from any non-terminal state; same-state is NOT a legal no-op).
-    fn can_transition_to(self, to: PlanStatus) -> bool {
+    pub fn can_transition_to(self, to: PlanStatus) -> bool {
         use PlanStatus::*;
         if self.terminal() || self == to {
             return false;
@@ -102,6 +102,9 @@ pub struct CompletionReceipt {
     /// The root captured by the completion snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_root: Option<String>,
+    /// Optional command observations; absence means declared evidence only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verification_ids: Vec<String>,
 }
 
 /// The `stateroot.plan.v1` sidecar.
@@ -185,8 +188,23 @@ fn latest_root_ref(project_dir: &Path) -> Option<String> {
 
 fn write_meta(project_dir: &Path, meta: &PlanMeta) -> Result<(), String> {
     let path = meta_path(project_dir, &meta.id);
-    let text = serde_json::to_string_pretty(meta).map_err(|e| e.to_string())?;
-    std::fs::write(&path, format!("{text}\n"))
+    let mut value = serde_json::to_value(meta).map_err(|e| e.to_string())?;
+    if path.exists() {
+        let previous: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+        if previous["schema_version"] != SCHEMA_PLAN_V1 || previous["id"] != meta.id {
+            return Err("unsupported or mismatched plan metadata; nothing overwritten".into());
+        }
+        if let (Some(old), Some(new)) = (previous.as_object(), value.as_object_mut()) {
+            for (key, value) in old {
+                if !new.contains_key(key) {
+                    new.insert(key.clone(), value.clone());
+                }
+            }
+        }
+    }
+    crate::safe_io::atomic_replace_json(&path, &value)
         .map_err(|e| format!("write {}: {e}", path.display()))?;
     report_plan_path(project_dir, &path);
     Ok(())
@@ -249,17 +267,179 @@ pub fn record(
 
 /// Every plan sidecar, newest first.
 pub fn list(project_dir: &Path) -> Vec<PlanMeta> {
+    scan_plans(project_dir, false)
+}
+
+pub fn diagnostic_plans(project_dir: &Path) -> Vec<PlanMeta> {
+    scan_plans(project_dir, true)
+}
+
+fn scan_plans(project_dir: &Path, bounded: bool) -> Vec<PlanMeta> {
     let Ok(entries) = std::fs::read_dir(plans_dir(project_dir)) else {
         return Vec::new();
     };
     let mut out: Vec<PlanMeta> = entries
+        .take(if bounded { 512 } else { usize::MAX })
         .flatten()
         .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-        .filter_map(|e| serde_json::from_str(&std::fs::read_to_string(e.path()).ok()?).ok())
+        .filter_map(|e| {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            std::fs::File::open(e.path())
+                .ok()?
+                .take(if bounded { 256 * 1024 + 1 } else { u64::MAX })
+                .read_to_end(&mut bytes)
+                .ok()?;
+            if bounded && bytes.len() > 256 * 1024 {
+                return None;
+            }
+            let meta: PlanMeta = serde_json::from_slice(&bytes).ok()?;
+            (e.path().file_stem().and_then(|stem| stem.to_str()) == Some(meta.id.as_str()))
+                .then_some(meta)
+        })
         .filter(|m: &PlanMeta| m.schema_version == SCHEMA_PLAN_V1)
+        .filter(|m| {
+            matches!(
+                m.status.as_str(),
+                "draft" | "approved" | "active" | "done" | "abandoned"
+            )
+        })
         .collect();
     out.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
     out
+}
+
+pub fn diagnostic_body_digest(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > 1024 * 1024 {
+        return None;
+    }
+    Some(format!("{:x}", sha2::Sha256::digest(&bytes)))
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+    #[test]
+    fn supported_updates_preserve_annotations_and_future_records_stay_visible() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = record(dir.path(), "current", "codex", None, "# Requirement").unwrap();
+        let path = meta_path(dir.path(), &plan.id);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["future_annotation"] = serde_json::json!({"retained":true});
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        transition(dir.path(), &plan.id, PlanStatus::Approved).unwrap();
+        let updated: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(updated["future_annotation"], value["future_annotation"]);
+        assert!(complete(
+            dir.path(),
+            &plan.id,
+            "explicit author declaration",
+            "codex",
+            None
+        )
+        .unwrap()
+        .completion_receipt
+        .unwrap()
+        .verification_ids
+        .is_empty());
+        let mut future = updated;
+        future["schema_version"] = serde_json::json!("stateroot.plan.v99");
+        let bytes = serde_json::to_vec(&future).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(load(dir.path(), &plan.id).is_none());
+        assert!(transition(dir.path(), &plan.id, PlanStatus::Active).is_err());
+        assert_eq!(compatibility_report(dir.path())["unsupported"], 1);
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+}
+
+/// Bounded read-only visibility of records the supported plan reader cannot
+/// interpret. Their bytes are retained, never migrated or treated as absent.
+pub fn compatibility_report(project: &Path) -> serde_json::Value {
+    use std::io::Read;
+    let mut supported = 0usize;
+    let mut unsupported = 0usize;
+    let mut unreadable = 0usize;
+    let mut incomplete = false;
+    let mut problems = Vec::new();
+    match std::fs::read_dir(plans_dir(project)) {
+        Ok(entries) => {
+            for (index, entry) in entries.enumerate() {
+                if index >= 512 {
+                    incomplete = true;
+                    break;
+                }
+                let path = match entry {
+                    Ok(entry) => entry.path(),
+                    Err(_) => {
+                        unreadable += 1;
+                        continue;
+                    }
+                };
+                if path.extension().is_none_or(|ext| ext != "json") {
+                    continue;
+                }
+                let record = (|| -> Option<serde_json::Value> {
+                    let mut bytes = Vec::new();
+                    std::fs::File::open(&path)
+                        .ok()?
+                        .take(256 * 1024 + 1)
+                        .read_to_end(&mut bytes)
+                        .ok()?;
+                    if bytes.len() > 256 * 1024 {
+                        return None;
+                    }
+                    serde_json::from_slice(&bytes).ok()
+                })();
+                let reason = match record {
+                    Some(value) if value["schema_version"] != SCHEMA_PLAN_V1 => {
+                        unsupported += 1;
+                        Some("unsupported schema")
+                    }
+                    Some(value)
+                        if serde_json::from_value::<PlanMeta>(value.clone()).is_ok()
+                            && path.file_stem().and_then(|stem| stem.to_str())
+                                == value["id"].as_str()
+                            && matches!(
+                                value["status"].as_str(),
+                                Some("draft" | "approved" | "active" | "done" | "abandoned")
+                            ) =>
+                    {
+                        supported += 1;
+                        None
+                    }
+                    Some(_) => {
+                        unsupported += 1;
+                        Some("unsupported or invalid plan state")
+                    }
+                    None => {
+                        unreadable += 1;
+                        Some("unreadable, corrupt or oversized metadata")
+                    }
+                };
+                if let Some(reason) = reason {
+                    if problems.len() < 20 {
+                        problems.push(serde_json::json!({"file":path.file_name().map(|name|name.to_string_lossy()),"reason":reason}));
+                    }
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => {
+            unreadable += 1;
+            incomplete = true;
+        }
+    }
+    serde_json::json!({"supported":supported,"unsupported":unsupported,"unreadable":unreadable,"incomplete":incomplete,"problems":problems})
 }
 
 /// Load one plan by id (exact, or a unique prefix) — meta + markdown path.
@@ -426,6 +606,17 @@ pub fn complete(
     actor: &str,
     completion_root: Option<String>,
 ) -> Result<PlanMeta, String> {
+    complete_with_verification(project_dir, id, evidence, actor, completion_root, &[])
+}
+
+pub fn complete_with_verification(
+    project_dir: &Path,
+    id: &str,
+    evidence: &str,
+    actor: &str,
+    completion_root: Option<String>,
+    verification_ids: &[String],
+) -> Result<PlanMeta, String> {
     let _guard = write_guard(project_dir)?;
     if evidence.trim().is_empty() {
         return Err(
@@ -446,6 +637,9 @@ pub fn complete(
     }
     let digest = body_digest(&body_path(project_dir, &meta.id))
         .ok_or_else(|| format!("cannot complete {}: plan body is unreadable", meta.id))?;
+    for verification in verification_ids {
+        crate::verification::validate(project_dir, &meta.id, verification)?;
+    }
     let now = now_rfc3339();
     meta.status = PlanStatus::Done.as_str().into();
     meta.updated_at = now.clone();
@@ -458,6 +652,7 @@ pub fn complete(
         evidence: evidence.trim().to_string(),
         body_digest: digest,
         completion_root,
+        verification_ids: verification_ids.to_vec(),
     });
     write_meta(project_dir, &meta)?;
     Ok(meta)

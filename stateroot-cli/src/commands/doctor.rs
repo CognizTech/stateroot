@@ -386,6 +386,20 @@ pub async fn run(ctx: &Ctx, json_out: bool) -> anyhow::Result<i32> {
         )
     });
 
+    let authoritative = authoritative_state(&ctx.cwd);
+    if local_store::is_stateroot_dir(&ctx.cwd) {
+        checks.push(Check {
+            label: "authoritative state".into(),
+            ok: authoritative["status"] == "available",
+            detail: format!("root {} · metadata {} · bound command observations {} · declared completions {} · {}",
+                authoritative["root"].as_str().unwrap_or("none"),
+                authoritative["metadata"].as_str().unwrap_or("unknown"),
+                authoritative["verification"]["bound_command_observations"],
+                authoritative["verification"]["declared_completions"],
+                authoritative["restoration"].as_str().unwrap_or("unavailable")),
+            hard: false, repair: None,
+        });
+    }
     let mut hard_failures = 0;
     let mut soft_warnings = 0;
     for check in &checks {
@@ -437,6 +451,7 @@ pub async fn run(ctx: &Ctx, json_out: bool) -> anyhow::Result<i32> {
             "checks": checks,
             "integrations": integrations,
             "integrations_summary": integrations_summary,
+            "authoritative_state": authoritative,
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(if hard_failures > 0 { 1 } else { 0 });
@@ -466,6 +481,9 @@ pub async fn run(ctx: &Ctx, json_out: bool) -> anyhow::Result<i32> {
             }
         }
     }
+    if local_store::is_stateroot_dir(&ctx.cwd) {
+        println!("verification scope: matching observed source/plan inputs and command exits only; semantic acceptance, execution isolation and environment reproduction are not established");
+    }
     if hard_failures > 0 {
         println!("base checks: {hard_failures} hard failure(s), {soft_warnings} warning(s)");
         Ok(1)
@@ -476,6 +494,108 @@ pub async fn run(ctx: &Ctx, json_out: bool) -> anyhow::Result<i32> {
         println!("doctor: all local checks pass");
         Ok(0)
     }
+}
+
+/// Compact and read-only. This reports direct retained objects and metadata,
+/// not an exhaustive history audit or a promise of environment reproduction.
+fn authoritative_state(project: &Path) -> Value {
+    use stateroot_core::{observations, plans, roots, verification};
+    if !local_store::is_stateroot_dir(project) {
+        return serde_json::json!({"status":"not a project","root":null});
+    }
+    let manifest_path = local_store::root(project).join(local_store::MANIFEST_PATH);
+    if std::fs::metadata(&manifest_path).is_ok_and(|metadata| metadata.len() > 256 * 1024) {
+        return serde_json::json!({"status":"unknown: diagnostic metadata budget exceeded","root":null,"metadata":"unavailable","incomplete":true,"restoration":"unknown; use compatible explicit inspection"});
+    }
+    let compatibility = plans::compatibility_report(project);
+    let manifest_status = match local_store::read_manifest(project) {
+        Ok(Some(manifest)) if manifest["schema_version"] == local_store::SCHEMA_MANIFEST_V1 => {
+            "supported"
+        }
+        Ok(Some(_)) => "unsupported or legacy unknown",
+        _ => "unavailable or corrupt",
+    };
+    let verification = verification::summary(project);
+    let trail = observations::capture_trail(project);
+    let current = if project.join(".git").exists() {
+        roots::latest_root(project)
+    } else {
+        Ok(None)
+    };
+    let mut report = serde_json::json!({
+        "root":null,"metadata":"unavailable","status":"no retained root",
+        "project_manifest":manifest_status,
+        "lineage_check":"current commit and direct parents only; no exhaustive history audit",
+        "plan_compatibility":compatibility,"verification":verification,
+        "capture":{"last_by_harness":trail.last_by_harness,"problems":trail.diagnosed},
+        "restoration":"unavailable: no retained root",
+        "limits":"current privacy exclusions apply; credentials, dependency installation and executable environment reproduction are not established"
+    });
+    match current {
+        Ok(Some(id)) => {
+            let metadata_path = local_store::root(project)
+                .join(roots::ROOTS_DIR)
+                .join(format!("{id}.json"));
+            if std::fs::metadata(metadata_path).is_ok_and(|metadata| metadata.len() > 256 * 1024) {
+                report["root"] = serde_json::json!(id);
+                report["status"] =
+                    serde_json::json!("unknown: root metadata diagnostic budget exceeded");
+                report["incomplete"] = serde_json::json!(true);
+                report["restoration"] = serde_json::json!(
+                    "retained content may be inspected; metadata interpretation unavailable"
+                );
+                return report;
+            }
+            match roots::get_root(project, &id) {
+                Ok(root) => {
+                    report["root"] = serde_json::json!(id);
+                    report["metadata"] = serde_json::json!(root.metadata_status);
+                    let parents_present =
+                        git2::Repository::open(project).ok().is_some_and(|repo| {
+                            root.parents.iter().all(|id| {
+                                git2::Oid::from_str(id)
+                                    .ok()
+                                    .is_some_and(|oid| repo.find_commit(oid).is_ok())
+                            })
+                        });
+                    report["direct_parents_available"] = serde_json::json!(parents_present);
+                    report["status"] = serde_json::json!(if root.metadata_status == "recorded"
+                        && manifest_status == "supported"
+                        && parents_present
+                        && report["plan_compatibility"]["unsupported"] == 0
+                        && report["plan_compatibility"]["unreadable"] == 0
+                        && report["plan_compatibility"]["incomplete"] == false
+                        && report["capture"]["problems"]
+                            .as_array()
+                            .is_some_and(|problems| problems.is_empty())
+                        && report["verification"]["incomplete"] == false
+                    {
+                        "available"
+                    } else {
+                        "attention or unknown"
+                    });
+                    report["restoration"] = serde_json::json!(if !matches!(
+                        root.metadata_status.as_str(),
+                        "recorded" | "legacy_unknown"
+                    ) {
+                        "retained content inspectable; mutation requires compatible valid metadata"
+                    } else {
+                        "retained eligible content available; not software-package or environment rollback"
+                    });
+                }
+                Err(error) => {
+                    report["status"] = serde_json::json!("unavailable or incompatible");
+                    report["error"] = serde_json::json!(error.to_string());
+                }
+            }
+        }
+        Err(error) => {
+            report["status"] = serde_json::json!("unavailable");
+            report["error"] = serde_json::json!(error.to_string());
+        }
+        Ok(None) => {}
+    }
+    report
 }
 
 /// Active-continuity runtime checks (all soft): the resident service, the
@@ -993,6 +1113,88 @@ fn continuity_chain_checks(home: &Path, project_dir: &Path) -> Vec<Check> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authoritative_summary_reports_future_and_legacy_metadata_without_mutation() {
+        use stateroot_core::{local_store, roots};
+        let dir = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(dir.path(), "diagnostic-project", "fixture", "fixture-owner")
+            .unwrap();
+        assert_eq!(
+            authoritative_state(dir.path())["status"],
+            "no retained root"
+        );
+        assert!(!dir.path().join(".git").exists());
+        std::fs::write(dir.path().join("code.txt"), "retained work").unwrap();
+        let (root, _) = roots::create_root(dir.path(), "codex", "fixture", None).unwrap();
+        let path = local_store::root(dir.path())
+            .join(roots::ROOTS_DIR)
+            .join(format!("{}.json", root.id));
+        let before = std::fs::read(&path).unwrap();
+        let current = authoritative_state(dir.path());
+        assert_eq!(current["root"], root.id);
+        assert_eq!(current["metadata"], "recorded");
+        assert_eq!(current["verification"]["bound_command_observations"], 0);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::write(&path, b"corrupt metadata").unwrap();
+        let corrupt = authoritative_state(dir.path());
+        assert_eq!(corrupt["metadata"], "corrupt");
+        assert!(corrupt["restoration"]
+            .as_str()
+            .unwrap()
+            .contains("valid metadata"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"corrupt metadata");
+        std::fs::write(&path, &before).unwrap();
+        let plan =
+            stateroot_core::plans::record(dir.path(), "diagnostic", "codex", None, "# Criteria")
+                .unwrap();
+        let pending =
+            stateroot_core::verification::start(dir.path(), &plan.id, "codex", &["fixture".into()])
+                .unwrap();
+        assert_eq!(
+            authoritative_state(dir.path())["verification"]["unfinished"],
+            1
+        );
+        let observed =
+            stateroot_core::verification::finish(dir.path(), pending, Some(0), None, vec![])
+                .unwrap();
+        assert_eq!(
+            authoritative_state(dir.path())["verification"]["bound_command_observations"],
+            1
+        );
+        std::fs::write(dir.path().join("code.txt"), "later work").unwrap();
+        assert_eq!(authoritative_state(dir.path())["verification"]["stale"], 1);
+        assert_eq!(
+            stateroot_core::verification::load(dir.path(), &observed.id)
+                .unwrap()
+                .exit_code,
+            Some(0)
+        );
+        let mut future = serde_json::to_value(&root).unwrap();
+        future["schema_version"] = serde_json::json!("stateroot.root.local.v99");
+        let bytes = serde_json::to_vec(&future).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(authoritative_state(dir.path())["metadata"], "unsupported");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        future.as_object_mut().unwrap().remove("schema_version");
+        std::fs::write(&path, serde_json::to_vec(&future).unwrap()).unwrap();
+        assert_eq!(
+            authoritative_state(dir.path())["metadata"],
+            "legacy_unknown"
+        );
+        let future_plan = local_store::root(dir.path()).join("plans/future.json");
+        std::fs::create_dir_all(future_plan.parent().unwrap()).unwrap();
+        std::fs::write(
+            &future_plan,
+            br#"{"schema_version":"future.plan","id":"future"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            authoritative_state(dir.path())["plan_compatibility"]["unsupported"],
+            1
+        );
+        assert_eq!(roots::latest_root(dir.path()).unwrap(), Some(root.id));
+    }
     use serde_json::json;
 
     #[test]

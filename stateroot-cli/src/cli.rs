@@ -355,6 +355,13 @@ pub enum PlanAction {
         /// Plan id (prefix allowed).
         id: String,
     },
+    /// Explicitly run a command and retain its observed result against exact
+    /// eligible project bytes and plan body. Does not complete the plan.
+    Verify {
+        id: String,
+        #[arg(last = true, required = true, num_args = 1..)]
+        command: Vec<String>,
+    },
     /// Mark a plan done with an explicit evidence-bearing completion
     /// receipt. Creates/verifies the completion snapshot first; any failure
     /// leaves the plan in its prior state.
@@ -364,6 +371,9 @@ pub enum PlanAction {
         /// What proves the work is done (gate results, release root, …).
         #[arg(long)]
         evidence: String,
+        /// Attach successful command observations on unchanged inputs.
+        #[arg(long = "verification", value_name = "ID")]
+        verification: Vec<String>,
         /// Completing harness (defaults to the active local marker or `cli`).
         #[arg(long)]
         from: Option<String>,

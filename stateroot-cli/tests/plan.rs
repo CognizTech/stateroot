@@ -69,6 +69,150 @@ fn episodic(project: &Path) -> String {
 }
 
 #[test]
+fn command_observation_completion_is_optional_source_bound_and_preserves_history() {
+    let (config, home) = homes();
+    let project = tempfile::tempdir().unwrap();
+    init_project(config.path(), home.path(), project.path());
+    let id = record_plan(
+        config.path(),
+        home.path(),
+        project.path(),
+        "Observed command",
+        "# Verify the declared source",
+    );
+    stateroot(config.path(), home.path(), project.path())
+        .args(["plan", "approve", &id])
+        .assert()
+        .success();
+    std::fs::write(project.path().join("code.txt"), "original").unwrap();
+    let binary = assert_cmd::cargo::cargo_bin("stateroot");
+    let output = stateroot(config.path(), home.path(), project.path())
+        .args(["plan", "verify", &id, "--"])
+        .arg(&binary)
+        .arg("--version")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output = String::from_utf8(output).unwrap();
+    let verification = output
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("verification ")
+                .and_then(|line| line.split(':').next())
+        })
+        .unwrap()
+        .to_string();
+    let dir = project.path().join(".stateroot/plans/verification");
+    let path = dir.join(format!("{verification}.finished.json"));
+    let before = std::fs::read(&path).unwrap();
+    let observed: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    assert_eq!(observed["exit_code"], 0);
+    assert_eq!(
+        Path::new(observed["command"][0].as_str().unwrap()),
+        binary.as_path()
+    );
+    assert!(observed["status"]
+        .as_str()
+        .unwrap()
+        .contains("semantic acceptance not established"));
+    assert_eq!(observed["output_digests"].as_array().unwrap().len(), 2);
+    assert!(project
+        .path()
+        .join(".stateroot/local/verification")
+        .join(format!("{verification}.stdout"))
+        .is_file());
+    std::fs::write(project.path().join("code.txt"), "changed").unwrap();
+    let root_before = stateroot_core::roots::latest_root(project.path()).unwrap();
+    stateroot(config.path(), home.path(), project.path())
+        .args([
+            "plan",
+            "done",
+            &id,
+            "--evidence",
+            "caller description",
+            "--verification",
+            &verification,
+        ])
+        .assert()
+        .failure();
+    assert_eq!(
+        stateroot_core::roots::latest_root(project.path()).unwrap(),
+        root_before
+    );
+    assert_eq!(
+        stateroot_core::plans::load(project.path(), &id)
+            .unwrap()
+            .0
+            .status,
+        "approved"
+    );
+    std::fs::write(project.path().join("code.txt"), "original").unwrap();
+    stateroot(config.path(), home.path(), project.path())
+        .args([
+            "plan",
+            "done",
+            &id,
+            "--evidence",
+            "command exited zero; acceptance assessed by caller",
+            "--verification",
+            &verification,
+        ])
+        .assert()
+        .success();
+    let completed = stateroot_core::plans::load(project.path(), &id).unwrap().0;
+    assert_eq!(
+        completed.completion_receipt.unwrap().verification_ids,
+        vec![verification]
+    );
+    assert_eq!(std::fs::read(path).unwrap(), before);
+}
+
+#[test]
+fn failed_command_observation_is_retained_without_completing_the_plan() {
+    let (config, home) = homes();
+    let project = tempfile::tempdir().unwrap();
+    init_project(config.path(), home.path(), project.path());
+    let id = record_plan(
+        config.path(),
+        home.path(),
+        project.path(),
+        "Failure",
+        "# Retain failure",
+    );
+    let binary = assert_cmd::cargo::cargo_bin("stateroot");
+    stateroot(config.path(), home.path(), project.path())
+        .args(["plan", "verify", &id, "--"])
+        .arg(binary)
+        .arg("not-a-command")
+        .assert()
+        .failure();
+    let directory = project.path().join(".stateroot/plans/verification");
+    let finished = std::fs::read_dir(directory)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".finished.json")
+        })
+        .unwrap()
+        .path();
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(finished).unwrap()).unwrap();
+    assert_eq!(record["status"], "observed command failure");
+    assert_eq!(
+        stateroot_core::plans::load(project.path(), &id)
+            .unwrap()
+            .0
+            .status,
+        "draft"
+    );
+}
+
+#[test]
 fn plan_lifecycle_walk_and_episodic_notes() {
     let (config_home, user_home) = homes();
     let project = tempfile::tempdir().expect("project");
