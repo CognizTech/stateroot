@@ -3,6 +3,59 @@
 All notable changes to StateRoot. Format loosely follows Keep a Changelog;
 StateRoot is pre-1.0 and milestones land as minor versions.
 
+## v0.2.7 — 2026-10-12
+
+- **Active local continuity.** StateRoot is now an active (still
+  deterministic, never agentic) continuity framework. Durable federated
+  obligations (`stateroot obligation add/list/show/done/snooze/cancel`,
+  UUIDv7 ids, idempotent operation ids, append-only event journal) carry
+  future work like campaign reviews across harnesses. One deterministic
+  continuity assessment derives stable attention items — due obligations,
+  plans awaiting their completion receipt, approved plans with no executor,
+  routed or stale handoffs, failed delegations, parked boundary jobs,
+  an unhealthy service, missing registry projects — and pushes them through
+  `## Needs Attention` in every digest, `stateroot status` (now a
+  decision-ready brief with `--json`), and the editor surfaces.
+- **Background service.** `stateroot service install|remove|start|stop|
+  restart|status|run` runs a single-instance per-user reconciler over every
+  registered project (systemd user unit, LaunchAgent, logon Scheduled Task,
+  WSL host task, or an honest detached fallback). `stateroot install`,
+  self-update, and uninstall manage it automatically; hooks and CLI
+  reconcile on activity regardless.
+- **Evidence-bearing plan completion.** `stateroot plan done <id>
+  --evidence "…"` records a completion receipt (actor, time, exact plan-body
+  digest, completion root) in one transaction — plans are never
+  auto-completed, and structurally finished work opens a closure obligation
+  instead. Plan directives in digests are state-aware (execute / close /
+  assign / plan), so a finished plan never again tells the next harness to
+  execute it.
+- **ChatGPT Dot support.** `stateroot dot` brings explicit, project-only
+  continuity to cloud dot environments — the ordinary CLI driven with exact
+  `--project` selection and truthful `--actor` attribution, a canonical
+  `stateroot-dot` skill, and handoff-only delegation. No host discovery,
+  hooks, telemetry, or update checks on that path.
+- **Handoff identity.** Merged fork histories can carry distinct packets
+  under one sequence number: `handoff list` now shows each packet's body
+  SHA256 (read-view dedupe only; history is immutable), `handoff show <seq>`
+  refuses to guess when a sequence is ambiguous, and `handoff show --id
+  <sha256>` selects exactly.
+- **Hardening batch (WS1–WS4).** Durable session-boundary evidence with
+  safe persistence, exact session continuity with reliable recall,
+  integration visibility with dependable background handling, and
+  inspectable receipts with honest restoration. The updater protects custom
+  build artifacts; `merge --stage --keep-main` supports explicit reviewed
+  selections; delegation capture re-reads and verifies attempt and worker
+  identity under short locks.
+- **Diagnostics.** Optional `plan verify`, exact observation attachment,
+  current-schema annotation preservation with future-state refusal, and a
+  bounded read-only authoritative `doctor` summary. `doctor` now prints the
+  count of soft warnings instead of claiming all checks pass.
+- The extension artifact is 0.2.23: the Needs-you surfaces consume the
+  continuity projection with Done / Snooze / Record-completion actions and
+  badge counts, and setup/reporting paths were reworked. It is published to
+  the registries with this release. Extension 0.2.22 remains fully
+  compatible with this CLI.
+
 ## v0.2.6 — 2026-09-29
 
 - **Truthful handoffs.** `handoff write` gains typed `--failed-approach
