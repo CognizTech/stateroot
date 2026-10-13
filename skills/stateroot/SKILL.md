@@ -74,6 +74,8 @@ stateroot skill show stateroot
 
 That skill is what setup/init wrote into the harness. Resume, checkpoint, handoff, memory, learnings, wiki, roots — all of it lives there. If this bootstrap skill is still in context, ignore it.
 
+The built-in skill also covers v0.2.7 continuity: `## Needs Attention`, durable obligations, explicit plan completion receipts, optional command observations, and the authoritative-state summary in `doctor`. Follow that skill for day-to-day commands after setup.
+
 **Keep using this skill** only when:
 
 1. the user asked to install or set up StateRoot
@@ -104,13 +106,13 @@ Skip if `stateroot --version` works.
 
 Ask before piping a remote script to a shell. Prefer that the user run the installer themselves if they hesitate. Official assets only.
 
-**Linux (x86_64):**
+**Linux (x86_64 or ARM64):**
 
 ```bash
 curl -sSfL https://github.com/CognizTech/stateroot/releases/latest/download/install.sh | sh
 ```
 
-Installs to `~/.local/bin`. Put that directory on `PATH` if `stateroot` is still not found. Needs glibc 2.17 or newer (Ubuntu 16.04, Debian 9, RHEL 7, and later).
+The installer selects the matching Linux release binary and installs it to `~/.local/bin`. Put that directory on `PATH` if `stateroot` is still not found. Needs glibc 2.17 or newer (Ubuntu 16.04, Debian 9, RHEL 7, and later).
 
 **Windows:** prefer the MSI: https://github.com/CognizTech/stateroot/releases/latest/download/StateRootSetup-x64.msi
 
@@ -136,6 +138,8 @@ stateroot doctor
 ```
 
 `doctor` is designed to pass with zero config and zero keys. If it fails, quote the CLI output. Do not work around a broken install by writing state files.
+
+In an initialized project, `doctor` also reports authoritative work-state availability and restoration limits. Read that summary separately from installation health; a fresh installation has no retained project root yet.
 
 ## Step 2 — Setup (global, required)
 
@@ -215,6 +219,8 @@ What it does:
 - **Plans across agents** — a plan store with an approval lifecycle; plan with a strong model in one agent, implement with a cheaper one in another.
 - **Cross-agent subagents** — delegate a bounded task into another agent's CLI and get back the conclusion.
 - **State versioning** — working-tree snapshots in Git plumbing: restore, fork, merge, compare, with receipts. Your branches are never touched.
+- **Active continuity** — due obligations and unresolved work appear in agent digests, status, and editor surfaces; a local deterministic service reconciles registered projects.
+- **Plan completion and diagnostics** — explicit completion receipts, optional source-bound command observations, and an authoritative-state summary in `doctor` make work progress inspectable.
 - **Skills and MCP sync** — SKILL.md packages and MCP server configs pooled and projected across agent configs without clobbering user content.
 - **Personality sharing** — one persona and user profile, injected in full at every session start.
 - **Local-first and private** — one static binary, zero config to start, everything on your machine, Apache-2.0.

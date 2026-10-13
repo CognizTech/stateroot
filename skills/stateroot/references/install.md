@@ -3,7 +3,7 @@
 Authoritative: https://stateroot.dev/docs/getting-started/installation  
 Releases: https://github.com/CognizTech/stateroot/releases
 
-Do not invent other download URLs. Current tagged releases ship **Linux x64**, **Windows x64**, and **macOS Apple Silicon** binaries. One binary, no extra runtime.
+Do not invent other download URLs. Current tagged releases ship **Linux x64 and ARM64**, **Windows x64**, and **macOS Apple Silicon** binaries. One binary, no extra runtime.
 
 ## Linux
 
@@ -11,7 +11,7 @@ Do not invent other download URLs. Current tagged releases ship **Linux x64**, *
 curl -sSfL https://github.com/CognizTech/stateroot/releases/latest/download/install.sh | sh
 ```
 
-Downloads `stateroot-linux-x64`, verifies SHA-256 against `checksums.txt` (fail closed), installs to `~/.local/bin`. x86_64 only for current releases. Needs glibc 2.17 or newer (Ubuntu 16.04, Debian 9, RHEL 7, and later).
+Selects `stateroot-linux-x64` or `stateroot-linux-arm64` for the host, verifies SHA-256 against `checksums.txt` (fail closed), and installs to `~/.local/bin`. Needs glibc 2.17 or newer (Ubuntu 16.04, Debian 9, RHEL 7, and later).
 
 If `command not found: stateroot` after a successful install, add `~/.local/bin` to `PATH` and retry in a new shell.
 

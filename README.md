@@ -76,6 +76,12 @@ Claude Code ──→ State A ──→ State B
 
 Switch harnesses, change models, retire tools — the project, the persona, and every lesson it ever learned carry on.
 
+### Continuity that stays active
+
+StateRoot surfaces due work and unfinished handoffs in `## Needs Attention` when an agent starts, in `stateroot status`, and in the editor extension. Durable `stateroot obligation` items carry follow-ups across harnesses; the per-user `stateroot service` reconciles them in the background. Local continuity is deterministic and runs without an AI agent of its own.
+
+Plans close with an explicit `stateroot plan done <id> --evidence "…"` receipt. When plan-bound todos finish, StateRoot keeps a completion obligation visible until the agent records the result. The [CLI guide](docs/cli.md) covers obligations, service controls, and plan lifecycle.
+
 ## Native harnesses stay native
 
 StateRoot does not replace Claude Code, Codex, Cursor, Kimi or any other tool with a proprietary runtime. Each harness keeps its own model, interface, capabilities and strengths; StateRoot is the persistent layer through which they share intelligence and work state. Choose the agent for the job: Codex authors the plan, Kimi implements one task, Cursor implements another on its own fork, Codex reviews and integrates. The agents remain distinct; the project does not reset when the worker changes.
@@ -129,6 +135,8 @@ Learnings are judgment, not facts: `prefer X over Y`, `never Z`, each with *when
 Git versions the commits you make. StateRoot snapshots the working tree during agent work, stored with Git *plumbing* under `refs/stateroot`. Your branches are never rewritten.
 
 Every snapshot is a complete, immutable, content-addressed state: restore it exactly, fork it safely, compare any two states honestly, and read the receipt of what changed between them.
+
+Current `.gitignore` and `.staterootignore` exclusions still apply when materializing an older state. `stateroot doctor` reports the current root, metadata compatibility, capture evidence, and restoration limits separately from general setup health. For an optional command observation tied to a plan and the eligible project files, run `stateroot plan verify <id> -- <command> [args...]`; attach a successful observation with `stateroot plan done <id> --evidence "…" --verification <observation-id>`. A recorded command result does not establish that every acceptance criterion passed. See the [CLI guide](docs/cli.md#optional-plan-command-observations-and-state-compatibility) for the exact scope.
 
 Restores and digests say where information came from: **verified** (Git), **observed** (transcripts), or **synthesized** (LLM). Empty stays empty.
 

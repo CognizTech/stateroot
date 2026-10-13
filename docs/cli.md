@@ -142,6 +142,14 @@ transition. `--status` is read-only and `--abort` removes only the local
 attempt record and its worktree. StateRoot never chooses a model or
 silently chooses a source side.
 
+For a reviewed candidate, `stateroot merge --stage <attempt>` folds the
+remaining forks into the reconciliation worktree without publishing. A
+fully staged candidate has a sealed tree for acceptance checks; edit it,
+then stage and check it again. `--stage <attempt> --keep-main <path>` retains
+one specifically reviewed live operational record that staging would
+otherwise overwrite (repeat the flag for additional exact paths). Publish
+only the gated candidate with `--continue <attempt>`.
+
 `stateroot handoff write --worktree <path>` binds a handoff to a
 registered fork: the packet carries the opaque `fork_id` (never the raw
 path), the receiver's digest opens with **Work in fork \<id\>** and the

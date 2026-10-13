@@ -18,6 +18,7 @@ Authoritative: https://stateroot.dev/docs/guides/privacy · https://stateroot.de
 | `~/.config/stateroot/` (Linux) or `%APPDATA%\stateroot\` (Windows) | first use / setup | `config.toml`, `projects.toml` |
 | `~/.stateroot/` | setup / first use | soul, USER.md, user-global learnings |
 | Harness config dirs | setup / `stateroot install` | session hooks so the **built-in** skill can run |
+| Per-user continuity service registration | supported installs / `stateroot install` | reconciles due work across registered projects; `stateroot service status` reports coverage |
 | `<project>/.stateroot/` | `stateroot init` only | project store |
 | Project stubs | `stateroot init` | e.g. `.cursor/rules/stateroot.mdc`, Claude command, AGENTS.md block |
 
