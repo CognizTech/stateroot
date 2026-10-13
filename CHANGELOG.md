@@ -3,6 +3,17 @@
 All notable changes to StateRoot. Format loosely follows Keep a Changelog;
 StateRoot is pre-1.0 and milestones land as minor versions.
 
+## v0.2.8 — 2026-10-13
+
+- **Documentation and skill alignment.** The README, the CLI guide
+  (`docs/cli.md`), the marketplace install skill, and the CLI-embedded
+  StateRoot skill now describe the v0.2.7 surface: active continuity,
+  obligations, the background service, evidence-bearing plan completion,
+  `plan verify`, exact handoff-id lookup, reviewed merge staging, and what
+  `doctor` does and does not assert. No code changes.
+- The extension artifact remains 0.2.23 (unchanged content, rebuilt from
+  the same source) and needs no registry action.
+
 ## v0.2.7 — 2026-10-12
 
 - **Active local continuity.** StateRoot is now an active (still
