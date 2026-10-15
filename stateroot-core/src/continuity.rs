@@ -436,11 +436,18 @@ impl PlanDirective {
 }
 
 /// The Telemetry-v2 closure signal: the current handoff declares no
-/// remaining work AND its boundary is not older than the plan's current
-/// status. The age guard matters: a project's init handoff carries empty
-/// next_actions forever — a handoff that predates the plan's activation
-/// cannot be declaring that plan finished.
-fn handoff_declares_no_remaining_work(project_dir: &Path, status_since: &str) -> bool {
+/// remaining work AND actually speaks for THIS plan. A handoff written while
+/// the plan was current carries `plan_ref.id` — that structural link is
+/// timestamp-independent. Legacy packets without `plan_ref` fall back to the
+/// age guard with STRICT inequality: a project's init handoff carries empty
+/// next_actions forever, and second-precision timestamps make a same-second
+/// init handoff indistinguishable from a later one — missed is honest,
+/// invented is not.
+fn handoff_declares_no_remaining_work(
+    project_dir: &Path,
+    plan_id: &str,
+    status_since: &str,
+) -> bool {
     let Ok(Some(packet)) = local_store::read_handoff_local(project_dir) else {
         return false;
     };
@@ -451,13 +458,20 @@ fn handoff_declares_no_remaining_work(project_dir: &Path, status_since: &str) ->
     if !no_actions {
         return false;
     }
+    let plan_ref = packet
+        .get("plan_ref")
+        .and_then(|p| p.get("id"))
+        .and_then(|v| v.as_str());
+    if let Some(bound) = plan_ref {
+        return bound == plan_id;
+    }
     let boundary = packet
         .get("written_at")
         .and_then(|v| v.as_str())
         .filter(|t| !t.is_empty())
         .or_else(|| packet.get("created_at").and_then(|v| v.as_str()))
         .unwrap_or("");
-    !boundary.is_empty() && boundary >= status_since
+    !boundary.is_empty() && boundary > status_since
 }
 
 /// Derive the directive for one plan from structural state only. Mirrors
@@ -487,7 +501,7 @@ pub fn plan_directive(project_dir: &Path, plan: &PlanMeta) -> PlanDirective {
         let incomplete_todos = matches!(todos, Some((done, total)) if done < total);
         if !running_bound
             && !incomplete_todos
-            && handoff_declares_no_remaining_work(project_dir, &plan.updated_at)
+            && handoff_declares_no_remaining_work(project_dir, &plan.id, &plan.updated_at)
         {
             return PlanDirective::Close;
         }
@@ -597,7 +611,7 @@ pub fn assess(
             let incomplete_todos = matches!(todos, Some((done, total)) if done < total);
             if !running_bound
                 && !incomplete_todos
-                && handoff_declares_no_remaining_work(project_dir, &plan.updated_at)
+                && handoff_declares_no_remaining_work(project_dir, &plan.id, &plan.updated_at)
             {
                 let mut item = AttentionItem::new(
                     KIND_PLAN_CLOSURE,
