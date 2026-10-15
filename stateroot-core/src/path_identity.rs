@@ -55,6 +55,18 @@ pub fn resolve_existing_dir(raw: &Path) -> Option<PathBuf> {
         .find(|path| path.is_dir())
 }
 
+/// Resolve a tool-reported existing file on this host, including Windows ↔
+/// WSL drive forms. The caller still verifies project scope after resolution.
+pub fn resolve_existing_file(raw: &Path) -> Option<PathBuf> {
+    if raw.is_file() {
+        return Some(raw.to_path_buf());
+    }
+    let norm = normalize_host_path(&raw.to_string_lossy());
+    native_candidates(&norm)
+        .into_iter()
+        .find(|path| path.is_file())
+}
+
 fn fold_wsl_unc(s: &str) -> String {
     let lower = s.to_ascii_lowercase();
     for prefix in ["//wsl$/", "//wsl.localhost/"] {

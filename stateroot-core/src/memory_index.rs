@@ -411,12 +411,40 @@ fn delete_source(conn: &Connection, source: &str) -> Result<(), MemoryIndexError
     Ok(())
 }
 
-/// Bounded searchable recent window, with original session/source references.
+/// Bounded opening and recent windows, with original session/source references.
 fn recent_projection(bundle: &serde_json::Value) -> String {
     const RECENT_CHARS: usize = 32_000;
+    const OPENING_CHARS: usize = 4_096;
+    let messages = bundle["messages"].as_array();
+    let total_chars = messages
+        .into_iter()
+        .flatten()
+        .fold(0usize, |count, message| {
+            count.saturating_add(message["text"].as_str().unwrap_or("").chars().count())
+        });
+    let has_omitted_middle = total_chars > RECENT_CHARS;
+    let mut opening = Vec::new();
+    if has_omitted_middle {
+        let mut remaining = OPENING_CHARS;
+        if let Some(messages) = messages {
+            for message in messages {
+                if remaining == 0 {
+                    break;
+                }
+                let first: String = message["text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .chars()
+                    .take(remaining)
+                    .collect();
+                remaining = remaining.saturating_sub(first.chars().count());
+                opening.push(first);
+            }
+        }
+    }
     let mut parts = Vec::new();
-    let mut remaining = RECENT_CHARS;
-    if let Some(messages) = bundle["messages"].as_array() {
+    let mut remaining = RECENT_CHARS - if has_omitted_middle { OPENING_CHARS } else { 0 };
+    if let Some(messages) = messages {
         for message in messages.iter().rev() {
             let text = message["text"].as_str().unwrap_or("");
             let tail: String = text
@@ -435,7 +463,21 @@ fn recent_projection(bundle: &serde_json::Value) -> String {
         }
     }
     parts.reverse();
-    format!("session={} harness={} source={} partial-recall-window=recent-32000-chars; native-window={}; parent/tool context outside the window may be unavailable; full evidence remains at source\n{}",bundle["session_id"].as_str().unwrap_or(""),bundle["harness"].as_str().unwrap_or(""),bundle["source_path"].as_str().unwrap_or(""),bundle["windowing"].as_str().unwrap_or("canonical recent messages"),parts.join("\n"))
+    let window = if has_omitted_middle {
+        "first-4096-chars+recent-27904-chars"
+    } else {
+        "recent-32000-chars"
+    };
+    let text = if has_omitted_middle {
+        format!(
+            "{}\n[intervening evidence omitted from recall index; inspect source]\n{}",
+            opening.join("\n"),
+            parts.join("\n")
+        )
+    } else {
+        parts.join("\n")
+    };
+    format!("session={} harness={} source={} partial-recall-window={window}; native-window={}; parent/tool context outside the window may be unavailable; full evidence remains at source\n{text}",bundle["session_id"].as_str().unwrap_or(""),bundle["harness"].as_str().unwrap_or(""),bundle["source_path"].as_str().unwrap_or(""),bundle["windowing"].as_str().unwrap_or("canonical recent messages"))
 }
 
 fn rebuild_with_conn(
@@ -949,6 +991,99 @@ mod tests {
         )
         .unwrap();
         file
+    }
+
+    #[test]
+    fn long_interrupted_session_recall_preserves_opening_and_recent_windows() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(project.path(), "p", "P", "default").unwrap();
+        let early = "firstturncanary20261015";
+        let middle = "middleturncanary20261015";
+        let late = "lastturncanary20261015";
+        let transcript = native_file(
+            home.path(),
+            project.path(),
+            "interrupted",
+            &format!(
+                "{early} {} {middle} {} {late}",
+                "middle ".repeat(4_500),
+                "middle ".repeat(4_500)
+            ),
+        );
+        crate::observations::capture(
+            project.path(),
+            crate::observations::CaptureRequest {
+                ts: "2026-10-15T00:00:00Z".into(),
+                event: "user_prompt_submit".into(),
+                harness: "codex".into(),
+                session_id: Some("interrupted".into()),
+                session_identity: "native".into(),
+                event_identity: None,
+                text: format!("early answer: {early}"),
+                kind_hint: None,
+                tool: None,
+                excerpt: None,
+                source: None,
+                local_payload: None,
+                source_status: "complete".into(),
+                meta: None,
+            },
+        )
+        .unwrap();
+
+        let started = std::time::Instant::now();
+        let early_hits = search(project.path(), home.path(), early, 5, true).unwrap();
+        let early_ms = started.elapsed().as_millis();
+        let started = std::time::Instant::now();
+        let late_hits = search(project.path(), home.path(), late, 5, true).unwrap();
+        let late_ms = started.elapsed().as_millis();
+        let middle_hits = search(project.path(), home.path(), middle, 5, true).unwrap();
+        let started = std::time::Instant::now();
+        let raw_hits = crate::observations::filter_spool(
+            project.path(),
+            &crate::observations::ObservationFilter {
+                query: Some(early.into()),
+                limit: 5,
+                ..Default::default()
+            },
+        );
+        let raw_ms = started.elapsed().as_millis();
+        eprintln!(
+            "long-session result: source_bytes={} recall_early={} ({early_ms}ms) recall_late={} ({late_ms}ms) recall_middle={} observations_early={} ({raw_ms}ms) excerpt_bytes={}",
+            fs::metadata(&transcript).unwrap().len(),
+            early_hits.len(),
+            late_hits.len(),
+            middle_hits.len(),
+            raw_hits.len(),
+            early_hits.iter().map(|hit| hit.text.len()).sum::<usize>()
+        );
+        assert!(early_hits
+            .iter()
+            .any(|hit| { hit.kind == "transcript" && Path::new(&hit.source) == transcript }));
+        assert!(late_hits
+            .iter()
+            .any(|hit| { hit.kind == "transcript" && Path::new(&hit.source) == transcript }));
+        assert!(
+            middle_hits.is_empty(),
+            "omitted middle remains source-linked, not invented"
+        );
+        assert!(raw_hits.iter().any(|hit| hit.text.contains(early)));
+        assert!(fs::read_to_string(&transcript).unwrap().contains(early));
+        assert!(fs::read_to_string(&transcript).unwrap().contains(middle));
+
+        fs::write(&transcript, b"{malformed native source").unwrap();
+        assert!(search(project.path(), home.path(), early, 5, true).is_err());
+        assert!(crate::observations::filter_spool(
+            project.path(),
+            &crate::observations::ObservationFilter {
+                query: Some(early.into()),
+                limit: 5,
+                ..Default::default()
+            }
+        )
+        .iter()
+        .any(|hit| hit.text.contains(early)));
     }
 
     #[test]

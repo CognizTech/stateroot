@@ -1142,6 +1142,7 @@ mod tests {
                 tool: None,
                 excerpt: None,
                 source: None,
+                local_payload: None,
                 source_status: "complete".into(),
                 meta: None,
             },

@@ -5331,6 +5331,102 @@ mod tests {
     use super::*;
 
     #[test]
+    fn explicit_capture_exclusion_keeps_full_raw_local_and_other_observations_shared() {
+        let (_tmp, dir) = project();
+        write(&dir, ".staterootignore", "private/\n");
+        write(&dir, ".staterootcaptureignore", "private/\n");
+        write(
+            &dir,
+            "private/ignored.txt",
+            "read-private-canary shell-private-canary",
+        );
+        write(&dir, "visible.txt", "public-canary");
+
+        for (tool, canary, local_only) in [
+            ("Read", "read-private-canary", true),
+            ("Bash", "shell-private-canary", false),
+            ("Read", "public-canary", false),
+        ] {
+            let payload = if tool == "Bash" {
+                json!({"tool_name": tool, "tool_input": {"command": "cat private/ignored.txt"}, "tool_response": {"content": canary}})
+            } else {
+                let file = if local_only {
+                    "private/ignored.txt"
+                } else {
+                    "visible.txt"
+                };
+                json!({"tool_name": tool, "tool_input": {"path": dir.join(file)}, "tool_response": {"content": canary}})
+            };
+            crate::observations::capture(
+                &dir,
+                crate::observations::CaptureRequest {
+                    ts: "2026-10-15T00:00:00Z".into(),
+                    event: "post_tool_use".into(),
+                    harness: "cursor".into(),
+                    session_id: Some("privacy-fixture".into()),
+                    session_identity: "native".into(),
+                    event_identity: None,
+                    text: format!("{tool}: {canary}"),
+                    kind_hint: None,
+                    tool: Some(tool.into()),
+                    excerpt: None,
+                    source: if local_only {
+                        None
+                    } else {
+                        Some(payload.clone())
+                    },
+                    local_payload: if local_only { Some(payload) } else { None },
+                    source_status: if local_only {
+                        "local_excluded"
+                    } else {
+                        "complete"
+                    }
+                    .into(),
+                    meta: None,
+                },
+            )
+            .unwrap();
+        }
+
+        let (root, _) = create_root(&dir, "cursor", "privacy fixture", None).unwrap();
+        let repo = ensure_repo(&dir).unwrap();
+        let tree = repo
+            .find_commit(root.id.parse().unwrap())
+            .unwrap()
+            .tree()
+            .unwrap();
+        assert!(tree.get_path(Path::new("private/ignored.txt")).is_err());
+        assert!(tree.get_path(Path::new("visible.txt")).is_ok());
+        let segment = std::fs::read_dir(crate::observations::segments_dir(&dir))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+            .unwrap();
+        let relative = segment.strip_prefix(&dir).unwrap();
+        let entry = tree.get_path(relative).unwrap();
+        let blob = repo.find_blob(entry.id()).unwrap();
+        let retained = std::str::from_utf8(blob.content()).unwrap();
+        assert!(
+            !retained.contains("read-private-canary"),
+            "explicitly excluded file-tool content entered the shared root"
+        );
+        assert!(retained.contains("shell-private-canary"));
+        assert!(retained.contains("public-canary"));
+        assert!(retained.contains("local_excluded"));
+        let local = std::fs::read_dir(dir.join(".stateroot/local/captured-tool-output"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .unwrap();
+        assert!(std::fs::read_to_string(&local)
+            .unwrap()
+            .contains("read-private-canary"));
+        assert!(tree.get_path(local.strip_prefix(&dir).unwrap()).is_err());
+    }
+
+    #[test]
     fn verification_fingerprint_reads_bytes_even_when_stat_cache_matches() {
         let (_tmp, dir) = project();
         write(&dir, "code.txt", "before");

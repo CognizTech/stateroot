@@ -116,6 +116,8 @@ Lineage does not depend on you remembering: `stateroot checkpoint` and the turn-
 
 `stateroot doctor` reports the current root, direct-parent availability, metadata compatibility, capture evidence, and restoration limits in an authoritative-state summary separate from setup health. Unknown or future metadata stays visible; incompatible operational mutations refuse without rewriting later history. A package downgrade does not restore an older project state. Historical restoration honors today's `.gitignore` and `.staterootignore` exclusions.
 
+Root ignore declarations exclude files, not text copied into tool results. For an explicit known file-tool path whose full result must stay local, use a project-root `.staterootcaptureignore` with gitignore-style patterns. Matching hook payloads retain full evidence under `.stateroot/local/captured-tool-output/`; shared observations keep labeled metadata and a local locator. This does not trace arbitrary shell output, native transcript imports, or text an agent authors into a handoff. `memory recall` indexes a bounded opening and recent window of long sessions; use `observations search` or the original native source for omitted middle history.
+
 ### 4) Session end / usage limit / harness switch -> handoff
 
 Before ending a session, when approaching usage limits, or when the user asks to switch harness:

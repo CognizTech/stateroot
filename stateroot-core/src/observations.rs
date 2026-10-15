@@ -42,6 +42,8 @@ use crate::safe_io::{self, ResourceLock};
 
 /// Schema tag written into every v2 record.
 pub const OBSERVATION_SCHEMA_V2: &str = "stateroot.observation.v2";
+/// Shared text for an explicitly local-only capture. Raw text stays local.
+pub const LOCAL_EXCLUDED_TEXT: &str = "tool payload retained locally by capture exclusion";
 /// Schema tag of the small current projection.
 pub const PROJECTION_SCHEMA_V1: &str = "stateroot.observations.projection.v1";
 /// Schema tag of the per-session durable frontier.
@@ -154,7 +156,7 @@ pub struct ObservationRecord {
     /// Capture outcome + source integrity.
     #[serde(default)]
     pub capture: CaptureInfo,
-    /// The authorized captured source (the raw hook payload), uncapped.
+    /// Captured source or a locator for an explicitly local-only payload.
     #[serde(default)]
     pub source: Option<SourceRef>,
     /// Unknown payload fields, kept as observed metadata.
@@ -201,7 +203,7 @@ fn default_source_status() -> String {
     "complete".into()
 }
 
-/// The authorized captured source (raw hook payload) with its digest.
+/// Captured source or local-only locator with its digest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceRef {
     /// The original payload JSON.
@@ -235,6 +237,9 @@ pub struct CaptureRequest {
     pub excerpt: Option<String>,
     /// The raw hook payload (authorized captured source).
     pub source: Option<Value>,
+    /// Full payload for an explicitly excluded file-tool event. Retained only
+    /// under `.stateroot/local/`; the shared source becomes a locator/digest.
+    pub local_payload: Option<Value>,
     /// `complete` | `transport_read_error`.
     pub source_status: String,
     /// Unknown payload fields as observed metadata.
@@ -350,6 +355,8 @@ pub struct SpoolHealth {
     pub conflicts: u64,
     /// Records whose captured source is incomplete/missing.
     pub source_unavailable: u64,
+    /// Full payloads deliberately retained only on this machine.
+    pub local_only: u64,
     /// Malformed/torn lines across the legacy spool and segments.
     pub corrupt: Vec<CorruptLine>,
     /// Legacy spool / segment / frontier files that exist but could not be
@@ -482,6 +489,76 @@ fn sha256_hex(text: &str) -> String {
     format!("{:x}", Sha256::digest(text.as_bytes()))
 }
 
+fn retain_local_payload(project_dir: &Path, payload: &Value) -> Result<SourceRef, CaptureError> {
+    let canonical = serde_json::to_string(payload)?;
+    let raw_digest = sha256_hex(&canonical);
+    let relative = format!("local/captured-tool-output/{raw_digest}.json");
+    let path = local_store::root(project_dir).join(&relative);
+    let parent = path.parent().expect("local capture has parent");
+    for dir in [
+        local_store::root(project_dir).join("local"),
+        parent.to_path_buf(),
+    ] {
+        match std::fs::symlink_metadata(&dir) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(CaptureError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "local capture directory is not a real directory",
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&dir)?;
+            }
+            Err(error) => return Err(CaptureError::Io(error)),
+        }
+    }
+    if let Ok(metadata) = std::fs::symlink_metadata(&path) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(CaptureError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "local capture target is not a regular file",
+            )));
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(existing) => {
+            if serde_json::from_str::<Value>(&existing)? != *payload {
+                return Err(CaptureError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "local capture digest collision",
+                )));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            safe_io::atomic_replace_json(&path, payload)?;
+        }
+        Err(error) => return Err(CaptureError::Io(error)),
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    let marker = serde_json::json!({
+        "storage": "local_only",
+        "relative_path": relative,
+        "raw_sha256": raw_digest,
+        "raw_bytes": canonical.len()
+    });
+    let text = serde_json::to_string(&marker)?;
+    Ok(SourceRef {
+        digest: sha256_hex(&text),
+        bytes: text.len(),
+        payload: marker,
+    })
+}
+
 /// Mint a unique capture id: UUIDv7 (time-ordered, collision-free without a
 /// process-local sequence or a pid component). Ordering is never
 /// load-bearing (dedup keys on event identity).
@@ -524,20 +601,33 @@ pub fn capture(project_dir: &Path, req: CaptureRequest) -> Result<CaptureOutcome
         })
         .collect();
 
-    let text_digest = sha256_hex(&req.text);
-    let (source, source_digest) = match &req.source {
+    let local_only = req.local_payload.is_some();
+    let shared_text = if local_only {
+        LOCAL_EXCLUDED_TEXT
+    } else {
+        req.text.as_str()
+    };
+    let text_digest = sha256_hex(shared_text);
+    let (source, source_digest) = match &req.local_payload {
         Some(payload) => {
-            let canonical = serde_json::to_string(payload).unwrap_or_default();
-            (
-                Some(SourceRef {
-                    digest: sha256_hex(&canonical),
-                    bytes: canonical.len(),
-                    payload: payload.clone(),
-                }),
-                Some(sha256_hex(&canonical)),
-            )
+            let source = retain_local_payload(project_dir, payload)?;
+            let digest = source.digest.clone();
+            (Some(source), Some(digest))
         }
-        None => (None, None),
+        None => match &req.source {
+            Some(payload) => {
+                let canonical = serde_json::to_string(payload).unwrap_or_default();
+                (
+                    Some(SourceRef {
+                        digest: sha256_hex(&canonical),
+                        bytes: canonical.len(),
+                        payload: payload.clone(),
+                    }),
+                    Some(sha256_hex(&canonical)),
+                )
+            }
+            None => (None, None),
+        },
     };
 
     let project_id = local_store::read_manifest(project_dir)
@@ -629,23 +719,35 @@ pub fn capture(project_dir: &Path, req: CaptureRequest) -> Result<CaptureOutcome
             // durable under the original record; digests on the sighting
             // keep the equality check auditable.
             text: if full {
-                req.text.clone()
+                shared_text.into()
             } else {
                 String::new()
             },
             text_digest: text_digest.clone(),
-            text_len: if full { req.text.len() } else { 0 },
-            kind_hint: req.kind_hint.clone(),
+            text_len: if full { shared_text.len() } else { 0 },
+            kind_hint: if local_only {
+                None
+            } else {
+                req.kind_hint.clone()
+            },
             tool: req.tool.clone(),
-            excerpt: req.excerpt.clone(),
+            excerpt: if local_only {
+                Some(LOCAL_EXCLUDED_TEXT.into())
+            } else {
+                req.excerpt.clone()
+            },
             capture: CaptureInfo {
                 status: status.into(),
                 replay_of,
                 conflict_with,
-                source_status: req.source_status.clone(),
+                source_status: if local_only {
+                    "local_excluded".into()
+                } else {
+                    req.source_status.clone()
+                },
             },
             source: if full { source.clone() } else { None },
-            meta: req.meta.clone(),
+            meta: if local_only { None } else { req.meta.clone() },
         }
     };
 
@@ -1762,21 +1864,45 @@ pub fn health(project_dir: &Path) -> SpoolHealth {
                             ));
                             continue;
                         }
-                        match value
+                        let status = value
                             .get("capture")
                             .and_then(|c| c.get("status"))
-                            .and_then(|s| s.as_str())
-                        {
+                            .and_then(|s| s.as_str());
+                        match status {
                             Some("replay") => health.replays += 1,
                             Some("conflict") => health.conflicts += 1,
                             _ => health.records += 1,
                         }
-                        let source_missing = value
+                        let source_status = value
                             .get("capture")
                             .and_then(|c| c.get("source_status"))
-                            .and_then(|s| s.as_str())
-                            != Some("complete")
-                            || value.get("source").is_none();
+                            .and_then(|s| s.as_str());
+                        if source_status == Some("local_excluded") && status != Some("replay") {
+                            health.local_only += 1;
+                        }
+                        let local_present = value
+                            .get("source")
+                            .and_then(|s| s.get("payload"))
+                            .and_then(|p| p.get("relative_path"))
+                            .and_then(Value::as_str)
+                            .and_then(|path| path.strip_prefix("local/captured-tool-output/"))
+                            .is_some_and(|name| {
+                                let bytes = name.as_bytes();
+                                bytes.len() == 69
+                                    && bytes[..64].iter().all(u8::is_ascii_hexdigit)
+                                    && &bytes[64..] == b".json"
+                                    && local_store::root(project_dir)
+                                        .join("local/captured-tool-output")
+                                        .join(name)
+                                        .is_file()
+                            });
+                        let source_missing = if status == Some("replay") {
+                            false
+                        } else if source_status == Some("local_excluded") {
+                            !local_present
+                        } else {
+                            source_status != Some("complete") || value.get("source").is_none()
+                        };
                         if source_missing {
                             health.source_unavailable += 1;
                         }
@@ -2201,6 +2327,7 @@ mod tests {
             tool: Some("Bash".into()),
             excerpt: None,
             source: Some(json!({"tool_name": "Bash"})),
+            local_payload: None,
             source_status: "complete".into(),
             meta: None,
         }
@@ -2674,6 +2801,77 @@ mod tests {
             record.source.as_ref().map(|s| s.payload.clone()),
             Some(json!({"tool_name": "Bash"}))
         );
+    }
+
+    #[test]
+    fn local_only_capture_never_shares_raw_caller_fields() {
+        let dir = project();
+        let mut req = request("private-local-canary");
+        req.local_payload = Some(json!({"tool_response": "private-local-canary"}));
+        req.source = Some(json!({"tool_response": "private-local-canary"}));
+        req.meta = Some(json!({"extra": "private-local-canary"}));
+        req.excerpt = Some("private-local-canary".into());
+        let outcome = capture(dir.path(), req).unwrap();
+        let record = archive_lookup(dir.path(), &outcome.record.capture_id).unwrap();
+        assert_eq!(record.capture.source_status, "local_excluded");
+        assert_eq!(record.text, LOCAL_EXCLUDED_TEXT);
+        assert!(record.meta.is_none());
+        assert!(!serde_json::to_string(&record)
+            .unwrap()
+            .contains("private-local-canary"));
+        let relative = record.source.unwrap().payload["relative_path"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let local = local_store::root(dir.path()).join(relative);
+        assert!(std::fs::read_to_string(local)
+            .unwrap()
+            .contains("private-local-canary"));
+        let health = health(dir.path());
+        assert_eq!(health.local_only, 1);
+        assert_eq!(health.source_unavailable, 0);
+    }
+
+    #[test]
+    fn local_only_capture_replay_and_conflict_follow_raw_payload_identity() {
+        let dir = project();
+        let mut req = request("shared placeholder");
+        req.event_identity = Some(("tool_use_id".into(), "local-identity".into()));
+        req.local_payload = Some(json!({"tool_response": "local-first-version"}));
+        let first = capture(dir.path(), req.clone()).unwrap();
+        assert_eq!(first.status, CaptureStatus::Captured);
+        assert_eq!(
+            capture(dir.path(), req.clone()).unwrap().status,
+            CaptureStatus::Replay
+        );
+        req.local_payload = Some(json!({"tool_response": "local-second-version"}));
+        assert_eq!(
+            capture(dir.path(), req).unwrap().status,
+            CaptureStatus::Conflict
+        );
+        let rows = std::fs::read_to_string(&first.segment).unwrap();
+        assert!(!rows.contains("local-first-version"));
+        assert!(!rows.contains("local-second-version"));
+        assert_eq!(health(dir.path()).local_only, 2);
+        assert_eq!(health(dir.path()).source_unavailable, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_only_capture_rejects_a_symlinked_private_directory() {
+        let dir = project();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(local_store::root(dir.path()).join("local")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path(),
+            local_store::root(dir.path()).join("local/captured-tool-output"),
+        )
+        .unwrap();
+        let mut req = request("private-local-canary");
+        req.local_payload = Some(json!({"tool_response": "private-local-canary"}));
+        assert!(capture(dir.path(), req).is_err());
+        assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
+        assert_eq!(health(dir.path()).records, 0);
     }
 
     #[test]

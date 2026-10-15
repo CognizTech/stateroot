@@ -16,7 +16,8 @@
 //! - capture (`post_tool_use`, `notification`, `subagent_*`, `pre_tool_use`):
 //!   durably append one observation to the session's immutable segment under
 //!   `.stateroot/spool/segments/` (locked append + sync before ack; dedup by
-//!   verified native event identity; full body + raw payload retained).
+//!   verified native event identity; full body + raw payload retained unless
+//!   an explicitly declared file-tool capture exclusion keeps them local).
 //! - checkpoint (`tool_failure`, `pre_compact`, `post_compaction`, `stop`,
 //!   `session_end`): checkpoint from the observation tail into the local
 //!   episodic log; `stop`/`session_end` enqueue transcript finalize + snap +
@@ -935,16 +936,65 @@ async fn resume_output(
 // capture
 // ---------------------------------------------------------------------
 
+fn capture_file_local_only(project_dir: &Path, payload: &Value) -> Result<bool, String> {
+    let policy = project_dir.join(stateroot_core::sync_engine::ignore::CAPTURE_IGNORE);
+    match std::fs::metadata(&policy) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("capture declaration unavailable: {error}")),
+        Ok(_) => {}
+    }
+    let input = payload
+        .get("tool_input")
+        .or_else(|| payload.get("input"))
+        .or_else(|| payload.get("arguments"))
+        .unwrap_or(payload);
+    let path = ["file_path", "filePath", "filepath", "path"]
+        .into_iter()
+        .find_map(|key| input.get(key).and_then(Value::as_str));
+    let Some(path) = path else {
+        return Ok(false);
+    };
+    let reported = Path::new(path);
+    let local = stateroot_core::path_identity::resolve_existing_file(reported).or_else(|| {
+        let cwd = payload_project_dir(payload).unwrap_or_else(|| project_dir.to_path_buf());
+        stateroot_core::path_identity::resolve_existing_file(&cwd.join(reported))
+    });
+    let local = local.ok_or_else(|| "tool file path cannot be verified".to_string())?;
+    stateroot_core::sync_engine::ignore::capture_file_excluded(project_dir, &local)
+}
+
 fn capture_observation(
     quirk: &registry::HarnessQuirk,
     canonical: &str,
     project_dir: &Path,
     payload: &Value,
 ) -> anyhow::Result<u8> {
-    let text = payload_text(payload);
-    let kind_hint = infer_kind_hint(canonical, &text);
+    let local_only = match capture_file_local_only(project_dir, payload) {
+        Ok(value) => value,
+        Err(_) => {
+            hook_note(
+                quirk,
+                "capture declaration could not verify a file path; payload retained locally",
+            );
+            true
+        }
+    };
+    let text = if local_only {
+        stateroot_core::observations::LOCAL_EXCLUDED_TEXT.to_string()
+    } else {
+        payload_text(payload)
+    };
+    let kind_hint = if local_only {
+        None
+    } else {
+        infer_kind_hint(canonical, &text)
+    };
     let tool = payload_tool(payload);
-    let excerpt = payload_excerpt(payload, &text);
+    let excerpt = if local_only {
+        Some(text.clone())
+    } else {
+        payload_excerpt(payload, &text)
+    };
     let session_id = digest_delivery::session_id_from_payload(payload);
     // `anon-*` ids are StateRoot-minted (session_identity::tag_payload) — the
     // host harness never carried one; label the provenance, never confuse it
@@ -954,7 +1004,9 @@ fn capture_observation(
         Some(_) => "native",
         None => "unavailable",
     };
-    let source_status = if payload.get("_transport_error").is_some() {
+    let source_status = if local_only {
+        "local_excluded"
+    } else if payload.get("_transport_error").is_some() {
         // The stdin read failed: surface the loss instead of acknowledging
         // complete evidence (A3).
         "transport_read_error"
@@ -974,9 +1026,22 @@ fn capture_observation(
             kind_hint: kind_hint.map(str::to_string),
             tool,
             excerpt,
-            source: Some(payload.clone()),
+            source: if local_only {
+                None
+            } else {
+                Some(payload.clone())
+            },
+            local_payload: if local_only {
+                Some(payload.clone())
+            } else {
+                None
+            },
             source_status: source_status.to_string(),
-            meta: payload_meta(payload),
+            meta: if local_only {
+                None
+            } else {
+                payload_meta(payload)
+            },
         },
     )?;
     match outcome.status {
@@ -1278,6 +1343,88 @@ fn spool_tail(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_file_capture_exclusion_routes_full_payload_to_local_storage() {
+        let project = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(project.path(), "p-test", "proj", "local").unwrap();
+        std::fs::write(project.path().join(".staterootcaptureignore"), "private/\n").unwrap();
+        std::fs::create_dir(project.path().join("private")).unwrap();
+        let file = project.path().join("private/ignored.txt");
+        std::fs::write(&file, "private-tool-canary").unwrap();
+        let payload = json!({
+            "cwd": project.path(),
+            "session_id": "capture-fixture",
+            "tool_name": "Read",
+            "tool_input": {"file_path": file},
+            "tool_response": {"content": "private-tool-canary"}
+        });
+        let quirk = quirk_any("cursor").unwrap();
+        assert!(capture_file_local_only(project.path(), &payload).unwrap());
+        let relative =
+            json!({"cwd": project.path(), "tool_input": {"path": "private/ignored.txt"}});
+        assert!(capture_file_local_only(project.path(), &relative).unwrap());
+        let shell = json!({"cwd": project.path(), "tool_name": "Bash", "tool_input": {"command": "cat private/ignored.txt"}});
+        assert!(!capture_file_local_only(project.path(), &shell).unwrap());
+        assert_eq!(
+            capture_observation(quirk, "post_tool_use", project.path(), &payload).unwrap(),
+            0
+        );
+        let rows = stateroot_core::observations::load_spool(project.path());
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].text.contains("private-tool-canary"));
+        let record = stateroot_core::observations::archive_lookup(
+            project.path(),
+            rows[0].capture_id.as_deref().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(record.capture.source_status, "local_excluded");
+        let shared = serde_json::to_string(&record).unwrap();
+        assert!(!shared.contains("private-tool-canary"));
+        let local = record.source.unwrap().payload["relative_path"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            std::fs::read_to_string(local_store::root(project.path()).join(local))
+                .unwrap()
+                .contains("private-tool-canary")
+        );
+        let health = stateroot_core::observations::health(project.path());
+        assert_eq!(health.local_only, 1);
+        assert_eq!(health.source_unavailable, 0);
+    }
+
+    #[test]
+    fn unverifiable_capture_file_path_stays_local_when_policy_exists() {
+        let project = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(project.path(), "p-test", "proj", "local").unwrap();
+        std::fs::write(project.path().join(".staterootcaptureignore"), "private/\n").unwrap();
+        let payload = json!({
+            "cwd": project.path(),
+            "session_id": "capture-fixture",
+            "tool_name": "Read",
+            "tool_input": {"file_path": "private/missing.txt"},
+            "tool_response": {"content": "unverified-private-canary"}
+        });
+        assert!(capture_file_local_only(project.path(), &payload).is_err());
+        let quirk = quirk_any("cursor").unwrap();
+        assert_eq!(
+            capture_observation(quirk, "post_tool_use", project.path(), &payload).unwrap(),
+            0
+        );
+        let rows = stateroot_core::observations::load_spool(project.path());
+        assert_eq!(rows.len(), 1);
+        let record = stateroot_core::observations::archive_lookup(
+            project.path(),
+            rows[0].capture_id.as_deref().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(record.capture.source_status, "local_excluded");
+        assert!(!serde_json::to_string(&record)
+            .unwrap()
+            .contains("unverified-private-canary"));
+    }
 
     #[test]
     fn payload_project_dir_prefers_agent_cwd_over_process() {

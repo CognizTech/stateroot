@@ -410,6 +410,33 @@ operations refuse rather than silently migrating or overwriting state. Package
 downgrade is not historical state restoration. No-root, partial scans, unknown
 metadata and missing verification are not reported as verified acceptance.
 
+## Capture exclusions and original-evidence recall
+
+Root `.gitignore` and `.staterootignore` exclude matching project files from
+snapshots. Tool results are a separate observation stream: by default their
+full payloads remain shared evidence, even when a result quotes an excluded
+file. For known file-tool inputs whose full result must stay on this machine,
+create a root `.staterootcaptureignore` with gitignore-style relative paths
+(for example, `private/`). A matching existing file path routes the raw hook
+payload to `.stateroot/local/captured-tool-output/` and shares only a labeled
+observation with its event identity, local locator and digest. An invalid
+declaration or a reported file path that cannot be verified also keeps that
+event local. `stateroot observations show <id>` points at the local evidence;
+`observations health` counts local-only and missing sources separately.
+
+This rule inspects explicit file-path fields in hook inputs. It does not parse
+shell command strings, infer the source of arbitrary output, change native
+transcript files, filter authored handoffs/memories, or rewrite older roots.
+An unproven shell result is still shared by default. It is a declaration about
+capture routing, not secret-pattern scanning.
+
+`stateroot memory recall` indexes a bounded opening and recent window from
+long native sessions (4,096 opening characters plus 27,904 recent characters
+when a middle is omitted). Hits retain the native source reference and label
+the omitted middle. `stateroot observations search` and direct native sources
+remain available for details outside that index window; an index failure is
+reported, never presented as a complete search.
+
 ## `stateroot handoff` — write flags and accept gates
 
 `handoff list` shows each distinct packet's full body SHA256, with only the

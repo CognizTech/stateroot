@@ -57,10 +57,17 @@ pub fn show(ctx: &Ctx, id: &str) -> anyhow::Result<()> {
             if let Some(capture_id) = row.capture_id.as_deref() {
                 if let Some(record) = observations::archive_lookup(&ctx.cwd, capture_id) {
                     if let Some(source) = record.source.as_ref() {
-                        println!(
-                            "  source: {} bytes, digest {} ({})",
-                            source.bytes, source.digest, record.capture.source_status
-                        );
+                        if record.capture.source_status == "local_excluded" {
+                            let relative = source.payload["relative_path"]
+                                .as_str()
+                                .unwrap_or("unavailable");
+                            println!("  source: local-only at .stateroot/{relative} (shared metadata digest {})", source.digest);
+                        } else {
+                            println!(
+                                "  source: {} bytes, digest {} ({})",
+                                source.bytes, source.digest, record.capture.source_status
+                            );
+                        }
                     } else {
                         println!("  source: unavailable ({})", record.capture.source_status);
                     }
@@ -94,8 +101,8 @@ pub fn health(ctx: &Ctx) -> anyhow::Result<()> {
         println!("  pending-seal: {name}");
     }
     println!(
-        "records: {} captured/conflict · {} replay sighting(s) · {} conflict(s) · {} source-unavailable",
-        health.records, health.replays, health.conflicts, health.source_unavailable
+        "records: {} captured/conflict · {} replay sighting(s) · {} conflict(s) · {} local-only · {} source-unavailable",
+        health.records, health.replays, health.conflicts, health.local_only, health.source_unavailable
     );
     println!("legacy rows: {}", health.legacy_rows);
     if health.corrupt.is_empty() {

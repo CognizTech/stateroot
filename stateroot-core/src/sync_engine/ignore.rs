@@ -14,6 +14,42 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 /// Name of the extra stateroot ignore file.
 pub const STATEROOTIGNORE: &str = ".staterootignore";
+/// An optional, separate declaration for file-tool payloads kept local.
+pub const CAPTURE_IGNORE: &str = ".staterootcaptureignore";
+
+/// Whether an existing file named by a tool input has a local-only capture
+/// declaration. This does not interpret shell commands or infer where their
+/// output originated; callers must label that limitation honestly.
+pub fn capture_file_excluded(project: &Path, file: &Path) -> Result<bool, String> {
+    let policy = project.join(CAPTURE_IGNORE);
+    let metadata = match std::fs::metadata(&policy) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("capture policy unreadable: {error}")),
+    };
+    if !metadata.is_file() || metadata.len() > 64 * 1024 {
+        return Err("capture policy is not a bounded regular file".into());
+    }
+    let (rules, error) = Gitignore::new(&policy);
+    if let Some(error) = error {
+        return Err(format!("capture policy invalid: {error}"));
+    }
+    let canonical_project = project
+        .canonicalize()
+        .map_err(|error| format!("project path unavailable: {error}"))?;
+    let canonical_file = file
+        .canonicalize()
+        .map_err(|error| format!("tool file path unavailable: {error}"))?;
+    let Ok(relative) = canonical_file.strip_prefix(&canonical_project) else {
+        return Ok(false);
+    };
+    // The ignore matcher is rooted at the original project path. On Windows,
+    // canonical paths gain a `\\?\` prefix; rejoin the scope-checked relative
+    // path under the matcher's own root before asking it to match.
+    Ok(rules
+        .matched_path_or_any_parents(project.join(relative), false)
+        .is_ignore())
+}
 
 /// One compiled gitignore with the root its patterns are relative to.
 struct RuleSet {
@@ -140,6 +176,20 @@ mod tests {
         assert!(rules.is_ignored(".stateroot/local", true));
         assert!(rules.is_ignored(".stateroot/local/cache", false));
         assert!(!rules.is_ignored(".stateroot/manifest.json", false));
+    }
+
+    #[test]
+    fn separate_capture_declaration_matches_only_named_files() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join(CAPTURE_IGNORE), "private/\n").unwrap();
+        std::fs::create_dir(project.path().join("private")).unwrap();
+        let private = project.path().join("private/ignored.txt");
+        let public = project.path().join("public.txt");
+        std::fs::write(&private, "private fixture").unwrap();
+        std::fs::write(&public, "public fixture").unwrap();
+        assert!(capture_file_excluded(project.path(), &private).unwrap());
+        assert!(!capture_file_excluded(project.path(), &public).unwrap());
+        assert!(!IgnoreRules::load(project.path()).is_ignored("private/ignored.txt", false));
     }
 
     #[test]
