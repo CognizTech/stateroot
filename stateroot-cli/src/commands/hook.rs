@@ -49,8 +49,9 @@ fn find_project_root(start: &Path) -> Option<PathBuf> {
 
 /// The agent's working directory from a hook payload, when the harness sends
 /// one: `cwd` / `project_dir` / `workspace_dir` string fields, or the first
-/// `workspace_roots` entry (cursor's shape). Translates Windows ↔ WSL forms
-/// so a payload from the other OS still attaches. Returns None on anything odd.
+/// `workspace_roots` entry (cursor's shape), or Antigravity's `workspacePaths`
+/// array. Translates Windows ↔ WSL forms so a payload from the other OS still
+/// attaches. Returns None on anything odd.
 fn payload_project_dir(payload: &Value) -> Option<PathBuf> {
     for key in ["cwd", "project_dir", "projectDir", "workspace_dir"] {
         if let Some(dir) = payload.get(key).and_then(|v| v.as_str()) {
@@ -60,13 +61,88 @@ fn payload_project_dir(payload: &Value) -> Option<PathBuf> {
             }
         }
     }
-    payload
+    if let Some(dir) = payload
         .get("workspace_roots")
         .and_then(|v| v.as_array())
         .and_then(|roots| roots.first())
         .and_then(|v| v.as_str())
         .map(Path::new)
         .and_then(stateroot_core::path_identity::resolve_existing_dir)
+    {
+        return Some(dir);
+    }
+    payload_workspace_paths(payload)
+}
+
+/// Antigravity payloads carry `workspacePaths`: every mounted workspace, any
+/// of which may hold the project. Prefer the entry that resolves inside an
+/// initialized project; fall back to the first existing directory so capture
+/// still attaches to a real cwd outside any project.
+fn payload_workspace_paths(payload: &Value) -> Option<PathBuf> {
+    let dirs: Vec<PathBuf> = payload
+        .get("workspacePaths")
+        .and_then(|v| v.as_array())
+        .map(|roots| {
+            roots
+                .iter()
+                .filter_map(|v| v.as_str())
+                .filter_map(|dir| {
+                    stateroot_core::path_identity::resolve_existing_dir(Path::new(dir))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    dirs.iter()
+        .find(|dir| find_project_root(dir).is_some())
+        .or_else(|| dirs.first())
+        .cloned()
+}
+
+/// Antigravity's PreInvocation fires before every model call and carries
+/// `invocationNum` (0-indexed). Past the first invocation the event is
+/// classified mid-turn — the host's model counter, not a session boundary.
+/// SessionStart payloads carry no `invocationNum`, and legacy
+/// SessionStart-less hosts open with `invocationNum: 0`: both are treated as
+/// session starts. A non-numeric or negative value degrades to "treat as a
+/// start" rather than dropping a genuine boundary. The classification only
+/// feeds the state-based delivery gate in `run` — the counter itself never
+/// suppresses delivery (StateRoot may first observe a conversation at any
+/// invocation number).
+fn preinvocation_mid_turn(payload: &Value) -> bool {
+    payload
+        .get("invocationNum")
+        .and_then(Value::as_i64)
+        .is_some_and(|n| n > 0)
+}
+
+/// Read-only preflight for a mid-turn PreInvocation (`invocationNum` > 0).
+/// True only when this conversation is already settled: the persona-injection
+/// scheduler recorded a completed first FULL with unchanged identity and no
+/// armed compaction, so it could only decide Nothing. Anything else — a
+/// conversation StateRoot never observed (late attach, resumed conversation),
+/// changed identity, a pending compaction — returns false and falls through
+/// to normal session-start handling, which delivers once and re-settles.
+fn antigravity_mid_turn_settled(
+    ctx: &Ctx,
+    quirk: &registry::HarnessQuirk,
+    project_dir: Option<&Path>,
+    payload: &Value,
+) -> bool {
+    let home =
+        stateroot_core::harness_install::home_dir().unwrap_or_else(|_| ctx.config_dir.clone());
+    let identity = hook_identity_prefix(&ctx.config_dir, &home, project_dir, quirk.id);
+    let hash = stateroot_core::persona_injection::content_hash(&identity);
+    let key = format!(
+        "{}:{}",
+        quirk.id,
+        stateroot_core::persona_injection::session_key(project_dir.unwrap_or(&ctx.cwd), payload)
+    );
+    let Some(state) = stateroot_core::persona_injection::load_state(&home, &key) else {
+        return false;
+    };
+    !state.last_full_ts.is_empty()
+        && !state.pending_compaction
+        && (hash.is_empty() || hash == state.content_hash)
 }
 
 /// kimi-code IDE sessions report the extension host's cwd in hook payloads
@@ -80,6 +156,176 @@ fn kimi_session_project(quirk: &registry::HarnessQuirk, payload: &Value) -> Opti
     let home = stateroot_core::harness_install::home_dir().ok()?;
     let dir = stateroot_core::session_identity::kimi_session_workdir(&home, payload)?;
     find_project_root(&dir)
+}
+
+/// Hermes hook payloads carry the hermes PROCESS cwd (`Path.cwd()` of the
+/// CLI or gateway — for a gateway that is its launch dir, not the agent's
+/// project; `agent/shell_hooks.py` `_serialize_payload`). The configured
+/// working directory rides the inherited `TERMINAL_CWD` env instead (the
+/// gateway sets it; CLI/cron fall back to launch cwd — `agent/runtime_cwd.py`),
+/// so for hermes it resolves BEFORE the payload cwd.
+fn hermes_terminal_project(quirk: &registry::HarnessQuirk) -> Option<PathBuf> {
+    if quirk.id != "hermes" {
+        return None;
+    }
+    let raw = std::env::var_os("TERMINAL_CWD")?;
+    if raw.to_str().map(str::trim).unwrap_or_default().is_empty() {
+        return None;
+    }
+    let dir = stateroot_core::path_identity::resolve_existing_dir(Path::new(&raw))?;
+    find_project_root(&dir)
+}
+
+/// A hermes `delegate_task` child is its own agent with its own session
+/// (`tools/delegate_tool.py`: `platform="subagent"`, `parent_session_id`
+/// stamped). The current serializer consumes `parent_session_id` into the
+/// `session_id` fallback (so `platform` is the reliable marker); the docs
+/// also list it as a payload field, so both placements count. A child must
+/// never consume its parent's identity digest or finalize its parent's
+/// session — its own evidence stays captured under its own native session id.
+fn hermes_delegated_child(quirk: &registry::HarnessQuirk, payload: &Value) -> bool {
+    if quirk.id != "hermes" {
+        return false;
+    }
+    let non_empty_str = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string()
+    };
+    let extra = payload.get("extra");
+    if non_empty_str(extra.and_then(|e| e.get("platform"))) == "subagent" {
+        return true;
+    }
+    !non_empty_str(payload.get("parent_session_id")).is_empty()
+        || !non_empty_str(extra.and_then(|e| e.get("parent_session_id"))).is_empty()
+}
+
+/// Part types hermes itself drops when it flattens message content
+/// (`agent/message_content.py`); text is read from these keys, in order.
+const HERMES_NON_TEXT_PART_TYPES: [&str; 5] =
+    ["image", "image_url", "input_image", "audio", "input_audio"];
+const HERMES_TEXT_PART_KEYS: [&str; 5] = [
+    "text",
+    "content",
+    "input_text",
+    "output_text",
+    "summary_text",
+];
+
+/// The visible text of a hermes `user_message`, flattened the way hermes
+/// flattens message content: a string as-is, a list of content parts joined
+/// by line with image/audio parts dropped. Empty means a non-text turn.
+fn hermes_prompt_text(message: &Value) -> Option<String> {
+    let text = match message {
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(hermes_part_text)
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        other => hermes_part_text(other)?.to_owned(),
+    };
+    (!text.trim().is_empty()).then_some(text)
+}
+
+fn hermes_part_text(part: &Value) -> Option<&str> {
+    match part {
+        Value::String(text) => Some(text),
+        Value::Object(fields) => {
+            let kind = fields
+                .get("type")
+                .and_then(Value::as_str)
+                .map(|kind| kind.trim().to_ascii_lowercase());
+            if kind.is_some_and(|kind| HERMES_NON_TEXT_PART_TYPES.contains(&kind.as_str())) {
+                return None;
+            }
+            HERMES_TEXT_PART_KEYS
+                .iter()
+                .find_map(|key| fields.get(*key).and_then(Value::as_str))
+        }
+        _ => None,
+    }
+}
+
+/// The turn-outcome suffix for a hermes on_session_end checkpoint note:
+/// `failed`/`interrupted`/`turn_exit_reason` ride `extra`
+/// (`agent/turn_finalizer.py`). Some only when the turn did not complete
+/// cleanly — clean turns add no noise.
+fn hermes_turn_outcome(quirk: &registry::HarnessQuirk, payload: &Value) -> Option<String> {
+    if quirk.id != "hermes" {
+        return None;
+    }
+    let extra = payload.get("extra").and_then(Value::as_object)?;
+    let flag = |key: &str| extra.get(key).and_then(Value::as_bool).unwrap_or(false);
+    let failed = flag("failed");
+    let interrupted = flag("interrupted");
+    let reason = extra
+        .get("turn_exit_reason")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if !failed && !interrupted && reason.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "outcome: failed={failed} interrupted={interrupted} reason={}",
+        if reason.is_empty() { "n/a" } else { &reason }
+    ))
+}
+
+/// Shape a hermes native payload before any consumer sees it. `pre_llm_call`
+/// carries the turn's prompt in `extra.user_message` (string or content
+/// parts) next to `extra.conversation_history` — the WHOLE conversation so
+/// far. Keep the flattened prompt plus bounded routing/identity fields and
+/// drop the history: capture must never spool an entire conversation per
+/// turn. Other hermes payloads are bounded by contract (tool args/result,
+/// outcome flags, child summaries) and pass through untouched.
+fn shape_hermes_payload(canonical: &str, payload: &mut Value) {
+    if canonical != "user_prompt_submit" || !payload.is_object() {
+        return;
+    }
+    let mut shaped = serde_json::Map::new();
+    for key in [
+        "hook_event_name",
+        "cwd",
+        "session_id",
+        "profile",
+        "parent_session_id",
+    ] {
+        if let Some(value) = payload.get(key) {
+            if !value.is_null() {
+                shaped.insert(key.to_string(), value.clone());
+            }
+        }
+    }
+    if let Some(extra) = payload.get("extra").and_then(Value::as_object) {
+        if let Some(prompt) = extra.get("user_message").and_then(hermes_prompt_text) {
+            shaped.insert("prompt".to_string(), prompt.into());
+        }
+        let mut kept = serde_json::Map::new();
+        for key in [
+            "model",
+            "platform",
+            "is_first_turn",
+            "turn_id",
+            "task_id",
+            "parent_session_id",
+            "sender_id",
+        ] {
+            if let Some(value) = extra.get(key) {
+                if !value.is_null() {
+                    kept.insert(key.to_string(), value.clone());
+                }
+            }
+        }
+        if !kept.is_empty() {
+            shaped.insert("extra".to_string(), Value::Object(kept));
+        }
+    }
+    *payload = Value::Object(shaped);
 }
 
 /// Lenient stdin payload parse (tolerates empty or non-JSON input). A failed
@@ -143,6 +389,42 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
         return Ok(0);
     };
 
+    // hermes: bound the native payload before any consumer sees it —
+    // pre_llm_call carries the whole conversation in extra.conversation_history;
+    // only the flattened prompt and bounded routing fields survive.
+    if quirk.id == "hermes" {
+        shape_hermes_payload(canonical, &mut payload);
+    }
+    let delegated_child = hermes_delegated_child(quirk, &payload);
+    // Antigravity lifecycle routing (native contract: PreInvocation fires
+    // before EVERY model invocation, SessionStart fires once per
+    // conversation; both register as `session_start` for legacy hosts):
+    // - A PreInvocation payload carries `invocationNum`; anything past the
+    //   first invocation is mid-turn, never a session boundary. The counter
+    //   is the host's model counter, not StateRoot's delivery state, so it
+    //   never suppresses delivery on its own: the state-based gate after
+    //   project resolution stays silent only for a conversation whose
+    //   identity was already delivered unchanged, while a first-seen
+    //   conversation (late attach, resumed) or a changed/pending identity
+    //   still delivers once. Ordinary repeats for a delivered conversation
+    //   never re-accept a handoff (the scheduler and the delivery ledger
+    //   dedupe per project+session).
+    // - PostToolUse carries an `error` string (empty on success): failures
+    //   route to the checkpoint lane for an immediate failure checkpoint, and
+    //   the checkpoint arm first captures the full payload durably (the
+    //   checkpoint alone would only label the failure over the prior tail).
+    let canonical = if quirk.id == "antigravity"
+        && canonical == "post_tool_use"
+        && payload
+            .get("error")
+            .and_then(Value::as_str)
+            .is_some_and(|error| !error.trim().is_empty())
+    {
+        "tool_failure"
+    } else {
+        canonical
+    };
+
     // Harnesses whose hook payloads carry no conversation id (IDE/ACP
     // adapters) get a StateRoot-managed session id, rotated per real
     // conversation — every downstream consumer sees a true per-session id.
@@ -159,17 +441,21 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
     // Project resolution: the event payload's cwd/workspace first (gateway
     // daemons and IDEs run hooks with THEIR cwd, not the agent's project —
     // the openclaw gateway bug), then walk-up from our process cwd, then the
-    // registry.
+    // registry. hermes is the reverse case: its payload cwd IS the process
+    // cwd (a gateway's launch dir), so the inherited TERMINAL_CWD env — the
+    // harness's configured working directory — resolves first.
     let payload_root = payload_project_dir(&payload).and_then(|d| find_project_root(&d));
     let kimi_root = || kimi_session_project(quirk, &payload);
-    let project_dir = payload_root.or_else(|| {
-        kimi_root().or_else(|| {
-            find_project_root(&ctx.cwd).or_else(|| {
-                ctx.current_project()
-                    .ok()
-                    .flatten()
-                    .and_then(|_| ctx.cwd.canonicalize().ok())
-                    .filter(|cwd| local_store::is_stateroot_dir(cwd))
+    let project_dir = hermes_terminal_project(quirk).or_else(|| {
+        payload_root.or_else(|| {
+            kimi_root().or_else(|| {
+                find_project_root(&ctx.cwd).or_else(|| {
+                    ctx.current_project()
+                        .ok()
+                        .flatten()
+                        .and_then(|_| ctx.cwd.canonicalize().ok())
+                        .filter(|cwd| local_store::is_stateroot_dir(cwd))
+                })
             })
         })
     });
@@ -177,14 +463,33 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
         return Ok(0);
     };
 
+    // Antigravity mid-turn PreInvocation: silent only when this conversation
+    // already settled (first FULL delivered, identity unchanged, no armed
+    // compaction). A conversation StateRoot first observes past invocation 0
+    // — install/attach mid-conversation, or a resumed conversation the
+    // ledger never saw — falls through and receives its one first delivery.
+    if quirk.id == "antigravity"
+        && canonical == "session_start"
+        && preinvocation_mid_turn(&payload)
+        && antigravity_mid_turn_settled(ctx, quirk, project_dir.as_deref(), &payload)
+    {
+        return Ok(0);
+    }
+
     match kind {
         EventKind::Resume => match project_dir.as_ref() {
             Some(project_dir) => {
+                // A hermes delegated child never consumes the parent's
+                // identity digest or its session-boundary federation work.
+                if delegated_child {
+                    return Ok(0);
+                }
                 if let Err(err) = super::active_harness::record(project_dir, quirk.id) {
                     note!("warning: could not record active harness: {err}");
                 }
                 resume_output(ctx, quirk, canonical, project_dir, &payload).await
             }
+            None if delegated_child => Ok(0),
             None => resume_identity_only(ctx, quirk, canonical, &payload),
         },
         EventKind::Capture => match project_dir.as_ref() {
@@ -193,8 +498,9 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
                     note!("warning: could not record active harness: {err}");
                 }
                 let code = capture_observation(quirk, canonical, project_dir, &payload)?;
-                let prompt_injects =
-                    canonical == "user_prompt_submit" && quirk.delivery().prompt_submit_injects;
+                let prompt_injects = canonical == "user_prompt_submit"
+                    && quirk.delivery().prompt_submit_injects
+                    && !delegated_child;
                 let cursor_reanchors = canonical == "post_tool_use"
                     && quirk.id == "cursor"
                     && cursor_post_tool_needs_identity(ctx, quirk, project_dir, &payload);
@@ -203,13 +509,31 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
                 }
                 Ok(code)
             }
-            None if canonical == "user_prompt_submit" && quirk.delivery().prompt_submit_injects => {
+            None if canonical == "user_prompt_submit"
+                && quirk.delivery().prompt_submit_injects
+                && !delegated_child =>
+            {
                 resume_identity_only(ctx, quirk, canonical, &payload)
             }
             None => Ok(0),
         },
         EventKind::Checkpoint => match project_dir.as_ref() {
             Some(project_dir) => {
+                // A hermes delegated child's session_finalize is not the
+                // parent's session teardown — retain the child's captured
+                // evidence and drop the boundary semantics entirely.
+                if delegated_child && canonical == "session_end" {
+                    return Ok(0);
+                }
+                // Antigravity has no native tool_failure event: for that
+                // harness the canonical name only arises from the failed-
+                // PostToolUse remap above. Capture the full authorized
+                // tool-result/error payload durably BEFORE the immediate
+                // failure checkpoint — the checkpoint lane alone retained
+                // only a label over the prior tail, never the payload.
+                if quirk.id == "antigravity" && canonical == "tool_failure" {
+                    capture_observation(quirk, canonical, project_dir, &payload)?;
+                }
                 let code =
                     checkpoint_from_spool(ctx, quirk, canonical, project_dir, &payload).await?;
                 // Plan federation: session boundaries pull the firing
@@ -352,6 +676,8 @@ fn resume_identity_only(
         Injection::None => Ok(0),
         Injection::StdoutJson
         | Injection::CursorJson
+        | Injection::ContextJson
+        | Injection::AntigravityJson
         | Injection::StdoutText
         | Injection::McpPull
         | Injection::UserPromptSubmit => {
@@ -737,6 +1063,25 @@ fn hook_event_name(canonical: &str) -> &'static str {
     }
 }
 
+/// hermes `pre_llm_call` injection envelope: `{"context": "…"}` stdout is
+/// injected into the turn's user message (observer events ignore the return).
+fn context_json_envelope(digest: &str) -> Value {
+    json!({ "context": digest })
+}
+
+/// Antigravity's documented injection envelope (SessionStart/PreInvocation
+/// stdout contract): steps injected into the conversation trajectory. Kept
+/// pure so tests assert the exact parseable shape.
+fn antigravity_envelope(digest: &str) -> Value {
+    json!({
+        "injectSteps": [{
+            "systemMessage": {
+                "systemMessage": digest,
+            }
+        }]
+    })
+}
+
 fn print_hook_injection(quirk: &registry::HarnessQuirk, canonical: &str, digest: &str) {
     match quirk.injection {
         Injection::StdoutJson => {
@@ -751,6 +1096,12 @@ fn print_hook_injection(quirk: &registry::HarnessQuirk, canonical: &str, digest:
         Injection::CursorJson => {
             let envelope = json!({ "additional_context": digest });
             println!("{envelope}");
+        }
+        Injection::ContextJson => {
+            println!("{}", context_json_envelope(digest));
+        }
+        Injection::AntigravityJson => {
+            println!("{}", antigravity_envelope(digest));
         }
         Injection::StdoutText | Injection::UserPromptSubmit | Injection::McpPull => {
             println!("{digest}");
@@ -1091,6 +1442,7 @@ const CONSUMED_PAYLOAD_KEYS: &[&str] = &[
     "projectDir",
     "workspace_dir",
     "workspace_roots",
+    "workspacePaths",
     "session_id",
     "conversation_id",
     "generation_id",
@@ -1229,8 +1581,49 @@ async fn checkpoint_from_spool(
         CHECKPOINT_TAIL,
     );
     let mut note_text = format!("{canonical} via {} hook", quirk.id);
+    // hermes on_session_end carries the turn outcome in extra — a failed or
+    // interrupted turn's evidence rides the checkpoint note, never dropped.
+    if let Some(outcome) = hermes_turn_outcome(quirk, payload) {
+        note_text.push_str(&format!(" [{outcome}]"));
+    }
     if let Some(raw) = payload.get("_raw").and_then(|v| v.as_str()) {
         note_text.push_str(&format!(": {}", truncate(raw, 200)));
+    }
+    // Antigravity Stop carries the loop's termination state
+    // (`terminationReason` / `error` / `fullyIdle`): record it verbatim so an
+    // errored or interrupted turn is never read back as a clean session end.
+    let antigravity_stop = if quirk.id == "antigravity" && canonical == "stop" {
+        let fully_idle = payload.get("fullyIdle").and_then(Value::as_bool);
+        let reason = payload
+            .get("terminationReason")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let error = payload
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        Some((fully_idle, reason, error))
+    } else {
+        None
+    };
+    if let Some((fully_idle, reason, error)) = &antigravity_stop {
+        let mut detail = Vec::new();
+        if !reason.is_empty() {
+            detail.push(format!("terminationReason={reason}"));
+        }
+        if let Some(idle) = fully_idle {
+            detail.push(format!("fullyIdle={idle}"));
+        }
+        if !error.is_empty() {
+            detail.push(format!("error={}", truncate(error, 200)));
+        }
+        if !detail.is_empty() {
+            note_text.push_str(&format!(" ({})", detail.join(", ")));
+        }
     }
     if !tail.is_empty() {
         note_text.push_str(&format!("\nobservations:\n{}", tail.join("\n")));
@@ -1268,14 +1661,17 @@ async fn checkpoint_from_spool(
     // stop/session_end: checkpoint already recorded above. Enqueue ONE
     // composite boundary job (durable journal, repair Phase 3) and return
     // inside the hook's latency budget — the detached drainer and every
-    // later safe entrypoint share recovery.
-    if matches!(canonical, "stop" | "session_end") {
+    // later safe entrypoint share recovery. A hermes delegated child's
+    // turn-end checkpoints stay project evidence but never enqueue boundary
+    // work (transcript finalize/snap/ingest belong to real sessions).
+    if matches!(canonical, "stop" | "session_end") && !hermes_delegated_child(quirk, payload) {
         let session_id = stateroot_core::digest_delivery::session_id_from_payload(payload)
             .unwrap_or_else(|| "unknown".to_string());
         let lineage_ref = stateroot_core::roots::lineage_refname(project_dir);
         let locator = payload
             .get("transcript_path")
             .or_else(|| payload.get("transcript"))
+            .or_else(|| payload.get("transcriptPath"))
             .and_then(Value::as_str)
             .filter(|locator| !locator.is_empty());
         let occurrence = payload
@@ -1300,20 +1696,37 @@ async fn checkpoint_from_spool(
                 json!({"status":"unreadable","harness":quirk.id,"session_id":session_id,"reason":reason})
             }
         };
-        match stateroot_core::finalize_journal::enqueue_with_capture(
-            project_dir,
-            quirk.id,
-            &session_id,
-            locator,
-            &lineage_ref,
-            &occurrence,
-            Some(capture_watermark),
-        ) {
-            Ok(_) => {
-                hook_note(quirk, "boundary job queued (durable journal)");
-                super::drain_finalize::kick(project_dir);
+        // A Stop that is explicitly not fully idle means background commands
+        // or async tasks are still running: the session is NOT complete, so
+        // the completion pipeline (snap → handoff finalize → ingest → seal)
+        // must not seal still-running work as a finished session. Evidence
+        // stays durable in the spool and episodic log; a later idle Stop (or
+        // any safe entrypoint) finalizes the boundary. Errored/interrupted
+        // stops that ARE idle still enqueue — abnormal stops are retained
+        // through the durable journal, never discarded.
+        let boundary_complete =
+            antigravity_stop.as_ref().and_then(|(idle, _, _)| *idle) != Some(false);
+        if boundary_complete {
+            match stateroot_core::finalize_journal::enqueue_with_capture(
+                project_dir,
+                quirk.id,
+                &session_id,
+                locator,
+                &lineage_ref,
+                &occurrence,
+                Some(capture_watermark),
+            ) {
+                Ok(_) => {
+                    hook_note(quirk, "boundary job queued (durable journal)");
+                    super::drain_finalize::kick(project_dir);
+                }
+                Err(err) => note!("boundary enqueue skipped: {err}"),
             }
-            Err(err) => note!("boundary enqueue skipped: {err}"),
+        } else {
+            hook_note(
+                quirk,
+                "stop not fully idle — background work still running; boundary finalize deferred (evidence retained)",
+            );
         }
         reconcile_boundary(&hook_ctx, project_dir);
         // No synchronous segment sealing here: sealing is the WS2 drainer's
@@ -1676,5 +2089,574 @@ mod tests {
                 .expect("json");
         assert_eq!(job["phase"], "queued");
         assert_eq!(job["state"], "active");
+    }
+
+    // -----------------------------------------------------------------
+    // hermes native lifecycle fixtures (wire contract: agent/shell_hooks.py
+    // + hermes-agent.nousresearch.com/docs/user-guide/features/hooks;
+    // live hermes host unavailable on this machine — see plan receipt)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn hermes_pre_llm_call_payload_keeps_prompt_drops_conversation() {
+        let mut payload = json!({
+            "hook_event_name": "pre_llm_call",
+            "tool_name": null,
+            "tool_input": null,
+            "session_id": "ses-1",
+            "cwd": "/home/user/project",
+            "profile": "default",
+            "extra": {
+                "task_id": "task-1",
+                "turn_id": "turn-1",
+                "user_message": "fix the flaky test",
+                "conversation_history": [
+                    {"role": "user", "content": "HISTORY_SENTINEL earlier prompt"},
+                    {"role": "assistant", "content": "HISTORY_SENTINEL earlier answer"}
+                ],
+                "is_first_turn": false,
+                "model": "hermes-4",
+                "platform": "cli",
+                "parent_session_id": "",
+                "sender_id": ""
+            }
+        });
+        shape_hermes_payload("user_prompt_submit", &mut payload);
+        let text = serde_json::to_string(&payload).expect("json");
+        assert!(
+            !text.contains("HISTORY_SENTINEL"),
+            "history dropped: {text}"
+        );
+        assert_eq!(payload["prompt"].as_str(), Some("fix the flaky test"));
+        assert_eq!(payload["session_id"].as_str(), Some("ses-1"));
+        // The docs-newer `profile` key is tolerated (passthrough), as is a
+        // checkout that predates it.
+        assert_eq!(payload["profile"].as_str(), Some("default"));
+        assert_eq!(payload["extra"]["model"].as_str(), Some("hermes-4"));
+        assert_eq!(payload["extra"]["turn_id"].as_str(), Some("turn-1"));
+
+        // Parts-form prompt (multimodal turn): text parts joined, image dropped.
+        let mut parts_payload = json!({
+            "hook_event_name": "pre_llm_call",
+            "session_id": "ses-2",
+            "extra": {
+                "user_message": [
+                    {"type": "text", "text": "describe this"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,xx"}},
+                    {"type": "input_text", "input_text": "carefully"}
+                ],
+                "conversation_history": ["HISTORY_SENTINEL"]
+            }
+        });
+        shape_hermes_payload("user_prompt_submit", &mut parts_payload);
+        assert_eq!(
+            parts_payload["prompt"].as_str(),
+            Some("describe this\ncarefully")
+        );
+        assert!(!serde_json::to_string(&parts_payload)
+            .unwrap()
+            .contains("HISTORY_SENTINEL"));
+
+        // Image-only turn: no prompt key, still no history.
+        let mut image_only = json!({
+            "session_id": "ses-3",
+            "extra": {
+                "user_message": [{"type": "image", "image": "data:image/png;base64,xx"}],
+                "conversation_history": ["HISTORY_SENTINEL"]
+            }
+        });
+        shape_hermes_payload("user_prompt_submit", &mut image_only);
+        assert!(image_only.get("prompt").is_none());
+        assert!(!serde_json::to_string(&image_only)
+            .unwrap()
+            .contains("HISTORY_SENTINEL"));
+
+        // Non-prompt events are never shaped.
+        let mut stop = json!({"session_id": "ses-1", "extra": {"completed": true}});
+        let before = stop.clone();
+        shape_hermes_payload("stop", &mut stop);
+        assert_eq!(stop, before);
+    }
+
+    #[test]
+    fn hermes_finalize_payload_finalizes_the_ending_session() {
+        // Gateway /new: on_session_finalize names the ENDING session in
+        // session_id; old/new ids ride extra. The new session that has just
+        // begun must never be closed by it.
+        let payload = json!({
+            "hook_event_name": "on_session_finalize",
+            "session_id": "ses-OLD",
+            "cwd": "/home/user/project",
+            "extra": {
+                "reason": "new_session",
+                "old_session_id": "ses-OLD",
+                "new_session_id": "ses-NEW",
+                "platform": "cli"
+            }
+        });
+        assert_eq!(
+            digest_delivery::session_id_from_payload(&payload).as_deref(),
+            Some("ses-OLD"),
+            "the ending session is the payload's session_id"
+        );
+        let mut shaped = payload.clone();
+        shape_hermes_payload("session_end", &mut shaped);
+        assert_eq!(shaped, payload, "finalize payloads are bounded already");
+    }
+
+    #[test]
+    fn hermes_context_json_envelope_is_the_native_injection_shape() {
+        let quirk = quirk_any("hermes").expect("hermes");
+        assert_eq!(quirk.injection, Injection::ContextJson);
+        let envelope = context_json_envelope("DIGEST BODY");
+        assert_eq!(envelope, json!({ "context": "DIGEST BODY" }));
+        // The envelope hermes parses on pre_llm_call stdout: a dict with a
+        // non-empty string `context` key (agent/shell_hooks.py _parse_response).
+        let text = serde_json::to_string(&envelope).expect("json");
+        let parsed: Value = serde_json::from_str(&text).expect("round-trip");
+        assert!(parsed["context"]
+            .as_str()
+            .is_some_and(|c| !c.trim().is_empty()));
+    }
+
+    #[test]
+    fn hermes_turn_outcome_flags_failed_and_interrupted_evidence() {
+        let hermes = quirk_any("hermes").expect("hermes");
+        let cursor = quirk_any("cursor").expect("cursor");
+        // Clean turn: no suffix.
+        assert!(hermes_turn_outcome(
+            hermes,
+            &json!({"extra": {"completed": true, "failed": false, "interrupted": false}})
+        )
+        .is_none());
+        // Failed turn.
+        let failed = hermes_turn_outcome(
+            hermes,
+            &json!({"extra": {"completed": false, "failed": true, "interrupted": false, "turn_exit_reason": "error"}}),
+        )
+        .expect("failed outcome");
+        assert!(failed.contains("failed=true"), "{failed}");
+        assert!(failed.contains("reason=error"), "{failed}");
+        // Interrupted turn.
+        let interrupted = hermes_turn_outcome(
+            hermes,
+            &json!({"extra": {"completed": false, "failed": false, "interrupted": true, "turn_exit_reason": "user_interrupt"}}),
+        )
+        .expect("interrupted outcome");
+        assert!(interrupted.contains("interrupted=true"), "{interrupted}");
+        // Iteration-limit exit with no flags still keeps its reason.
+        let limited = hermes_turn_outcome(
+            hermes,
+            &json!({"extra": {"completed": false, "turn_exit_reason": "max_iterations"}}),
+        )
+        .expect("reason-only outcome");
+        assert!(limited.contains("reason=max_iterations"), "{limited}");
+        // The suffix is hermes-scoped.
+        assert!(hermes_turn_outcome(cursor, &json!({"extra": {"failed": true}})).is_none());
+    }
+
+    #[test]
+    fn hermes_delegated_child_markers() {
+        let hermes = quirk_any("hermes").expect("hermes");
+        let cursor = quirk_any("cursor").expect("cursor");
+        // tools/delegate_tool.py: children run with platform="subagent" and
+        // a stamped parent_session_id; either marker scopes the payload.
+        assert!(hermes_delegated_child(
+            hermes,
+            &json!({"extra": {"platform": "subagent"}})
+        ));
+        assert!(hermes_delegated_child(
+            hermes,
+            &json!({"extra": {"platform": "cli", "parent_session_id": "parent-1"}})
+        ));
+        assert!(!hermes_delegated_child(
+            hermes,
+            &json!({"extra": {"platform": "cli", "parent_session_id": ""}})
+        ));
+        assert!(!hermes_delegated_child(
+            hermes,
+            &json!({"extra": {"platform": "telegram"}})
+        ));
+        assert!(!hermes_delegated_child(hermes, &json!({})));
+        // The markers are hermes-scoped — no other harness is affected.
+        assert!(!hermes_delegated_child(
+            cursor,
+            &json!({"extra": {"platform": "subagent"}})
+        ));
+    }
+
+    #[test]
+    fn hermes_terminal_cwd_resolves_project() {
+        let _guard = crate::test_env::env_lock();
+        let project = tempfile::tempdir().expect("project");
+        local_store::init_skeleton(project.path(), "p-test", "proj", "local").expect("skeleton");
+        let quirk = quirk_any("hermes").expect("hermes");
+        let prior = std::env::var_os("TERMINAL_CWD");
+        // SAFETY: serialized by the shared test env lock.
+        unsafe { std::env::set_var("TERMINAL_CWD", project.path()) };
+        let found = hermes_terminal_project(quirk).map(|p| p.canonicalize().expect("canonical"));
+        // Non-hermes quirks never consult TERMINAL_CWD.
+        let cursor = hermes_terminal_project(quirk_any("cursor").expect("cursor"));
+        match prior {
+            Some(value) => unsafe { std::env::set_var("TERMINAL_CWD", value) },
+            None => unsafe { std::env::remove_var("TERMINAL_CWD") },
+        }
+        assert_eq!(
+            found,
+            Some(project.path().canonicalize().expect("canonical")),
+            "gateway-configured workdir resolves the project"
+        );
+        assert!(cursor.is_none());
+    }
+
+    #[test]
+    fn hermes_shaped_prompt_capture_stores_prompt_not_history() {
+        let project = tempfile::tempdir().expect("project");
+        local_store::init_skeleton(project.path(), "p-test", "proj", "local").expect("skeleton");
+        let quirk = quirk_any("hermes").expect("hermes");
+        let mut payload = json!({
+            "hook_event_name": "pre_llm_call",
+            "session_id": "ses-1",
+            "cwd": project.path(),
+            "extra": {
+                "user_message": "actually, use the staging bucket instead",
+                "conversation_history": [{"role": "user", "content": "HISTORY_SENTINEL"}],
+                "is_first_turn": false,
+                "model": "hermes-4",
+                "platform": "cli"
+            }
+        });
+        shape_hermes_payload("user_prompt_submit", &mut payload);
+        assert_eq!(
+            capture_observation(quirk, "user_prompt_submit", project.path(), &payload)
+                .expect("capture"),
+            0
+        );
+        let rows = stateroot_core::observations::load_spool(project.path());
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].text.contains("staging bucket"));
+        assert!(!rows[0].text.contains("HISTORY_SENTINEL"));
+        assert_eq!(rows[0].session_id.as_deref(), Some("ses-1"));
+        assert_eq!(rows[0].session_identity.as_deref(), Some("native"));
+        // Correction hinting works on the flattened prompt.
+        assert_eq!(rows[0].kind_hint.as_deref(), Some("correction"));
+        // The archived source payload carries no conversation history either.
+        let record = stateroot_core::observations::archive_lookup(
+            project.path(),
+            rows[0].capture_id.as_deref().unwrap(),
+        )
+        .unwrap();
+        let serialized = serde_json::to_string(&record).unwrap();
+        assert!(!serialized.contains("HISTORY_SENTINEL"));
+        assert!(serialized.contains("staging bucket"));
+    }
+
+    #[tokio::test]
+    async fn hermes_child_turn_checkpoint_never_enqueues_boundary_work() {
+        let project = tempfile::tempdir().expect("project");
+        local_store::init_skeleton(project.path(), "p-test", "proj", "local").expect("skeleton");
+        let home = tempfile::tempdir().expect("home");
+        let ctx = Ctx {
+            cwd: project.path().to_path_buf(),
+            config_dir: home.path().to_path_buf(),
+            config: stateroot_core::config::AppConfig::default(),
+        };
+        let quirk = quirk_any("hermes").expect("hermes");
+        let journal_dir = project.path().join(".stateroot/local/finalize-journal");
+        let count_jobs = || -> usize {
+            std::fs::read_dir(&journal_dir)
+                .map(|rd| {
+                    rd.flatten()
+                        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+                        .count()
+                })
+                .unwrap_or(0)
+        };
+
+        // A delegated child's on_session_end (turn finalization with
+        // platform="subagent") checkpoints but never enqueues boundary work.
+        let child_payload = json!({
+            "hook_event_name": "on_session_end",
+            "session_id": "child-ses-1",
+            "cwd": project.path(),
+            "extra": {
+                "platform": "subagent",
+                "parent_session_id": "parent-ses-1",
+                "completed": true,
+                "interrupted": false,
+                "model": "hermes-4",
+                "turn_id": "t-1"
+            }
+        });
+        let code = checkpoint_from_spool(&ctx, quirk, "stop", project.path(), &child_payload)
+            .await
+            .expect("child stop");
+        assert_eq!(code, 0);
+        assert_eq!(count_jobs(), 0, "child never enqueues boundary jobs");
+
+        // The parent's own turn-end DOES enqueue — turn checkpoints are not
+        // dropped evidence, and real sessions keep their boundary job.
+        let parent_payload = json!({
+            "hook_event_name": "on_session_end",
+            "session_id": "parent-ses-1",
+            "cwd": project.path(),
+            "extra": {
+                "platform": "cli",
+                "parent_session_id": "",
+                "completed": true,
+                "interrupted": false,
+                "turn_id": "t-2"
+            }
+        });
+        checkpoint_from_spool(&ctx, quirk, "stop", project.path(), &parent_payload)
+            .await
+            .expect("parent stop");
+        assert_eq!(count_jobs(), 1, "parent turn enqueues one boundary job");
+    }
+
+    // ---- Antigravity native contract regressions -------------------------
+
+    fn journal_jobs(project: &Path) -> Vec<Value> {
+        let journal_dir = project.join(".stateroot/local/finalize-journal");
+        std::fs::read_dir(&journal_dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+            .filter_map(|e| serde_json::from_str(&std::fs::read_to_string(e.path()).ok()?).ok())
+            .collect()
+    }
+
+    fn episodic_notes(project: &Path) -> String {
+        std::fs::read_to_string(project.join(".stateroot/memories/episodic.jsonl"))
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn antigravity_envelope_is_the_native_injectsteps_shape() {
+        let digest = "persona line\nObjective: ship the hooks";
+        let text = serde_json::to_string(&antigravity_envelope(digest)).expect("serialize");
+        // Exact parseable output: one systemMessage step carrying the digest.
+        let parsed: Value = serde_json::from_str(&text).expect("parseable JSON");
+        let steps = parsed["injectSteps"].as_array().expect("injectSteps array");
+        assert_eq!(steps.len(), 1, "{text}");
+        assert_eq!(
+            steps[0]["systemMessage"]["systemMessage"],
+            json!(digest),
+            "{text}"
+        );
+        // The documented shape only — no Claude/Cursor envelope leaks in.
+        assert!(parsed.get("hookSpecificOutput").is_none(), "{text}");
+        assert!(parsed.get("additional_context").is_none(), "{text}");
+        // Unrelated harnesses keep their own channels.
+        assert_eq!(
+            quirk_any("claude-code").unwrap().injection,
+            Injection::StdoutJson
+        );
+        assert_eq!(
+            quirk_any("cursor").unwrap().injection,
+            Injection::CursorJson
+        );
+        assert_eq!(
+            quirk_any("gemini-cli").unwrap().injection,
+            Injection::StdoutText
+        );
+        assert_eq!(quirk_any("kimi").unwrap().injection, Injection::StdoutText);
+    }
+
+    #[test]
+    fn preinvocation_mid_turn_gating() {
+        // SessionStart payloads carry no invocationNum → a real boundary.
+        assert!(!preinvocation_mid_turn(&json!({})));
+        // Legacy hosts without SessionStart open with invocationNum 0.
+        assert!(!preinvocation_mid_turn(&json!({"invocationNum": 0})));
+        // Every later model invocation is mid-turn noise.
+        assert!(preinvocation_mid_turn(&json!({"invocationNum": 1})));
+        assert!(preinvocation_mid_turn(&json!({"invocationNum": 19})));
+        // Malformed values degrade toward treating the event as a boundary
+        // (the scheduler dedupes repeats) rather than dropping a real start.
+        assert!(!preinvocation_mid_turn(&json!({"invocationNum": "3"})));
+        assert!(!preinvocation_mid_turn(&json!({"invocationNum": -1})));
+        assert!(!preinvocation_mid_turn(&json!({"invocationNum": 1.5})));
+    }
+
+    #[test]
+    fn workspace_paths_project_routing() {
+        let base = tempfile::tempdir().expect("base");
+        // Spaces and Unicode in mounted workspace names.
+        let other = base.path().join("plain workspace");
+        std::fs::create_dir(&other).expect("other");
+        let project = base.path().join("projet étendu");
+        std::fs::create_dir(&project).expect("project");
+        local_store::init_skeleton(&project, "p-test", "proj", "local").expect("skeleton");
+        let missing = base.path().join("not-here");
+        // Multiple roots: the project may be any entry (serde_json escapes
+        // the paths — never hand-built JSON).
+        let payload = json!({
+            "workspacePaths": [
+                missing.to_string_lossy(),
+                other.to_string_lossy(),
+                project.to_string_lossy(),
+            ]
+        });
+        let dir = payload_project_dir(&payload).expect("dir");
+        assert_eq!(dir.canonicalize().unwrap(), project.canonicalize().unwrap());
+        assert!(find_project_root(&dir).is_some());
+        // Without any project, the first existing workspace attaches.
+        let payload =
+            json!({"workspacePaths": [other.to_string_lossy(), missing.to_string_lossy()]});
+        let dir = payload_project_dir(&payload).expect("dir");
+        assert_eq!(dir.canonicalize().unwrap(), other.canonicalize().unwrap());
+        // Garbage degrades to None, never a guess.
+        assert!(payload_project_dir(&json!({"workspacePaths": 42})).is_none());
+        assert!(payload_project_dir(&json!({"workspacePaths": []})).is_none());
+        assert!(payload_project_dir(&json!({"workspacePaths": ["relative/dir"]})).is_none());
+        assert!(
+            payload_project_dir(&json!({"workspacePaths": ["/definitely/not/here"]})).is_none()
+        );
+    }
+
+    #[test]
+    fn workspace_paths_windows_json_escaping_round_trips() {
+        // A Windows-shaped path must survive the JSON round-trip exactly
+        // (serde_json does the escaping; hand-built JSON corrupted these).
+        let win = r"C:\Users\Usama\work\projet étendu";
+        let text = serde_json::to_string(&json!({"workspacePaths": [win]})).expect("serialize");
+        let parsed: Value = serde_json::from_str(&text).expect("parse");
+        assert_eq!(parsed["workspacePaths"][0], json!(win));
+        // A path that does not exist on this host degrades to None cleanly.
+        assert!(payload_project_dir(&parsed).is_none());
+    }
+
+    #[tokio::test]
+    async fn antigravity_stop_not_fully_idle_defers_finalize_but_keeps_evidence() {
+        let project = tempfile::tempdir().expect("project");
+        local_store::init_skeleton(project.path(), "p-test", "proj", "local").expect("skeleton");
+        let home = tempfile::tempdir().expect("home");
+        let ctx = Ctx {
+            cwd: project.path().to_path_buf(),
+            config_dir: home.path().to_path_buf(),
+            config: stateroot_core::config::AppConfig::default(),
+        };
+        let quirk = quirk_any("antigravity").expect("antigravity");
+        let payload = json!({
+            "conversationId": "conv-nonidle",
+            "executionNum": 1,
+            "terminationReason": "model_stop",
+            "fullyIdle": false,
+            "transcriptPath": "/tmp/transcript.jsonl",
+            "event_id": "stop-nonidle-1",
+        });
+        let code = checkpoint_from_spool(&ctx, quirk, "stop", project.path(), &payload)
+            .await
+            .expect("stop");
+        assert_eq!(code, 0);
+        // Still-running background work is not sealed as a completed session.
+        assert!(
+            journal_jobs(project.path()).is_empty(),
+            "non-idle stop must not enqueue a boundary job"
+        );
+        // Evidence stays durable and honest about the termination state.
+        let notes = episodic_notes(project.path());
+        assert!(notes.contains("stop via antigravity hook"), "{notes}");
+        assert!(notes.contains("fullyIdle=false"), "{notes}");
+        assert!(notes.contains("terminationReason=model_stop"), "{notes}");
+        assert!(!notes.contains("successful"), "{notes}");
+    }
+
+    #[tokio::test]
+    async fn antigravity_idle_error_stop_enqueues_once_per_occurrence() {
+        let project = tempfile::tempdir().expect("project");
+        local_store::init_skeleton(project.path(), "p-test", "proj", "local").expect("skeleton");
+        let home = tempfile::tempdir().expect("home");
+        let ctx = Ctx {
+            cwd: project.path().to_path_buf(),
+            config_dir: home.path().to_path_buf(),
+            config: stateroot_core::config::AppConfig::default(),
+        };
+        let quirk = quirk_any("antigravity").expect("antigravity");
+        let transcript =
+            "/home/u/.gemini/antigravity/brain/conv-err/.system_generated/logs/transcript.jsonl";
+        let payload = json!({
+            "conversationId": "conv-err",
+            "terminationReason": "error",
+            "error": "model exploded: quota",
+            "fullyIdle": true,
+            "transcriptPath": transcript,
+            "event_id": "stop-err-1",
+        });
+        for _ in 0..2 {
+            // Replay of the same boundary occurrence.
+            let code = checkpoint_from_spool(&ctx, quirk, "stop", project.path(), &payload)
+                .await
+                .expect("stop");
+            assert_eq!(code, 0);
+        }
+        // Abnormal-but-idle stops are retained through the durable journal —
+        // exactly once per boundary occurrence.
+        let jobs = journal_jobs(project.path());
+        assert_eq!(jobs.len(), 1, "replay dedupes by occurrence: {jobs:?}");
+        assert_eq!(jobs[0]["transcript"], json!(transcript));
+        let notes = episodic_notes(project.path());
+        assert!(notes.contains("terminationReason=error"), "{notes}");
+        assert!(notes.contains("fullyIdle=true"), "{notes}");
+        assert!(notes.contains("error=model exploded: quota"), "{notes}");
+    }
+
+    #[tokio::test]
+    async fn antigravity_abnormal_stop_without_idle_state_still_enqueues() {
+        let project = tempfile::tempdir().expect("project");
+        local_store::init_skeleton(project.path(), "p-test", "proj", "local").expect("skeleton");
+        let home = tempfile::tempdir().expect("home");
+        let ctx = Ctx {
+            cwd: project.path().to_path_buf(),
+            config_dir: home.path().to_path_buf(),
+            config: stateroot_core::config::AppConfig::default(),
+        };
+        let quirk = quirk_any("antigravity").expect("antigravity");
+        // An interrupted stop whose fullyIdle never arrived: absent is not
+        // "still running" — the evidence must not be discarded.
+        let payload = json!({
+            "conversationId": "conv-maxsteps",
+            "terminationReason": "max_steps_exceeded",
+            "event_id": "stop-max-1",
+        });
+        let code = checkpoint_from_spool(&ctx, quirk, "stop", project.path(), &payload)
+            .await
+            .expect("stop");
+        assert_eq!(code, 0);
+        assert_eq!(journal_jobs(project.path()).len(), 1);
+        let notes = episodic_notes(project.path());
+        assert!(
+            notes.contains("terminationReason=max_steps_exceeded"),
+            "{notes}"
+        );
+    }
+
+    #[tokio::test]
+    async fn antigravity_stop_malformed_fields_degrade_to_finalize() {
+        let project = tempfile::tempdir().expect("project");
+        local_store::init_skeleton(project.path(), "p-test", "proj", "local").expect("skeleton");
+        let home = tempfile::tempdir().expect("home");
+        let ctx = Ctx {
+            cwd: project.path().to_path_buf(),
+            config_dir: home.path().to_path_buf(),
+            config: stateroot_core::config::AppConfig::default(),
+        };
+        let quirk = quirk_any("antigravity").expect("antigravity");
+        // Wrong-typed fields: not an explicit "still running" signal, so the
+        // boundary proceeds and nothing panics.
+        let payload = json!({
+            "conversationId": "conv-malformed",
+            "fullyIdle": "no",
+            "terminationReason": 7,
+            "event_id": "stop-mal-1",
+        });
+        let code = checkpoint_from_spool(&ctx, quirk, "stop", project.path(), &payload)
+            .await
+            .expect("stop");
+        assert_eq!(code, 0);
+        assert_eq!(journal_jobs(project.path()).len(), 1);
     }
 }

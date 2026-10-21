@@ -647,8 +647,18 @@ fn capture_outcome_root_with_guard(
     if captured.get("attempt").and_then(Value::as_u64) != Some(attempt) {
         return;
     }
-    let result =
-        stateroot_core::roots::snap_if_changed(work_dir, harness, "auto: delegation outcome", None);
+    // Terminal delegation capture is an explicit semantic milestone, not
+    // ordinary changed-project-file detection: the outcome root must seal
+    // the final live store (closed plan, return handoff, late captured
+    // intelligence) even when no product file moved since the code root.
+    // `snap_if_changed` intentionally ignores `.stateroot/` deltas and
+    // would reuse the pre-intelligence root here.
+    let result = stateroot_core::roots::create_root(
+        work_dir,
+        harness,
+        "milestone: delegation outcome",
+        None,
+    );
     #[cfg(test)]
     if let Some(observer) = TEST_AFTER_OUTCOME_SNAPSHOT.with(|slot| slot.borrow_mut().take()) {
         observer(record_root);
@@ -688,17 +698,9 @@ fn capture_outcome_root_with_guard(
         return;
     }
     match result {
-        Ok(stateroot_core::roots::SnapOutcome::Created(manifest, _)) => {
+        Ok((manifest, _transition)) => {
             record["outcome_root"] = json!(manifest.id);
             append_event(&mut record, "capture", "worktree captured to fork lineage");
-        }
-        Ok(stateroot_core::roots::SnapOutcome::Unchanged { root }) => {
-            record["outcome_root"] = json!(root);
-            append_event(
-                &mut record,
-                "capture",
-                "no changes; tip already describes the work",
-            );
         }
         Err(err) => {
             append_event(&mut record, "capture-error", &format!("{err}"));
@@ -1378,6 +1380,169 @@ mod tests {
         let (_, captured) = load_record(project.path(), "capture-locked").unwrap();
         assert_eq!(captured["outcome"], "cancelling");
         assert!(captured["outcome_root"].is_string());
+    }
+
+    /// Terminal outcome capture is an explicit semantic milestone: the
+    /// product work was already snapshotted, then ONLY StateRoot working
+    /// intelligence moves (plan closed, return handoff authored) before the
+    /// worker's outcome lands. The reported outcome root must seal that
+    /// final store state — reusing the pre-intelligence code root strands
+    /// the closed-plan/handoff history outside the fork lineage (real corpus
+    /// merge lost 124 inbox notes + 1 log entry to exactly this).
+    #[test]
+    fn outcome_capture_seals_store_only_terminal_intelligence() {
+        let project = tempfile::tempdir().unwrap();
+        let dir = delegations_dir(project.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(project.path().join("work.txt"), "captured work").unwrap();
+        let record = json!({"id":"capture-store-only","attempt":1,"pid":101,"process_namespace":"fixture-host","fingerprint":{"task":"fixture"},"ts":"first","log":"old.log","harness":"codex","command":"codex","outcome":"completed","events":[]});
+        write_record(&dir, &record).unwrap();
+        let (code_root, _) = stateroot_core::roots::create_root(
+            project.path(),
+            "codex",
+            "test: product work already immutable",
+            None,
+        )
+        .unwrap();
+        // After the code root, only working intelligence changes.
+        std::fs::create_dir_all(project.path().join(".stateroot/handoffs")).unwrap();
+        std::fs::write(
+            project.path().join(".stateroot/handoffs/7-return.md"),
+            "final worker intelligence: plan closed, handoff authored",
+        )
+        .unwrap();
+        capture_outcome_root(
+            project.path(),
+            project.path(),
+            "capture-store-only",
+            "codex",
+            1,
+        );
+        let (_, captured) = load_record(project.path(), "capture-store-only").unwrap();
+        let outcome_root = captured["outcome_root"]
+            .as_str()
+            .expect("outcome root recorded");
+        assert_ne!(
+            outcome_root, code_root.id,
+            "terminal capture must not reuse a code root that predates final store intelligence"
+        );
+        let sealed = stateroot_core::roots::get_root(project.path(), outcome_root).unwrap();
+        assert_eq!(
+            sealed.parents,
+            vec![code_root.id.clone()],
+            "the closure root descends from the code root"
+        );
+        let repo = git2::Repository::open(project.path()).unwrap();
+        let tree = repo
+            .find_commit(git2::Oid::from_str(outcome_root).unwrap())
+            .unwrap()
+            .tree()
+            .unwrap();
+        let blob = repo
+            .find_blob(
+                tree.get_path(Path::new(".stateroot/handoffs/7-return.md"))
+                    .expect("final intelligence sealed into the outcome root")
+                    .id(),
+            )
+            .unwrap();
+        assert_eq!(
+            std::str::from_utf8(blob.content()).unwrap(),
+            "final worker intelligence: plan closed, handoff authored"
+        );
+        // Truthful scope: no eligible product file moved between the code
+        // root and the closure root — the delta is exactly the store state.
+        let diff = stateroot_core::roots::diff_roots(
+            project.path(),
+            &code_root.id,
+            outcome_root,
+            false,
+            10,
+            10,
+        )
+        .unwrap();
+        assert_eq!(diff["files"], json!([]), "no product file moves");
+        assert!(
+            diff["state"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["path"] == ".stateroot/handoffs/7-return.md"),
+            "store-only delta is the sealed intelligence: {diff}"
+        );
+    }
+
+    /// Fork-bound form: the worker runs in a fork worktree while the caller
+    /// owns the record store. The outcome root must seal the fork's final
+    /// store-only intelligence and be readable from the caller's record.
+    #[test]
+    fn outcome_capture_seals_store_only_intelligence_for_a_fork_worktree() {
+        let caller = tempfile::tempdir().unwrap();
+        let fork = tempfile::tempdir().unwrap();
+        let dir = delegations_dir(caller.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(fork.path().join("work.txt"), "fork work").unwrap();
+        let record = json!({"id":"capture-fork-store-only","attempt":1,"pid":101,"process_namespace":"fixture-host","fingerprint":{"task":"fixture"},"ts":"first","log":"fork.log","harness":"codex","command":"codex","outcome":"completed","worktree":fork.path().to_string_lossy(),"events":[]});
+        write_record(&dir, &record).unwrap();
+        let (code_root, _) = stateroot_core::roots::create_root(
+            fork.path(),
+            "codex",
+            "test: fork product work already immutable",
+            None,
+        )
+        .unwrap();
+        std::fs::create_dir_all(fork.path().join(".stateroot/plans")).unwrap();
+        std::fs::write(
+            fork.path().join(".stateroot/plans/plan_done.md"),
+            "status: done at terminal capture",
+        )
+        .unwrap();
+        capture_outcome_root(
+            fork.path(),
+            caller.path(),
+            "capture-fork-store-only",
+            "codex",
+            1,
+        );
+        let (_, captured) = load_record(caller.path(), "capture-fork-store-only").unwrap();
+        let outcome_root = captured["outcome_root"]
+            .as_str()
+            .expect("outcome root recorded in the caller store");
+        assert_ne!(
+            outcome_root, code_root.id,
+            "fork terminal capture must seal the fork's final store intelligence"
+        );
+        let repo = git2::Repository::open(fork.path()).unwrap();
+        let tree = repo
+            .find_commit(git2::Oid::from_str(outcome_root).unwrap())
+            .unwrap()
+            .tree()
+            .unwrap();
+        let blob = repo
+            .find_blob(
+                tree.get_path(Path::new(".stateroot/plans/plan_done.md"))
+                    .expect("fork final intelligence sealed into the outcome root")
+                    .id(),
+            )
+            .unwrap();
+        assert_eq!(
+            std::str::from_utf8(blob.content()).unwrap(),
+            "status: done at terminal capture"
+        );
+        let product = stateroot_core::roots::current_product_tree(fork.path()).unwrap();
+        let code_product = {
+            let code_tree = repo
+                .find_commit(git2::Oid::from_str(&code_root.id).unwrap())
+                .unwrap()
+                .tree()
+                .unwrap();
+            let mut builder = repo.treebuilder(Some(&code_tree)).unwrap();
+            builder.remove(".stateroot").unwrap();
+            builder.write().unwrap().to_string()
+        };
+        assert_eq!(
+            product, code_product,
+            "eligible product source is unchanged between code root and closure root"
+        );
     }
 
     #[test]

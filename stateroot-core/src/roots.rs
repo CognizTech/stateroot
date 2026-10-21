@@ -4732,11 +4732,37 @@ fn resolve_explicit_trunk_conflicts(
     Ok(())
 }
 
-/// Resolve the two coordination records which necessarily diverge while a
-/// fork is being executed. They are control-plane state, not competing work:
-/// the trunk owns its current handoff and a plan sidecar is a monotonic
-/// lifecycle record, so its most recently updated version wins. Everything
-/// else remains a normal, fail-closed three-way merge.
+/// `.stateroot/wiki/pages/_inbox.md` — deterministic distill floor.
+const WIKI_INBOX_PATH: &str = ".stateroot/wiki/pages/_inbox.md";
+/// `.stateroot/wiki/log.md` — date-grouped update log, newest first.
+const WIKI_LOG_PATH: &str = ".stateroot/wiki/log.md";
+/// `.stateroot/spool/current.json` — small current observation projection.
+const SPOOL_CURRENT_PATH: &str = ".stateroot/spool/current.json";
+/// `.stateroot/ingest-gov.json` — wiki ingest compiler skip cache.
+const INGEST_GOV_PATH: &str = ".stateroot/ingest-gov.json";
+
+/// Resolve the coordination records which necessarily diverge while a fork
+/// is being executed. They are control-plane state, not competing work: the
+/// trunk owns its current handoff, a plan sidecar is a monotonic lifecycle
+/// record whose most recently updated version wins, and StateRoot's own
+/// generated records fold by the exact shapes their native writers produce.
+/// Everything else remains a normal, fail-closed three-way merge.
+///
+/// Two mutable operational caches additionally keep the trunk version
+/// (deterministic, never a generic main-wins):
+///
+/// - `spool/current.json` is the small current observation projection —
+///   documented in `observations.rs` as "rebuildable from segments; never
+///   the source of truth". A fork's captured events survive in its
+///   identity-addressed `spool/segments/*.jsonl` and the append-only legacy
+///   `spool/observations.jsonl`; `publish_merge` already re-pins the live
+///   trunk projection at materialization, so keeping the trunk entry here
+///   only removes a noise conflict.
+/// - `ingest-gov.json` is the wiki ingest compiler's skip cache
+///   (`last_input_sha256`/`last_run_at`), declared machine-local in
+///   `local_store::COLLAB_LOCAL_PATHS`. A merged tree whose compile inputs
+///   differ from the cached hash simply re-runs the next compile, so the
+///   trunk cursor is preserved and self-heals.
 fn resolve_control_plane_conflicts(
     repo: &git2::Repository,
     index: &mut git2::Index,
@@ -4764,6 +4790,20 @@ fn resolve_control_plane_conflicts(
             conflict.our
         } else if path_text.starts_with(".stateroot/plans/") && path_text.ends_with(".json") {
             newest_plan_entry(repo, conflict.our, conflict.their)?
+        } else if path_text == WIKI_INBOX_PATH || path_text == WIKI_LOG_PATH {
+            // StateRoot's own generated records merge by content, but only
+            // when both sides changed the shared base in exactly the shape
+            // the record's native writer produces. Anything unrecognized
+            // stays a conflict (fail closed).
+            match merge_native_record(repo, conflict, path_text == WIKI_INBOX_PATH)? {
+                Some(entry) => Some(entry),
+                None => continue,
+            }
+        } else if path_text == SPOOL_CURRENT_PATH || path_text == INGEST_GOV_PATH {
+            // Mutable operational projections/caches (see the function
+            // docs): the trunk version is preserved; immutable captures,
+            // segments, receipts and history files are never touched here.
+            conflict.our
         } else {
             continue;
         };
@@ -4777,6 +4817,251 @@ fn resolve_control_plane_conflicts(
         }
     }
     Ok(())
+}
+
+fn conflict_blob_text(repo: &git2::Repository, entry: &git2::IndexEntry) -> Option<String> {
+    let blob = repo.find_blob(entry.id).ok()?;
+    String::from_utf8(blob.content().to_vec()).ok()
+}
+
+/// Merge one of StateRoot's own generated text records when — and only
+/// when — both sides changed the shared base in exactly the shape the
+/// record's native writer produces (`_inbox.md` bullet appends, `log.md`
+/// date-grouped prepends). Returns the merged index entry, or None to leave
+/// the conflict untouched (fail closed: authored pages, rewritten history
+/// and unrecognized shapes never auto-merge).
+fn merge_native_record(
+    repo: &git2::Repository,
+    conflict: git2::IndexConflict,
+    inbox: bool,
+) -> Result<Option<git2::IndexEntry>, RootsError> {
+    let git2::IndexConflict {
+        ancestor,
+        our,
+        their,
+    } = conflict;
+    let (Some(ancestor), Some(our), Some(their)) = (ancestor, our, their) else {
+        return Ok(None);
+    };
+    let (Some(base), Some(ours), Some(theirs)) = (
+        conflict_blob_text(repo, &ancestor),
+        conflict_blob_text(repo, &our),
+        conflict_blob_text(repo, &their),
+    ) else {
+        return Ok(None);
+    };
+    let merged = if inbox {
+        merge_native_inbox(&base, &ours, &theirs)
+    } else {
+        merge_native_log(&base, &ours, &theirs)
+    };
+    let Some(merged) = merged else {
+        return Ok(None);
+    };
+    let mut entry = our;
+    entry.id = repo.blob(merged.as_bytes())?;
+    Ok(Some(entry))
+}
+
+/// Mirrors `wiki::normalize` — the native inbox writer's uniqueness key.
+fn normalize_inbox_bullet(bullet: &str) -> String {
+    bullet
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// Bullets appended to a native `_inbox.md` when — and only when — `text` is
+/// the shared `base` plus `- ` bullet lines, the exact shape
+/// `wiki::append_inbox_bullets` writes (fixed frontmatter intact, nothing
+/// rewritten, reordered or deleted). Anything else is not recognized.
+fn native_inbox_appended(base: &str, text: &str) -> Option<Vec<String>> {
+    if !text.ends_with('\n') {
+        return None;
+    }
+    let rest = text.strip_prefix(base.trim_end_matches('\n'))?;
+    let rest = rest.strip_prefix('\n')?;
+    let mut added = Vec::new();
+    for line in rest.lines() {
+        let bullet = line.strip_prefix("- ")?.trim();
+        // The native writer never admits shorter notes.
+        if bullet.len() < 8 {
+            return None;
+        }
+        added.push(bullet.to_string());
+    }
+    Some(added)
+}
+
+/// Fold two native inbox evolutions of one shared base: the base once, then
+/// the trunk (ours) bullets, then the fork (theirs) bullets — the bytes the
+/// writer itself would produce applying both sides' appends in that order,
+/// including its normalized-uniqueness contract.
+fn merge_native_inbox(base: &str, ours: &str, theirs: &str) -> Option<String> {
+    // `ours` is validated and becomes the merged prefix verbatim.
+    native_inbox_appended(base, ours)?;
+    let theirs_added = native_inbox_appended(base, theirs)?;
+    let mut seen: BTreeSet<String> = ours
+        .lines()
+        .filter_map(|line| line.strip_prefix("- "))
+        .map(normalize_inbox_bullet)
+        .collect();
+    let mut merged = ours.to_string();
+    for bullet in theirs_added {
+        if seen.insert(normalize_inbox_bullet(&bullet)) {
+            merged.push_str("- ");
+            merged.push_str(&bullet);
+            merged.push('\n');
+        }
+    }
+    Some(merged)
+}
+
+/// One parsed date group of a native `wiki/log.md`: a `## YYYY-MM-DD`
+/// heading plus its verbatim entry lines (separator blank lines excluded).
+#[derive(Debug, Clone, PartialEq)]
+struct NativeLogBlock {
+    date: String,
+    lines: Vec<String>,
+}
+
+fn is_log_date(heading: &str) -> bool {
+    let bytes = heading.as_bytes();
+    bytes.len() == 10
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit())
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+}
+
+/// Parse a native `wiki/log.md`: the `# Directory Update Log` header followed
+/// by `## YYYY-MM-DD` date groups. An empty file parses as zero groups (the
+/// layout's initial state). Any other shape — missing header, preamble
+/// content, non-date headings — is not recognized.
+fn parse_native_log(text: &str) -> Option<Vec<NativeLogBlock>> {
+    if text.is_empty() {
+        return Some(Vec::new());
+    }
+    let body = text.strip_prefix("# Directory Update Log\n")?;
+    let mut blocks: Vec<NativeLogBlock> = Vec::new();
+    let mut preamble_nonblank = false;
+    for line in body.lines() {
+        if let Some(heading) = line.strip_prefix("## ") {
+            if !is_log_date(heading) {
+                return None;
+            }
+            blocks.push(NativeLogBlock {
+                date: heading.to_string(),
+                lines: Vec::new(),
+            });
+        } else if let Some(block) = blocks.last_mut() {
+            block.lines.push(line.to_string());
+        } else if !line.trim().is_empty() {
+            preamble_nonblank = true;
+        }
+    }
+    if preamble_nonblank {
+        return None;
+    }
+    for block in &mut blocks {
+        // Block content keeps interior blank lines; the blank line between
+        // groups is structural, not content.
+        while block.lines.first().is_some_and(|l| l.trim().is_empty()) {
+            block.lines.remove(0);
+        }
+        while block.lines.last().is_some_and(|l| l.trim().is_empty()) {
+            block.lines.pop();
+        }
+    }
+    Some(blocks)
+}
+
+/// The prepend-only evolution of a native log, when `text` is exactly the
+/// shared `base` groups with entries prepended inside existing groups and/or
+/// wholly new date groups inserted — the shape `wiki::append_log` writes.
+/// Returns per-base-group prepended lines (aligned with `base`) and the new
+/// groups, or None when a base group vanished, moved, or was edited.
+fn native_log_evolution(
+    base: &[NativeLogBlock],
+    text: &str,
+) -> Option<(Vec<Vec<String>>, Vec<NativeLogBlock>)> {
+    let blocks = parse_native_log(text)?;
+    // The native writer keeps existing groups in order, newest date first.
+    if !base.windows(2).all(|pair| pair[0].date >= pair[1].date) {
+        return None;
+    }
+    let mut prepended: Vec<Vec<String>> = Vec::with_capacity(base.len());
+    let mut new_blocks = Vec::new();
+    let mut next = 0;
+    for block in blocks {
+        if next < base.len() && block.date == base[next].date {
+            // Prepend-only inside an existing group: the base lines stay a
+            // suffix; nothing rewritten, reordered or deleted.
+            if !block.lines.ends_with(base[next].lines.as_slice()) {
+                return None;
+            }
+            let added = block.lines.len() - base[next].lines.len();
+            prepended.push(block.lines[..added].to_vec());
+            next += 1;
+        } else {
+            new_blocks.push(block);
+        }
+    }
+    if next != base.len() {
+        return None;
+    }
+    Some((prepended, new_blocks))
+}
+
+/// Fold two native log evolutions of one shared base into the union record:
+/// shared groups keep base history with trunk (ours) prepends above fork
+/// (theirs) prepends; wholly new date groups from both sides interleave
+/// newest-first. Identical messages added by both sides are two recorded
+/// events and both lines stay.
+fn merge_native_log(base: &str, ours: &str, theirs: &str) -> Option<String> {
+    let base_blocks = parse_native_log(base)?;
+    let (ours_prepended, ours_new) = native_log_evolution(&base_blocks, ours)?;
+    let (theirs_prepended, theirs_new) = native_log_evolution(&base_blocks, theirs)?;
+    let mut blocks: Vec<NativeLogBlock> = base_blocks
+        .iter()
+        .enumerate()
+        .map(|(i, block)| {
+            let mut lines = ours_prepended[i].clone();
+            lines.extend(theirs_prepended[i].iter().cloned());
+            lines.extend(block.lines.iter().cloned());
+            NativeLogBlock {
+                date: block.date.clone(),
+                lines,
+            }
+        })
+        .collect();
+    // Combine wholly new groups from both sides; a same-date pair is one
+    // group (trunk entries above fork entries).
+    let mut combined_new: Vec<NativeLogBlock> = Vec::new();
+    for block in ours_new.into_iter().chain(theirs_new) {
+        if let Some(existing) = combined_new.iter_mut().find(|b| b.date == block.date) {
+            existing.lines.extend(block.lines);
+        } else {
+            combined_new.push(block);
+        }
+    }
+    blocks.extend(combined_new);
+    // Newest date first; stable, so shared base groups never reorder.
+    blocks.sort_by(|a, b| b.date.cmp(&a.date));
+    let mut out = String::from("# Directory Update Log\n");
+    for block in &blocks {
+        out.push_str("\n## ");
+        out.push_str(&block.date);
+        out.push('\n');
+        for line in &block.lines {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    Some(out)
 }
 
 fn newest_plan_entry(
@@ -8697,5 +8982,545 @@ mod tests {
                 "racer {i}'s file lost despite the chain"
             );
         }
+    }
+
+    // -- Native wiki record merges (inbox append / log prepend) and the
+    //    documented trunk-preserving policy for mutable operational caches --
+
+    fn tree_text(repo: &git2::Repository, root_id: &str, path: &str) -> String {
+        let tree = repo
+            .find_commit(root_id.parse().expect("oid"))
+            .expect("commit")
+            .tree()
+            .expect("tree");
+        let blob = repo
+            .find_blob(tree.get_path(Path::new(path)).expect("path").id())
+            .expect("blob");
+        String::from_utf8(blob.content().to_vec()).expect("utf8")
+    }
+
+    /// Fork from `root_id`, materialize, run `work` on the checkout, then pin
+    /// the fork lineage (store-only changes never trigger an automatic snap,
+    /// so this uses an explicit root).
+    fn fork_with_work(
+        dir: &Path,
+        root_id: &str,
+        name: &str,
+        work: impl FnOnce(&Path),
+    ) -> (tempfile::TempDir, String) {
+        let (fork_name, _) = fork_root(dir, root_id, Some(name), "cli").expect("fork");
+        let wt_tmp = tempfile::tempdir().expect("wt tmp");
+        let wt = wt_tmp.path().join("checkout");
+        fork_materialize(dir, &fork_name, &wt, None).expect("materialize");
+        work(&wt);
+        let (manifest, _) = create_root(&wt, "kimi", "fork work", None).expect("fork snap");
+        (wt_tmp, manifest.id)
+    }
+
+    #[test]
+    fn merge_preserves_native_wiki_inbox_appends_from_three_forks() {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        crate::wiki::ensure_layout(&dir).expect("layout");
+        crate::wiki::append_inbox_bullets(&dir, &["shared base observation about merges".into()])
+            .expect("base bullet");
+        let (base, _) = create_root(&dir, "cli", "base", None).expect("snap");
+
+        let (_wa, _) = fork_with_work(&dir, &base.id, "fork-alpha", |wt| {
+            crate::wiki::append_inbox_bullets(wt, &["alpha note about durable segments".into()])
+                .expect("alpha");
+        });
+        let (_wb, _) = fork_with_work(&dir, &base.id, "fork-beta", |wt| {
+            crate::wiki::append_inbox_bullets(wt, &["beta note about compiler caches".into()])
+                .expect("beta");
+        });
+        let (_wg, _) = fork_with_work(&dir, &base.id, "fork-gamma", |wt| {
+            crate::wiki::append_inbox_bullets(wt, &["gamma note about lineage proofs".into()])
+                .expect("gamma");
+        });
+        crate::wiki::append_inbox_bullets(&dir, &["trunk note about shared intelligence".into()])
+            .expect("trunk");
+        create_root(&dir, "cli", "trunk continued", None).expect("trunk snap");
+
+        let (manifest, _, merged) = merge_forks(
+            &dir,
+            &[
+                "fork-alpha".to_string(),
+                "fork-beta".to_string(),
+                "fork-gamma".to_string(),
+            ],
+            "kimi",
+        )
+        .expect("native inbox appends merge cleanly");
+        assert_eq!(merged.len(), 3);
+        let repo = git2::Repository::open(&dir).expect("repo");
+        let inbox = tree_text(&repo, &manifest.id, WIKI_INBOX_PATH);
+        assert!(
+            inbox.starts_with("---\ntype: Inbox\nstatus: draft\n---\n"),
+            "single native frontmatter preserved: {inbox}"
+        );
+        assert_eq!(
+            inbox.matches("---").count(),
+            2,
+            "exactly one frontmatter block: {inbox}"
+        );
+        let bullets = [
+            "shared base observation about merges",
+            "trunk note about shared intelligence",
+            "alpha note about durable segments",
+            "beta note about compiler caches",
+            "gamma note about lineage proofs",
+        ];
+        for bullet in bullets {
+            assert_eq!(
+                inbox.matches(&format!("- {bullet}\n")).count(),
+                1,
+                "bullet appears exactly once: {bullet}\n{inbox}"
+            );
+        }
+        assert_eq!(
+            inbox.lines().filter(|line| line.starts_with("- ")).count(),
+            5,
+            "base once plus trunk and three fork contributions: {inbox}"
+        );
+        let positions: Vec<usize> = [
+            "shared base observation",
+            "trunk note",
+            "alpha note",
+            "beta note",
+            "gamma note",
+        ]
+        .iter()
+        .map(|needle| inbox.find(needle).expect("present"))
+        .collect();
+        assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "base first, trunk next, forks in fold order: {inbox}"
+        );
+        let live = std::fs::read_to_string(dir.join(WIKI_INBOX_PATH)).expect("live inbox");
+        assert_eq!(live, inbox, "materialized trunk matches the merged root");
+    }
+
+    #[test]
+    fn merge_preserves_native_wiki_log_prepends_same_day_and_new_day() {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        crate::wiki::ensure_layout(&dir).expect("layout");
+        let base_log = "# Directory Update Log\n\n## 2020-01-01\n* **Update**: base historical event\n  with a continuation line\n";
+        write(&dir, WIKI_LOG_PATH, base_log);
+        let (base, _) = create_root(&dir, "cli", "base", None).expect("snap");
+        let today = now_rfc3339()[..10].to_string();
+
+        let (_wa, _) = fork_with_work(&dir, &base.id, "fork-alpha", |wt| {
+            crate::wiki::append_log(wt, "fork alpha same-day event").expect("alpha log");
+        });
+        // A new-day prepend rendered exactly as append_log writes it.
+        let (_wb, _) = fork_with_work(&dir, &base.id, "fork-beta", |wt| {
+            write(
+                wt,
+                WIKI_LOG_PATH,
+                "# Directory Update Log\n\n## 2020-06-15\n* **Update**: fork beta new-day event\n\n## 2020-01-01\n* **Update**: base historical event\n  with a continuation line\n",
+            );
+        });
+        crate::wiki::append_log(&dir, "trunk same-day event").expect("trunk log");
+        create_root(&dir, "cli", "trunk continued", None).expect("trunk snap");
+
+        let (manifest, _, _) = merge_forks(
+            &dir,
+            &["fork-alpha".to_string(), "fork-beta".to_string()],
+            "kimi",
+        )
+        .expect("native log prepends merge cleanly");
+        let repo = git2::Repository::open(&dir).expect("repo");
+        let log = tree_text(&repo, &manifest.id, WIKI_LOG_PATH);
+        assert!(log.starts_with("# Directory Update Log\n"), "{log}");
+        assert_eq!(
+            log.matches(&format!("## {today}")).count(),
+            1,
+            "one shared same-day group: {log}"
+        );
+        let today_pos = log.find(&format!("## {today}")).expect("today group");
+        let beta_pos = log.find("## 2020-06-15").expect("new-day group");
+        let base_pos = log.find("## 2020-01-01").expect("base group");
+        assert!(
+            today_pos < beta_pos && beta_pos < base_pos,
+            "date groups stay newest-first: {log}"
+        );
+        let trunk_event = log
+            .find("* **Update**: trunk same-day event")
+            .expect("trunk event");
+        let alpha_event = log
+            .find("* **Update**: fork alpha same-day event")
+            .expect("alpha event");
+        assert!(
+            today_pos < trunk_event && trunk_event < alpha_event && alpha_event < beta_pos,
+            "trunk entry first inside the shared day group: {log}"
+        );
+        assert!(
+            log.contains("* **Update**: fork beta new-day event"),
+            "{log}"
+        );
+        assert!(
+            log.ends_with(
+                "## 2020-01-01\n* **Update**: base historical event\n  with a continuation line\n"
+            ),
+            "base group intact with multiline content: {log}"
+        );
+    }
+
+    #[test]
+    fn prepare_merge_attempt_folds_native_records_without_conflicts() {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        crate::wiki::ensure_layout(&dir).expect("layout");
+        crate::wiki::append_inbox_bullets(&dir, &["shared base observation about merges".into()])
+            .expect("base bullet");
+        write(
+            &dir,
+            WIKI_LOG_PATH,
+            "# Directory Update Log\n\n## 2020-01-01\n* **Update**: base historical event\n",
+        );
+        write(
+            &dir,
+            SPOOL_CURRENT_PATH,
+            "{\"schema_version\":\"stateroot.observations.projection.v1\",\"updated_at\":\"base\"}\n",
+        );
+        write(
+            &dir,
+            INGEST_GOV_PATH,
+            "{\"last_input_sha256\":\"basehash\",\"last_run_at\":\"2020-01-01T00:00:00Z\"}\n",
+        );
+        let (base, _) = create_root(&dir, "cli", "base", None).expect("snap");
+
+        let (_wa, _) = fork_with_work(&dir, &base.id, "fork-alpha", |wt| {
+            crate::wiki::append_inbox_bullets(wt, &["alpha note about durable segments".into()])
+                .expect("alpha");
+            crate::wiki::append_log(wt, "fork alpha ingest event").expect("alpha log");
+            write(
+                wt,
+                SPOOL_CURRENT_PATH,
+                "{\"schema_version\":\"stateroot.observations.projection.v1\",\"updated_at\":\"fork\"}\n",
+            );
+            write(
+                wt,
+                INGEST_GOV_PATH,
+                "{\"last_input_sha256\":\"forkhash\",\"last_run_at\":\"2020-06-15T00:00:00Z\"}\n",
+            );
+        });
+        crate::wiki::append_inbox_bullets(&dir, &["trunk note about shared intelligence".into()])
+            .expect("trunk");
+        crate::wiki::append_log(&dir, "trunk ingest event").expect("trunk log");
+        write(
+            &dir,
+            SPOOL_CURRENT_PATH,
+            "{\"schema_version\":\"stateroot.observations.projection.v1\",\"updated_at\":\"trunk\"}\n",
+        );
+        write(
+            &dir,
+            INGEST_GOV_PATH,
+            "{\"last_input_sha256\":\"trunkhash\",\"last_run_at\":\"2020-03-01T00:00:00Z\"}\n",
+        );
+        create_root(&dir, "cli", "trunk continued", None).expect("trunk snap");
+
+        let attempt =
+            prepare_merge_attempt(&dir, &["fork-alpha".to_string()], "kimi").expect("prepare");
+        assert_eq!(
+            attempt.state, "ready",
+            "native records fold without attention: {:?}",
+            attempt.conflicts
+        );
+        assert!(attempt.conflicts.is_empty(), "{:?}", attempt.conflicts);
+        assert!(attempt.worktree.is_none());
+        abort_merge_attempt(&dir, &attempt.id).expect("abort");
+    }
+
+    #[test]
+    fn merge_keeps_trunk_operational_projections_and_preserves_immutable_spool() {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        write(
+            &dir,
+            ".stateroot/spool/observations.jsonl",
+            "{\"legacy\":\"row1\"}\n",
+        );
+        write(&dir, SPOOL_CURRENT_PATH, "{\"updated_at\":\"base\"}\n");
+        write(
+            &dir,
+            INGEST_GOV_PATH,
+            "{\"last_input_sha256\":\"basehash\",\"last_run_at\":\"2020-01-01T00:00:00Z\"}\n",
+        );
+        let (base, _) = create_root(&dir, "cli", "base", None).expect("snap");
+
+        let segment =
+            ".stateroot/spool/segments/kimi__session-00000000-1111-2222-3333-444444444444.jsonl";
+        let history = ".stateroot/handoffs/history/2020-06-15T00-00-00Z-kimi.json";
+        let (_wa, _) = fork_with_work(&dir, &base.id, "fork-alpha", |wt| {
+            write(wt, SPOOL_CURRENT_PATH, "{\"updated_at\":\"fork\"}\n");
+            write(
+                wt,
+                INGEST_GOV_PATH,
+                "{\"last_input_sha256\":\"forkhash\",\"last_run_at\":\"2020-06-15T00:00:00Z\"}\n",
+            );
+            write(
+                wt,
+                segment,
+                "{\"id\":\"cap_fork\",\"event\":\"fork capture\"}\n",
+            );
+            write(wt, history, "{\"id\":\"h-fork\"}\n");
+        });
+        write(&dir, SPOOL_CURRENT_PATH, "{\"updated_at\":\"trunk\"}\n");
+        write(
+            &dir,
+            INGEST_GOV_PATH,
+            "{\"last_input_sha256\":\"trunkhash\",\"last_run_at\":\"2020-03-01T00:00:00Z\"}\n",
+        );
+        create_root(&dir, "cli", "trunk continued", None).expect("trunk snap");
+
+        let (manifest, _, _) =
+            merge_forks(&dir, &["fork-alpha".to_string()], "kimi").expect("merge");
+        let repo = git2::Repository::open(&dir).expect("repo");
+        assert_eq!(
+            tree_text(&repo, &manifest.id, SPOOL_CURRENT_PATH),
+            "{\"updated_at\":\"trunk\"}\n",
+            "mutable projection: trunk preserved"
+        );
+        assert_eq!(
+            tree_text(&repo, &manifest.id, INGEST_GOV_PATH),
+            "{\"last_input_sha256\":\"trunkhash\",\"last_run_at\":\"2020-03-01T00:00:00Z\"}\n",
+            "compiler cache: trunk preserved"
+        );
+        assert_eq!(
+            tree_text(&repo, &manifest.id, ".stateroot/spool/observations.jsonl"),
+            "{\"legacy\":\"row1\"}\n",
+            "legacy spool untouched"
+        );
+        assert_eq!(
+            tree_text(&repo, &manifest.id, segment),
+            "{\"id\":\"cap_fork\",\"event\":\"fork capture\"}\n",
+            "immutable fork segment retained"
+        );
+        assert_eq!(
+            tree_text(&repo, &manifest.id, history),
+            "{\"id\":\"h-fork\"}\n",
+            "handoff history retained"
+        );
+    }
+
+    #[test]
+    fn merge_fails_closed_on_non_native_wiki_changes() {
+        // An authored wiki page edited on both sides never auto-merges.
+        {
+            let (_tmp, dir) = project();
+            write(&dir, "src/main.rs", "fn main() {}\n");
+            crate::wiki::ensure_layout(&dir).expect("layout");
+            write(&dir, ".stateroot/wiki/pages/guide.md", "guide v1\n");
+            let (base, _) = create_root(&dir, "cli", "base", None).expect("snap");
+            let (_wa, _) = fork_with_work(&dir, &base.id, "fork-alpha", |wt| {
+                write(wt, ".stateroot/wiki/pages/guide.md", "guide fork\n");
+            });
+            write(&dir, ".stateroot/wiki/pages/guide.md", "guide trunk\n");
+            let (trunk, _) = create_root(&dir, "cli", "trunk", None).expect("trunk");
+            let err = merge_forks(&dir, &["fork-alpha".to_string()], "kimi")
+                .expect_err("authored page conflict must not auto-merge");
+            assert!(
+                err.to_string().contains(".stateroot/wiki/pages/guide.md"),
+                "{err}"
+            );
+            let repo = git2::Repository::open(&dir).expect("repo");
+            assert_eq!(
+                repo.refname_to_id(LATEST_REF).expect("latest").to_string(),
+                trunk.id,
+                "trunk unmoved by the failed merge"
+            );
+        }
+        // Inbox frontmatter rewritten: not a pure native append.
+        {
+            let (_tmp, dir) = project();
+            write(&dir, "src/main.rs", "fn main() {}\n");
+            crate::wiki::ensure_layout(&dir).expect("layout");
+            crate::wiki::append_inbox_bullets(
+                &dir,
+                &["shared base observation about merges".into()],
+            )
+            .expect("base bullet");
+            let (base, _) = create_root(&dir, "cli", "base", None).expect("snap");
+            let (_wa, _) = fork_with_work(&dir, &base.id, "fork-alpha", |wt| {
+                let path = wt.join(WIKI_INBOX_PATH);
+                let text = std::fs::read_to_string(&path).expect("inbox");
+                let rewritten = text.replacen("status: draft", "status: published", 1);
+                std::fs::write(
+                    &path,
+                    format!("{rewritten}- alpha note about durable segments\n"),
+                )
+                .expect("write");
+            });
+            crate::wiki::append_inbox_bullets(
+                &dir,
+                &["trunk note about shared intelligence".into()],
+            )
+            .expect("trunk");
+            create_root(&dir, "cli", "trunk", None).expect("trunk");
+            let err = merge_forks(&dir, &["fork-alpha".to_string()], "kimi")
+                .expect_err("frontmatter rewrite must fail closed");
+            assert!(err.to_string().contains(WIKI_INBOX_PATH), "{err}");
+        }
+        // A shared base bullet rewritten mid-file: not a pure native append.
+        {
+            let (_tmp, dir) = project();
+            write(&dir, "src/main.rs", "fn main() {}\n");
+            crate::wiki::ensure_layout(&dir).expect("layout");
+            crate::wiki::append_inbox_bullets(
+                &dir,
+                &["shared base observation about merges".into()],
+            )
+            .expect("base bullet");
+            let (base, _) = create_root(&dir, "cli", "base", None).expect("snap");
+            let (_wa, _) = fork_with_work(&dir, &base.id, "fork-alpha", |wt| {
+                let path = wt.join(WIKI_INBOX_PATH);
+                let text = std::fs::read_to_string(&path).expect("inbox");
+                let rewritten = text.replacen(
+                    "shared base observation about merges",
+                    "rewritten base observation",
+                    1,
+                );
+                std::fs::write(
+                    &path,
+                    format!("{rewritten}- alpha note about durable segments\n"),
+                )
+                .expect("write");
+            });
+            crate::wiki::append_inbox_bullets(
+                &dir,
+                &["trunk note about shared intelligence".into()],
+            )
+            .expect("trunk");
+            create_root(&dir, "cli", "trunk", None).expect("trunk");
+            let err = merge_forks(&dir, &["fork-alpha".to_string()], "kimi")
+                .expect_err("base rewrite must fail closed");
+            assert!(err.to_string().contains(WIKI_INBOX_PATH), "{err}");
+        }
+        // A log rewritten with a non-date heading: unrecognized shape.
+        {
+            let (_tmp, dir) = project();
+            write(&dir, "src/main.rs", "fn main() {}\n");
+            crate::wiki::ensure_layout(&dir).expect("layout");
+            write(
+                &dir,
+                WIKI_LOG_PATH,
+                "# Directory Update Log\n\n## 2020-01-01\n* **Update**: base historical event\n",
+            );
+            let (base, _) = create_root(&dir, "cli", "base", None).expect("snap");
+            let (_wa, _) = fork_with_work(&dir, &base.id, "fork-alpha", |wt| {
+                write(
+                    wt,
+                    WIKI_LOG_PATH,
+                    "# Directory Update Log\n\n## Notes\n* fork authored note\n",
+                );
+            });
+            crate::wiki::append_log(&dir, "trunk ingest event").expect("trunk log");
+            create_root(&dir, "cli", "trunk", None).expect("trunk");
+            let err = merge_forks(&dir, &["fork-alpha".to_string()], "kimi")
+                .expect_err("non-date log headings must fail closed");
+            assert!(err.to_string().contains(WIKI_LOG_PATH), "{err}");
+        }
+    }
+
+    #[test]
+    fn merge_reports_source_conflicts_without_masking_by_native_wiki_merges() {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "fn main() {}\n");
+        crate::wiki::ensure_layout(&dir).expect("layout");
+        crate::wiki::append_inbox_bullets(&dir, &["shared base observation about merges".into()])
+            .expect("base bullet");
+        let (base, _) = create_root(&dir, "cli", "base", None).expect("snap");
+        let (_wa, _) = fork_with_work(&dir, &base.id, "fork-alpha", |wt| {
+            crate::wiki::append_inbox_bullets(wt, &["alpha note about durable segments".into()])
+                .expect("alpha");
+            crate::wiki::append_log(wt, "fork alpha ingest event").expect("alpha log");
+            write(wt, "src/main.rs", "fn main() { println!(\"fork\"); }\n");
+        });
+        crate::wiki::append_inbox_bullets(&dir, &["trunk note about shared intelligence".into()])
+            .expect("trunk");
+        crate::wiki::append_log(&dir, "trunk ingest event").expect("trunk log");
+        write(&dir, "src/main.rs", "fn main() { println!(\"trunk\"); }\n");
+        let (trunk, _) = create_root(&dir, "cli", "trunk", None).expect("trunk");
+        let err = merge_forks(&dir, &["fork-alpha".to_string()], "kimi")
+            .expect_err("source conflict stays fail-closed");
+        let text = err.to_string();
+        assert!(text.contains("src/main.rs"), "{text}");
+        assert!(
+            !text.contains(WIKI_INBOX_PATH) && !text.contains(WIKI_LOG_PATH),
+            "native wiki records folded away from the conflict report: {text}"
+        );
+        let repo = git2::Repository::open(&dir).expect("repo");
+        assert_eq!(
+            repo.refname_to_id(LATEST_REF).expect("latest").to_string(),
+            trunk.id,
+            "trunk unmoved by the failed merge"
+        );
+    }
+
+    #[test]
+    fn native_record_merge_is_idempotent_and_keeps_parallel_identical_events() {
+        let base_inbox = "---\ntype: Inbox\nstatus: draft\n---\n\n# Inbox\n\nDeterministic distill floor — unique mined notes awaiting compile.\n- shared base observation about merges\n";
+        let ours = format!("{base_inbox}- trunk note about shared intelligence\n");
+        let theirs = format!("{base_inbox}- alpha note about durable segments\n");
+        let merged = merge_native_inbox(base_inbox, &ours, &theirs).expect("inbox merge");
+        // Replays never multiply the shared base or remove an entry.
+        assert_eq!(
+            merge_native_inbox(base_inbox, &merged, &theirs).as_deref(),
+            Some(merged.as_str())
+        );
+        assert_eq!(
+            merge_native_inbox(base_inbox, &ours, &merged).as_deref(),
+            Some(merged.as_str())
+        );
+        // A normalized duplicate collapses exactly like the writer's dedup.
+        let dup = format!("{base_inbox}- Trunk   note about shared intelligence\n");
+        assert_eq!(
+            merge_native_inbox(base_inbox, &ours, &dup).as_deref(),
+            Some(ours.as_str())
+        );
+        // Anything but pure appends is not recognized.
+        assert!(merge_native_inbox(
+            base_inbox,
+            &ours,
+            &base_inbox.replace("status: draft", "status: published")
+        )
+        .is_none());
+        assert!(merge_native_inbox(base_inbox, &ours, &format!("{base_inbox}- tiny\n")).is_none());
+
+        let base_log =
+            "# Directory Update Log\n\n## 2020-01-01\n* **Update**: base historical event\n";
+        let ours_log = "# Directory Update Log\n\n## 2020-06-15\n* **Update**: shared event\n* **Update**: trunk event\n\n## 2020-01-01\n* **Update**: base historical event\n";
+        let theirs_log = "# Directory Update Log\n\n## 2020-06-15\n* **Update**: shared event\n\n## 2020-01-01\n* **Update**: base historical event\n";
+        let merged_log = merge_native_log(base_log, ours_log, theirs_log).expect("log merge");
+        // Identical messages added by both sides are two recorded events.
+        assert_eq!(
+            merged_log.matches("* **Update**: shared event\n").count(),
+            2
+        );
+        assert_eq!(
+            merged_log
+                .matches("* **Update**: base historical event\n")
+                .count(),
+            1
+        );
+        // Folding an unchanged side is the identity — no multiplication.
+        assert_eq!(
+            merge_native_log(base_log, &merged_log, base_log).as_deref(),
+            Some(merged_log.as_str())
+        );
+        // A base group that vanished or a non-date heading fails closed.
+        assert!(merge_native_log(base_log, ours_log, "# Directory Update Log\n").is_none());
+        assert!(merge_native_log(
+            base_log,
+            ours_log,
+            "# Directory Update Log\n\n## Notes\n* authored\n"
+        )
+        .is_none());
+        assert!(
+            merge_native_log(base_log, ours_log, "# Other Log\n\n## 2020-06-15\n* x\n").is_none()
+        );
     }
 }

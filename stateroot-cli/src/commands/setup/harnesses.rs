@@ -146,10 +146,6 @@ fn print_write_plan(home: &std::path::Path, rows: &[&PickRow]) {
             writes.push(format!("lifecycle hooks → {}", target.path));
         } else {
             match quirk.id {
-                "hermes" => writes.push(
-                    "no hook files yet — stateroot hermes plugin planned (resume via MCP bridge)"
-                        .to_string(),
-                ),
                 "crush" => writes.push("managed — no files".to_string()),
                 _ if quirk.tier == registry::Tier::B
                     && stateroot_core::harness_install::plugins::ts_plugin_path(quirk)
@@ -546,7 +542,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hermes_row_installs_block_and_yaml_mcp() {
+    async fn hermes_row_installs_block_yaml_mcp_and_hooks() {
         let home = tempfile::tempdir().expect("home");
         std::fs::create_dir_all(home.path().join(".hermes")).expect(".hermes");
         let cwd = tempfile::tempdir().expect("cwd");
@@ -580,7 +576,26 @@ mod tests {
         let ours = &servers[serde_yaml::Value::String("stateroot".to_string())];
         assert_eq!(ours["command"], "stateroot");
         assert_eq!(ours["args"][0], "mcp-stdio");
-        // No hooks in v1 — the guidance note is the honest placeholder.
-        assert!(joined.contains("plugin planned"), "actions: {joined}");
+        // Native shell hooks merged into the same config.yaml.
+        assert!(joined.contains("hooks installed"), "actions: {joined}");
+        let hooks = config["hooks"].as_mapping().expect("hooks");
+        let pre_llm = hooks["pre_llm_call"].as_sequence().expect("pre_llm_call");
+        assert!(
+            pre_llm.iter().any(|entry| entry["command"]
+                .as_str()
+                .is_some_and(|c| c.contains("hook user_prompt_submit --harness hermes"))),
+            "pre_llm_call entry: {config:?}"
+        );
+        // The consent guidance is honest: stateroot never sets hooks_auto_accept.
+        assert!(joined.contains("consent"), "actions: {joined}");
+        assert!(config.get("hooks_auto_accept").is_none());
+        // Turn checkpoint and teardown are distinct entries.
+        assert!(hooks["on_session_end"].as_sequence().is_some());
+        assert!(hooks["on_session_finalize"].as_sequence().is_some());
+        // Automatic delivery claim, not the old degraded note.
+        assert!(
+            joined.contains("identity delivery: automatic"),
+            "actions: {joined}"
+        );
     }
 }

@@ -28,16 +28,45 @@ into placeholder/empty slots (user content is never overwritten; re-running
   `synthesized — unverified (<backend>)`. Synthesis problems never fail
   `init`: a note is printed, the deterministic seed stands, exit stays 0.
 
+## Optional API transports — provider call hardening
+
+The two optional API paths — the synthesis caller (`--synthesize`, continuity
+advisory, memory distill) and the local-ingest caller — share one hardened
+HTTP client, used only when an operator key (`DEEPSEEK_API_KEY` /
+`OPENAI_API_KEY`) is configured:
+
+- **Redirects** — exact-origin hops only (scheme + host + port must all
+  match; an explicit default port still matches). An HTTPS→HTTP downgrade is
+  refused even on the same host, a cross-origin target is refused outright,
+  and a 5-redirect ceiling makes loops fail fast instead of walking the
+  request body onto an origin the operator never configured.
+- **Response bound** — bodies are capped at 1 MiB: an honest over-cap
+  Content-Length fails before body bytes are consumed, and streamed reads
+  enforce the same cap, so a pathological endpoint is reported, never read
+  whole into memory.
+- **Error excerpts** — diagnostics quote at most the first 300 chars of an
+  upstream error body, cut on Unicode char boundaries with a `…[truncated]`
+  marker. These are raw upstream excerpts: they can echo whatever the
+  provider chose to send, so they are not a guarantee that an error body can
+  never contain sensitive data — the CLI simply never adds request auth
+  headers or the prompt to them.
+- **Fallback unchanged** — every API path stays optional: missing keys,
+  refusals, and provider failures degrade to the existing deterministic
+  observed context pack. No scanner, no capture restriction, no new
+  approval, and no always-on LLM.
+
 ## `stateroot delegate` — cross-harness subagents, async-only
 
 `stateroot delegate --to <harness> --task "<bounded task>"` spawns another
 harness's CLI as a **detached** subagent inside the current project, writes a
-`stateroot.delegation.v1` record with `status: "running"` and a pid, prints
+`stateroot.delegation.v2` record with `status: "running"` and a pid, prints
 the delegation id and exits 0 immediately. Async was always the right
 architecture: launch detached, observe until done, completions surface in the
-record and the digest. **There is no sync mode, and no timeout anywhere —
-nothing is ever killed or blocked on.** The harness runs to its natural end;
-its own internal limits belong to the harness.
+record and the digest. **There is no sync mode, and no automatic timeout
+anywhere — a worker is never killed on a timer or blocked on.** The harness
+runs to its natural end; its own internal limits belong to the harness. The
+only stop is an explicit `stateroot delegate cancel` (below), which preserves
+the partial work root.
 
 ```bash
 stateroot delegate --to codex --task "add the failing parser test"
@@ -50,11 +79,17 @@ stateroot delegate status <id>             # the record + a bounded log tail
   `.stateroot/delegations/<ts>-<h>-d<depth>.log`. The worker runs the full
   path (resolve → depth guard → prompt wrap → capture, no kill condition)
   and finalizes the record (`outcome: completed|failed`, `exit_code`,
-  `duration_ms`, `ended_at`) plus an episodic lineage note.
-- **Live status** — `list` reports `running | completed | failed | lost`.
-  `lost` means the worker died before writing an outcome (dead pid, no final
-  record): `list`/`status` probe pid liveness and reap the record to
-  `lost` — never a silent running-forever.
+  `duration_ms`, `ended_at`) plus an episodic lineage note. `completed`
+  means the worker PROCESS exited — not plan acceptance: judge the actual
+  work by the retained `outcome_root`, the test evidence, and the plan's
+  completion receipt.
+- **Live status** — `list` reports `running | completed | failed | lost |
+  unknown`. Status reads are read-only: they probe pid liveness and REPORT,
+  never rewrite the worker's record. `lost` means the worker died before
+  writing an outcome (dead pid, no final record) — never a silent
+  running-forever; `unknown` means the recorded pid belongs to a foreign or
+  legacy process namespace this host cannot verify — only the worker's own
+  final outcome is authoritative.
 - **Completions surface asynchronously** — the digest gains a
   `## Recent Delegations` section (last few with status + task), so a parent
   harness learns on its next session or prompt that labor finished.
@@ -72,8 +107,12 @@ stateroot delegate status <id>             # the record + a bounded log tail
   `--timeout-secs` and `--max-output-chars` no longer exist (the sync
   contract they belonged to is gone).
 - **Idempotency** — `--key <k>` (1–64 chars of `A–Z a–z 0–9 . _ -`) makes
-  the record id the key: a replayed spawn re-attaches to a live worker or
-  refuses a finished one; a same-key request that differs is rejected.
+  the record id the key: a replayed spawn re-attaches to a live worker
+  ("already running — no double-spawn"), resubmits a `failed`/`lost` worker
+  as the next attempt under the same key (a compact retry history is kept
+  on the replacement record), and refuses a terminal `completed`/`cancelled`
+  one — finished records are immutable, so a genuinely new run needs a new
+  key. A same-key request that differs is rejected.
 - **Lifecycle** — records run one state machine per key (`starting` →
   `running` → terminal) with a bounded event history. Every outcome —
   completion, failure, cancellation — captures the work as an immutable
@@ -150,11 +189,16 @@ one specifically reviewed live operational record that staging would
 otherwise overwrite (repeat the flag for additional exact paths). Publish
 only the gated candidate with `--continue <attempt>`.
 
-`stateroot handoff write --worktree <path>` binds a handoff to a
-registered fork: the packet carries the opaque `fork_id` (never the raw
-path), the receiver's digest opens with **Work in fork \<id\>** and the
-registry-resolved path, and `resume` anywhere else fails closed with the
-exact recovery command.
+`stateroot handoff write --worktree <path>` is PARENT-side routing: run from
+the trunk (or any other) checkout, it binds the handoff to a registered fork
+of this project and delivers the packet into that fork's own current slot
+(the sender keeps an immutable audit record). The packet carries the opaque
+`fork_id` (never the raw path), the receiver's digest opens with **Work in
+fork \<id\>** and the registry-resolved path, and `resume` anywhere else
+fails closed with the exact recovery command. When writing a handoff from
+ALREADY INSIDE the receiving fork, omit `--worktree` — a plain
+`handoff write` updates the fork's own packet (the fork is not a registered
+fork of itself, so the flag would only fail validation).
 
 ## Extension subcommands — git-style `stateroot-<name>` on PATH
 
@@ -436,6 +480,41 @@ when a middle is omitted). Hits retain the native source reference and label
 the omitted middle. `stateroot observations search` and direct native sources
 remain available for details outside that index window; an index failure is
 reported, never presented as a complete search.
+
+Unspaced-script recall (Han/Kana/Hangul): the FTS tokenizer folds an unspaced
+run into ONE token, so a bare FTS query only matches exact run boundaries.
+Query terms from those scripts therefore also run a bounded substring pass
+over the derived index docs — independent of the old newest-1000 fallback
+scan, so an old CJK document outside that window is still found — and never
+re-reading the native sources. Query punctuation is normalized away first
+(alphanumerics plus `_`/`-` survive; `支付服务？` and `（支付服务）` carry the
+same intended run), and typed wildcards never widen the match. The FTS stream
+and the substring stream are merged by reciprocal-rank fusion, so each stream
+keeps its own relevance order without comparing incompatible raw score
+scales; a doc found by both appears once with the summed rank
+contribution. Reported scores are retrieval ranking within one result set,
+not confidence. The pass is a limited derived-index scan with result limits —
+not an indexed substring accelerator and not an unbounded-completeness
+guarantee.
+
+## Recovery diagnostics — an interrupted-work example
+
+The durable observation, finalize-journal and resume primitives compose into
+one inspectable recovery flow. An already-queued boundary job retains its
+frozen identity across interruption, and a safe entrypoint can retry that
+retained job. A writer killed before durable publication may leave no record
+or job. Inspect the retained evidence without changing it:
+
+```bash
+stateroot observations health        # torn/corrupt capture tails counted, bytes retained
+stateroot handoff inspect --job <id> # the retained boundary job as JSON — no retry, no rewrite
+stateroot resume                     # inspect current root, retained references, and outstanding work
+stateroot doctor                     # authoritative-state summary: root availability, capture facts
+```
+
+This composition is proven by an acceptance test over composed local fixtures
+(owned fixture kills, journal phase rewind, exact-occurrence replay) — it is
+not evidence of real quota-exhaustion or native-harness recovery in the wild.
 
 ## `stateroot handoff` — write flags and accept gates
 

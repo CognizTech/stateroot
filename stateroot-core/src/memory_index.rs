@@ -27,7 +27,8 @@ pub struct RecallHit {
     pub path: String,
     /// Snippet text.
     pub text: String,
-    /// Rank score (higher is better; from bm25 inverted).
+    /// Rank score (higher is better): reciprocal-rank-fusion contribution,
+    /// comparable only within one merged result set.
     pub score: f64,
     /// Whether the entry is marked private.
     pub private: bool,
@@ -612,6 +613,15 @@ fn insert_source_doc(
     Ok(())
 }
 
+/// Standard reciprocal-rank-fusion constant (60): keeps top ranks distinct
+/// without letting any single stream dominate by position alone.
+const RRF_K: f64 = 60.0;
+
+/// One stream's fused contribution for its 0-based rank position.
+fn rrf_score(rank: usize) -> f64 {
+    1.0 / (RRF_K + rank as f64 + 1.0)
+}
+
 /// Search. When `owner` is false, private docs are excluded.
 pub fn search(
     project_dir: &Path,
@@ -634,10 +644,15 @@ pub fn search(
                 MemoryIndexError::Source(format!("current tombstones unavailable: {error}"))
             })?;
     let old_sources = stored_sources(&transaction);
+    // Reciprocal-rank fusion: the FTS bm25 scale and the substring matched-
+    // count scale are incompatible, so each stream contributes only the
+    // rank-based score 1/(RRF_K + rank). Raw magnitudes never compete, each
+    // stream keeps its own internal relevance order, and a minority query
+    // stream cannot be starved by score-scale mismatch alone.
     let mut hits = Vec::new();
     let fts_query = build_fts_query(q);
     let mut stmt = transaction.prepare(
-        "SELECT d.kind,d.path,d.text,d.private,bm25(docs_fts),d.source
+        "SELECT d.kind,d.path,d.text,d.private,d.source
          FROM docs_fts JOIN docs d ON d.id=docs_fts.rowid
          WHERE docs_fts MATCH ?1 ORDER BY bm25(docs_fts) LIMIT ?2",
     )?;
@@ -647,13 +662,28 @@ pub fn search(
             path: row.get(1)?,
             text: row.get(2)?,
             private: row.get::<_, i64>(3)? != 0,
-            score: 1000.0 - row.get::<_, f64>(4)?,
-            source: row.get(5)?,
+            score: 0.0,
+            source: row.get(4)?,
             stale,
         })
     })?;
-    for row in rows {
-        hits.push(row?);
+    for (rank, row) in rows.enumerate() {
+        let mut hit = row?;
+        hit.score = rrf_score(rank);
+        hits.push(hit);
+    }
+    // unicode61 folds an unspaced Han/Kana/Hangul run into ONE token, so FTS
+    // MATCH only recalls exact run boundaries. Terms from those scripts get a
+    // bounded substring pass over the derived docs table (never a source
+    // reread), independent of whether unrelated Latin tokens already hit.
+    let substring_terms = cjk_substring_terms(q);
+    if !substring_terms.is_empty() {
+        hits.extend(cjk_substring_hits(
+            &transaction,
+            &substring_terms,
+            limit.saturating_mul(4).max(20),
+            owner,
+        )?);
     }
     if hits.is_empty() {
         hits = like_fallback(&transaction, q, limit.saturating_mul(4).max(20), owner)?;
@@ -696,13 +726,28 @@ pub fn search(
                 .filter(|hit| owner || !hit.private),
         );
     }
-    filtered.sort_by(|a, b| {
+    // Fuse the streams: a doc found by several streams sums its reciprocal-
+    // rank contributions and appears once; rank ties keep insertion order
+    // (stable sort, FTS stream first), preserving Latin relevance primacy.
+    let mut merged: Vec<RecallHit> = Vec::with_capacity(filtered.len());
+    let mut slots: std::collections::HashMap<(String, String), usize> =
+        std::collections::HashMap::new();
+    for hit in filtered {
+        let key = (hit.path.clone(), hit.text.clone());
+        if let Some(&slot) = slots.get(&key) {
+            merged[slot].score += hit.score;
+        } else {
+            slots.insert(key, merged.len());
+            merged.push(hit);
+        }
+    }
+    merged.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    filtered.dedup_by(|a, b| a.path == b.path && a.text == b.text);
-    filtered.truncate(limit);
+    merged.truncate(limit);
+    let mut filtered = merged;
     for hit in &mut filtered {
         hit.text = excerpt_around(&hit.text, q);
     }
@@ -922,6 +967,117 @@ fn like_fallback(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     hits.truncate(limit);
+    // Matched-term count only fixes this stream's internal order; convert to
+    // rank contributions so the merged comparison stays scale-free.
+    for (rank, hit) in hits.iter_mut().enumerate() {
+        hit.score = rrf_score(rank);
+    }
+    Ok(hits)
+}
+
+/// Query terms whose script unicode61 cannot substring-match: an unspaced
+/// run of Han, Kana, or Hangul is indexed as ONE token, so FTS MATCH only
+/// finds exact run boundaries. These terms get a LIKE pass over the derived
+/// docs table. Punctuation is normalized away with the same keep-set as
+/// `build_fts_query` (alphanumeric plus `_`/`-`), so 支付服务？ or （支付服务）
+/// still carries the intended run instead of becoming literal pattern text.
+/// `%` is dropped by that keep-set and `_`/`\` stay escaped by
+/// `like_pattern`, so typed wildcards never widen the LIKE match. A term
+/// that normalizes to nothing carried no substring intent and is dropped.
+fn cjk_substring_terms(q: &str) -> Vec<String> {
+    q.split_whitespace()
+        .map(|t| {
+            t.chars()
+                .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                .collect::<String>()
+        })
+        .filter(|t| t.len() > 1)
+        .filter(|t| t.chars().any(is_unspaced_script))
+        .collect()
+}
+
+/// Scripts the unicode61 tokenizer folds into single unspaced-run tokens.
+fn is_unspaced_script(c: char) -> bool {
+    matches!(c as u32,
+        0x1100..=0x11FF      // Hangul Jamo
+        | 0x3040..=0x309F    // Hiragana
+        | 0x30A0..=0x30FF    // Katakana
+        | 0x3130..=0x318F    // Hangul Compatibility Jamo
+        | 0x3400..=0x4DBF    // CJK Unified Ideographs Extension A
+        | 0x4E00..=0x9FFF    // CJK Unified Ideographs
+        | 0xAC00..=0xD7AF    // Hangul Syllables
+        | 0xF900..=0xFAFF    // CJK Compatibility Ideographs
+        | 0xFF66..=0xFF9D    // Halfwidth Katakana
+        | 0x20000..=0x2A6DF  // CJK Unified Ideographs Extension B
+    )
+}
+
+/// Escape a term for a SQL `LIKE ... ESCAPE '\'` substring pattern.
+fn like_pattern(term: &str) -> String {
+    let mut out = String::with_capacity(term.len() + 2);
+    out.push('%');
+    for c in term.chars() {
+        if matches!(c, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('%');
+    out
+}
+
+/// Substring recall over the derived docs table for unspaced-script terms.
+/// One SQL scan evaluates every term per row; SQLite LIKE folds ASCII case,
+/// matching `like_fallback` for the ASCII parts of mixed terms. Rows arrive
+/// ordered by matched-term count and recency; that position becomes the
+/// stream's reciprocal-rank contribution, keeping this stream's scale
+/// comparable to the FTS stream. The scan reads only the derived index,
+/// never the native sources.
+fn cjk_substring_hits(
+    conn: &Connection,
+    terms: &[String],
+    limit: usize,
+    owner: bool,
+) -> Result<Vec<RecallHit>, MemoryIndexError> {
+    if terms.is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+    let matched = terms
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("(text LIKE ?{} ESCAPE '\\')", i + 1))
+        .collect::<Vec<_>>()
+        .join("+");
+    let sql = format!(
+        "SELECT kind,path,text,private,source,matched FROM (
+           SELECT id,kind,path,text,private,source,({matched}) AS matched FROM docs
+         ) WHERE matched > 0 {} ORDER BY matched DESC, id DESC LIMIT ?{}",
+        if owner { "" } else { "AND private = 0" },
+        terms.len() + 1,
+    );
+    let mut values: Vec<rusqlite::types::Value> = terms
+        .iter()
+        .map(|term| rusqlite::types::Value::Text(like_pattern(term)))
+        .collect();
+    values.push(rusqlite::types::Value::Integer(limit as i64));
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(values), |row| {
+        Ok(RecallHit {
+            kind: row.get(0)?,
+            path: row.get(1)?,
+            text: row.get(2)?,
+            private: row.get::<_, i64>(3)? != 0,
+            source: row.get(4)?,
+            score: 0.0,
+            stale: false,
+        })
+    })?;
+    let mut hits = Vec::new();
+    for (rank, row) in rows.enumerate() {
+        let mut hit = row?;
+        hit.score = rrf_score(rank);
+        hits.push(hit);
+    }
     Ok(hits)
 }
 
@@ -1409,6 +1565,492 @@ mod tests {
         assert!(
             pub_hits.iter().any(|h| h.text.contains("80")),
             "{pub_hits:?}"
+        );
+    }
+
+    /// Write a curated MEMORY.md directly: the real source of record, sized
+    /// corpora without lock round-trips per entry.
+    fn write_memory_entries(project: &Path, entries: &[String]) {
+        let path = local_store::root(project).join(local_store::MEMORY_CORE_PATH);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(
+            path,
+            format!("# Project Memory\n{}", hot_apex::join_entries(entries)),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn mixed_latin_cjk_query_keeps_cjk_substring_recall() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(project.path(), "p", "P", "default").unwrap();
+        hot_apex::add(
+            project.path(),
+            home.path(),
+            "memory",
+            "周五把微信支付服务迁移到生产环境并验证回调",
+            false,
+        )
+        .unwrap();
+        hot_apex::add(
+            project.path(),
+            home.path(),
+            "memory",
+            "rollback the deploy after tests pass",
+            false,
+        )
+        .unwrap();
+        rebuild(project.path(), home.path()).unwrap();
+        // Pure CJK substring recall worked via the LIKE fallback.
+        let pure = search(project.path(), home.path(), "支付服务", 8, true).unwrap();
+        assert!(
+            pure.iter().any(|hit| hit.text.contains("支付服务")),
+            "pure CJK query regressed: {pure:?}"
+        );
+        // A Latin FTS hit must not starve the unspaced-CJK stream.
+        let mixed = search(project.path(), home.path(), "支付服务 rollback", 8, true).unwrap();
+        assert!(
+            mixed.iter().any(|hit| hit.text.contains("支付服务")),
+            "CJK doc starved by unrelated Latin FTS hit: {mixed:?}"
+        );
+        assert!(
+            mixed.iter().any(|hit| hit.text.contains("rollback")),
+            "Latin FTS hit lost: {mixed:?}"
+        );
+    }
+
+    #[test]
+    fn cjk_match_beyond_newest_thousand_docs_is_recalled() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(project.path(), "p", "P", "default").unwrap();
+        let mut entries = vec!["周五把微信支付服务迁移到生产环境".to_string()];
+        for i in 0..1200 {
+            entries.push(format!("routine deploy note {i:04} stays unrelated"));
+        }
+        write_memory_entries(project.path(), &entries);
+        rebuild(project.path(), home.path()).unwrap();
+        let hits = search(project.path(), home.path(), "支付服务", 8, true).unwrap();
+        assert!(
+            hits.iter().any(|hit| hit.text.contains("支付服务")),
+            "old CJK document hidden by the newest-1000 fallback window: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn mixed_queries_keep_japanese_and_korean_substring_recall() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(project.path(), "p", "P", "default").unwrap();
+        hot_apex::add(
+            project.path(),
+            home.path(),
+            "memory",
+            "本番環境で自動更新機能を確認する",
+            false,
+        )
+        .unwrap();
+        hot_apex::add(
+            project.path(),
+            home.path(),
+            "memory",
+            "자동업데이트기능을확인했다",
+            false,
+        )
+        .unwrap();
+        hot_apex::add(
+            project.path(),
+            home.path(),
+            "memory",
+            "rollback the deploy after tests pass",
+            false,
+        )
+        .unwrap();
+        rebuild(project.path(), home.path()).unwrap();
+        let japanese = search(project.path(), home.path(), "自動更新 rollback", 8, true).unwrap();
+        assert!(
+            japanese.iter().any(|hit| hit.text.contains("自動更新")),
+            "Japanese doc starved: {japanese:?}"
+        );
+        let korean = search(project.path(), home.path(), "업데이트 rollback", 8, true).unwrap();
+        assert!(
+            korean.iter().any(|hit| hit.text.contains("업데이트")),
+            "Korean doc starved: {korean:?}"
+        );
+    }
+
+    #[test]
+    fn mixed_query_finds_unspaced_cjk_in_native_transcript() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(project.path(), "p", "P", "default").unwrap();
+        let file = native_file(
+            home.path(),
+            project.path(),
+            "cjk-stream",
+            "用户要求把微信支付服务接入生产环境",
+        );
+        hot_apex::add(
+            project.path(),
+            home.path(),
+            "memory",
+            "rollback the deploy plan",
+            false,
+        )
+        .unwrap();
+        rebuild(project.path(), home.path()).unwrap();
+        let hits = search(project.path(), home.path(), "支付服务 rollback", 8, true).unwrap();
+        assert!(
+            hits.iter()
+                .any(|hit| hit.kind == "transcript" && Path::new(&hit.source) == file),
+            "transcript CJK stream starved: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn doc_matched_by_both_fts_and_substring_paths_appears_once() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(project.path(), "p", "P", "default").unwrap();
+        hot_apex::add(
+            project.path(),
+            home.path(),
+            "memory",
+            "微信支付服务 rollout finished on friday",
+            false,
+        )
+        .unwrap();
+        rebuild(project.path(), home.path()).unwrap();
+        // Space-bounded run: FTS matches the token AND the substring pass
+        // matches the text. The merged result must not duplicate the doc.
+        let hits = search(project.path(), home.path(), "微信支付服务 rollout", 8, true).unwrap();
+        let matching: Vec<_> = hits
+            .iter()
+            .filter(|hit| hit.text.contains("微信支付服务"))
+            .collect();
+        assert_eq!(matching.len(), 1, "duplicate merged hit: {hits:?}");
+        assert!(hits.iter().any(|hit| hit.text.contains("rollout")));
+    }
+
+    #[test]
+    fn cjk_no_match_query_returns_empty_without_error() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(project.path(), "p", "P", "default").unwrap();
+        hot_apex::add(
+            project.path(),
+            home.path(),
+            "memory",
+            "周五把微信支付服务迁移到生产环境",
+            false,
+        )
+        .unwrap();
+        rebuild(project.path(), home.path()).unwrap();
+        let hits = search(project.path(), home.path(), "存在しない語句", 8, true).unwrap();
+        assert!(hits.is_empty(), "phantom CJK hits: {hits:?}");
+    }
+
+    #[test]
+    fn cjk_substring_recall_crosses_punctuation_boundaries() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(project.path(), "p", "P", "default").unwrap();
+        hot_apex::add(
+            project.path(),
+            home.path(),
+            "memory",
+            "部署微信支付服务。",
+            false,
+        )
+        .unwrap();
+        rebuild(project.path(), home.path()).unwrap();
+        // 。 breaks the unicode61 run into 部署微信支付服务; a shorter
+        // substring query must still recall the doc.
+        let hits = search(project.path(), home.path(), "支付服务", 8, true).unwrap();
+        assert!(
+            hits.iter().any(|hit| hit.text.contains("支付服务")),
+            "punctuation-bounded CJK run not recalled: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn rebuild_and_reopen_preserves_cjk_recall() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(project.path(), "p", "P", "default").unwrap();
+        hot_apex::add(
+            project.path(),
+            home.path(),
+            "memory",
+            "周五把微信支付服务迁移到生产环境",
+            false,
+        )
+        .unwrap();
+        rebuild(project.path(), home.path()).unwrap();
+        let first = search(project.path(), home.path(), "支付服务", 8, true).unwrap();
+        // Forced rebuild plus fresh read connections (search opens one per call).
+        rebuild(project.path(), home.path()).unwrap();
+        let second = search(project.path(), home.path(), "支付服务", 8, true).unwrap();
+        for (label, hits) in [("first", first), ("second", second)] {
+            assert!(
+                hits.iter().any(|hit| hit.text.contains("支付服务")),
+                "{label} search after rebuild lost CJK recall: {hits:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn latin_ranking_and_fallback_unchanged_by_cjk_support() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(project.path(), "p", "P", "default").unwrap();
+        hot_apex::add(
+            project.path(),
+            home.path(),
+            "memory",
+            "rollback the deploy after tests pass",
+            false,
+        )
+        .unwrap();
+        hot_apex::add(
+            project.path(),
+            home.path(),
+            "memory",
+            "rollback only this single step",
+            false,
+        )
+        .unwrap();
+        hot_apex::add(
+            project.path(),
+            home.path(),
+            "memory",
+            "paymentrollbackhandler stays one token",
+            false,
+        )
+        .unwrap();
+        rebuild(project.path(), home.path()).unwrap();
+        // Two-token Latin query: bm25 still ranks the richer match first.
+        let hits = search(project.path(), home.path(), "rollback deploy", 8, true).unwrap();
+        assert!(
+            hits.first().is_some_and(|hit| hit.text.contains("deploy")),
+            "Latin bm25 ranking changed: {hits:?}"
+        );
+        // Latin mid-token substring still falls back to LIKE when FTS is empty.
+        let sub = search(project.path(), home.path(), "rollbackhandler", 8, true).unwrap();
+        assert!(
+            sub.iter()
+                .any(|hit| hit.text.contains("paymentrollbackhandler")),
+            "Latin LIKE fallback lost: {sub:?}"
+        );
+    }
+
+    #[test]
+    fn cjk_substring_pass_respects_private_visibility() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(project.path(), "p", "P", "default").unwrap();
+        hot_apex::add(
+            project.path(),
+            home.path(),
+            "memory",
+            "家庭支付服务细节",
+            true,
+        )
+        .unwrap();
+        rebuild(project.path(), home.path()).unwrap();
+        let owner = search(project.path(), home.path(), "支付服务", 8, true).unwrap();
+        assert!(
+            owner
+                .iter()
+                .any(|hit| hit.private && hit.text.contains("支付服务")),
+            "owner lost private CJK recall: {owner:?}"
+        );
+        let external = search(project.path(), home.path(), "支付服务", 8, false).unwrap();
+        assert!(
+            external.is_empty(),
+            "private CJK doc leaked to external recall: {external:?}"
+        );
+    }
+
+    #[test]
+    fn cjk_recall_measurement_over_representative_index() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(project.path(), "p", "P", "default").unwrap();
+        let mut entries = vec!["周五把微信支付服务迁移到生产环境".to_string()];
+        for i in 0..2000 {
+            entries.push(format!(
+                "routine deploy note {i:04} {}",
+                "filler ".repeat(100)
+            ));
+        }
+        entries.push("最近确认自动更新功能已经启用".to_string());
+        write_memory_entries(project.path(), &entries);
+        let source_bytes =
+            fs::metadata(local_store::root(project.path()).join(local_store::MEMORY_CORE_PATH))
+                .unwrap()
+                .len();
+        let building = std::time::Instant::now();
+        rebuild(project.path(), home.path()).unwrap();
+        let rebuild_ms = building.elapsed().as_millis();
+        let cold = std::time::Instant::now();
+        let hits = search(
+            project.path(),
+            home.path(),
+            "支付服务 更新 rollback",
+            8,
+            true,
+        )
+        .unwrap();
+        let cold_ms = cold.elapsed().as_millis();
+        assert!(hits.iter().any(|hit| hit.text.contains("支付服务")));
+        assert!(hits.iter().any(|hit| hit.text.contains("更新")));
+        let warm = std::time::Instant::now();
+        for _ in 0..20 {
+            assert!(search(project.path(), home.path(), "支付服务", 8, true)
+                .unwrap()
+                .iter()
+                .any(|hit| hit.text.contains("支付服务")));
+        }
+        let warm_20_ms = warm.elapsed().as_millis();
+        // Adversarial shape: many CJK terms in one query.
+        let long_query = (0..48)
+            .map(|i| format!("存在しない語句{i:02}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let adversarial = std::time::Instant::now();
+        assert!(search(project.path(), home.path(), &long_query, 8, true)
+            .unwrap()
+            .is_empty());
+        let adversarial_ms = adversarial.elapsed().as_millis();
+        eprintln!(
+            "cjk recall measurement: source_bytes={source_bytes} docs={} rebuild_ms={rebuild_ms} cold_mixed_ms={cold_ms} warm_20_ms={warm_20_ms} adversarial_48term_ms={adversarial_ms}",
+            entries.len()
+        );
+    }
+
+    #[test]
+    fn mixed_query_topk_preserves_minority_cjk_stream() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(project.path(), "p", "P", "default").unwrap();
+        // 32 relevant Latin-only docs plus one CJK substring doc; limit 8.
+        let mut entries = vec!["周五把微信支付服务迁移到生产环境".to_string()];
+        entries.push("rollback rollback rollback the most relevant rollback deploy".to_string());
+        for i in 0..31 {
+            entries.push(format!("rollback deploy note {i:02} stays latin only"));
+        }
+        write_memory_entries(project.path(), &entries);
+        rebuild(project.path(), home.path()).unwrap();
+        let hits = search(project.path(), home.path(), "支付服务 rollback", 8, true).unwrap();
+        assert!(
+            hits.iter().any(|hit| hit.text.contains("支付服务")),
+            "minority CJK stream starved by 32 Latin FTS hits at limit 8: {hits:?}"
+        );
+        assert!(
+            hits.iter().any(|hit| hit.text.contains("rollback")),
+            "Latin stream lost: {hits:?}"
+        );
+        // Meaningful Latin relevance order survives the merge: the bm25-richest
+        // Latin doc still leads the Latin stream.
+        let first_latin = hits
+            .iter()
+            .find(|hit| hit.text.contains("rollback"))
+            .expect("Latin stream present");
+        assert!(
+            first_latin.text.contains("most relevant"),
+            "Latin relevance order changed by the merge: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn cjk_query_with_surrounding_punctuation_still_recalls_substring() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(project.path(), "p", "P", "default").unwrap();
+        hot_apex::add(
+            project.path(),
+            home.path(),
+            "memory",
+            "周五把微信支付服务迁移到生产环境",
+            false,
+        )
+        .unwrap();
+        hot_apex::add(
+            project.path(),
+            home.path(),
+            "memory",
+            "rollback the deploy after tests pass",
+            false,
+        )
+        .unwrap();
+        rebuild(project.path(), home.path()).unwrap();
+        // Normal query punctuation — half-width, paired, and full-width — must
+        // not become part of the literal substring pattern.
+        for query in ["支付服务？", "(支付服务) rollback", "（支付服务）？"] {
+            let hits = search(project.path(), home.path(), query, 8, true).unwrap();
+            assert!(
+                hits.iter().any(|hit| hit.text.contains("支付服务")),
+                "punctuation-wrapped query {query:?} lost the CJK doc: {hits:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cjk_substring_terms_never_become_like_wildcards() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(project.path(), "p", "P", "default").unwrap();
+        hot_apex::add(
+            project.path(),
+            home.path(),
+            "memory",
+            "微信支付服务已上线",
+            false,
+        )
+        .unwrap();
+        hot_apex::add(
+            project.path(),
+            home.path(),
+            "memory",
+            "微信支付_服务配置说明",
+            false,
+        )
+        .unwrap();
+        rebuild(project.path(), home.path()).unwrap();
+        // Pure control: the plain run recalls the contiguous doc.
+        let pure = search(project.path(), home.path(), "支付服务", 8, true).unwrap();
+        assert!(
+            pure.iter()
+                .any(|hit| hit.text.contains("微信支付服务已上线")),
+            "pure control regressed: {pure:?}"
+        );
+        // `_` stays an escaped literal, never a single-char wildcard.
+        let underscored = search(project.path(), home.path(), "支付_服务", 8, true).unwrap();
+        assert!(
+            underscored.iter().any(|hit| hit.text.contains("支付_服务")),
+            "literal-underscore doc lost: {underscored:?}"
+        );
+        assert!(
+            underscored
+                .iter()
+                .all(|hit| !hit.text.contains("微信支付服务已上线")),
+            "`_` acted as a LIKE wildcard: {underscored:?}"
+        );
+        // `%` normalizes away like other query punctuation instead of wildcarding.
+        let percent = search(project.path(), home.path(), "支付%服务", 8, true).unwrap();
+        assert!(
+            percent
+                .iter()
+                .any(|hit| hit.text.contains("微信支付服务已上线")),
+            "normalized `%` query lost the contiguous doc: {percent:?}"
+        );
+        assert!(
+            percent.iter().all(|hit| !hit.text.contains("支付_服务")),
+            "`%` acted as a LIKE wildcard: {percent:?}"
         );
     }
 }

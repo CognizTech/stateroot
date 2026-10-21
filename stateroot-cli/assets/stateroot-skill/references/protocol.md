@@ -73,7 +73,7 @@ Compact strict example (no envelope or provenance keys):
 {"objective":"Ship reliable local handoffs","task":"Finish adversarial CLI tests","context_summary":"Structured input and verified transcript enrichment are implemented; final workspace checks remain.","decisions":["Keep envelope ownership in the CLI"],"changed_files":["stateroot-cli/src/commands/handoff.rs"],"tests_run":["cargo test -p stateroot-cli"],"failures":[],"bugs_found":[],"next_actions":["Run the full workspace checks"]}
 ```
 
-Write the JSON to a normal path only when flags are insufficient (Windows paths are supported) and pass that path to `--input`. `--input -` may read stdin when convenient, but shell piping is optional. Do not paste giant transcript or state dumps into `--note`; unstructured notes become only the summary, while exact legacy section labels receive conservative migration.
+Write the JSON to a normal path only when flags are insufficient (Windows paths are supported) and pass that path to `--input`. For a large payload, prefer streaming `--input -` from stdin over a scratch file; any file form lives at an ordinary path outside the project, never under the project `.stateroot/` store. Do not paste giant transcript or state dumps into `--note`; unstructured notes become only the summary, while exact legacy section labels receive conservative migration.
 
 ## Learnings quality (taste)
 

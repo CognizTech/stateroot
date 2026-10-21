@@ -76,6 +76,21 @@ pub fn dsh_root(home: &Path) -> PathBuf {
     dsh_root_in(home, std::env::var_os(ENV_DSH_HOME))
 }
 
+/// Hermes home override (`$HERMES_HOME`; default `~/.hermes`) — the harness's
+/// own documented override (`hermes_constants.get_hermes_home`), which the
+/// shell-hook subprocess also inherits per profile.
+pub const ENV_HERMES_HOME: &str = "HERMES_HOME";
+
+/// Hermes home: `$HERMES_HOME` or `home/.hermes`.
+pub fn hermes_root_in(home: &Path, env: Option<OsString>) -> PathBuf {
+    agent_config_home(env).unwrap_or_else(|| home.join(".hermes"))
+}
+
+/// Hermes home using the process environment.
+pub fn hermes_root(home: &Path) -> PathBuf {
+    hermes_root_in(home, std::env::var_os(ENV_HERMES_HOME))
+}
+
 fn resolve_prefixed(root: PathBuf, home: &Path, rel: &str, prefix: &str) -> PathBuf {
     if rel == prefix {
         return root;
@@ -102,6 +117,7 @@ fn resolve_claude_path_in(home: &Path, rel: &str, env: Option<OsString>) -> Path
 }
 
 /// Resolve a registry home-relative path for `quirk_id`, honoring env overrides.
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_registry_path_in(
     home: &Path,
     quirk_id: &str,
@@ -110,6 +126,7 @@ pub fn resolve_registry_path_in(
     claude_config: Option<OsString>,
     kimi_code_home: Option<OsString>,
     grok_home: Option<OsString>,
+    hermes_home: Option<OsString>,
 ) -> PathBuf {
     match quirk_id {
         "codex" => resolve_prefixed(codex_root_in(home, codex_home), home, rel, ".codex"),
@@ -121,6 +138,7 @@ pub fn resolve_registry_path_in(
             ".kimi-code",
         ),
         "grok" => resolve_prefixed(grok_root_in(home, grok_home), home, rel, ".grok"),
+        "hermes" => resolve_prefixed(hermes_root_in(home, hermes_home), home, rel, ".hermes"),
         _ => home.join(rel),
     }
 }
@@ -135,10 +153,12 @@ pub fn resolve_registry_path(home: &Path, quirk_id: &str, rel: &str) -> PathBuf 
         std::env::var_os(ENV_CLAUDE_CONFIG_DIR),
         std::env::var_os(ENV_KIMI_CODE_HOME),
         std::env::var_os(ENV_GROK_HOME),
+        std::env::var_os(ENV_HERMES_HOME),
     )
 }
 
 /// Active install path plus the legacy default when a relocation env is in play.
+#[allow(clippy::too_many_arguments)]
 pub fn registry_path_candidates_in(
     home: &Path,
     quirk_id: &str,
@@ -147,6 +167,7 @@ pub fn registry_path_candidates_in(
     claude_config: Option<OsString>,
     kimi_code_home: Option<OsString>,
     grok_home: Option<OsString>,
+    hermes_home: Option<OsString>,
 ) -> Vec<PathBuf> {
     let active = resolve_registry_path_in(
         home,
@@ -156,6 +177,7 @@ pub fn registry_path_candidates_in(
         claude_config,
         kimi_code_home,
         grok_home,
+        hermes_home,
     );
     let default = home.join(rel);
     if default == active {
@@ -175,6 +197,7 @@ pub fn registry_path_candidates(home: &Path, quirk_id: &str, rel: &str) -> Vec<P
         std::env::var_os(ENV_CLAUDE_CONFIG_DIR),
         std::env::var_os(ENV_KIMI_CODE_HOME),
         std::env::var_os(ENV_GROK_HOME),
+        std::env::var_os(ENV_HERMES_HOME),
     )
 }
 
@@ -307,6 +330,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert_eq!(resolved, PathBuf::from("/stores/codex/hooks.json"));
     }
@@ -314,8 +338,16 @@ mod tests {
     #[test]
     fn codex_home_defaults_to_dot_codex() {
         let home = Path::new("/home/alice");
-        let resolved =
-            resolve_registry_path_in(home, "codex", ".codex/AGENTS.md", None, None, None, None);
+        let resolved = resolve_registry_path_in(
+            home,
+            "codex",
+            ".codex/AGENTS.md",
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert_eq!(resolved, PathBuf::from("/home/alice/.codex/AGENTS.md"));
     }
 
@@ -331,6 +363,7 @@ mod tests {
                 None,
                 env.clone(),
                 None,
+                None,
                 None
             ),
             PathBuf::from("/stores/claude/settings.json")
@@ -343,12 +376,22 @@ mod tests {
                 None,
                 env.clone(),
                 None,
+                None,
                 None
             ),
             PathBuf::from("/stores/claude/CLAUDE.md")
         );
         assert_eq!(
-            resolve_registry_path_in(home, "claude-code", ".claude.json", None, env, None, None),
+            resolve_registry_path_in(
+                home,
+                "claude-code",
+                ".claude.json",
+                None,
+                env,
+                None,
+                None,
+                None
+            ),
             PathBuf::from("/stores/claude/.claude.json")
         );
     }
@@ -375,6 +418,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert_eq!(
             paths,
@@ -382,6 +426,44 @@ mod tests {
                 PathBuf::from("/stores/codex/hooks.json"),
                 PathBuf::from("/home/alice/.codex/hooks.json"),
             ]
+        );
+    }
+
+    #[test]
+    fn hermes_home_honors_env_override() {
+        let home = Path::new("/home/alice");
+        let resolved = resolve_registry_path_in(
+            home,
+            "hermes",
+            ".hermes/config.yaml",
+            None,
+            None,
+            None,
+            None,
+            Some(OsString::from("/stores/hermes")),
+        );
+        assert_eq!(resolved, PathBuf::from("/stores/hermes/config.yaml"));
+        // Default keeps ~/.hermes; candidates sweep both when relocated.
+        let candidates = registry_path_candidates_in(
+            home,
+            "hermes",
+            ".hermes/config.yaml",
+            None,
+            None,
+            None,
+            None,
+            Some(OsString::from("/stores/hermes")),
+        );
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from("/stores/hermes/config.yaml"),
+                PathBuf::from("/home/alice/.hermes/config.yaml"),
+            ]
+        );
+        assert_eq!(
+            hermes_root_in(home, None),
+            PathBuf::from("/home/alice/.hermes")
         );
     }
 

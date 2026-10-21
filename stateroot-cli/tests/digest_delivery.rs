@@ -726,3 +726,214 @@ fn pi_demo_both_chats_receive_marid_identity() {
     );
     assert!(contains_marid(&hi_out), "hi chat: {hi_out}");
 }
+
+// ---- Antigravity PreInvocation delivery (native contract) ------------------
+//
+// Antigravity fires SessionStart once per conversation and PreInvocation
+// before EVERY model call (`invocationNum`, 0-indexed). The invocation counter
+// is the host's model counter, not StateRoot's delivery state: a conversation
+// StateRoot first observes at invocationNum > 0 (installed/attached mid-
+// conversation, or a resumed conversation the ledger never saw) must still
+// receive its one first delivery, and already-delivered conversations must
+// stay silent without re-accepting the handoff.
+
+/// Parse the native injectSteps envelope; None when stdout is not one.
+fn antigravity_envelope(assert: &assert_cmd::assert::Assert) -> Option<String> {
+    let text = stdout_of(assert);
+    let parsed: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
+    parsed["injectSteps"][0]["systemMessage"]["systemMessage"]
+        .as_str()
+        .map(str::to_string)
+}
+
+fn antigravity_preinvocation(
+    config_home: &Path,
+    user_home: &Path,
+    project: &Path,
+    conversation: &str,
+    invocation_num: i64,
+) -> assert_cmd::assert::Assert {
+    stateroot(config_home, user_home, project)
+        .args(["hook", "PreInvocation", "--harness", "antigravity"])
+        .write_stdin(
+            serde_json::json!({"conversationId": conversation, "invocationNum": invocation_num})
+                .to_string(),
+        )
+        .assert()
+        .success()
+}
+
+fn antigravity_session_start(
+    config_home: &Path,
+    user_home: &Path,
+    project: &Path,
+    conversation: &str,
+) -> assert_cmd::assert::Assert {
+    stateroot(config_home, user_home, project)
+        .args(["hook", "SessionStart", "--harness", "antigravity"])
+        .write_stdin(serde_json::json!({"conversationId": conversation}).to_string())
+        .assert()
+        .success()
+}
+
+fn ledger_delivery_count(project: &Path, conversation: &str) -> usize {
+    let ledger: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.join(".stateroot/local/digest-delivery.v1.json"))
+            .expect("ledger"),
+    )
+    .expect("json");
+    ledger["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .filter(|entry| entry["session_id"] == serde_json::json!(conversation))
+        .count()
+}
+
+#[test]
+fn antigravity_session_start_and_first_preinvocation_deliver_native_envelope() {
+    let config_home = tempfile::tempdir().expect("config");
+    let user_home = tempfile::tempdir().expect("home");
+    let project = tempfile::tempdir().expect("project");
+    seed_marid(config_home.path(), user_home.path());
+    init_project(config_home.path(), user_home.path(), project.path());
+
+    // Real SessionStart (no invocationNum): the documented boundary.
+    let start = antigravity_session_start(
+        config_home.path(),
+        user_home.path(),
+        project.path(),
+        "conv-start",
+    );
+    let text = antigravity_envelope(&start).expect("SessionStart injectSteps envelope");
+    assert!(contains_marid(&text), "SessionStart identity: {text}");
+
+    // Legacy SessionStart-less hosts open with PreInvocation invocationNum 0.
+    let zero = antigravity_preinvocation(
+        config_home.path(),
+        user_home.path(),
+        project.path(),
+        "conv-zero",
+        0,
+    );
+    let text = antigravity_envelope(&zero).expect("invocationNum 0 injectSteps envelope");
+    assert!(contains_marid(&text), "invocationNum 0 identity: {text}");
+}
+
+#[test]
+fn antigravity_late_attach_mid_turn_preinvocation_delivers_once() {
+    let config_home = tempfile::tempdir().expect("config");
+    let user_home = tempfile::tempdir().expect("home");
+    let project = tempfile::tempdir().expect("project");
+    seed_marid(config_home.path(), user_home.path());
+    init_project(config_home.path(), user_home.path(), project.path());
+
+    // StateRoot attached after invocation 0: the first hook StateRoot ever
+    // observes for this conversation already carries invocationNum 3.
+    let first = antigravity_preinvocation(
+        config_home.path(),
+        user_home.path(),
+        project.path(),
+        "conv-late",
+        3,
+    );
+    let text = antigravity_envelope(&first)
+        .expect("first-seen conversation must deliver even at invocationNum 3");
+    assert!(contains_marid(&text), "late-attach identity: {text}");
+
+    // Ordinary repeats of the same conversation stay silent — no duplicate
+    // first-delivery context, no handoff re-acceptance.
+    for n in [4, 9] {
+        let repeat = antigravity_preinvocation(
+            config_home.path(),
+            user_home.path(),
+            project.path(),
+            "conv-late",
+            n,
+        );
+        let out = stdout_of(&repeat);
+        assert!(
+            out.trim().is_empty(),
+            "repeat invocationNum {n} must be silent: {out}"
+        );
+    }
+    // A duplicate SessionStart for the delivered conversation stays silent too.
+    let dup = antigravity_session_start(
+        config_home.path(),
+        user_home.path(),
+        project.path(),
+        "conv-late",
+    );
+    let out = stdout_of(&dup);
+    assert!(
+        out.trim().is_empty(),
+        "duplicate SessionStart must be silent: {out}"
+    );
+
+    // The delivery ledger recorded exactly one delivery for the conversation.
+    assert_eq!(ledger_delivery_count(project.path(), "conv-late"), 1);
+
+    // A genuinely new conversation id first observed mid-turn is independent:
+    // it has no delivery state and must receive its own first delivery.
+    let other = antigravity_preinvocation(
+        config_home.path(),
+        user_home.path(),
+        project.path(),
+        "conv-other",
+        7,
+    );
+    let text = antigravity_envelope(&other).expect("new conversation id delivers");
+    assert!(contains_marid(&text), "new conversation identity: {text}");
+    assert_eq!(ledger_delivery_count(project.path(), "conv-other"), 1);
+    assert_eq!(ledger_delivery_count(project.path(), "conv-late"), 1);
+}
+
+#[test]
+fn antigravity_identity_change_redelivers_mid_conversation() {
+    let config_home = tempfile::tempdir().expect("config");
+    let user_home = tempfile::tempdir().expect("home");
+    let project = tempfile::tempdir().expect("project");
+    seed_marid(config_home.path(), user_home.path());
+    init_project(config_home.path(), user_home.path(), project.path());
+
+    let first = antigravity_preinvocation(
+        config_home.path(),
+        user_home.path(),
+        project.path(),
+        "conv-change",
+        0,
+    );
+    assert!(antigravity_envelope(&first).is_some());
+
+    // Identity changed after the first delivery: a later model invocation
+    // must re-deliver — model-call count never suppresses pending identity.
+    std::fs::write(
+        config_home.path().join("persona.md"),
+        "## Working relationship\n\nYou are Yinyue now.\n",
+    )
+    .expect("persona change");
+    let changed = antigravity_preinvocation(
+        config_home.path(),
+        user_home.path(),
+        project.path(),
+        "conv-change",
+        7,
+    );
+    let text = antigravity_envelope(&changed)
+        .expect("changed identity must re-deliver at invocationNum 7");
+    assert!(text.contains("You are Yinyue now."), "new identity: {text}");
+
+    // Settled again: the next ordinary repeat is silent.
+    let repeat = antigravity_preinvocation(
+        config_home.path(),
+        user_home.path(),
+        project.path(),
+        "conv-change",
+        8,
+    );
+    let out = stdout_of(&repeat);
+    assert!(
+        out.trim().is_empty(),
+        "post-redelivery repeat must be silent: {out}"
+    );
+}

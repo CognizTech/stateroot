@@ -616,3 +616,391 @@ async fn synthesize_uses_observed_pack_when_no_transcripts() {
     assert!(handoff.contains("gpt-5.6-luna"), "model: {handoff}");
     server.verify().await;
 }
+
+// ---------------------------------------------------------------------------
+// Provider transport robustness (plan_2026-10-20T07-10-54Z): Unicode error
+// boundaries, bounded bodies, redirect origin rules. All fixtures are local
+// wiremock servers — no live provider traffic.
+// ---------------------------------------------------------------------------
+
+/// Error body whose byte 300 lands mid-codepoint ("界" starts at byte 299).
+/// The old `&text[..300]` byte slice panicked on exactly this shape.
+fn straddling_unicode_error_body() -> Vec<u8> {
+    let mut body = b"error-code-teapot ".to_vec();
+    body.resize(299, b'x');
+    body.extend_from_slice("界".as_bytes());
+    body.extend_from_slice(b" detail after the wide char");
+    body
+}
+
+/// One-line summary of what a redirect target server actually received —
+/// the evidence channel for cross-origin leak checks.
+async fn observed_requests_summary(server: &MockServer) -> String {
+    let requests = server.received_requests().await.unwrap_or_default();
+    if requests.is_empty() {
+        return "<no requests>".to_string();
+    }
+    requests
+        .iter()
+        .map(|r| {
+            let auth = r
+                .headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("<none>");
+            format!(
+                "{} {} auth={auth} body_bytes={} body_has_marker={}",
+                r.method,
+                r.url.path(),
+                r.body.len(),
+                String::from_utf8_lossy(&r.body).contains("ZebraQuasar")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn valid_synthesis_response(marker: &str) -> ResponseTemplate {
+    let sections = json!({
+        "progress_report": [marker],
+        "decisions_and_amendments": [],
+        "residual_work": [],
+        "resolutions": []
+    });
+    ResponseTemplate::new(200).set_body_json(json!({
+        "choices": [{"message": {"content": sections.to_string()}}]
+    }))
+}
+
+/// Project holding only a README marker — the observed context pack carries
+/// the marker into the provider request body, making body forwarding visible.
+fn marker_project(config_home: &Path, user_home: &Path) -> tempfile::TempDir {
+    seed_config_home(config_home, "");
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home, user_home, project.path());
+    std::fs::write(
+        project.path().join("README.md"),
+        "# Marker\n\nZebraQuasar synthesis marker.\n",
+    )
+    .expect("readme");
+    project
+}
+
+#[tokio::test]
+async fn provider_transport_unicode_error_body_falls_back_without_panic() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(500).set_body_bytes(straddling_unicode_error_body()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let config_home = tempfile::tempdir().expect("config home");
+    let user_home = tempfile::tempdir().expect("user home");
+    let project = marker_project(config_home.path(), user_home.path());
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .env("DEEPSEEK_API_KEY", "test-key")
+        .env("STATEROOT_SYNTHESIS_API_BASE", server.uri())
+        .arg("synthesize")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains("synthesis skipped or failed — deterministic digest intact"),
+        "unicode error must degrade to deterministic, not crash: {stdout}"
+    );
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn provider_transport_unicode_error_note_is_clean_and_keeps_content() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(500).set_body_bytes(straddling_unicode_error_body()))
+        .mount(&server)
+        .await;
+
+    let config_home = tempfile::tempdir().expect("config home");
+    seed_config_home(config_home.path(), "");
+    let user_home = tempfile::tempdir().expect("user home");
+    let project = tempfile::tempdir().expect("project");
+    std::fs::write(
+        project.path().join("README.md"),
+        "# Marker\n\nZebraQuasar synthesis marker.\n",
+    )
+    .expect("readme");
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .env("DEEPSEEK_API_KEY", "test-key")
+        .env("STATEROOT_SYNTHESIS_API_BASE", server.uri())
+        .args(["init", "--synthesize", "--synthesize-with", "deepseek"])
+        .assert()
+        .success();
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).expect("utf8");
+    assert!(
+        stderr.contains("synthesis via deepseek failed"),
+        "init must surface the provider failure, not panic: {stderr}"
+    );
+    assert!(
+        stderr.contains("error-code-teapot"),
+        "error note must keep useful provider content: {stderr}"
+    );
+    assert!(
+        !stderr.contains("test-key"),
+        "error note must never leak the bearer token: {stderr}"
+    );
+}
+
+#[tokio::test]
+async fn provider_transport_cross_origin_307_redirect_never_reaches_target() {
+    let target = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(valid_synthesis_response("redirected"))
+        .mount(&target)
+        .await;
+
+    let entry = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(307)
+                .insert_header("location", format!("{}/chat/completions", target.uri())),
+        )
+        .mount(&entry)
+        .await;
+
+    let config_home = tempfile::tempdir().expect("config home");
+    let user_home = tempfile::tempdir().expect("user home");
+    let project = marker_project(config_home.path(), user_home.path());
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .env("DEEPSEEK_API_KEY", "test-key")
+        .env("STATEROOT_SYNTHESIS_API_BASE", entry.uri())
+        .arg("synthesize")
+        .assert()
+        .success();
+    let observed = observed_requests_summary(&target).await;
+    eprintln!("cross-origin 307 target observed: {observed}");
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains("synthesis skipped or failed — deterministic digest intact"),
+        "cross-origin redirect must be refused, not followed: {stdout}"
+    );
+    assert_eq!(
+        observed, "<no requests>",
+        "307 redirect target must never receive the prompt body or token"
+    );
+}
+
+#[tokio::test]
+async fn provider_transport_cross_origin_308_redirect_never_reaches_target() {
+    let target = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(valid_synthesis_response("redirected"))
+        .mount(&target)
+        .await;
+
+    let entry = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(308)
+                .insert_header("location", format!("{}/chat/completions", target.uri())),
+        )
+        .mount(&entry)
+        .await;
+
+    let config_home = tempfile::tempdir().expect("config home");
+    let user_home = tempfile::tempdir().expect("user home");
+    let project = marker_project(config_home.path(), user_home.path());
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .env("DEEPSEEK_API_KEY", "test-key")
+        .env("STATEROOT_SYNTHESIS_API_BASE", entry.uri())
+        .arg("synthesize")
+        .assert()
+        .success();
+    let observed = observed_requests_summary(&target).await;
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains("synthesis skipped or failed — deterministic digest intact"),
+        "cross-origin redirect must be refused, not followed: {stdout}"
+    );
+    assert_eq!(
+        observed, "<no requests>",
+        "308 redirect target must never receive the prompt body or token"
+    );
+}
+
+#[tokio::test]
+async fn provider_transport_cross_origin_302_redirect_never_reaches_target() {
+    let target = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(valid_synthesis_response("redirected"))
+        .mount(&target)
+        .await;
+
+    let entry = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("location", format!("{}/chat/completions", target.uri())),
+        )
+        .mount(&entry)
+        .await;
+
+    let config_home = tempfile::tempdir().expect("config home");
+    let user_home = tempfile::tempdir().expect("user home");
+    let project = marker_project(config_home.path(), user_home.path());
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .env("DEEPSEEK_API_KEY", "test-key")
+        .env("STATEROOT_SYNTHESIS_API_BASE", entry.uri())
+        .arg("synthesize")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains("synthesis skipped or failed — deterministic digest intact"),
+        "cross-origin redirect must be refused, not followed: {stdout}"
+    );
+    let observed = observed_requests_summary(&target).await;
+    assert_eq!(
+        observed, "<no requests>",
+        "302 redirect target must never be contacted"
+    );
+}
+
+#[tokio::test]
+async fn provider_transport_same_origin_307_redirect_still_merges() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(307)
+                .insert_header("location", format!("{}/v1/chat/completions", server.uri())),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(valid_synthesis_response("same-origin gateway"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let config_home = tempfile::tempdir().expect("config home");
+    let user_home = tempfile::tempdir().expect("user home");
+    let project = marker_project(config_home.path(), user_home.path());
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .env("DEEPSEEK_API_KEY", "test-key")
+        .env("STATEROOT_SYNTHESIS_API_BASE", server.uri())
+        .arg("synthesize")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains("synthesis merged"),
+        "same-origin gateway redirect must keep working: {stdout}"
+    );
+    server.verify().await;
+    let requests = server.received_requests().await.unwrap_or_default();
+    let gateway = requests
+        .iter()
+        .find(|r| r.url.path() == "/v1/chat/completions")
+        .expect("gateway request recorded");
+    let auth = gateway
+        .headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(
+        auth, "Bearer test-key",
+        "same-origin redirect must preserve the bearer token"
+    );
+    assert!(
+        String::from_utf8_lossy(&gateway.body).contains("ZebraQuasar"),
+        "same-origin 307 must carry the request body through"
+    );
+}
+
+#[tokio::test]
+async fn provider_transport_redirect_loop_is_capped() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(307)
+                .insert_header("location", format!("{}/chat/completions", server.uri())),
+        )
+        .expect(5)
+        .mount(&server)
+        .await;
+
+    let config_home = tempfile::tempdir().expect("config home");
+    let user_home = tempfile::tempdir().expect("user home");
+    let project = marker_project(config_home.path(), user_home.path());
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .env("DEEPSEEK_API_KEY", "test-key")
+        .env("STATEROOT_SYNTHESIS_API_BASE", server.uri())
+        .arg("synthesize")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains("synthesis skipped or failed — deterministic digest intact"),
+        "redirect loop must be refused after the cap, not spun: {stdout}"
+    );
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn provider_transport_oversize_success_body_is_bounded() {
+    let server = MockServer::start().await;
+    // Valid chat-completions JSON trailed by 2 MiB of legal JSON whitespace:
+    // an unbounded reader parses it and merges; a bounded reader must refuse.
+    let sections = json!({
+        "progress_report": ["oversize"],
+        "decisions_and_amendments": [],
+        "residual_work": [],
+        "resolutions": []
+    });
+    let mut body = serde_json::to_vec(&json!({
+        "choices": [{"message": {"content": sections.to_string()}}]
+    }))
+    .expect("json");
+    body.resize(2 * 1024 * 1024, b' ');
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let config_home = tempfile::tempdir().expect("config home");
+    let user_home = tempfile::tempdir().expect("user home");
+    let project = marker_project(config_home.path(), user_home.path());
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .env("DEEPSEEK_API_KEY", "test-key")
+        .env("STATEROOT_SYNTHESIS_API_BASE", server.uri())
+        .arg("synthesize")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains("synthesis skipped or failed — deterministic digest intact"),
+        "oversize body must be reported and dropped, not read whole: {stdout}"
+    );
+    server.verify().await;
+}

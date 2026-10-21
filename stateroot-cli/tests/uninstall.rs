@@ -41,10 +41,28 @@ fn seed_registrations(home: &Path) {
     )
     .unwrap();
     // hermes MCP: YAML shape, ours + foreign, with no backup to restore.
+    // The same file carries a hooks: block — ours stripped, foreign kept.
     std::fs::create_dir_all(home.join(".hermes")).unwrap();
     std::fs::write(
         home.join(".hermes/config.yaml"),
-        "model: gpt-4\nmcp_servers:\n  stateroot:\n    command: stateroot\n    args: [mcp-stdio]\n  foreign:\n    command: other\n",
+        concat!(
+            "model: gpt-4\n",
+            "mcp_servers:\n",
+            "  stateroot:\n",
+            "    command: stateroot\n",
+            "    args: [mcp-stdio]\n",
+            "  foreign:\n",
+            "    command: other\n",
+            "hooks:\n",
+            "  pre_llm_call:\n",
+            "    - command: stateroot hook user_prompt_submit --harness hermes\n",
+            // Quoted executable path, as the installer emits it for homes
+            // with spaces — must be recognized as ours on uninstall.
+            "    - command: '\"/opt/my bin/stateroot\" hook user_prompt_submit --harness hermes'\n",
+            "    - command: ~/.hermes/agent-hooks/foreign.sh\n",
+            "  on_session_end:\n",
+            "    - command: stateroot hook stop --harness hermes\n",
+        ),
     )
     .unwrap();
     // claude hooks (nested) + instruction block with user content
@@ -115,6 +133,18 @@ fn uninstall_cleans_registrations_and_preserves_foreign_and_data() {
     assert!(hermes["mcp_servers"]["stateroot"].is_null());
     assert_eq!(hermes["mcp_servers"]["foreign"]["command"], "other");
     assert!(!stdout.contains("hermes MCP removal failed"), "{stdout}");
+    // YAML shell hooks: stateroot entries stripped, foreign entry kept, and
+    // the event list emptied by the strip was dropped.
+    let hooks = hermes["hooks"].as_mapping().expect("hooks mapping");
+    let pre_llm = hooks["pre_llm_call"].as_sequence().expect("pre_llm_call");
+    assert_eq!(pre_llm.len(), 1, "{hermes:?}");
+    assert_eq!(
+        pre_llm[0]["command"].as_str(),
+        Some("~/.hermes/agent-hooks/foreign.sh"),
+        "{hermes:?}"
+    );
+    assert!(hooks.get("on_session_end").is_none(), "{hermes:?}");
+    assert_eq!(hermes["model"].as_str(), Some("gpt-4"), "{hermes:?}");
 
     let settings: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(user_home.path().join(".claude/settings.json")).unwrap(),

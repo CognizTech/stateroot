@@ -278,6 +278,30 @@ pub fn extract_hook_commands(path: &Path, format: HookFormat) -> Vec<String> {
                 Vec::new()
             }
         }
+        HookFormat::YamlHooks => {
+            // hermes `config.yaml`: `hooks: {<event>: [{command: "…"}]}` —
+            // reserved sub-sections (`outbound`, `output_spill`) are not
+            // entry lists and are skipped by the sequence check.
+            let Ok(text) = std::fs::read_to_string(path) else {
+                return Vec::new();
+            };
+            let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(&text) else {
+                return Vec::new();
+            };
+            doc.get("hooks")
+                .and_then(|hooks| hooks.as_mapping())
+                .map(|hooks| {
+                    hooks
+                        .values()
+                        .filter_map(|entries| entries.as_sequence())
+                        .flatten()
+                        .filter_map(|entry| entry.get("command").and_then(|c| c.as_str()))
+                        .filter(|command| is_stateroot_hook_command(command))
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
         HookFormat::NamedGroupsJson => {
             // `{"stateroot": {<event>: [handlers]}}` — handlers are flat
             // `{command}` or nested `{matcher, hooks: [{command}]}`.
@@ -445,6 +469,8 @@ fn hooks_component(home: &Path, quirk: &HarnessQuirk) -> ComponentHealth {
             };
             let parseable = if target.format == HookFormat::TomlHooks {
                 toml::from_str::<toml::Value>(&text).is_ok()
+            } else if target.format == HookFormat::YamlHooks {
+                serde_yaml::from_str::<serde_yaml::Value>(&text).is_ok()
             } else {
                 serde_json::from_str::<serde_json::Value>(&text).is_ok()
             };
@@ -1065,11 +1091,68 @@ mod tests {
     #[test]
     fn degraded_tier_carries_the_note() {
         let home = tempfile::tempdir().expect("home");
-        // hermes: MCP-only, degraded delivery.
+        // zero: hooks installed, but no verified prompt injection — degraded.
+        write(
+            &home.path().join(".config/zero/hooks.json"),
+            &serde_json::to_string_pretty(&serde_json::json!({
+                "enabled": true,
+                "hooks": [{
+                    "id": "stateroot-session_start",
+                    "name": "stateroot session_start",
+                    "event": "sessionStart",
+                    "command": "stateroot",
+                    "args": ["hook", "session_start", "--harness", "zero"],
+                    "enabled": true
+                }]
+            }))
+            .expect("json"),
+        );
+        let prober = StubProber::with(&["zero"]);
+        let health = integration_health(home.path(), None, &prober, &[]);
+        let row = health
+            .harnesses
+            .iter()
+            .find(|h| h.harness == "zero")
+            .expect("zero row");
+        assert_eq!(row.delivery_tier, DeliveryTier::Degraded);
+        assert!(row.degraded.is_some());
+        assert!(row.hooks.state.ok(), "{:?}", row.hooks);
+    }
+
+    #[test]
+    fn yaml_hooks_extract_and_grade_hermes_config() {
+        let home = tempfile::tempdir().expect("home");
         write(
             &home.path().join(".hermes/config.yaml"),
-            "mcp_servers:\n  stateroot:\n    command: stateroot\n    args: [mcp-stdio]\n",
+            concat!(
+                "mcp_servers:\n",
+                "  stateroot:\n",
+                "    command: stateroot\n",
+                "    args: [mcp-stdio]\n",
+                "hooks:\n",
+                "  pre_llm_call:\n",
+                "    - command: ~/.hermes/agent-hooks/foreign.sh\n",
+                "    - command: '\"/home/alice/my bin/stateroot\" hook user_prompt_submit --harness hermes'\n",
+                "  on_session_end:\n",
+                "    - command: stateroot hook stop --harness hermes\n",
+                "  outbound:\n",
+                "    - name: ci\n",
+                "      url: https://ci.example/hook\n",
+            ),
         );
+        let commands = extract_hook_commands(
+            &home.path().join(".hermes/config.yaml"),
+            HookFormat::YamlHooks,
+        );
+        assert_eq!(commands.len(), 2, "{commands:?}");
+        assert!(commands
+            .iter()
+            .any(|c| c.contains("hook user_prompt_submit --harness hermes")));
+        assert!(commands
+            .iter()
+            .any(|c| c.contains("hook stop --harness hermes")));
+
+        // Health grades the YAML config: registered hooks + MCP read ok.
         let prober = StubProber::with(&["hermes"]);
         let health = integration_health(home.path(), None, &prober, &[]);
         let row = health
@@ -1077,9 +1160,27 @@ mod tests {
             .iter()
             .find(|h| h.harness == "hermes")
             .expect("hermes row");
-        assert_eq!(row.delivery_tier, DeliveryTier::Degraded);
-        assert!(row.degraded.is_some());
+        assert!(row.hooks.state.ok(), "{:?}", row.hooks);
         assert!(row.mcp.state.ok(), "{:?}", row.mcp);
+        // hermes delivers automatically now — never a degraded note.
+        assert_eq!(row.delivery_tier, DeliveryTier::Automatic);
+        assert!(row.degraded.is_none());
+        assert!(row.delivery_note.contains("pre_llm_call"));
+
+        // Malformed YAML is Unreadable, never "no registration".
+        write(&home.path().join(".hermes/config.yaml"), "hooks: [broken\n");
+        let health = integration_health(home.path(), None, &prober, &[]);
+        let row = health
+            .harnesses
+            .iter()
+            .find(|h| h.harness == "hermes")
+            .expect("hermes row");
+        assert_eq!(
+            row.hooks.state,
+            ComponentState::Unreadable,
+            "{:?}",
+            row.hooks
+        );
     }
 
     #[test]

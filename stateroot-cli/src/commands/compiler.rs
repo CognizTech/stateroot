@@ -196,6 +196,93 @@ fn parse_sections(content: &str) -> Result<Value> {
     Ok(Value::Object(sections))
 }
 
+/// Redirect ceiling for one provider request. Gateway path moves need ≤2
+/// hops; 5 gives headroom while making redirect loops fail fast.
+const PROVIDER_MAX_REDIRECTS: usize = 5;
+
+/// Hard cap on a provider response body. Chat-completions JSON for the
+/// compiler is a few KB; 1 MiB is ~100× headroom. Larger bodies are
+/// pathological and reported, never read whole into memory.
+const PROVIDER_MAX_BODY_BYTES: usize = 1024 * 1024;
+
+/// Chars of a provider error body quoted in diagnostics. Counted in chars,
+/// not bytes: the old 300-byte slice panicked when the index landed
+/// mid-codepoint.
+const PROVIDER_ERROR_EXCERPT_CHARS: usize = 300;
+
+/// Whether a redirect from `previous` to `next` stays inside the configured
+/// provider origin. Only exact-origin hops (scheme + host + port) are
+/// followed: anything else would carry the prompt body — and on 307/308 the
+/// request — to an origin the operator never configured, and an HTTPS→HTTP
+/// hop would strip TLS.
+fn redirect_follow_allowed(previous: &reqwest::Url, next: &reqwest::Url) -> Result<(), String> {
+    if previous.scheme() == "https" && next.scheme() == "http" {
+        return Err(format!("refusing HTTPS→HTTP downgrade redirect to {next}"));
+    }
+    let same_origin = previous.scheme() == next.scheme()
+        && previous.host_str() == next.host_str()
+        && previous.port_or_known_default() == next.port_or_known_default();
+    if !same_origin {
+        return Err(format!("refusing cross-origin provider redirect to {next}"));
+    }
+    Ok(())
+}
+
+/// HTTP client for the optional provider calls: exact-origin redirects only,
+/// capped, so a misbehaving endpoint or gateway cannot loop the CLI or walk
+/// the request body onto another origin.
+fn provider_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= PROVIDER_MAX_REDIRECTS {
+                return attempt.error(format!(
+                    "provider redirect limit ({PROVIDER_MAX_REDIRECTS}) exceeded — possible loop"
+                ));
+            }
+            let previous = attempt
+                .previous()
+                .last()
+                .expect("a redirect attempt always has a previous URL");
+            if let Err(reason) = redirect_follow_allowed(previous, attempt.url()) {
+                return attempt.error(reason);
+            }
+            attempt.follow()
+        }))
+        .build()
+}
+
+/// Read a provider response body with a hard size cap. An honest
+/// Content-Length over the cap fails before body bytes are consumed.
+async fn read_body_bounded(resp: reqwest::Response) -> Result<String> {
+    if let Some(len) = resp.content_length() {
+        if len > PROVIDER_MAX_BODY_BYTES as u64 {
+            anyhow::bail!(
+                "provider response body exceeds the {PROVIDER_MAX_BODY_BYTES} byte cap (content-length {len})"
+            );
+        }
+    }
+    let mut resp = resp;
+    let mut buf = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        if buf.len() + chunk.len() > PROVIDER_MAX_BODY_BYTES {
+            anyhow::bail!("provider response body exceeds the {PROVIDER_MAX_BODY_BYTES} byte cap");
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// First chars of a provider error body for diagnostics — char-boundary
+/// safe, with a truncation marker when the body ran longer.
+fn error_excerpt(text: &str) -> String {
+    let excerpt: String = text.chars().take(PROVIDER_ERROR_EXCERPT_CHARS).collect();
+    if excerpt.len() < text.len() {
+        format!("{excerpt}…[truncated]")
+    } else {
+        excerpt
+    }
+}
+
 /// Shared chat-completions POST for every API-backed synthesis caller.
 ///
 /// Merges `synthesis.extra_body` config into the request, then returns the
@@ -218,7 +305,7 @@ pub async fn call_provider(
             body[key] = value.clone();
         }
     }
-    let client = reqwest::Client::new();
+    let client = provider_client()?;
     let resp = client
         .post(format!("{}/chat/completions", endpoint.base_url))
         .bearer_auth(&endpoint.api_key)
@@ -226,11 +313,11 @@ pub async fn call_provider(
         .send()
         .await?;
     let status = resp.status();
-    let text = resp.text().await?;
+    let text = read_body_bounded(resp).await?;
     if !status.is_success() {
         anyhow::bail!(
             "synthesis provider returned {status}: {}",
-            &text[..text.len().min(300)]
+            error_excerpt(&text)
         );
     }
     let parsed: Value = serde_json::from_str(&text)?;
@@ -524,7 +611,7 @@ async fn call_local_ingest(
             body[key] = value.clone();
         }
     }
-    let client = reqwest::Client::new();
+    let client = provider_client()?;
     let resp = client
         .post(format!("{base_url}/chat/completions"))
         .bearer_auth(api_key)
@@ -532,11 +619,11 @@ async fn call_local_ingest(
         .send()
         .await?;
     let status = resp.status();
-    let text = resp.text().await?;
+    let text = read_body_bounded(resp).await?;
     if !status.is_success() {
         anyhow::bail!(
             "ingest provider returned {status}: {}",
-            &text[..text.len().min(300)]
+            error_excerpt(&text)
         );
     }
     let parsed: Value = serde_json::from_str(&text)?;
@@ -652,5 +739,229 @@ mod tests {
         let ep = endpoint_from(Some("ds"), None, Some("http://127.0.0.1:9/")).expect("endpoint");
         assert_eq!(ep.base_url, "http://127.0.0.1:9");
         assert_eq!(ep.model, DEEPSEEK_MODEL);
+    }
+
+    // --- provider transport guards (plan_2026-10-20T07-10-54Z) -----------
+
+    fn test_ctx() -> Ctx {
+        Ctx {
+            cwd: std::env::temp_dir(),
+            config_dir: std::env::temp_dir(),
+            config: stateroot_core::config::AppConfig::default(),
+        }
+    }
+
+    fn endpoint_to(base_url: &str) -> SynthesisEndpoint {
+        SynthesisEndpoint {
+            provider: "deepseek",
+            api_key: "test-key".into(),
+            base_url: base_url.into(),
+            model: "deepseek-v4-flash".into(),
+        }
+    }
+
+    #[test]
+    fn error_excerpt_short_text_passes_through() {
+        assert_eq!(error_excerpt("plain failure"), "plain failure");
+        assert_eq!(error_excerpt(""), "");
+    }
+
+    #[test]
+    fn error_excerpt_truncates_on_char_boundaries() {
+        // 299 ASCII bytes then a 3-byte codepoint: byte 300 is mid-char —
+        // the old byte slice panicked on exactly this shape.
+        let mut text = "x".repeat(299);
+        text.push('界');
+        text.push_str(" tail");
+        let excerpt = error_excerpt(&text);
+        assert!(excerpt.starts_with(&"x".repeat(299)));
+        assert!(excerpt.contains('界'), "wide char kept whole: {excerpt:?}");
+        assert!(excerpt.ends_with("…[truncated]"));
+        // Exactly 300 chars: no marker.
+        let exact = "y".repeat(PROVIDER_ERROR_EXCERPT_CHARS);
+        assert_eq!(error_excerpt(&exact), exact);
+    }
+
+    #[test]
+    fn redirect_rules_follow_only_exact_origin() {
+        let prev = reqwest::Url::parse("https://api.example.com/v1/chat/completions").unwrap();
+        // Same origin, new path (gateway move): allowed.
+        assert!(redirect_follow_allowed(
+            &prev,
+            &reqwest::Url::parse("https://api.example.com/v2/chat/completions").unwrap()
+        )
+        .is_ok());
+        // Explicit default port is still the same origin.
+        assert!(redirect_follow_allowed(
+            &prev,
+            &reqwest::Url::parse("https://api.example.com:443/v2/chat/completions").unwrap()
+        )
+        .is_ok());
+        // HTTPS→HTTP downgrade: refused even on the same host+port.
+        let down = redirect_follow_allowed(
+            &prev,
+            &reqwest::Url::parse("http://api.example.com/v1/chat/completions").unwrap(),
+        )
+        .expect_err("downgrade must be refused");
+        assert!(down.contains("downgrade"), "{down}");
+        // Other port, host or scheme: refused as cross-origin.
+        for next in [
+            "https://api.example.com:8443/v1/chat/completions",
+            "https://other.example.com/v1/chat/completions",
+            "http://api.example.com:8080/v1/chat/completions",
+        ] {
+            let err = redirect_follow_allowed(&prev, &reqwest::Url::parse(next).unwrap())
+                .expect_err("cross-origin must be refused");
+            assert!(
+                err.contains("cross-origin") || err.contains("downgrade"),
+                "{err}"
+            );
+        }
+    }
+
+    /// Error body whose byte 300 lands mid-codepoint ("界" at bytes 299..302).
+    fn straddling_error_body() -> Vec<u8> {
+        let mut body = b"error-code-teapot ".to_vec();
+        body.resize(299, b'x');
+        body.extend_from_slice("界".as_bytes());
+        body.extend_from_slice(b" detail after the wide char");
+        body
+    }
+
+    #[tokio::test]
+    async fn call_provider_unicode_error_renders_without_panic() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(500).set_body_bytes(straddling_error_body()),
+            )
+            .mount(&server)
+            .await;
+        let err = call_provider(&test_ctx(), &endpoint_to(&server.uri()), "sys", "user")
+            .await
+            .expect_err("500 must error");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("500"), "{msg}");
+        assert!(
+            msg.contains("error-code-teapot"),
+            "content preserved: {msg}"
+        );
+        assert!(!msg.contains("test-key"), "token never rendered: {msg}");
+    }
+
+    #[tokio::test]
+    async fn call_local_ingest_unicode_error_renders_without_panic() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(500).set_body_bytes(straddling_error_body()),
+            )
+            .mount(&server)
+            .await;
+        let err = call_local_ingest(&test_ctx(), &server.uri(), "test-key", "model", "payload")
+            .await
+            .expect_err("500 must error");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("500"), "{msg}");
+        assert!(
+            msg.contains("error-code-teapot"),
+            "content preserved: {msg}"
+        );
+        assert!(!msg.contains("test-key"), "token never rendered: {msg}");
+    }
+
+    #[tokio::test]
+    async fn call_local_ingest_direct_endpoint_and_oversize_guard() {
+        // Direct configured endpoint keeps working.
+        let server = wiremock::MockServer::start().await;
+        let content = serde_json::json!({"pages": [], "memory_facts": []}).to_string();
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/chat/completions"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({"choices": [{"message": {"content": content}}]}),
+                ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let got = call_local_ingest(&test_ctx(), &server.uri(), "test-key", "model", "payload")
+            .await
+            .expect("direct endpoint works");
+        assert!(got.contains("memory_facts"), "{got}");
+        server.verify().await;
+
+        // A body over the cap errors honestly instead of being read whole.
+        let big = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(vec![
+                b' ';
+                PROVIDER_MAX_BODY_BYTES
+                    + 1
+            ]))
+            .mount(&big)
+            .await;
+        let err = call_local_ingest(&test_ctx(), &big.uri(), "test-key", "model", "payload")
+            .await
+            .expect_err("oversize must error");
+        assert!(format!("{err:#}").contains("byte cap"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn provider_client_refuses_cross_origin_and_follows_same_origin() {
+        let client = provider_client().expect("client builds");
+        // Cross-origin: the request fails at the entry hop, target untouched.
+        let target = wiremock::MockServer::start().await;
+        let entry = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/start-cross"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(307)
+                    .insert_header("location", format!("{}/moved", target.uri())),
+            )
+            .mount(&entry)
+            .await;
+        let err = client
+            .get(format!("{}/start-cross", entry.uri()))
+            .send()
+            .await
+            .expect_err("cross-origin redirect must error");
+        // reqwest's top-level Display is generic; the refusal reason lives
+        // in the source chain.
+        let mut msg = err.to_string();
+        let mut src = std::error::Error::source(&err);
+        while let Some(e) = src {
+            msg.push_str(&format!(": {e}"));
+            src = e.source();
+        }
+        assert!(msg.contains("cross-origin"), "{msg}");
+        assert!(
+            target
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "cross-origin target contacted"
+        );
+        // Same origin path move: followed.
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/start"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(307)
+                    .insert_header("location", format!("{}/v2/start", entry.uri())),
+            )
+            .mount(&entry)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/v2/start"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("ok"))
+            .mount(&entry)
+            .await;
+        let resp = client
+            .get(format!("{}/start", entry.uri()))
+            .send()
+            .await
+            .expect("same-origin redirect follows");
+        assert_eq!(resp.status(), 200);
     }
 }

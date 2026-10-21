@@ -681,3 +681,124 @@ fn legacy_ids_resolve_and_unavailable_is_reported_honestly() {
     assert!(stdout.contains("legacy rows: 1"), "{stdout}");
     assert!(stdout.contains("corrupt/torn lines: 1"), "{stdout}");
 }
+
+#[test]
+fn antigravity_failed_post_tool_use_retains_full_evidence_before_checkpoint() {
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+
+    // Native-shaped Antigravity PostToolUse failure: conversationId +
+    // workspacePaths + toolCall + error/result. `tool_call_id` is the common
+    // supported event-identity seam (no verified native id-field name yet).
+    let long_error = format!("命令失败 {} 💥 error-tail-ორიგინალი", "é".repeat(1200));
+    let long_result = format!("部分输出 {} 🦀 result-tail-საბოლოო", "漢".repeat(1200));
+    let failure = json!({
+        "conversationId": "conv-tool-fail",
+        "workspacePaths": [project.path()],
+        "tool_call_id": "tc-fail-1",
+        "toolCall": {"name": "run_terminal_command", "args": {"command": "cargo test"}},
+        "result": long_result,
+        "error": long_error,
+    });
+    let deliver = |payload: &Value| {
+        stateroot(config_home.path(), user_home.path(), project.path())
+            .args(["hook", "PostToolUse", "--harness", "antigravity"])
+            .write_stdin(payload.to_string())
+            .assert()
+            .success();
+    };
+    deliver(&failure);
+    // Replay of the same failure: deduped by the stable event identity.
+    deliver(&failure);
+
+    // The failed tool's FULL authorized payload is durable in the observation
+    // spool — not merely an episodic failure label.
+    let records = segment_records(project.path());
+    let failures: Vec<_> = records
+        .iter()
+        .filter(|r| r["event"].as_str() == Some("tool_failure"))
+        .collect();
+    assert_eq!(failures.len(), 1, "one failed-tool record: {records:?}");
+    let record = failures[0];
+    let text = record["text"].as_str().expect("text");
+    assert!(
+        text.contains("error-tail-ორიგინალი"),
+        "full unicode error retained: {} bytes",
+        text.len()
+    );
+    assert!(
+        text.contains("result-tail-საბოლოო"),
+        "full unicode result retained: {} bytes",
+        text.len()
+    );
+    assert!(
+        text.len() > 2400,
+        "no excerpt-grade truncation: {} bytes",
+        text.len()
+    );
+    assert_eq!(
+        record["capture"]["source_status"].as_str(),
+        Some("complete")
+    );
+    assert_eq!(
+        record["source"]["payload"]["error"].as_str(),
+        Some(long_error.as_str())
+    );
+    assert_eq!(
+        record["source"]["payload"]["result"].as_str(),
+        Some(long_result.as_str())
+    );
+    assert_eq!(record["session_identity"].as_str(), Some("native"));
+    assert_eq!(record["event_identity"]["status"].as_str(), Some("native"));
+    assert_eq!(
+        record["event_identity"]["value"].as_str(),
+        Some("tc-fail-1")
+    );
+    assert!(
+        replay_sightings(project.path()) >= 1,
+        "replay sighted, not duplicated"
+    );
+
+    // The immediate failure checkpoint is kept alongside the durable capture.
+    let episodic = std::fs::read_to_string(
+        project
+            .path()
+            .join(".stateroot")
+            .join("memories")
+            .join("episodic.jsonl"),
+    )
+    .expect("episodic log");
+    assert!(
+        episodic.contains("tool_failure via antigravity hook"),
+        "{episodic}"
+    );
+
+    // Successful control: an empty error captures as an ordinary post_tool_use.
+    let success = json!({
+        "conversationId": "conv-tool-ok",
+        "workspacePaths": [project.path()],
+        "tool_call_id": "tc-ok-1",
+        "toolCall": {"name": "run_terminal_command"},
+        "result": "ok-body-sentinel",
+        "error": "",
+    });
+    deliver(&success);
+    let records = segment_records(project.path());
+    let oks: Vec<_> = records
+        .iter()
+        .filter(|r| r["event"].as_str() == Some("post_tool_use"))
+        .collect();
+    assert_eq!(
+        oks.len(),
+        1,
+        "successful control captures once: {records:?}"
+    );
+    assert!(
+        oks[0]["text"]
+            .as_str()
+            .expect("text")
+            .contains("ok-body-sentinel"),
+        "successful result retained"
+    );
+}

@@ -1189,7 +1189,7 @@
         "antigravity",
         "agy"
       ],
-      "framing": "Antigravity harness: stdout-text resume with skill inventory.",
+      "framing": "Antigravity harness: injectSteps JSON session injection with skill inventory.",
       "tier": "A",
       "detect": [
         ".gemini/config"

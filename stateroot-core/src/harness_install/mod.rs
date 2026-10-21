@@ -546,11 +546,6 @@ pub fn install_quirk_full(home: &Path, quirk: &registry::HarnessQuirk, block: &s
         hooks::install_hooks(home, quirk)
     } else if quirk.tier == registry::Tier::B {
         plugins::install_ts_plugin(home, quirk)
-    } else if quirk.id == "hermes" {
-        Ok(vec![
-            "note: hermes hooks/resume plugin planned — resume works today via the MCP bridge"
-                .to_string(),
-        ])
     } else {
         Ok(Vec::new())
     };
@@ -664,9 +659,14 @@ fn uninstall_json_mcp_entry_at(path: &Path, root_key: &str) -> Result<bool, Harn
 }
 
 fn uninstall_yaml_mcp_entry(path: &Path) -> Result<bool, HarnessError> {
-    if restore_mcp_backup(path)? {
-        return Ok(true);
-    }
+    // Surgical-only for the operator-SHARED YAML config: unlike the JSON MCP
+    // files, hermes `config.yaml` also carries the shell-hooks block and
+    // operator settings, and its `.bak` lifecycle is shared with the hook
+    // installer/uninstaller. A bak-restore here can resurrect stateroot hook
+    // entries the hook uninstaller has just stripped (its fresh backup names
+    // the pre-strip file), and would silently nuke the operator's post-install
+    // hand edits. Deleting only the managed key is correct in every flow;
+    // the `.bak` stays as the operator's own safety copy.
     if !path.is_file() {
         return Ok(false);
     }
@@ -1055,6 +1055,52 @@ mod tests {
     }
 
     #[test]
+    fn yaml_shared_file_uninstall_never_resurrects_stripped_hooks() {
+        // The operator-shared config.yaml carries BOTH the hooks block and
+        // mcp_servers. The hook uninstaller's fresh `.bak` names the pre-strip
+        // file; a bak-restore by the MCP uninstaller would resurrect the
+        // stripped hook entries. CLI order is hooks first, then MCP.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let file = tmp.path().join(".hermes/config.yaml");
+        std::fs::create_dir_all(file.parent().expect("parent")).expect("mkdir");
+        std::fs::write(
+            &file,
+            concat!(
+                "model: gpt-4\n",
+                "mcp_servers:\n",
+                "  stateroot:\n",
+                "    command: stateroot\n",
+                "    args: [mcp-stdio]\n",
+                "  foreign:\n",
+                "    command: other\n",
+                "hooks:\n",
+                "  pre_llm_call:\n",
+                "    - command: stateroot hook user_prompt_submit --harness hermes\n",
+                "    - command: ~/.hermes/agent-hooks/foreign.sh\n",
+            ),
+        )
+        .expect("seed");
+
+        let hermes = registry::quirk("hermes").expect("hermes");
+        let actions = hooks::remove_hooks(tmp.path(), hermes).expect("hooks removed");
+        assert!(!actions.is_empty());
+        assert!(uninstall_quirk_mcp(tmp.path(), hermes).expect("mcp uninstall"));
+
+        let doc = yaml_doc(&file);
+        assert_eq!(doc["model"], "gpt-4");
+        let servers = doc["mcp_servers"].as_mapping().expect("mapping");
+        assert!(!servers.contains_key(serde_yaml::Value::String("stateroot".to_string())));
+        assert!(servers.contains_key(serde_yaml::Value::String("foreign".to_string())));
+        let hooks = doc["hooks"].as_mapping().expect("hooks mapping");
+        let entries = hooks["pre_llm_call"].as_sequence().expect("pre_llm_call");
+        assert_eq!(entries.len(), 1, "only the foreign hook survives: {doc:?}");
+        assert_eq!(
+            entries[0]["command"].as_str(),
+            Some("~/.hermes/agent-hooks/foreign.sh")
+        );
+    }
+
+    #[test]
     fn servers_json_uninstall_uses_declared_root_key() {
         let tmp = tempfile::tempdir().expect("tmp");
         let vscode = registry::adapters()
@@ -1100,22 +1146,33 @@ mod tests {
     }
 
     #[test]
-    fn install_quirk_full_hermes_writes_block_and_mcp() {
+    fn install_quirk_full_hermes_writes_block_mcp_and_hooks() {
         let tmp = tempfile::tempdir().expect("tmp");
         let hermes = registry::quirk("hermes").expect("hermes");
         let actions = install_quirk_full(tmp.path(), hermes, "BLOCK BODY");
         let joined = actions.join("\n");
         assert!(joined.contains("SOUL.md"), "actions: {joined}");
         assert!(joined.contains("config.yaml"), "actions: {joined}");
-        assert!(joined.contains("plugin planned"), "actions: {joined}");
+        assert!(joined.contains("hooks installed"), "actions: {joined}");
+        assert!(
+            joined.contains("identity delivery: automatic"),
+            "actions: {joined}"
+        );
 
         let soul = std::fs::read_to_string(tmp.path().join(".hermes/SOUL.md")).expect("soul");
         assert!(soul.contains(BLOCK_BEGIN));
         assert!(soul.contains("BLOCK BODY"));
-        // Idempotent block on rerun.
+        // Native shell hooks landed in the same config.yaml as the MCP entry.
+        let config =
+            std::fs::read_to_string(tmp.path().join(".hermes/config.yaml")).expect("config.yaml");
+        assert!(config.contains("pre_llm_call"), "config: {config}");
+        assert!(config.contains("on_session_finalize"), "config: {config}");
+        assert!(config.contains("mcp_servers"), "config: {config}");
+        // Idempotent on rerun — every component reports up to date.
         let rerun = install_quirk_full(tmp.path(), hermes, "BLOCK BODY").join("\n");
         assert!(rerun.contains("block already up to date"), "rerun: {rerun}");
         assert!(rerun.contains("MCP already registered"), "rerun: {rerun}");
+        assert!(rerun.contains("hooks already up to date"), "rerun: {rerun}");
     }
 
     #[test]

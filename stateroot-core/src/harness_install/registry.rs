@@ -54,6 +54,10 @@ pub enum HookFormat {
     /// only on filterable events; VS Code parses the same file).
     /// (vscode-copilot: `~/.copilot/hooks/stateroot.json`.)
     CopilotJson,
+    /// `hooks: {<event>: [{command: "…"}]}` inside the harness's own YAML
+    /// config (hermes `~/.hermes/config.yaml` shell hooks — the file also
+    /// carries `mcp_servers` and operator settings; merge, never replace).
+    YamlHooks,
 }
 
 /// One hook target: home-relative file (or directory for plugins).
@@ -118,13 +122,21 @@ impl DigestDeliveryPolicy {
                 tier: DeliveryTier::Automatic,
                 note: "session-start inject; postToolUse restores identity after compaction",
             },
-            "gemini-cli" | "antigravity" => Self {
+            "gemini-cli" => Self {
                 primary_event: "session_start",
                 session_start_prints: true,
                 session_start_marks: true,
                 prompt_submit_injects: false,
                 tier: DeliveryTier::Automatic,
                 note: "session-start inject; no prompt-submit fallback on this harness",
+            },
+            "antigravity" => Self {
+                primary_event: "session_start",
+                session_start_prints: true,
+                session_start_marks: true,
+                prompt_submit_injects: false,
+                tier: DeliveryTier::Automatic,
+                note: "SessionStart injects via the injectSteps envelope; first PreInvocation covers hosts that never fire SessionStart",
             },
             "kimi-code" => Self {
                 primary_event: "user_prompt_submit",
@@ -175,12 +187,17 @@ impl DigestDeliveryPolicy {
                 note: "no verified prompt injection; run `stateroot resume` if identity is missing",
             },
             "hermes" => Self {
-                primary_event: "",
-                session_start_prints: false,
+                primary_event: "user_prompt_submit",
+                // on_session_start fires only for brand-new sessions and its
+                // stdout is parsed but the return is dropped (observer); it
+                // prints so the session-start path (federation syncs) runs.
+                session_start_prints: true,
                 session_start_marks: false,
-                prompt_submit_injects: false,
-                tier: DeliveryTier::Degraded,
-                note: "no hooks in v1 — resume via MCP / `stateroot resume --harness hermes`",
+                // pre_llm_call fires every turn; its {"context": …} stdout is
+                // injected into the turn's user message — the real channel.
+                prompt_submit_injects: true,
+                tier: DeliveryTier::Automatic,
+                note: "pre_llm_call injects the digest into the user message; hermes gates shell hooks behind one-time consent",
             },
             "vscode-copilot" => Self {
                 primary_event: "session_start",
@@ -225,14 +242,21 @@ pub enum Injection {
     StdoutJson,
     /// Cursor native hooks: `{ "additional_context": "…" }` on stdout.
     CursorJson,
-    /// Plain text on stdout (gemini-cli, antigravity, kimi).
+    /// Antigravity native hooks: `{"injectSteps": [{"systemMessage":
+    /// {"systemMessage": "…"}}]}` on stdout — the documented SessionStart /
+    /// PreInvocation injection envelope (antigravity.google/docs/hooks).
+    AntigravityJson,
+    /// Plain text on stdout (gemini-cli, kimi).
     StdoutText,
     /// Stdout is discarded on SessionStart; resume fires on UserPromptSubmit
     /// (kimi-code).
     UserPromptSubmit,
     /// Harness/plugin pulls digest: hook still prints stdout for capture
-    /// (openclaw, grok, zero, hermes).
+    /// (openclaw, grok, zero).
     McpPull,
+    /// `{"context": "…"}` JSON envelope on stdout, injected into the turn's
+    /// user message by the harness (hermes `pre_llm_call`).
+    ContextJson,
     /// No hook stdout channel — instruction file carries the digest protocol
     /// (vscode-copilot, crush).
     None,
@@ -380,6 +404,25 @@ const DEVIN_EVENTS: &[(&str, &str)] = &[
 
 const GROK_EVENTS: &[(&str, &str)] = CLAUDE_EVENTS;
 
+/// Hermes shell-hook events (`agent/shell_hooks.py` + the plugin-hook
+/// catalog): `on_session_end` fires at EVERY turn finalization (a turn
+/// checkpoint, canonical `stop`); `on_session_finalize` is the real session
+/// teardown (canonical `session_end`). `pre_llm_call` fires once per turn and
+/// is the context-injection channel (canonical `user_prompt_submit`).
+/// `on_session_reset` is deliberately unmapped: its `session_id` is the NEW
+/// session (the old one already finalized with old/new ids in `extra`).
+const HERMES_EVENTS: &[(&str, &str)] = &[
+    ("on_session_start", "session_start"),
+    ("pre_llm_call", "user_prompt_submit"),
+    ("pre_tool_call", "pre_tool_use"),
+    ("post_tool_call", "post_tool_use"),
+    ("post_compaction", "post_compaction"),
+    ("on_session_end", "stop"),
+    ("on_session_finalize", "session_end"),
+    ("subagent_start", "subagent_start"),
+    ("subagent_stop", "subagent_stop"),
+];
+
 const ZERO_EVENTS: &[(&str, &str)] = &[
     ("sessionStart", "session_start"),
     ("sessionEnd", "session_end"),
@@ -390,6 +433,12 @@ const ZERO_EVENTS: &[(&str, &str)] = &[
 ];
 
 const ANTIGRAVITY_EVENTS: &[(&str, &str)] = &[
+    // SessionStart is the real session boundary (fires once per conversation,
+    // before the first model invocation). PreInvocation fires before EVERY
+    // model call — hook.rs treats invocationNum 0/absent as the start and
+    // gates later PreInvocations by per-conversation delivery state, so a
+    // first-seen conversation still delivers once at any invocation number.
+    ("SessionStart", "session_start"),
     ("PreInvocation", "session_start"),
     ("PreToolUse", "pre_tool_use"),
     ("PostToolUse", "post_tool_use"),
@@ -671,7 +720,7 @@ pub const ADAPTERS: &[HarnessQuirk] = &[
             path: ".gemini/config/hooks.json",
             format: HookFormat::NamedGroupsJson,
         }),
-        injection: Injection::StdoutText,
+        injection: Injection::AntigravityJson,
         compact_injection: false,
         events: es::ALL
             & !es::SUBAGENT
@@ -787,14 +836,24 @@ pub const ADAPTERS: &[HarnessQuirk] = &[
             path: ".hermes/config.yaml",
             shape: McpShape::YamlMcpServers,
         }),
-        // No hooks in v1: hermes has a plugin system and a stateroot plugin
-        // is a later item. Resume works today via the MCP bridge (pull).
-        hooks: None,
-        injection: Injection::McpPull,
+        // Native shell hooks merged into the same YAML config (`hooks:` block;
+        // `agent/shell_hooks.py`). Hermes gates each (event, command) pair
+        // behind its own first-use consent prompt — the installer never sets
+        // `hooks_auto_accept` (that choice belongs to the operator).
+        hooks: Some(HookTarget {
+            path: ".hermes/config.yaml",
+            format: HookFormat::YamlHooks,
+        }),
+        injection: Injection::ContextJson,
         compact_injection: false,
-        events: 0,
+        events: es::SESSION_START
+            | es::USER_PROMPT_SUBMIT
+            | es::POST_TOOL_USE
+            | es::STOP
+            | es::SESSION_END
+            | es::SUBAGENT,
         legacy_id: None,
-        event_map: &[],
+        event_map: HERMES_EVENTS,
     },
 ];
 
@@ -970,14 +1029,7 @@ mod tests {
                 q.id
             );
             match q.tier {
-                // hermes is the one Tier A row without hooks in v1 (its
-                // plugin system integration is a later item; it still has a
-                // full block+MCP install path).
-                Tier::A => assert!(
-                    q.hooks.is_some() || q.id == "hermes",
-                    "{}: Tier A without hooks",
-                    q.id
-                ),
+                Tier::A => assert!(q.hooks.is_some(), "{}: Tier A without hooks", q.id),
                 Tier::B | Tier::C => {}
             }
             // Every event_map canonical target is a known canonical event.
@@ -1001,7 +1053,43 @@ mod tests {
         let mcp = hermes.mcp.expect("hermes mcp target");
         assert_eq!(mcp.path, ".hermes/config.yaml");
         assert_eq!(mcp.shape, McpShape::YamlMcpServers);
-        assert!(hermes.hooks.is_none(), "hermes hooks are a later item");
+        let hooks = hermes.hooks.expect("hermes hooks target");
+        assert_eq!(hooks.path, ".hermes/config.yaml");
+        assert!(matches!(hooks.format, HookFormat::YamlHooks));
+        assert_eq!(hermes.injection, Injection::ContextJson);
+        // Turn checkpoint and session teardown are distinct native events.
+        assert_eq!(
+            normalize_event(hermes, "on_session_end"),
+            Some("stop"),
+            "on_session_end fires per turn — it is the turn checkpoint"
+        );
+        assert_eq!(
+            normalize_event(hermes, "on_session_finalize"),
+            Some("session_end"),
+            "on_session_finalize is the real session teardown"
+        );
+        assert_eq!(
+            normalize_event(hermes, "pre_llm_call"),
+            Some("user_prompt_submit")
+        );
+        // on_session_reset is unmapped: its session_id is the NEW session.
+        assert!(
+            !hermes
+                .event_map
+                .iter()
+                .any(|(event, _)| *event == "on_session_reset"),
+            "on_session_reset must not be installed"
+        );
+        let policy = hermes.delivery();
+        assert_eq!(policy.tier, DeliveryTier::Automatic);
+        assert_eq!(policy.primary_event, "user_prompt_submit");
+        assert!(policy.session_start_prints);
+        assert!(!policy.session_start_marks);
+        assert!(policy.prompt_submit_injects);
+        assert!(
+            policy.note.contains("pre_llm_call"),
+            "hermes note must name the verified injection event"
+        );
     }
 
     #[test]
@@ -1023,6 +1111,32 @@ mod tests {
         let policy = copilot.delivery();
         assert_eq!(policy.tier, DeliveryTier::Automatic);
         assert_eq!(policy.primary_event, "session_start");
+        assert!(policy.session_start_marks);
+        assert!(!policy.prompt_submit_injects);
+    }
+
+    #[test]
+    fn antigravity_row_shape_and_delivery() {
+        let agy = quirk("antigravity").expect("antigravity row");
+        assert_eq!(agy.tier, Tier::A);
+        assert_eq!(agy.injection, Injection::AntigravityJson);
+        let hooks = agy.hooks.expect("antigravity hooks");
+        assert_eq!(hooks.path, ".gemini/config/hooks.json");
+        assert!(matches!(hooks.format, HookFormat::NamedGroupsJson));
+        // Native contract (antigravity.google/docs/hooks): SessionStart is the
+        // real conversation boundary; PreInvocation stays mapped for legacy
+        // hosts that never fire it (hook.rs dedupes mid-turn PreInvocations
+        // by delivery state, not the invocation counter).
+        assert_eq!(normalize_event(agy, "SessionStart"), Some("session_start"));
+        assert_eq!(normalize_event(agy, "PreInvocation"), Some("session_start"));
+        assert_eq!(normalize_event(agy, "PreToolUse"), Some("pre_tool_use"));
+        assert_eq!(normalize_event(agy, "PostToolUse"), Some("post_tool_use"));
+        assert_eq!(normalize_event(agy, "Stop"), Some("stop"));
+        assert_eq!(agy.event_map.len(), 5);
+        let policy = agy.delivery();
+        assert_eq!(policy.tier, DeliveryTier::Automatic);
+        assert_eq!(policy.primary_event, "session_start");
+        assert!(policy.session_start_prints);
         assert!(policy.session_start_marks);
         assert!(!policy.prompt_submit_injects);
     }
@@ -1138,9 +1252,16 @@ mod tests {
                         "pi note must name the verified injection event"
                     );
                 }
-                "dot" | "hermes" | "crush" | "zero" => {
+                "dot" | "crush" | "zero" => {
                     assert_eq!(policy.tier, DeliveryTier::Degraded);
                     assert!(!policy.prompt_submit_injects);
+                }
+                "hermes" => {
+                    assert_eq!(policy.primary_event, "user_prompt_submit");
+                    assert!(policy.session_start_prints);
+                    assert!(!policy.session_start_marks);
+                    assert!(policy.prompt_submit_injects);
+                    assert_eq!(policy.tier, DeliveryTier::Automatic);
                 }
                 "vscode-copilot" => {
                     assert_eq!(policy.primary_event, "session_start");
@@ -1162,6 +1283,12 @@ mod tests {
                     assert!(policy.session_start_marks);
                     assert!(!policy.prompt_submit_injects);
                     assert_eq!(policy.tier, DeliveryTier::Automatic);
+                    if quirk.id == "antigravity" {
+                        assert!(
+                            policy.note.contains("injectSteps"),
+                            "antigravity note must name the verified injection envelope"
+                        );
+                    }
                 }
                 "grok" => {
                     assert!(!policy.session_start_marks);
