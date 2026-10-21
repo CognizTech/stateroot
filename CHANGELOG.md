@@ -3,6 +3,27 @@
 All notable changes to StateRoot. Format loosely follows Keep a Changelog;
 StateRoot is pre-1.0 and milestones land as minor versions.
 
+## v0.2.9 — 2026-10-21
+
+- **Hermes and Antigravity integration.** Hermes gains native lifecycle and
+  YAML config handling; Antigravity gains native context/lifecycle support
+  and durable failed-tool evidence. Both follow the established
+  registry/hook/paths conventions.
+- **Interrupted-work proof.** A new `interrupted_continuity` suite pins the
+  behavior of resuming after interrupted sessions; continuity handlers were
+  updated accordingly.
+- **Recall improvements.** Mixed-language content indexes and recalls more
+  reliably, with bounded windows and honest source locators.
+- **Provider transport bounds.** Optional synthesis calls gain bounded
+  transport and origin-redirect handling; default config remains
+  provider-free.
+- **Delegation intelligence.** Terminal delegation records carry snapshot
+  metadata for review.
+- **Wiki-record merge preservation.** Native wiki records survive fork
+  merges without loss.
+- The extension artifact remains 0.2.23 (no extension implementation
+  changed) and needs no registry action.
+
 ## v0.2.8 — 2026-10-13
 
 - **Documentation and skill alignment.** The README, the CLI guide
