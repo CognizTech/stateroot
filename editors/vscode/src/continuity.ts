@@ -10,22 +10,6 @@
 export const CONTINUITY_SCHEMA = "stateroot.continuity.v1";
 export const CONTINUITY_ADVISORY_SCHEMA = "stateroot.continuity-advisory.v1";
 
-/** Attention kinds — stable vocabulary, one per evidence source (CLI-owned). */
-export const ATTENTION_KINDS = [
-  "obligation_due",
-  "plan_receipt_pending",
-  "plan_closure",
-  "handoff_routed",
-  "delegation_failed",
-  "boundary_journal_manual",
-  "plan_unassigned",
-  "handoff_stale",
-  "service_unhealthy",
-  "registry_project_missing",
-] as const;
-
-export type AttentionKind = (typeof ATTENTION_KINDS)[number];
-
 /** One derived attention item. `id` is stable (`<kind>:<entity>`), so
  * view-level dismissal survives CLI reconciles. */
 export interface AttentionItem {

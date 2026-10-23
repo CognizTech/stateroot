@@ -2,38 +2,14 @@
 //! completion, deterministic reconciliation for every attention kind, and
 //! the human/JSON status + digest surfaces.
 
+// Each test binary includes this module but uses a subset of its helpers.
+#[path = "support/mod.rs"]
+mod support;
+
 use std::path::Path;
 
 use assert_cmd::assert::Assert;
-use tempfile::TempDir;
-
-fn stateroot(config_home: &Path, user_home: &Path, cwd: &Path) -> assert_cmd::Command {
-    let mut cmd = assert_cmd::Command::cargo_bin("stateroot").expect("binary");
-    cmd.env("STATEROOT_HOME", config_home)
-        .env("STATEROOT_TEST_HOME", user_home)
-        .env("STATEROOT_TEST_CMD_PROBES", "")
-        .env_remove("DEEPSEEK_API_KEY")
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_BASE")
-        .current_dir(cwd);
-    cmd
-}
-
-fn homes() -> (TempDir, TempDir) {
-    (
-        tempfile::tempdir().expect("config home"),
-        tempfile::tempdir().expect("user home"),
-    )
-}
-
-fn init_project(config_home: &Path, user_home: &Path, project: &Path) {
-    std::fs::create_dir_all(project).expect("project dir");
-    stateroot(config_home, user_home, project)
-        .arg("init")
-        .assert()
-        .success();
-}
+use support::{homes, init_project, stateroot};
 
 fn stdout_of(out: Assert) -> String {
     String::from_utf8(out.get_output().stdout.clone()).expect("utf8")
@@ -282,13 +258,14 @@ fn deterministic_reconciliation_covers_each_attention_kind() {
     assert_eq!(status["plan"]["directive"], "assign");
     assert!(attention_kinds(project.path()).contains(&"plan_unassigned".to_string()));
 
-    // delegation_failed against the open plan (store shape).
+    // delegation_failed against the open plan (store shape — the writer's
+    // real `schema_version` key).
     let delegations = project.path().join(".stateroot/delegations");
     std::fs::create_dir_all(&delegations).expect("delegations dir");
     std::fs::write(
         delegations.join("d-fail.json"),
         serde_json::json!({
-            "schema": "stateroot.delegation.v2",
+            "schema_version": "stateroot.delegation.v2",
             "id": "d-fail",
             "plan_id": unassigned,
             "outcome": "failed"
@@ -394,5 +371,245 @@ fn missing_registry_project_produces_attention() {
         kinds.contains(&"registry_project_missing".to_string()),
         "kinds: {kinds:?} (ghost {})",
         ghost_path.display()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// M6: one shared delegation-status interpretation (CLI == continuity)
+// ---------------------------------------------------------------------------
+
+/// The recorded PID-namespace identity of this host, computed with the
+/// writer's own inputs (the format is a stability contract: changing it
+/// silently invalidates every existing record). None where unsupported.
+#[cfg(target_os = "linux")]
+fn current_namespace() -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    let link = std::fs::read_link("/proc/self/ns/pid").ok()?;
+    let identity = format!("linux:{}:{}", boot.trim(), link.display());
+    Some(format!("sha256:{:x}", Sha256::digest(identity.as_bytes())))
+}
+#[cfg(windows)]
+fn current_namespace() -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let identity = format!("windows:{}", std::env::var("COMPUTERNAME").ok()?);
+    Some(format!("sha256:{:x}", Sha256::digest(identity.as_bytes())))
+}
+#[cfg(not(any(target_os = "linux", windows)))]
+fn current_namespace() -> Option<String> {
+    None
+}
+
+/// Write one delegation record in the REAL writer's shape (`schema_version`,
+/// never the continuity reader's historic `schema` miskey).
+fn write_delegation(project: &Path, record: serde_json::Value) {
+    let dir = project.join(".stateroot/delegations");
+    std::fs::create_dir_all(&dir).expect("delegations dir");
+    let id = record["id"].as_str().expect("record id").to_string();
+    let mut record = record;
+    record
+        .as_object_mut()
+        .expect("object")
+        .insert("schema_version".into(), "stateroot.delegation.v2".into());
+    std::fs::write(dir.join(format!("{id}.json")), record.to_string()).expect("write record");
+}
+
+#[test]
+fn bound_running_delegation_counts_as_executor_everywhere() {
+    let Some(namespace) = current_namespace() else {
+        eprintln!("skipping: namespace identity unsupported on this platform");
+        return;
+    };
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    let plan = record_plan(
+        config_home.path(),
+        user_home.path(),
+        project.path(),
+        "Executed",
+    );
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["plan", "approve", &plan])
+        .assert()
+        .success();
+    // A live, owned, plan-bound worker (this test process is the live pid).
+    write_delegation(
+        project.path(),
+        serde_json::json!({
+            "id": "d-live",
+            "plan_id": plan,
+            "harness": "codex",
+            "task": "bound work",
+            "ts": "2026-10-22T00:00:00Z",
+            "status": "running",
+            "pid": std::process::id(),
+            "process_namespace": namespace,
+        }),
+    );
+    // CLI view: running (already true today — the agreement half).
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["delegate", "list"])
+        .assert()
+        .success();
+    let stdout = stdout_of(out);
+    assert!(stdout.contains("· running ·"), "stdout: {stdout}");
+    // Continuity view (reconciled): the same evidence must count as an
+    // executor — no false "no executor" guidance.
+    let status = status_json(config_home.path(), user_home.path(), project.path());
+    assert!(
+        !attention_kinds(project.path()).contains(&"plan_unassigned".to_string()),
+        "a bound live worker must suppress plan_unassigned"
+    );
+    assert_eq!(status["plan"]["directive"], "execute");
+}
+
+#[test]
+fn foreign_delegation_is_unknown_not_failed_and_not_absent() {
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    let plan = record_plan(
+        config_home.path(),
+        user_home.path(),
+        project.path(),
+        "Foreign",
+    );
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["plan", "approve", &plan])
+        .assert()
+        .success();
+    // A foreign-namespace worker whose pid coincides with a dead local pid:
+    // unknown — never lost/failed, and never proof that no executor exists.
+    write_delegation(
+        project.path(),
+        serde_json::json!({
+            "id": "d-foreign",
+            "plan_id": plan,
+            "harness": "codex",
+            "task": "bound work",
+            "ts": "2026-10-22T00:00:00Z",
+            "status": "running",
+            "pid": 4_000_000u32,
+            "process_namespace": "another-host-namespace",
+        }),
+    );
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["delegate", "list"])
+        .assert()
+        .success();
+    let stdout = stdout_of(out);
+    assert!(stdout.contains("· unknown ·"), "stdout: {stdout}");
+    let _ = status_json(config_home.path(), user_home.path(), project.path());
+    let kinds = attention_kinds(project.path());
+    assert!(
+        !kinds.contains(&"delegation_failed".to_string()),
+        "unknown must never become a failure signal: {kinds:?}"
+    );
+    assert!(
+        !kinds.contains(&"plan_unassigned".to_string()),
+        "unknown must never prove the absence of an executor: {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&"delegation_status_unknown".to_string()),
+        "the honest observation replaces the false guidance: {kinds:?}"
+    );
+}
+
+#[test]
+fn unknown_bound_delegation_does_not_close_an_active_plan() {
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    let plan = record_plan(
+        config_home.path(),
+        user_home.path(),
+        project.path(),
+        "Active",
+    );
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["plan", "approve", &plan])
+        .assert()
+        .success();
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["plan", "activate", &plan])
+        .assert()
+        .success();
+    // A plan-bound handoff declaring no remaining work…
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args([
+            "handoff",
+            "write",
+            "--from",
+            "codex",
+            "--plan",
+            &plan,
+            "--objective",
+            "wrapped",
+            "--task",
+            "done",
+            "--context-summary",
+            "everything recorded",
+        ])
+        .assert()
+        .success();
+    // …plus a plan-bound delegation whose status is unknowable here.
+    write_delegation(
+        project.path(),
+        serde_json::json!({
+            "id": "d-unverifiable",
+            "plan_id": plan,
+            "harness": "kimi",
+            "task": "bound work",
+            "ts": "2026-10-22T00:00:00Z",
+            "status": "running",
+            "pid": 4_000_000u32,
+            "process_namespace": "another-host-namespace",
+        }),
+    );
+    // Unknown must not become proof that the work completed.
+    let status = status_json(config_home.path(), user_home.path(), project.path());
+    assert_ne!(
+        status["plan"]["directive"], "close",
+        "unknown evidence must never close a plan"
+    );
+    assert!(
+        !attention_kinds(project.path()).contains(&"plan_closure".to_string()),
+        "unknown evidence must never produce closure guidance"
+    );
+}
+
+#[test]
+fn degraded_delegation_records_are_surfaced_not_dropped() {
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    let dir = project.path().join(".stateroot/delegations");
+    std::fs::create_dir_all(&dir).expect("delegations dir");
+    // Unparseable bytes, an unsupported schema and a record without id —
+    // preserved and reported, never silently equated with absence.
+    std::fs::write(dir.join("broken.json"), b"{not json".as_slice()).expect("broken");
+    std::fs::write(
+        dir.join("future.json"),
+        serde_json::json!({"schema_version": "stateroot.delegation.v9", "id": "future"})
+            .to_string(),
+    )
+    .expect("future");
+    std::fs::write(
+        dir.join("noname.json"),
+        serde_json::json!({"schema_version": "stateroot.delegation.v2", "status": "running"})
+            .to_string(),
+    )
+    .expect("noname");
+    let _ = status_json(config_home.path(), user_home.path(), project.path());
+    let kinds = attention_kinds(project.path());
+    assert!(
+        kinds.contains(&"delegation_record_degraded".to_string()),
+        "degraded records must surface as observations: {kinds:?}"
+    );
+    // Bytes preserved by the read path.
+    assert_eq!(
+        std::fs::read(dir.join("broken.json")).expect("broken bytes"),
+        b"{not json".as_slice()
     );
 }

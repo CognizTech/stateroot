@@ -128,8 +128,11 @@ impl IgnoreRules {
         }
         // Capture's existing locks live beside its durable segments, not in
         // the evidence itself. Never pin/transport ownership tokens.
-        if rel == ".stateroot/spool/current.lock"
-            || (rel.starts_with(".stateroot/spool/segments/") && rel.ends_with(".lock"))
+        if matches!(
+            rel,
+            ".stateroot/spool/current.lock" | ".stateroot/spool/current.lock.guard"
+        ) || (rel.starts_with(".stateroot/spool/segments/")
+            && (rel.ends_with(".lock") || rel.ends_with(".lock.guard")))
         {
             return true;
         }
@@ -176,6 +179,16 @@ mod tests {
         assert!(rules.is_ignored(".stateroot/local", true));
         assert!(rules.is_ignored(".stateroot/local/cache", false));
         assert!(!rules.is_ignored(".stateroot/manifest.json", false));
+        for lock in [
+            ".stateroot/spool/current.lock.guard",
+            ".stateroot/spool/segments/codex__session.lock.guard",
+        ] {
+            assert!(
+                rules.is_ignored(lock, false),
+                "kernel mutation guards stay with their checkout"
+            );
+        }
+        assert!(!rules.is_ignored(".stateroot/spool/segments/codex__session.jsonl", false));
     }
 
     #[test]

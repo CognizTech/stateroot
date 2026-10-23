@@ -1,5 +1,9 @@
 //! Strict local handoff contract: temp fixtures only, using native readers.
 
+// Each test binary includes this module but uses a subset of its helpers.
+#[path = "support/mod.rs"]
+mod support;
+
 use std::io::Write as _;
 use std::path::Path;
 
@@ -7,17 +11,8 @@ use assert_cmd::Command;
 use serde_json::{json, Value};
 
 fn stateroot(config: &Path, home: &Path, cwd: &Path) -> Command {
-    let mut command = Command::cargo_bin("stateroot").expect("binary");
-    command
-        .env("STATEROOT_HOME", config)
-        .env("STATEROOT_TEST_HOME", home)
-        .env("STATEROOT_TEST_CMD_PROBES", "")
-        .env_remove("DEEPSEEK_API_KEY")
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_BASE")
-        .env_remove("HERMES_HOME")
-        .current_dir(cwd);
+    let mut command = support::stateroot(config, home, cwd);
+    command.env_remove("HERMES_HOME");
     command
 }
 
@@ -74,6 +69,92 @@ fn write_rollout(home: &Path, name: &str, events: &[Value]) {
 
 fn meta(id: &str, cwd: &Path, ts: &str) -> Value {
     json!({"timestamp":ts,"type":"session_meta","payload":{"id":id,"cwd":cwd,"timestamp":ts}})
+}
+
+#[test]
+fn handoff_numbers_are_shared_across_forks_and_routed_delivery() {
+    let (config, home, project) = project();
+    stateroot(config.path(), home.path(), project.path())
+        .args(["snap", "--reason", "numbering baseline"])
+        .assert()
+        .success();
+    let root = stateroot_core::roots::latest_root(project.path())
+        .unwrap()
+        .unwrap();
+    let worktrees = tempfile::tempdir().unwrap();
+    let left = worktrees.path().join("left");
+    let right = worktrees.path().join("right");
+    for (name, path) in [("left", &left), ("right", &right)] {
+        stateroot(config.path(), home.path(), project.path())
+            .args(["fork", &root, "--name", name, "--worktree"])
+            .arg(path)
+            .assert()
+            .success();
+    }
+    let write = |cwd: &Path| {
+        stateroot(config.path(), home.path(), cwd)
+            .args([
+                "handoff",
+                "write",
+                "--from",
+                "codex",
+                "--no-plan",
+                "--task",
+                "Numbering check",
+            ])
+            .assert()
+            .success();
+        current(cwd)["seq"].as_i64().unwrap()
+    };
+    let first = write(project.path());
+    let returned = write(&left);
+    assert_eq!(
+        returned,
+        first + 1,
+        "a fork return must advance the shared sequence"
+    );
+    let left_packet = current(&left);
+    stateroot(config.path(), home.path(), project.path())
+        .args([
+            "handoff",
+            "write",
+            "--from",
+            "codex",
+            "--to",
+            "kimi",
+            "--no-plan",
+            "--task",
+            "Routed numbering check",
+            "--next",
+            "Review this packet",
+            "--worktree",
+        ])
+        .arg(&right)
+        .assert()
+        .success();
+    assert_eq!(current(&right)["seq"].as_i64().unwrap(), returned + 1);
+    assert_eq!(
+        current(project.path())["seq"].as_i64().unwrap(),
+        first,
+        "routed delivery must not replace the sender's current packet"
+    );
+    assert_eq!(
+        current(&left),
+        left_packet,
+        "existing packets stay immutable"
+    );
+    assert_eq!(write(&left), returned + 2);
+    let mut concurrent = std::thread::scope(|scope| {
+        let a = scope.spawn(|| write(&left));
+        let b = scope.spawn(|| write(&right));
+        [a.join().unwrap(), b.join().unwrap()]
+    });
+    concurrent.sort();
+    assert_eq!(
+        concurrent,
+        [returned + 3, returned + 4],
+        "simultaneous writers in different checkouts must reserve distinct numbers"
+    );
 }
 
 #[test]

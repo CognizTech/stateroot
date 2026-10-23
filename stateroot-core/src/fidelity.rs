@@ -7,6 +7,71 @@ use std::io::Read;
 use std::path::Path;
 
 pub const MANIFEST_PATH: &str = ".stateroot/reproducibility.json";
+
+pub(crate) fn generated_declaration(repo: &git2::Repository, id: git2::Oid) -> bool {
+    repo.find_blob(id)
+        .ok()
+        .and_then(|blob| serde_json::from_slice::<Value>(blob.content()).ok())
+        .is_some_and(|value| {
+            value["schema_version"] == "stateroot.reproducibility.v1"
+                && value["lockfiles"].is_object()
+                && value["platform"]["os"].is_string()
+                && value["platform"]["arch"].is_string()
+                && value["tools"].is_object()
+                && value["execution_reproduction"] == "not guaranteed"
+        })
+}
+
+/// One publication contract for snapshots, merges and historical restoration.
+/// Its source identity omits the declaration itself, avoiding self-reference.
+pub(crate) fn require_supported_declaration(
+    repo: &git2::Repository,
+    tree: &git2::Tree,
+) -> Result<(), roots::RootsError> {
+    if tree
+        .get_path(Path::new(MANIFEST_PATH))
+        .is_ok_and(|entry| !generated_declaration(repo, entry.id()))
+    {
+        return Err(roots::RootsError::Merge("unsupported or authored reproducibility declaration; original evidence retained; reconcile explicitly with a compatible writer".into()));
+    }
+    Ok(())
+}
+
+pub(crate) fn publication_tree(
+    repo: &git2::Repository,
+    tree: git2::Oid,
+    project: &Path,
+    ctx: Option<&SnapContext>,
+    operation: &str,
+    historical_root: Option<&str>,
+) -> Result<git2::Oid, roots::RootsError> {
+    let mut index = git2::Index::new()?;
+    let original = repo.find_tree(tree)?;
+    require_supported_declaration(repo, &original)?;
+    index.read_tree(&original)?;
+    if index.get_path(Path::new(MANIFEST_PATH), 0).is_some() {
+        index.remove_path(Path::new(MANIFEST_PATH))?;
+    }
+    let source = repo.find_tree(index.write_tree_to(repo)?)?;
+    let mut value = capture(repo, &source, project, ctx);
+    value["publication"] = json!({"operation":operation,"source_tree_without_declaration":source.id().to_string(),"historical_root":historical_root,"context":"observed publication context; parent roots retain historical declarations; environment reproduction not established"});
+    let bytes = serde_json::to_vec(&value)?;
+    index.add(&git2::IndexEntry {
+        ctime: git2::IndexTime::new(0, 0),
+        mtime: git2::IndexTime::new(0, 0),
+        dev: 0,
+        ino: 0,
+        mode: 0o100644,
+        uid: 0,
+        gid: 0,
+        file_size: bytes.len() as u32,
+        id: repo.blob(&bytes)?,
+        flags: 0,
+        flags_extended: 0,
+        path: MANIFEST_PATH.as_bytes().to_vec(),
+    })?;
+    Ok(index.write_tree_to(repo)?)
+}
 const LOCKFILES: &[&str] = &[
     "Cargo.lock",
     "package-lock.json",

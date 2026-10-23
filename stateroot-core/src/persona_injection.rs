@@ -374,6 +374,52 @@ pub fn content_hash(identity_text: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// The scheduler's resolved injection for one hook event: what the identity
+/// section of the emitted context must carry — the full block, the
+/// compressed pointer, or silence. State handling is exactly
+/// [`decide_and_record`]'s; the caller renders context around the result at
+/// most once and keeps stdin/stdout at its own boundary (M3: decision is a
+/// core result, not a print side effect).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InjectionResolution {
+    /// Print nothing.
+    Nothing,
+    /// Carry the full identity block.
+    Full,
+    /// Carry this 1–2 line pointer text instead.
+    Compressed(String),
+}
+
+/// Decide AND record one hook event (see [`decide_and_record`]), returning
+/// the resolved injection. The compressed pointer is computed here in core
+/// so the CLI never re-derives persona name/tagline itself.
+pub fn resolve_injection(
+    home: &Path,
+    key: &str,
+    canonical: &str,
+    identity_text: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    mark: bool,
+    deliverable: bool,
+) -> InjectionResolution {
+    let hash = content_hash(identity_text);
+    match decide_and_record(home, key, canonical, &hash, now, mark, deliverable) {
+        Decision::Full => InjectionResolution::Full,
+        Decision::Compressed => {
+            let name = persona_name(identity_text);
+            let tagline = persona_tagline(identity_text);
+            InjectionResolution::Compressed(compressed_pointer(
+                &name,
+                &tagline,
+                &home
+                    .join(crate::soul::SOUL_DIR)
+                    .join(crate::soul::CANONICAL_FILE),
+            ))
+        }
+        Decision::Nothing => InjectionResolution::Nothing,
+    }
+}
+
 /// Now as chrono (test seam: callers inject explicit times).
 pub fn utc_now() -> chrono::DateTime<chrono::Utc> {
     chrono::Utc::now()
@@ -704,6 +750,88 @@ mod tests {
         let s = apply(s, "user_prompt_submit", Decision::Full, "h2", t(300), true);
         assert_eq!(s.prompts_since_full, 1);
         assert_eq!(s.last_full_ts, t(300).to_rfc3339());
+    }
+
+    #[test]
+    fn resolve_injection_returns_decision_content_and_preserves_state() {
+        let home = tempfile::tempdir().expect("home");
+        let key = "p:s1";
+        let persona = "# Soul\n\nI am Marid, the jinn of the lamp.\n";
+        // First call: FULL.
+        let r = resolve_injection(
+            home.path(),
+            key,
+            "user_prompt_submit",
+            persona,
+            t(0),
+            true,
+            true,
+        );
+        assert_eq!(r, InjectionResolution::Full);
+        // Immediate repeat: Nothing (dedupe) — and no pointer is computed.
+        let r = resolve_injection(
+            home.path(),
+            key,
+            "user_prompt_submit",
+            persona,
+            t(1),
+            true,
+            true,
+        );
+        assert_eq!(r, InjectionResolution::Nothing);
+        // The cadence slot resolves to the compressed pointer with the voice
+        // anchor and the canonical soul path (computed in core, not the CLI).
+        let mut pointers: Vec<String> = Vec::new();
+        let mut now = 1;
+        for _ in 2..=8 {
+            now += 61;
+            if let InjectionResolution::Compressed(pointer) = resolve_injection(
+                home.path(),
+                key,
+                "user_prompt_submit",
+                persona,
+                t(now),
+                true,
+                true,
+            ) {
+                pointers.push(pointer);
+            }
+        }
+        let [pointer] = pointers.as_slice() else {
+            panic!("exactly one cadence prompt resolves compressed: {pointers:?}");
+        };
+        assert!(pointer.contains("Soul"), "{pointer}");
+        assert!(pointer.contains("I am Marid"), "{pointer}");
+        assert!(pointer.contains("SOUL.md"), "{pointer}");
+        // The state file advanced exactly as decide_and_record would leave it.
+        let state = load_state(home.path(), key).expect("state");
+        assert!(state.started);
+        assert!(
+            !state.last_any_ts.is_empty(),
+            "the compressed delivery marked"
+        );
+    }
+
+    #[test]
+    fn resolve_injection_arms_compaction_without_a_delivery() {
+        let home = tempfile::tempdir().expect("home");
+        let key = "p:s1";
+        let r = resolve_injection(
+            home.path(),
+            key,
+            "pre_compact",
+            "persona",
+            t(10),
+            true,
+            false,
+        );
+        assert_eq!(r, InjectionResolution::Nothing, "compaction never prints");
+        assert!(
+            load_state(home.path(), key)
+                .expect("state")
+                .pending_compaction,
+            "the flag is armed for the next deliverable event"
+        );
     }
 
     #[test]

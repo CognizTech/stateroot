@@ -27,6 +27,9 @@ use serde_json::{json, Value};
 
 use crate::local_store::{self, now_rfc3339};
 use crate::sync_engine::ignore::IgnoreRules;
+use crate::wiki::{
+    native_inbox_appended, normalize_inbox_bullet, parse_native_log, NativeLogBlock,
+};
 
 /// Binary marker so `strings` can prove WS3(1-3) is in the linked CLI.
 #[used]
@@ -121,6 +124,9 @@ fn materialization_guards_retaining_main(
             continue;
         };
         let path = path.to_string_lossy().replace('\\', "/");
+        if IgnoreRules::none().is_ignored(&path, false) {
+            continue;
+        }
         let Some(relative) = path.strip_prefix(".stateroot/") else {
             continue;
         };
@@ -160,7 +166,7 @@ fn materialization_guards_retaining_main(
         }
         if relative.starts_with("learnings/") {
             names.insert("01-learnings".into());
-        } else if relative.starts_with("plans/") {
+        } else if relative.starts_with("plans/") || relative.starts_with("plan-bindings/") {
             names.insert("02-plans".into());
         } else if relative == local_store::MEMORY_CORE_PATH {
             names.insert("03-memory".into());
@@ -171,6 +177,19 @@ fn materialization_guards_retaining_main(
         } else if relative.starts_with("handoffs/") {
             names.insert("06-handoff-write".into());
             names.insert("07-handoff-current".into());
+        } else if let Some(key) = relative
+            .strip_prefix("spool/acknowledgements/")
+            .and_then(|name| name.strip_suffix(".json"))
+        {
+            let entry = target
+                .get_path(Path::new(&path))
+                .or_else(|_| before.get_path(Path::new(&path)))?;
+            let blob = repo.find_blob(entry.id())?;
+            let segment = crate::observations::acknowledgement_segment(blob.content(), key)?;
+            names.insert(format!(
+                "08-segment:{}",
+                segment.strip_suffix(".jsonl").unwrap()
+            ));
         } else if relative.starts_with("spool/segments/") {
             let name = relative.strip_prefix("spool/segments/").unwrap();
             let stem = name
@@ -383,6 +402,9 @@ pub struct Transition {
 /// silent repo). A parent repo is NOT reused — the project dir is the sync
 /// root, and snapshotting an ancestor's whole tree would be wrong.
 pub fn ensure_repo(dir: &Path) -> Result<Repository, RootsError> {
+    if let Some((owner, _)) = reconciliation_owner(dir)? {
+        return Ok(Repository::open(owner)?);
+    }
     if dir.join(".git").exists() {
         return Ok(git2::Repository::open(dir)?);
     }
@@ -406,7 +428,6 @@ pub const TREE_SIZE_WARN_BYTES: u64 = 200 * 1024 * 1024;
 pub(crate) struct TreeBuild {
     pub(crate) tree: git2::Oid,
     pub(crate) pinned: i64,
-    pub(crate) bytes: u64,
     /// Files reused from the stat index without re-hashing.
     #[allow(dead_code)]
     pub(crate) index_hits: u64,
@@ -427,6 +448,8 @@ pub(crate) struct TreeBuild {
 /// recovery path: one full re-hash, then the index is rewritten.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct BlobIndex {
+    #[serde(default)]
+    owner: PathBuf,
     written_at: (u64, u32),
     entries: std::collections::HashMap<String, ((u64, u32), u64, String)>,
 }
@@ -435,9 +458,12 @@ fn blob_index_path(dir: &Path) -> PathBuf {
     dir.join(".stateroot/local/blob_index.json")
 }
 
-fn load_blob_index(dir: &Path) -> BlobIndex {
+fn load_blob_index(dir: &Path, owner: &Path) -> BlobIndex {
     let text = std::fs::read_to_string(blob_index_path(dir)).unwrap_or_default();
-    serde_json::from_str(&text).unwrap_or_default()
+    serde_json::from_str::<BlobIndex>(&text)
+        .ok()
+        .filter(|index| index.owner == owner)
+        .unwrap_or_default()
 }
 
 fn write_blob_index(dir: &Path, index: &BlobIndex) {
@@ -569,16 +595,18 @@ fn build_tree_with_budget(
     repo: &Repository,
     dir: &Path,
     mut budget: Option<&mut ScanBudget>,
-    read_all_bytes: bool,
+    product_only: bool,
 ) -> Result<TreeBuild, RootsError> {
     let rules = IgnoreRules::load(dir);
     let index_written_at = now_stamp();
-    let index = if read_all_bytes {
+    let owner = repo.commondir().canonicalize()?;
+    let index = if product_only {
         BlobIndex::default()
     } else {
-        load_blob_index(dir)
+        load_blob_index(dir, &owner)
     };
     let mut next_index = BlobIndex {
+        owner,
         written_at: index_written_at,
         ..Default::default()
     };
@@ -590,13 +618,13 @@ fn build_tree_with_budget(
         root: &Path,
         dir: &Path,
         rules: &IgnoreRules,
+        product_only: bool,
         index: &BlobIndex,
         next_index: &mut BlobIndex,
         budget: &mut Option<&mut ScanBudget>,
         hits: &mut u64,
         misses: &mut u64,
         pinned: &mut i64,
-        total_bytes: &mut u64,
     ) -> Result<Option<git2::Oid>, RootsError> {
         let mut builder = repo.treebuilder(None)?;
         let mut any = false;
@@ -614,6 +642,11 @@ fn build_tree_with_budget(
                 .strip_prefix(root)
                 .map(|r| r.to_string_lossy().replace('\\', "/"))
                 .unwrap_or_default();
+            // Verification binds source bytes. Never even inspect a store
+            // entry, including a symlink or an unreadable store directory.
+            if product_only && rel == ".stateroot" {
+                continue;
+            }
             if let Some(budget) = budget.as_deref_mut() {
                 budget.observe_entry(&rel)?;
             }
@@ -632,13 +665,13 @@ fn build_tree_with_budget(
                     root,
                     &path,
                     rules,
+                    product_only,
                     index,
                     next_index,
                     budget,
                     hits,
                     misses,
                     pinned,
-                    total_bytes,
                 )? {
                     builder.insert(&name, sub, 0o040000)?;
                     any = true;
@@ -668,11 +701,11 @@ fn build_tree_with_budget(
                     .filter(|(stored_mtime, stored_len, _)| {
                         *stored_mtime == mtime && *stored_len == len && mtime < index.written_at
                     })
-                    .and_then(|(_, _, oid)| git2::Oid::from_str(oid).ok());
+                    .and_then(|(_, _, oid)| git2::Oid::from_str(oid).ok())
+                    .filter(|oid| repo.find_blob(*oid).is_ok());
                 let blob = match reused {
                     Some(oid) => {
                         *hits += 1;
-                        *total_bytes += len;
                         next_index
                             .entries
                             .insert(rel.clone(), (mtime, len, oid.to_string()));
@@ -681,7 +714,6 @@ fn build_tree_with_budget(
                     None => {
                         *misses += 1;
                         let bytes = read_validated(&path, len, mtime)?;
-                        *total_bytes += bytes.len() as u64;
                         let oid = repo.blob(&bytes)?;
                         next_index
                             .entries
@@ -704,30 +736,30 @@ fn build_tree_with_budget(
         }
     }
     let mut pinned = 0i64;
-    let mut total_bytes = 0u64;
     let tree = walk(
         repo,
         dir,
         dir,
         &rules,
+        product_only,
         &index,
         &mut next_index,
         &mut budget,
         &mut hits,
         &mut misses,
         &mut pinned,
-        &mut total_bytes,
     )?;
     // An empty tree is legal (state_only roots before any project file).
     let tree = match tree {
         Some(oid) => oid,
         None => repo.treebuilder(None)?.write()?,
     };
-    write_blob_index(dir, &next_index);
+    if !product_only {
+        write_blob_index(dir, &next_index);
+    }
     Ok(TreeBuild {
         tree,
         pinned,
-        bytes: total_bytes,
         index_hits: hits,
         index_misses: misses,
     })
@@ -783,6 +815,11 @@ pub fn lineage_refname(project_dir: &Path) -> String {
 
 /// The checked form of [`lineage_refname`] for lineage writes.
 pub fn lineage_refname_checked(project_dir: &Path) -> Result<String, RootsError> {
+    if reconciliation_owner(project_dir)?.is_some() {
+        return Err(RootsError::Merge(
+            "reconciliation candidates cannot advance lineage; stage and continue from the owning project".into(),
+        ));
+    }
     let context_path = local_store::root(project_dir).join("local/fork-context.json");
     if !context_path.is_file() {
         return Ok(LATEST_REF.to_string());
@@ -961,6 +998,7 @@ pub fn create_root(
     reason: &str,
     snap_ctx: Option<&crate::snap_context::SnapContext>,
 ) -> Result<(RootManifest, Transition), RootsError> {
+    lineage_refname_checked(project_dir)?;
     let repo = ensure_repo(project_dir)?;
     let build = build_tree(&repo, project_dir)?;
     commit_new_root(
@@ -968,7 +1006,6 @@ pub fn create_root(
         project_dir,
         build.tree,
         build.pinned,
-        build.bytes,
         harness,
         reason,
         snap_ctx,
@@ -998,6 +1035,7 @@ pub fn snap_if_changed(
     reason: &str,
     snap_ctx: Option<&crate::snap_context::SnapContext>,
 ) -> Result<SnapOutcome, RootsError> {
+    lineage_refname_checked(project_dir)?;
     let repo = ensure_repo(project_dir)?;
     // A racing snap can publish a tree built before another racer finished
     // writing.  CAS makes the roots a chain, but does not by itself make the
@@ -1025,7 +1063,6 @@ pub fn snap_if_changed(
             project_dir,
             build.tree,
             build.pinned,
-            build.bytes,
             harness,
             reason,
             snap_ctx,
@@ -1068,19 +1105,17 @@ fn project_files_changed(
 /// the input a command checked. Uses the same declared exclusions as roots.
 pub fn current_product_tree(project: &Path) -> Result<String, RootsError> {
     let repo = ensure_repo(project)?;
-    let tree = repo.find_tree(build_tree_with_budget(&repo, project, None, true)?.tree)?;
-    let mut builder = repo.treebuilder(Some(&tree))?;
-    if tree.get_name(".stateroot").is_some() {
-        builder.remove(".stateroot")?;
-    }
-    Ok(builder.write()?.to_string())
+    Ok(build_tree_with_budget(&repo, project, None, true)?
+        .tree
+        .to_string())
 }
 
 /// Read-only, bounded comparison against an already captured eligible tree.
 /// Missing objects or exhausted budgets are unavailable evidence, not a pass.
 pub fn product_tree_matches(project: &Path, id: &str) -> Result<bool, String> {
     use std::io::Read;
-    let repo = Repository::open(project).map_err(|e| e.to_string())?;
+    let owner = repository_owner(project).map_err(|e| e.to_string())?;
+    let repo = Repository::open(owner).map_err(|e| e.to_string())?;
     let tree = repo
         .find_tree(git2::Oid::from_str(id).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
@@ -1231,6 +1266,13 @@ fn audit_writes(
                     continue;
                 }
                 let blob_id = delta.new_file().id();
+                // This Git-only result declaration is constructed by root
+                // publication, not an authored disk write in the funnel.
+                if rel == crate::fidelity::MANIFEST_PATH
+                    && crate::fidelity::generated_declaration(repo, blob_id)
+                {
+                    continue;
+                }
                 let identity = repo
                     .find_blob(blob_id)
                     .map(|blob| {
@@ -1319,42 +1361,13 @@ fn commit_new_root(
     project_dir: &Path,
     tree: git2::Oid,
     pinned: i64,
-    tree_bytes: u64,
     harness: &str,
     reason: &str,
     snap_ctx: Option<&crate::snap_context::SnapContext>,
 ) -> Result<(RootManifest, Transition), RootsError> {
-    let source_tree = repo.find_tree(tree)?;
-    let manifest = crate::fidelity::capture(repo, &source_tree, project_dir, snap_ctx);
-    let mut index = git2::Index::new()?;
-    index.read_tree(&source_tree)?;
-    let bytes = serde_json::to_vec(&manifest)?;
-    let replaced_bytes = source_tree
-        .get_path(Path::new(crate::fidelity::MANIFEST_PATH))
-        .ok()
-        .and_then(|entry| repo.odb().and_then(|odb| odb.read_header(entry.id())).ok())
-        .map(|(size, _)| size as u64)
-        .unwrap_or(0);
-    let tree_bytes = tree_bytes
-        .saturating_sub(replaced_bytes)
-        .saturating_add(bytes.len() as u64);
-    let mut entry = git2::IndexEntry {
-        ctime: git2::IndexTime::new(0, 0),
-        mtime: git2::IndexTime::new(0, 0),
-        dev: 0,
-        ino: 0,
-        mode: 0o100644,
-        uid: 0,
-        gid: 0,
-        file_size: bytes.len() as u32,
-        id: repo.blob(&bytes)?,
-        flags: 0,
-        flags_extended: 0,
-        path: crate::fidelity::MANIFEST_PATH.as_bytes().to_vec(),
-    };
-    entry.flags = entry.path.len().min(0xfff) as u16;
-    index.add(&entry)?;
-    let tree = index.write_tree_to(repo)?;
+    let tree =
+        crate::fidelity::publication_tree(repo, tree, project_dir, snap_ctx, "snapshot", None)?;
+    let tree_bytes = tree_stats(repo, tree).1;
     // Same-ref CAS span (repair Phase 4): tip read → parent selection →
     // commit construction → ref update CAS, retried against the new tip on
     // a Moved conflict. The tree is parent-independent, so a retry only
@@ -1423,6 +1436,9 @@ fn commit_new_root(
 
 /// The latest root hash, if any.
 pub fn latest_root(project_dir: &Path) -> Result<Option<String>, RootsError> {
+    if let Some((_, attempt)) = reconciliation_owner(project_dir)? {
+        return Ok(Some(attempt.trunk_tip));
+    }
     let repo = ensure_repo(project_dir)?;
     Ok(latest_oid_for(&repo, project_dir)?.map(|oid| oid.to_string()))
 }
@@ -1883,6 +1899,14 @@ fn retained_restoration_tree(
             index.add(&entry)?;
         }
     }
+    apply_receiver_records(
+        repo,
+        &mut index,
+        &repo.find_tree(target)?,
+        &repo.find_tree(live)?,
+        &repo.find_tree(target)?,
+        false,
+    )?;
     Ok(index.write_tree_to(repo)?)
 }
 
@@ -1909,6 +1933,7 @@ pub fn revert_to_root(
     hash_prefix: &str,
     harness: &str,
 ) -> Result<(RootManifest, Transition), RootsError> {
+    lineage_refname_checked(project_dir)?;
     let repo = ensure_repo(project_dir)?;
     let target = commit_for(&repo, project_dir, hash_prefix)?;
     let target_id = target.id().to_string();
@@ -1927,6 +1952,7 @@ pub fn revert_to_root(
     )?;
     let target_tree =
         retained_restoration_tree(&repo, project_dir, target.tree()?.id(), rollback_tree)?;
+    crate::fidelity::require_supported_declaration(&repo, &repo.find_tree(target_tree)?)?;
     let files_pinned = {
         let tree = repo.find_tree(target_tree)?;
         let mut files = 0;
@@ -1960,7 +1986,6 @@ pub fn revert_to_root(
         let parents: Vec<git2::Oid> = parent.into_iter().collect();
         let parent_hashes: Vec<String> = parents.iter().map(|o| o.to_string()).collect();
         let message = format!("revert to {} (by {harness})", &target_id[..12]);
-        let oid = commit_root(&repo, target_tree, &parents, &message)?;
         if let Err(error) = checkout_root_tree(&repo, project_dir, target_tree, Some(rollback_tree))
         {
             return match checkout_root_tree(&repo, project_dir, rollback_tree, None) {
@@ -1974,11 +1999,15 @@ pub fn revert_to_root(
         let parent_for_recovery = parent.unwrap_or(target.id());
         let observed_tree =
             observed_materialized_tree(&repo, project_dir, target_tree, parent_for_recovery)?;
-        let oid = if observed_tree != target_tree {
-            commit_root(&repo, observed_tree, &parents, &message)?
-        } else {
-            oid
-        };
+        let observed_tree = crate::fidelity::publication_tree(
+            &repo,
+            observed_tree,
+            project_dir,
+            None,
+            "restore",
+            Some(&target_id),
+        )?;
+        let oid = commit_root(&repo, observed_tree, &parents, &message)?;
         match persist_root(
             &repo,
             project_dir,
@@ -2057,6 +2086,7 @@ pub fn fork_root(
     branch: Option<&str>,
     harness: &str,
 ) -> Result<(String, String), RootsError> {
+    lineage_refname_checked(project_dir)?;
     let repo = ensure_repo(project_dir)?;
     let commit = commit_for(&repo, project_dir, hash_prefix)?;
     require_supported_root_metadata(project_dir, &commit.id().to_string())?;
@@ -2113,6 +2143,7 @@ pub fn fork_materialize(
     worktree_path: &Path,
     plan: Option<&str>,
 ) -> Result<(), RootsError> {
+    lineage_refname_checked(project_dir)?;
     validate_fork_name(name)?;
     let repo = ensure_repo(project_dir)?;
     let refname = format!("{FORKS_REF_PREFIX}{name}");
@@ -2470,6 +2501,37 @@ fn verify_retained_main_paths(
     Ok(())
 }
 
+fn apply_retained_main_paths(
+    index: &mut git2::Index,
+    selections: &[RetainedMainPath],
+) -> Result<(), RootsError> {
+    for selection in selections {
+        let path = Path::new(&selection.path);
+        if index.conflict_get(path).is_ok() {
+            index.conflict_remove(path)?;
+        }
+        if let (Some(blob), Some(mode)) = (&selection.blob, selection.mode) {
+            index.add(&git2::IndexEntry {
+                ctime: git2::IndexTime::new(0, 0),
+                mtime: git2::IndexTime::new(0, 0),
+                dev: 0,
+                ino: 0,
+                mode: mode as u32,
+                uid: 0,
+                gid: 0,
+                file_size: 0,
+                id: blob.parse()?,
+                flags: 0,
+                flags_extended: 0,
+                path: selection.path.as_bytes().to_vec(),
+            })?;
+        } else if index.get_path(path, 0).is_some() {
+            index.remove_path(path)?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MergeAttemptFork {
     pub name: String,
@@ -2506,6 +2568,80 @@ fn merge_attempt_path(project_dir: &Path, id: &str) -> PathBuf {
     merge_attempt_dir(project_dir).join(format!("{id}.json"))
 }
 
+/// Only the existing attempt binding can lend a reconciliation candidate its
+/// owner's ODB. Ordinary nested projects continue to own independent repos.
+fn reconciliation_owner(project: &Path) -> Result<Option<(PathBuf, MergeAttempt)>, RootsError> {
+    let canonical = match project.canonicalize() {
+        Ok(path) => path,
+        // Ordinary not-yet-created projects still support explicit init.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let project = canonical.as_path();
+    if project.file_name().is_none_or(|name| name != "worktree") {
+        return Ok(None);
+    }
+    let Some(attempt_dir) = project.parent() else {
+        return Ok(None);
+    };
+    let Some(attempts) = attempt_dir.parent() else {
+        return Ok(None);
+    };
+    let Some(local) = attempts.parent() else {
+        return Ok(None);
+    };
+    let Some(store) = local.parent() else {
+        return Ok(None);
+    };
+    if attempts
+        .file_name()
+        .is_none_or(|name| name != "merge-attempts")
+        || local.file_name().is_none_or(|name| name != "local")
+        || store.file_name().is_none_or(|name| name != ".stateroot")
+    {
+        return Ok(None);
+    }
+    let owner = store
+        .parent()
+        .ok_or_else(|| RootsError::Merge("candidate owner unavailable".into()))?;
+    let id = attempt_dir
+        .file_name()
+        .and_then(|id| id.to_str())
+        .ok_or_else(|| RootsError::Merge("candidate attempt identity unavailable".into()))?;
+    let attempt = merge_attempt(owner, id)?;
+    let bound = attempt_worktree(owner, &attempt)?;
+    if bound.canonicalize()? != project.canonicalize()? {
+        return Err(RootsError::Merge(
+            "candidate does not match its recorded owner binding".into(),
+        ));
+    }
+    if project.join(".git").exists() {
+        return Err(RootsError::Merge("legacy reconciliation candidate has a private .git repository; its objects, observations and raw logs remain in this attempt. Preserve this attempt and prepare a new merge from the owning project, then rerun verification there; no private evidence was imported or deleted".into()));
+    }
+    let identity = |dir: &Path| -> Result<String, RootsError> {
+        local_store::read_manifest(dir)?
+            .and_then(|value| value["project_id"].as_str().map(str::to_owned))
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                RootsError::Merge("candidate or owner project identity unavailable".into())
+            })
+    };
+    let owner_identity = identity(owner)?;
+    let candidate_identity = identity(project)?;
+    if owner_identity != candidate_identity {
+        return Err(RootsError::Merge(
+            "candidate project identity differs from its owning project".into(),
+        ));
+    }
+    Ok(Some((owner.to_path_buf(), attempt)))
+}
+
+pub(crate) fn repository_owner(project: &Path) -> Result<PathBuf, RootsError> {
+    Ok(reconciliation_owner(project)?
+        .map(|(owner, _)| owner)
+        .unwrap_or_else(|| project.to_path_buf()))
+}
+
 /// Prepare a merge for an agent chosen by the user.
 ///
 /// The merge calculation is performed against frozen refs and persisted in
@@ -2520,6 +2656,7 @@ pub fn prepare_merge_attempt(
     forks: &[String],
     harness: &str,
 ) -> Result<MergeAttempt, RootsError> {
+    lineage_refname_checked(project_dir)?;
     if forks.is_empty() {
         return Err(RootsError::Merge(
             "no forks named — pass at least one fork to merge".into(),
@@ -2596,6 +2733,26 @@ struct AttemptAnalysis {
     worktree: Option<String>,
 }
 
+/// The shared deterministic fold. Callers own freezing, explicit resolution,
+/// staging, recovery and publication; a contained tip contributes no fold.
+fn fold_fork_index(
+    repo: &Repository,
+    head: git2::Oid,
+    current: &git2::Tree,
+    tip: git2::Oid,
+) -> Result<Option<git2::Index>, RootsError> {
+    let base = repo.merge_base(head, tip)?;
+    if base == tip {
+        return Ok(None);
+    }
+    let base = repo.find_commit(base)?.tree()?;
+    let incoming = repo.find_commit(tip)?.tree()?;
+    let mut index = repo.merge_trees(&base, current, &incoming, None)?;
+    resolve_control_plane_conflicts(repo, &mut index)?;
+    apply_receiver_records(repo, &mut index, &base, current, &incoming, true)?;
+    Ok(Some(index))
+}
+
 /// Fold forks in caller order against the accumulated line, exactly as the
 /// publisher does. The first conflict stops the fold: every earlier fork is
 /// recorded as folded, the conflicted fork and every later selection become
@@ -2613,18 +2770,9 @@ fn analyze_merge_attempt(
     let mut folded = Vec::new();
     for (position, fork) in forks.iter().enumerate() {
         let tip = git2::Oid::from_str(&fork.tip)?;
-        let ancestor_oid = repo.merge_base(head_oid, tip)?;
-        if ancestor_oid == tip {
+        let Some(mut index) = fold_fork_index(repo, head_oid, &current_tree, tip)? else {
             continue;
-        }
-        let ancestor_tree = repo.find_commit(ancestor_oid)?.tree()?;
-        let mut index = repo.merge_trees(
-            &ancestor_tree,
-            &current_tree,
-            &repo.find_commit(tip)?.tree()?,
-            None,
-        )?;
-        resolve_control_plane_conflicts(repo, &mut index)?;
+        };
         if index.has_conflicts() {
             let conflicts = collect_attempt_conflicts(&index, fork)?;
             let tree = render_resolution_tree(repo, &index, fork, &conflicts)?;
@@ -2882,6 +3030,7 @@ pub fn abort_merge_attempt(
     project_dir: &Path,
     id_prefix: &str,
 ) -> Result<MergeAttempt, RootsError> {
+    lineage_refname_checked(project_dir)?;
     let attempt = merge_attempt(project_dir, id_prefix)?;
     let dir = merge_attempt_dir(project_dir).join(&attempt.id);
     if dir.exists() {
@@ -2902,6 +3051,7 @@ pub fn continue_merge_attempt(
     id_prefix: &str,
     evidence: &[String],
 ) -> Result<(RootManifest, Transition, Vec<MergedFork>), RootsError> {
+    lineage_refname_checked(project_dir)?;
     let attempt = merge_attempt(project_dir, id_prefix)?;
     let repo = ensure_repo(project_dir)?;
     require_supported_root_metadata(project_dir, &attempt.trunk_tip)?;
@@ -2966,9 +3116,9 @@ fn attempt_worktree(project: &Path, attempt: &MergeAttempt) -> Result<PathBuf, R
                 "attempt has no reconciliation worktree; stage or prepare again".into(),
             )
         })?;
-    if path != expected
-        || !path.is_dir()
+    if !path.is_dir()
         || std::fs::symlink_metadata(&path)?.file_type().is_symlink()
+        || path.canonicalize()? != expected.canonicalize()?
     {
         return Err(RootsError::Merge(
             "attempt reconciliation worktree is missing or has unexpected binding".into(),
@@ -2995,6 +3145,7 @@ pub fn stage_merge_attempt_retaining_main(
     keep_trunk_paths: &[String],
     keep_main_paths: &[String],
 ) -> Result<MergeAttempt, RootsError> {
+    lineage_refname_checked(project)?;
     if local_store::fork_context(project).is_some() {
         return Err(RootsError::Merge(
             "stage must run against the trunk project".into(),
@@ -3046,17 +3197,9 @@ pub fn stage_merge_attempt_retaining_main(
         let mut head = trunk;
         for fork in &attempt.forks {
             let tip = git2::Oid::from_str(&fork.tip)?;
-            let base = repo.merge_base(head, tip)?;
-            if base == tip {
+            let Some(mut index) = fold_fork_index(&repo, head, &tree, tip)? else {
                 continue;
-            }
-            let mut index = repo.merge_trees(
-                &repo.find_commit(base)?.tree()?,
-                &tree,
-                &repo.find_commit(tip)?.tree()?,
-                None,
-            )?;
-            resolve_control_plane_conflicts(&repo, &mut index)?;
+            };
             if index.has_conflicts() {
                 return Err(RootsError::Merge(
                     "clean preparation no longer computes cleanly; prepare again".into(),
@@ -3139,28 +3282,7 @@ pub fn stage_merge_attempt_retaining_main(
         });
     }
     verify_retained_main_paths(&live_tree, &attempt.retained_main_paths)?;
-    for selection in &attempt.retained_main_paths {
-        let (Some(blob), Some(mode)) = (&selection.blob, selection.mode) else {
-            if index.get_path(Path::new(&selection.path), 0).is_some() {
-                index.remove_path(Path::new(&selection.path))?;
-            }
-            continue;
-        };
-        index.add(&git2::IndexEntry {
-            ctime: git2::IndexTime::new(0, 0),
-            mtime: git2::IndexTime::new(0, 0),
-            dev: 0,
-            ino: 0,
-            mode: mode as u32,
-            uid: 0,
-            gid: 0,
-            file_size: 0,
-            id: blob.parse()?,
-            flags: 0,
-            flags_extended: 0,
-            path: selection.path.as_bytes().to_vec(),
-        })?;
-    }
+    apply_retained_main_paths(&mut index, &attempt.retained_main_paths)?;
     for path in &requested {
         match trunk_tree.get_path(Path::new(path)) {
             Ok(entry) => {
@@ -3245,17 +3367,9 @@ pub fn stage_merge_attempt_retaining_main(
         attempt.pending_forks.clear();
         for (position, fork) in pending.iter().enumerate() {
             let tip = git2::Oid::from_str(&fork.tip)?;
-            let base = repo.merge_base(head, tip)?;
-            if base == tip {
+            let Some(mut index) = fold_fork_index(&repo, head, &current, tip)? else {
                 continue;
-            }
-            let mut index = repo.merge_trees(
-                &repo.find_commit(base)?.tree()?,
-                &current,
-                &repo.find_commit(tip)?.tree()?,
-                None,
-            )?;
-            resolve_control_plane_conflicts(&repo, &mut index)?;
+            };
             if index.has_conflicts() {
                 attempt.conflicts = collect_attempt_conflicts(&index, fork)?;
                 current = repo.find_tree(render_resolution_tree(
@@ -3506,19 +3620,10 @@ fn continue_attention_attempt(
     let fold_start = Instant::now();
     for fork in &attempt.pending_forks[1..] {
         let tip = git2::Oid::from_str(&fork.tip)?;
-        let ancestor_oid = repo.merge_base(head_oid, tip)?;
-        if ancestor_oid == tip {
+        let Some(mut index) = fold_fork_index(repo, head_oid, &current_tree, tip)? else {
             skipped.push(fork.name.clone());
             continue;
-        }
-        let ancestor_tree = repo.find_commit(ancestor_oid)?.tree()?;
-        let mut index = repo.merge_trees(
-            &ancestor_tree,
-            &current_tree,
-            &repo.find_commit(tip)?.tree()?,
-            None,
-        )?;
-        resolve_control_plane_conflicts(repo, &mut index)?;
+        };
         if index.has_conflicts() {
             let mut paths: Vec<String> = index
                 .conflicts()?
@@ -3622,6 +3727,7 @@ pub fn merge_forks_resolving(
     harness: &str,
     keep_trunk_paths: &[String],
 ) -> Result<(RootManifest, Transition, Vec<MergedFork>), RootsError> {
+    lineage_refname_checked(project_dir)?;
     if forks.is_empty() {
         return Err(RootsError::Merge(
             "no forks named — pass at least one fork to merge".into(),
@@ -3678,17 +3784,11 @@ fn merge_forks_once(
             .refname_to_id(&refname)
             .map_err(|_| RootsError::NotFound(format!("no fork named {name}")))?;
         require_supported_root_metadata(project_dir, &tip.to_string())?;
-        let fork_commit = repo.find_commit(tip)?;
-        let ancestor_oid = repo.merge_base(head_oid, tip)?;
-        if ancestor_oid == tip {
+        let Some(mut index) = fold_fork_index(&repo, head_oid, &current_tree, tip)? else {
             // The accumulated line already contains this fork entirely.
             skipped.push(name.clone());
             continue;
-        }
-        let ancestor_tree = repo.find_commit(ancestor_oid)?.tree()?;
-        let mut index =
-            repo.merge_trees(&ancestor_tree, &current_tree, &fork_commit.tree()?, None)?;
-        resolve_control_plane_conflicts(&repo, &mut index)?;
+        };
         resolve_explicit_trunk_conflicts(&mut index, &mut unresolved_trunk_paths)?;
         if index.has_conflicts() {
             let mut paths: Vec<String> = index
@@ -3799,6 +3899,8 @@ fn publish_merge(
     let live_tree = repo.find_tree(live.tree)?;
     verify_retained_main_paths(&live_tree, keep_main)?;
     let mut live_index = repo.merge_trees(&frozen, &folded, &live_tree, None)?;
+    apply_receiver_records(repo, &mut live_index, &frozen, &live_tree, &folded, true)?;
+    apply_retained_main_paths(&mut live_index, keep_main)?;
     let conflicts: Vec<_> = live_index.conflicts()?.collect::<Result<Vec<_>, _>>()?;
     for conflict in conflicts {
         let Some(path) = conflict
@@ -3810,7 +3912,22 @@ fn publish_merge(
         else {
             continue;
         };
-        if matches!(
+        if path == crate::fidelity::MANIFEST_PATH
+            && [
+                conflict.ancestor.as_ref(),
+                conflict.our.as_ref(),
+                conflict.their.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .all(|entry| crate::fidelity::generated_declaration(repo, entry.id))
+        {
+            live_index.conflict_remove(Path::new(&path))?;
+            if let Some(mut entry) = conflict.their {
+                entry.flags &= !0x3000;
+                live_index.add(&entry)?;
+            }
+        } else if matches!(
             path.as_str(),
             ".stateroot/project/state.json" | ".stateroot/handoffs/current.json"
         ) {
@@ -3915,6 +4032,7 @@ fn publish_merge(
     // checkpoint capturing them is honest new work, not a merge lie.
     let base_tree = repo.find_commit(base_oid)?.tree()?;
     let current_tree = repo.find_tree(merge_tree_oid)?;
+    crate::fidelity::require_supported_declaration(repo, &current_tree)?;
     verify_retained_main_paths(&current_tree, keep_main)?;
     let dirty = workspace_conflicts(repo, project_dir, &base_tree, &current_tree)?;
     if !dirty.is_empty() {
@@ -4104,6 +4222,8 @@ fn publish_merge(
     let phase_start = Instant::now();
     publication_observer(project_dir);
     let merge_tree_oid = observed_materialized_tree(repo, project_dir, merge_tree_oid, base_oid)?;
+    let merge_tree_oid =
+        crate::fidelity::publication_tree(repo, merge_tree_oid, project_dir, None, "merge", None)?;
     let oid = commit_root(repo, merge_tree_oid, &parents, &message)?;
     let parent_hashes: Vec<String> = parents.iter().map(|o| o.to_string()).collect();
     let (files_pinned, tree_bytes) = tree_stats(repo, merge_tree_oid);
@@ -4165,6 +4285,7 @@ pub fn cleanup_merged_forks(
     project_dir: &Path,
     forks: &[String],
 ) -> Result<Vec<ForkCleanup>, RootsError> {
+    lineage_refname_checked(project_dir)?;
     if forks.is_empty() {
         return Err(RootsError::Merge(
             "no forks named — pass at least one fork to clean up".into(),
@@ -4741,6 +4862,111 @@ const SPOOL_CURRENT_PATH: &str = ".stateroot/spool/current.json";
 /// `.stateroot/ingest-gov.json` — wiki ingest compiler skip cache.
 const INGEST_GOV_PATH: &str = ".stateroot/ingest-gov.json";
 
+fn receiver_owned_path(path: &str, controls: bool) -> bool {
+    crate::todo_federation::current_binding_path(path)
+        || matches!(path, INGEST_GOV_PATH | SPOOL_CURRENT_PATH)
+        || (controls
+            && matches!(
+                path,
+                ".stateroot/project/state.json" | ".stateroot/handoffs/current.json"
+            ))
+}
+
+fn immutable_evidence_path(path: &str) -> bool {
+    path.starts_with(".stateroot/spool/acknowledgements/")
+        || path.starts_with(".stateroot/plans/verification/")
+        || path.starts_with(".stateroot/plan-bindings/history/")
+}
+
+/// Retention and execution ownership are independent. Preserve exact binding
+/// versions as domain history, keep receiver routing/cursors (including
+/// absence), and never three-way-edit an immutable evidence identity.
+fn apply_receiver_records(
+    repo: &Repository,
+    index: &mut git2::Index,
+    base: &git2::Tree,
+    receiver: &git2::Tree,
+    incoming: &git2::Tree,
+    controls: bool,
+) -> Result<(), RootsError> {
+    let mut sources = [
+        git2::Index::new()?,
+        git2::Index::new()?,
+        git2::Index::new()?,
+    ];
+    for (source, tree) in sources.iter_mut().zip([base, receiver, incoming]) {
+        source.read_tree(tree)?;
+    }
+    let paths: BTreeSet<String> = sources
+        .iter()
+        .flat_map(|source| source.iter())
+        .filter_map(|entry| String::from_utf8(entry.path).ok())
+        .filter(|path| {
+            receiver_owned_path(path, controls)
+                || immutable_evidence_path(path)
+                || IgnoreRules::none().is_ignored(path, false)
+        })
+        .collect();
+    for path in paths {
+        if IgnoreRules::none().is_ignored(&path, false) {
+            if index.conflict_get(Path::new(&path)).is_ok() {
+                index.conflict_remove(Path::new(&path))?;
+            }
+            if index.get_path(Path::new(&path), 0).is_some() {
+                index.remove_path(Path::new(&path))?;
+            }
+            continue;
+        }
+        if crate::todo_federation::current_binding_path(&path) {
+            for source in &sources {
+                if let Some(mut entry) = source.get_path(Path::new(&path), 0) {
+                    let blob = repo.find_blob(entry.id)?;
+                    entry.path =
+                        crate::todo_federation::binding_history_path(blob.content()).into_bytes();
+                    entry.flags = 0;
+                    index.add(&entry)?;
+                }
+            }
+        }
+        let entries = sources
+            .each_ref()
+            .map(|source| source.get_path(Path::new(&path), 0));
+        if immutable_evidence_path(&path) {
+            let ids: BTreeSet<_> = entries.iter().flatten().map(|entry| entry.id).collect();
+            if ids.len() > 1 {
+                if index.get_path(Path::new(&path), 0).is_some() {
+                    index.remove_path(Path::new(&path))?;
+                }
+                if index.conflict_get(Path::new(&path)).is_ok() {
+                    index.conflict_remove(Path::new(&path))?;
+                }
+                for (stage, entry) in entries.into_iter().enumerate() {
+                    if let Some(mut entry) = entry {
+                        entry.flags = (entry.flags & !0x3000) | (((stage + 1) as u16) << 12);
+                        index.add(&entry)?;
+                    }
+                }
+                continue;
+            }
+        }
+        if index.conflict_get(Path::new(&path)).is_ok() {
+            index.conflict_remove(Path::new(&path))?;
+        }
+        let selected = if receiver_owned_path(&path, controls) {
+            entries.into_iter().nth(1).flatten()
+        } else {
+            entries.into_iter().flatten().next()
+        };
+        if let Some(mut entry) = selected {
+            entry.flags &= !0x3000;
+            index.add(&entry)?;
+        } else if index.get_path(Path::new(&path), 0).is_some() {
+            index.remove_path(Path::new(&path))?;
+        }
+    }
+    Ok(())
+}
+
 /// Resolve the coordination records which necessarily diverge while a fork
 /// is being executed. They are control-plane state, not competing work: the
 /// trunk owns its current handoff, a plan sidecar is a monotonic lifecycle
@@ -4784,7 +5010,18 @@ fn resolve_control_plane_conflicts(
     for path in paths {
         let path_text = path.to_string_lossy();
         let conflict = index.conflict_get(&path)?;
-        let selected = if path_text == ".stateroot/handoffs/current.json" {
+        let selected = if path_text == crate::fidelity::MANIFEST_PATH
+            && [
+                conflict.ancestor.as_ref(),
+                conflict.our.as_ref(),
+                conflict.their.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .all(|entry| crate::fidelity::generated_declaration(repo, entry.id))
+        {
+            conflict.our
+        } else if path_text == ".stateroot/handoffs/current.json" {
             // A fork's current handoff describes work inside that fork. It
             // must never displace the trunk's continuity packet on merge.
             conflict.our
@@ -4863,37 +5100,6 @@ fn merge_native_record(
     Ok(Some(entry))
 }
 
-/// Mirrors `wiki::normalize` — the native inbox writer's uniqueness key.
-fn normalize_inbox_bullet(bullet: &str) -> String {
-    bullet
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
-}
-
-/// Bullets appended to a native `_inbox.md` when — and only when — `text` is
-/// the shared `base` plus `- ` bullet lines, the exact shape
-/// `wiki::append_inbox_bullets` writes (fixed frontmatter intact, nothing
-/// rewritten, reordered or deleted). Anything else is not recognized.
-fn native_inbox_appended(base: &str, text: &str) -> Option<Vec<String>> {
-    if !text.ends_with('\n') {
-        return None;
-    }
-    let rest = text.strip_prefix(base.trim_end_matches('\n'))?;
-    let rest = rest.strip_prefix('\n')?;
-    let mut added = Vec::new();
-    for line in rest.lines() {
-        let bullet = line.strip_prefix("- ")?.trim();
-        // The native writer never admits shorter notes.
-        if bullet.len() < 8 {
-            return None;
-        }
-        added.push(bullet.to_string());
-    }
-    Some(added)
-}
-
 /// Fold two native inbox evolutions of one shared base: the base once, then
 /// the trunk (ours) bullets, then the fork (theirs) bullets — the bytes the
 /// writer itself would produce applying both sides' appends in that order,
@@ -4916,67 +5122,6 @@ fn merge_native_inbox(base: &str, ours: &str, theirs: &str) -> Option<String> {
         }
     }
     Some(merged)
-}
-
-/// One parsed date group of a native `wiki/log.md`: a `## YYYY-MM-DD`
-/// heading plus its verbatim entry lines (separator blank lines excluded).
-#[derive(Debug, Clone, PartialEq)]
-struct NativeLogBlock {
-    date: String,
-    lines: Vec<String>,
-}
-
-fn is_log_date(heading: &str) -> bool {
-    let bytes = heading.as_bytes();
-    bytes.len() == 10
-        && bytes
-            .iter()
-            .enumerate()
-            .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit())
-        && bytes[4] == b'-'
-        && bytes[7] == b'-'
-}
-
-/// Parse a native `wiki/log.md`: the `# Directory Update Log` header followed
-/// by `## YYYY-MM-DD` date groups. An empty file parses as zero groups (the
-/// layout's initial state). Any other shape — missing header, preamble
-/// content, non-date headings — is not recognized.
-fn parse_native_log(text: &str) -> Option<Vec<NativeLogBlock>> {
-    if text.is_empty() {
-        return Some(Vec::new());
-    }
-    let body = text.strip_prefix("# Directory Update Log\n")?;
-    let mut blocks: Vec<NativeLogBlock> = Vec::new();
-    let mut preamble_nonblank = false;
-    for line in body.lines() {
-        if let Some(heading) = line.strip_prefix("## ") {
-            if !is_log_date(heading) {
-                return None;
-            }
-            blocks.push(NativeLogBlock {
-                date: heading.to_string(),
-                lines: Vec::new(),
-            });
-        } else if let Some(block) = blocks.last_mut() {
-            block.lines.push(line.to_string());
-        } else if !line.trim().is_empty() {
-            preamble_nonblank = true;
-        }
-    }
-    if preamble_nonblank {
-        return None;
-    }
-    for block in &mut blocks {
-        // Block content keeps interior blank lines; the blank line between
-        // groups is structural, not content.
-        while block.lines.first().is_some_and(|l| l.trim().is_empty()) {
-            block.lines.remove(0);
-        }
-        while block.lines.last().is_some_and(|l| l.trim().is_empty()) {
-            block.lines.pop();
-        }
-    }
-    Some(blocks)
 }
 
 /// The prepend-only evolution of a native log, when `text` is exactly the
@@ -5051,7 +5196,7 @@ fn merge_native_log(base: &str, ours: &str, theirs: &str) -> Option<String> {
     blocks.extend(combined_new);
     // Newest date first; stable, so shared base groups never reorder.
     blocks.sort_by(|a, b| b.date.cmp(&a.date));
-    let mut out = String::from("# Directory Update Log\n");
+    let mut out = format!("{}\n", crate::wiki::LOG_HEADER);
     for block in &blocks {
         out.push_str("\n## ");
         out.push_str(&block.date);
@@ -5726,6 +5871,34 @@ mod tests {
             .unwrap();
         assert_ne!(current_product_tree(&dir).unwrap(), first);
         assert!(!product_tree_matches(&dir, &first).unwrap());
+    }
+
+    #[test]
+    fn verification_fingerprint_skips_store_and_preserves_snapshot_cache() {
+        let (_tmp, dir) = project();
+        write(&dir, "code.txt", "source");
+        write(
+            &dir,
+            ".stateroot/large/history.jsonl",
+            &"retained history\n".repeat(100_000),
+        );
+        let repo = ensure_repo(&dir).unwrap();
+        build_tree(&repo, &dir).unwrap();
+        let cache = std::fs::read(blob_index_path(&dir)).unwrap();
+        let measured = build_tree_with_budget(&repo, &dir, None, true).unwrap();
+        assert_eq!(
+            measured.index_misses, 1,
+            "only eligible source bytes were read"
+        );
+        let first = current_product_tree(&dir).unwrap();
+        assert_eq!(std::fs::read(blob_index_path(&dir)).unwrap(), cache);
+        write(
+            &dir,
+            ".stateroot/large/history.jsonl",
+            "changed retained history",
+        );
+        assert_eq!(current_product_tree(&dir).unwrap(), first);
+        assert_eq!(std::fs::read(blob_index_path(&dir)).unwrap(), cache);
     }
 
     #[test]
@@ -6652,6 +6825,32 @@ mod tests {
     }
 
     #[test]
+    fn stat_index_recomputes_blobs_for_a_different_object_database() {
+        let (_tmp, dir) = project();
+        write(&dir, "a.txt", "alpha");
+        let repo = ensure_repo(&dir).unwrap();
+        build_tree(&repo, &dir).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let other_repo = Repository::init(other.path()).unwrap();
+        let rebuilt = build_tree(&other_repo, &dir).unwrap();
+        assert_eq!(rebuilt.index_hits, 0);
+        assert_eq!(rebuilt.index_misses, 1);
+        let tree = other_repo.find_tree(rebuilt.tree).unwrap();
+        let blob = other_repo
+            .find_blob(tree.get_name("a.txt").unwrap().id())
+            .unwrap();
+        assert_eq!(blob.content(), b"alpha");
+        // An owner-matching derived cache can also lose or corrupt an OID.
+        // A tree object is not a reusable blob even though it exists here.
+        let mut cache = load_blob_index(&dir, &other_repo.commondir().canonicalize().unwrap());
+        cache.entries.get_mut("a.txt").unwrap().2 = rebuilt.tree.to_string();
+        write_blob_index(&dir, &cache);
+        let repaired = build_tree(&other_repo, &dir).unwrap();
+        assert_eq!(repaired.index_misses, 1);
+        assert_eq!(repaired.tree, rebuilt.tree);
+    }
+
+    #[test]
     fn storage_amplification_is_bounded_by_changes_not_by_snaps() {
         let (_tmp, dir) = project();
         for i in 0..20 {
@@ -7375,8 +7574,22 @@ mod tests {
         }
         let (child, _) = create_root(&branch, "cli", "child controls", None).unwrap();
         let attempt = prepare_merge_attempt(&dir, &["keep-main".into()], "codex").unwrap();
-        let staged = stage_merge_attempt(&dir, &attempt.id, &[]).unwrap();
+        assert!(
+            attempt
+                .conflicts
+                .iter()
+                .all(|entry| paths[4..].contains(&entry.path.as_str())),
+            "only altered immutable identities require a decision"
+        );
+        let selections: Vec<_> = paths[4..].iter().map(|path| path.to_string()).collect();
+        let staged = stage_merge_attempt(&dir, &attempt.id, &selections).unwrap();
         let candidate = PathBuf::from(staged.worktree.as_ref().unwrap());
+        // Normal ownership needs no keep-main choices. This legacy escape
+        // hatch is exercised only for an explicitly edited candidate.
+        for path in paths {
+            write(&candidate, path, "{\"fixture\":\"operator candidate\"}\n");
+        }
+        stage_merge_attempt(&dir, &attempt.id, &[]).unwrap();
         let repo = ensure_repo(&dir).unwrap();
         let initial_candidate = build_tree(&repo, &candidate).unwrap().tree;
         for invalid in [
@@ -7623,6 +7836,159 @@ mod tests {
     }
 
     #[test]
+    fn candidate_owner_binding_prevents_lineage_writes_and_preserves_legacy_evidence() {
+        let (_tmp, dir) = project();
+        write(
+            &dir,
+            ".stateroot/manifest.json",
+            "{\"project_id\":\"candidate-owner\"}",
+        );
+        write(&dir, "src/main.rs", "base\n");
+        let (base, _) = create_root(&dir, "cli", "base", None).unwrap();
+        let (_fork, _) = fork_with_change(&dir, &base.id, "owner-check", "src/new.rs", "new\n");
+        let attempt = prepare_merge_attempt(&dir, &["owner-check".into()], "codex").unwrap();
+        let attempt = stage_merge_attempt(&dir, &attempt.id, &[]).unwrap();
+        let candidate = PathBuf::from(attempt.worktree.as_ref().unwrap());
+        let repo = ensure_repo(&dir).unwrap();
+        let refs = || {
+            let mut refs = repo
+                .references()
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    (entry.name().unwrap().to_owned(), entry.target())
+                })
+                .collect::<Vec<_>>();
+            refs.sort();
+            refs
+        };
+        let before = refs();
+        assert_eq!(
+            ensure_repo(&candidate).unwrap().commondir(),
+            repo.commondir()
+        );
+        assert_eq!(
+            latest_root(&candidate).unwrap().as_deref(),
+            Some(base.id.as_str())
+        );
+        let fingerprint = current_product_tree(&candidate).unwrap();
+        assert!(product_tree_matches(&candidate, &fingerprint).unwrap());
+        assert!(!candidate.join(".git").exists());
+        #[cfg(unix)]
+        {
+            let alias = dir.parent().unwrap().join("candidate-alias");
+            std::os::unix::fs::symlink(&candidate, &alias).unwrap();
+            assert_eq!(ensure_repo(&alias).unwrap().commondir(), repo.commondir());
+            assert!(create_root(&alias, "codex", "forbidden alias snap", None).is_err());
+            assert!(!candidate.join(".git").exists());
+        }
+        let destination = dir.parent().unwrap().join("must-not-materialize");
+        let rejected = [
+            (
+                "snap",
+                create_root(&candidate, "codex", "forbidden", None).is_err(),
+            ),
+            (
+                "automatic snap",
+                snap_if_changed(&candidate, "codex", "forbidden", None).is_err(),
+            ),
+            (
+                "restore",
+                revert_to_root(&candidate, &base.id, "codex").is_err(),
+            ),
+            (
+                "fork",
+                fork_root(&candidate, &base.id, Some("forbidden"), "codex").is_err(),
+            ),
+            (
+                "fork materialization",
+                fork_materialize(&candidate, "owner-check", &destination, None).is_err(),
+            ),
+            (
+                "prepare",
+                prepare_merge_attempt(&candidate, &["owner-check".into()], "codex").is_err(),
+            ),
+            (
+                "stage",
+                stage_merge_attempt(&candidate, &attempt.id, &[]).is_err(),
+            ),
+            (
+                "continue",
+                continue_merge_attempt(&candidate, &attempt.id, &[]).is_err(),
+            ),
+            (
+                "abort",
+                abort_merge_attempt(&candidate, &attempt.id).is_err(),
+            ),
+            (
+                "one-shot merge",
+                merge_forks(&candidate, &["owner-check".into()], "codex").is_err(),
+            ),
+            (
+                "cleanup",
+                cleanup_merged_forks(&candidate, &["owner-check".into()]).is_err(),
+            ),
+        ];
+        for (operation, rejected) in rejected {
+            assert!(rejected, "candidate unexpectedly allowed {operation}");
+        }
+        assert_eq!(refs(), before);
+        assert!(!destination.exists());
+
+        let original = std::fs::read(merge_attempt_path(&dir, &attempt.id)).unwrap();
+        let mut wrong_binding = attempt.clone();
+        wrong_binding.worktree = Some(dir.to_string_lossy().into_owned());
+        write_json(&merge_attempt_path(&dir, &attempt.id), &wrong_binding).unwrap();
+        assert!(current_product_tree(&candidate)
+            .unwrap_err()
+            .to_string()
+            .contains("unexpected binding"));
+        assert!(!candidate.join(".git").exists());
+        assert_eq!(refs(), before);
+        std::fs::write(merge_attempt_path(&dir, &attempt.id), &original).unwrap();
+        write(&candidate, ".stateroot/manifest.json", "{}");
+        assert!(current_product_tree(&candidate)
+            .unwrap_err()
+            .to_string()
+            .contains("identity unavailable"));
+        write(
+            &candidate,
+            ".stateroot/manifest.json",
+            "{\"project_id\":\"candidate-owner\"}",
+        );
+        std::fs::write(merge_attempt_path(&dir, &attempt.id), b"{}").unwrap();
+        assert!(current_product_tree(&candidate).is_err());
+        assert!(!candidate.join(".git").exists());
+        std::fs::write(merge_attempt_path(&dir, &attempt.id), original).unwrap();
+
+        Repository::init(&candidate).unwrap();
+        write(
+            &candidate,
+            ".stateroot/local/verification/old.stdout",
+            "original evidence",
+        );
+        let error = current_product_tree(&candidate).unwrap_err().to_string();
+        assert!(
+            error.contains("Preserve this attempt and prepare a new merge"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(candidate.join(".stateroot/local/verification/old.stdout")).unwrap(),
+            b"original evidence"
+        );
+        assert!(candidate.join(".git").exists());
+        assert_eq!(refs(), before);
+
+        // Merely being nested under another repository never lends its ODB.
+        let ordinary = dir.join("ordinary/worktree");
+        std::fs::create_dir_all(&ordinary).unwrap();
+        assert_ne!(
+            ensure_repo(&ordinary).unwrap().commondir(),
+            repo.commondir()
+        );
+    }
+
+    #[test]
     fn merge_attempt_freezes_clean_inputs_then_continues() {
         let (_tmp, dir) = project();
         write(&dir, "src/main.rs", "fn main() {}\n");
@@ -7655,6 +8021,264 @@ mod tests {
         assert!(
             merge_attempt(&dir, &attempt.id).is_err(),
             "attempt consumed"
+        );
+    }
+
+    #[test]
+    fn publication_provenance_describes_snapshot_merge_and_restoration_result() {
+        let (_tmp, dir) = project();
+        write(&dir, "Cargo.lock", "base locks");
+        let (base, _) = create_root(&dir, "codex", "base", None).unwrap();
+        let (_left, _) =
+            fork_with_change(&dir, &base.id, "provenance-left", "Cargo.lock", "new locks");
+        let (_right, _) =
+            fork_with_change(&dir, &base.id, "provenance-right", "new.txt", "new source");
+        let attempt = prepare_merge_attempt(
+            &dir,
+            &["provenance-left".into(), "provenance-right".into()],
+            "codex",
+        )
+        .unwrap();
+        assert!(
+            attempt.conflicts.is_empty(),
+            "generated declarations must not compete: {:?}",
+            attempt.conflicts
+        );
+        let (merged, _, _) = continue_merge_attempt(&dir, &attempt.id, &[]).unwrap();
+        let repo = ensure_repo(&dir).unwrap();
+        let declaration = |id: &str| {
+            let tree = repo
+                .find_commit(id.parse().unwrap())
+                .unwrap()
+                .tree()
+                .unwrap();
+            let entry = tree
+                .get_path(Path::new(crate::fidelity::MANIFEST_PATH))
+                .unwrap();
+            serde_json::from_slice::<Value>(repo.find_blob(entry.id()).unwrap().content()).unwrap()
+        };
+        assert_eq!(
+            declaration(&base.id)["publication"]["operation"],
+            "snapshot"
+        );
+        let value = declaration(&merged.id);
+        assert_eq!(value["publication"]["operation"], "merge");
+        assert_eq!(
+            value["lockfiles"]["Cargo.lock"],
+            blake3::hash(b"new locks").to_hex().as_str()
+        );
+        // Retain the actual pre-publication-field native v1 shape used by
+        // v0.2.9, rather than testing compatibility only with new roots.
+        let base_tree = repo
+            .find_commit(base.id.parse().unwrap())
+            .unwrap()
+            .tree()
+            .unwrap();
+        let legacy = crate::fidelity::capture(&repo, &base_tree, &dir, None);
+        assert!(legacy.get("publication").is_none());
+        let mut legacy_index = git2::Index::new().unwrap();
+        legacy_index.read_tree(&base_tree).unwrap();
+        let mut entry = legacy_index
+            .get_path(Path::new(crate::fidelity::MANIFEST_PATH), 0)
+            .unwrap();
+        entry.id = repo.blob(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+        legacy_index.add(&entry).unwrap();
+        let legacy_tree = legacy_index.write_tree_to(&repo).unwrap();
+        let legacy_root = commit_root(
+            &repo,
+            legacy_tree,
+            &[base.id.parse().unwrap()],
+            "legacy v1 fixture",
+        )
+        .unwrap()
+        .to_string();
+        repo.reference(
+            &format!("{ROOTS_REF_PREFIX}{legacy_root}"),
+            legacy_root.parse().unwrap(),
+            false,
+            "retain legacy fixture",
+        )
+        .unwrap();
+        assert_eq!(declaration(&legacy_root), legacy);
+        let (restored, _) = revert_to_root(&dir, &legacy_root, "codex").unwrap();
+        let value = declaration(&restored.id);
+        assert_eq!(value["publication"]["operation"], "restore");
+        assert_eq!(value["publication"]["historical_root"], legacy_root);
+        assert_eq!(
+            value["lockfiles"]["Cargo.lock"],
+            blake3::hash(b"base locks").to_hex().as_str()
+        );
+        assert_eq!(value["execution_reproduction"], "not guaranteed");
+        assert_eq!(
+            declaration(&legacy_root),
+            legacy,
+            "historical declaration remains immutable"
+        );
+    }
+
+    #[test]
+    fn receiver_routing_keeps_exact_binding_history_and_acknowledgement_identity() {
+        let (_tmp, dir) = project();
+        write(&dir, "source.txt", "base");
+        let plan = crate::plans::record(&dir, "Routing", "codex", None, "# Routing\n").unwrap();
+        crate::plans::transition(&dir, &plan.id, crate::plans::PlanStatus::Approved).unwrap();
+        let (historical, _) = create_root(&dir, "codex", "before routing", None).unwrap();
+        let legacy = json!({"schema_version":"stateroot.plan-binding.v1","harness":"codex","session_id":"shared-session","plan_id":plan.id,"bound_at":"2026-01-01T00:00:00Z","source":"legacy"}).to_string().into_bytes();
+        write(
+            &dir,
+            ".stateroot/plan-bindings/codex/shared-session.json",
+            std::str::from_utf8(&legacy).unwrap(),
+        );
+        crate::todo_federation::record_binding(
+            &dir,
+            "codex",
+            "shared-session",
+            &plan.id,
+            "receiver",
+        )
+        .unwrap();
+        write(
+            &dir,
+            INGEST_GOV_PATH,
+            "{\"last_input_sha256\":\"receiver\"}",
+        );
+        let routing =
+            std::fs::read(dir.join(".stateroot/plan-bindings/codex/shared-session.json")).unwrap();
+        let (base, _) = create_root(&dir, "codex", "receiver routing", None).unwrap();
+        let mut checkouts = Vec::new();
+        let mut binding_versions = vec![routing.clone(), legacy];
+        let acknowledgement = |name: &str, capture: &str| {
+            json!({"schema":"stateroot.observations.ack.v1","ingest_key":name,"harness":"codex","session_id":name,"watermark":{"segment":format!("codex__{name}.jsonl"),"records":1,"last_capture_id":capture}}).to_string()
+        };
+        for name in ["ownership-left", "ownership-right"] {
+            let (checkout, _) =
+                fork_with_change(&dir, &base.id, name, &format!("{name}.txt"), name);
+            let child = checkout.path().join("checkout");
+            assert_eq!(
+                crate::todo_federation::bound_plan_id(&child, "codex", "shared-session"),
+                None,
+                "inherited receiver binding must not activate in child"
+            );
+            crate::todo_federation::record_binding(
+                &child,
+                "codex",
+                "shared-session",
+                &plan.id,
+                name,
+            )
+            .unwrap();
+            let context_path = child.join(".stateroot/local/fork-context.json");
+            let context = std::fs::read(&context_path).unwrap();
+            for corrupt in [Some(b"{}".as_slice()), None] {
+                match corrupt {
+                    Some(bytes) => std::fs::write(&context_path, bytes).unwrap(),
+                    None => std::fs::remove_file(&context_path).unwrap(),
+                }
+                assert_eq!(
+                    crate::todo_federation::bound_plan_id(&child, "codex", "shared-session"),
+                    None
+                );
+                assert!(crate::todo_federation::record_binding(
+                    &child,
+                    "codex",
+                    "shared-session",
+                    &plan.id,
+                    "unavailable"
+                )
+                .is_err());
+            }
+            std::fs::write(&context_path, context).unwrap();
+            binding_versions.push(
+                std::fs::read(child.join(".stateroot/plan-bindings/codex/shared-session.json"))
+                    .unwrap(),
+            );
+            write(
+                &child,
+                INGEST_GOV_PATH,
+                &format!("{{\"last_input_sha256\":\"{name}\"}}"),
+            );
+            write(
+                &child,
+                SPOOL_CURRENT_PATH,
+                &format!("{{\"fork_projection\":\"{name}\"}}"),
+            );
+            write(
+                &child,
+                &format!(".stateroot/spool/acknowledgements/{name}.json"),
+                &acknowledgement(name, name),
+            );
+            create_root(&child, "codex", "owned records", None).unwrap();
+            checkouts.push(checkout);
+        }
+        let attempt = prepare_merge_attempt(
+            &dir,
+            &["ownership-left".into(), "ownership-right".into()],
+            "codex",
+        )
+        .unwrap();
+        assert!(
+            attempt.conflicts.is_empty(),
+            "owned records need no UUID selections: {:?}",
+            attempt.conflicts
+        );
+        let (merged, _, _) = continue_merge_attempt(&dir, &attempt.id, &[]).unwrap();
+        assert_eq!(
+            std::fs::read(dir.join(".stateroot/plan-bindings/codex/shared-session.json")).unwrap(),
+            routing
+        );
+        assert!(
+            !dir.join(SPOOL_CURRENT_PATH).exists(),
+            "receiver absence is owned too"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join(INGEST_GOV_PATH)).unwrap(),
+            "{\"last_input_sha256\":\"receiver\"}"
+        );
+        for bytes in binding_versions {
+            assert_eq!(
+                std::fs::read(dir.join(crate::todo_federation::binding_history_path(&bytes)))
+                    .unwrap(),
+                bytes
+            );
+        }
+        for name in ["ownership-left", "ownership-right"] {
+            assert_eq!(
+                std::fs::read_to_string(
+                    dir.join(format!(".stateroot/spool/acknowledgements/{name}.json"))
+                )
+                .unwrap(),
+                acknowledgement(name, name)
+            );
+        }
+        let (bad, _) = fork_with_change(
+            &dir,
+            &merged.id,
+            "changed-identity",
+            "changed-product.txt",
+            "new work",
+        );
+        let bad_dir = bad.path().join("checkout");
+        write(
+            &bad_dir,
+            ".stateroot/spool/acknowledgements/ownership-left.json",
+            &acknowledgement("ownership-left", "different frontier"),
+        );
+        create_root(&bad_dir, "codex", "different immutable body", None).unwrap();
+        let conflict = prepare_merge_attempt(&dir, &["changed-identity".into()], "codex").unwrap();
+        assert!(conflict
+            .conflicts
+            .iter()
+            .any(|entry| entry.path == ".stateroot/spool/acknowledgements/ownership-left.json"));
+        abort_merge_attempt(&dir, &conflict.id).unwrap();
+        drop(bad);
+        revert_to_root(&dir, &historical.id, "codex").unwrap();
+        assert_eq!(
+            crate::todo_federation::bound_plan_id(&dir, "codex", "shared-session"),
+            Some(plan.id)
+        );
+        assert_eq!(
+            std::fs::read(dir.join(".stateroot/plan-bindings/codex/shared-session.json")).unwrap(),
+            routing
         );
     }
 

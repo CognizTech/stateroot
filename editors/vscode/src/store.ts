@@ -44,6 +44,8 @@ export interface PlanMeta {
 
 export interface DelegationRecord {
   id: string;
+  /** Store locator only; never passed to worker commands. */
+  file?: string;
   harness: string;
   task: string;
   status?: string;
@@ -154,10 +156,6 @@ export function listTodoRecords(root: string): TodoRecord[] {
 }
 
 /** Newest session record per harness — same view as `stateroot todo list`. */
-export function currentTodoLists(root: string): TodoRecord[] {
-  return currentTodoListsFrom(listTodoRecords(root));
-}
-
 export function currentTodoListsFrom(records: TodoRecord[]): TodoRecord[] {
   const seen = new Set<string>();
   const current: TodoRecord[] = [];
@@ -191,14 +189,6 @@ export function currentTodoListsFrom(records: TodoRecord[]): TodoRecord[] {
 
 function todoHasText(record: TodoRecord): boolean {
   return (record.items || []).some((item) => (item.content || item.key || "").trim().length > 0);
-}
-
-export function todoLabel(item: TodoItem): string {
-  return (item.content || item.key || "").trim();
-}
-
-export function planBoundTodos(root: string, planId: string): TodoRecord | undefined {
-  return planBoundIndex(listTodoRecords(root)).get(planId);
 }
 
 export function planBoundIndex(records: TodoRecord[]): Map<string, TodoRecord> {
@@ -285,7 +275,7 @@ export function listDelegations(root: string): DelegationRecord[] {
   for (const name of names) {
     const rec = readJson<DelegationRecord>(path.join(dir, name));
     if (rec?.id) {
-      rows.push(rec);
+      rows.push({ ...rec, file: name });
     }
   }
   rows.sort((a, b) => (b.ts || b.id).localeCompare(a.ts || a.id));
@@ -423,7 +413,8 @@ export function memoryFilePath(root: string): string {
 }
 
 export function wikiPagePath(root: string, rel: string): string {
-  return path.join(root, STORE, "memories", "pages", ...rel.split("/"));
+  const modern = path.join(root, STORE, "wiki", "pages", ...rel.split("/"));
+  return fs.existsSync(modern) ? modern : path.join(root, STORE, "memories", "pages", ...rel.split("/"));
 }
 
 export function listLearnings(root: string): LearningRecord[] {

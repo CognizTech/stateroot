@@ -18,3 +18,5 @@ editors/vscode/LICENSE
 
 # Local VSIX release staging (packaging/extension/package-release.sh)
 dist/
+
+humanplans/

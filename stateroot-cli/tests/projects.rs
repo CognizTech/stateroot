@@ -1,19 +1,18 @@
 //! `stateroot projects` — the global registry window: listing, JSON shape,
 //! missing-dir honesty, and --prune.
 
+// Each test binary includes this module but uses a subset of its helpers.
+#[path = "support/mod.rs"]
+mod support;
+
 use std::path::Path;
 
 use assert_cmd::Command;
 
+/// Registry-window commands need a config home and a cwd; the user home is
+/// hermetic too (a disposable child of the config home).
 fn stateroot(config_home: &Path, cwd: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("stateroot").expect("binary");
-    cmd.env("STATEROOT_HOME", config_home)
-        .env("STATEROOT_TEST_CMD_PROBES", "")
-        .env_remove("DEEPSEEK_API_KEY")
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_BASE")
-        .current_dir(cwd);
-    cmd
+    support::stateroot(config_home, &config_home.join("test-home"), cwd)
 }
 
 #[test]

@@ -7,6 +7,9 @@
 //! the updater — the background path swallows every failure into debug
 //! logs and always keeps the old binary. The updater NEVER runs on `hook`
 //! or `mcp-stdio` paths (enforced in main's dispatch whitelist, tested).
+//! Automatic routes (awaited AND detached) NEVER run under the test-harness
+//! marker, and NEVER touch a cargo build artifact: the shared eligibility
+//! check refuses before any release lookup, download, or worker spawn.
 
 use std::path::{Path, PathBuf};
 
@@ -31,10 +34,12 @@ fn cache_path(ctx: &Ctx) -> PathBuf {
 }
 
 /// True inside the test harness: every suite's spawned commands carry the
-/// STATEROOT_TEST_CMD_PROBES marker (empty or not). Update machinery must
-/// never run there — a background self-replace swaps `target/debug/stateroot`
-/// while sibling suites are mid-run, corrupting every later assertion.
-/// (The update suite unsets the marker deliberately to test this machinery.)
+/// STATEROOT_TEST_CMD_PROBES marker (empty or not). Automatic update
+/// machinery must never run there — a background self-replace swaps
+/// `target/debug/stateroot` while sibling suites are mid-run, corrupting
+/// every later assertion, and an awaited release lookup would turn every
+/// fixture command into a live network call. (The update suite unsets the
+/// marker deliberately to test this machinery.)
 fn in_test_harness() -> bool {
     std::env::var_os("STATEROOT_TEST_CMD_PROBES").is_some()
 }
@@ -55,6 +60,11 @@ pub fn maybe_spawn_scheduled_update(config_dir: &Path, interval_hours: i64) {
         return;
     }
     if let Ok(worker) = std::env::current_exe() {
+        // A cargo build artifact can never be self-replaced — don't spawn a
+        // worker just to have it look up a release and refuse.
+        if self_replace_refusal(&worker).is_some() {
+            return;
+        }
         spawn_scheduled_update(config_dir, interval_hours, &worker);
     }
 }
@@ -702,8 +712,10 @@ pub async fn download_verified_asset(
 }
 
 /// Download the asset + checksums.txt, verify the sha256, and self-replace.
-/// On ANY failure the old binary stays in place (the self-replace rolls
-/// back internally; download failures never touch the install).
+/// An ineligible executable (cargo build artifact) is refused BEFORE any
+/// request or temp file. On ANY failure the old binary stays in place (the
+/// self-replace rolls back internally; download failures never touch the
+/// install).
 pub async fn download_and_install(ctx: &Ctx, info: &ReleaseInfo) -> anyhow::Result<PathBuf> {
     download_and_install_quiet(ctx, info, false).await
 }
@@ -728,6 +740,18 @@ fn is_cargo_build_artifact(exe: &Path) -> bool {
         })
 }
 
+/// The single executable-installation admission check, shared by every
+/// update route: a cargo build artifact is a development surface, never an
+/// update target. Returns the actionable refusal message when ineligible.
+fn self_replace_refusal(exe: &Path) -> Option<String> {
+    is_cargo_build_artifact(exe).then(|| {
+        format!(
+            "refusing to self-replace a cargo build artifact ({}) — install it first",
+            exe.display()
+        )
+    })
+}
+
 /// [`download_and_install`] with a quiet switch for the background path
 /// (no install output, failures only traced).
 pub async fn download_and_install_quiet(
@@ -735,21 +759,18 @@ pub async fn download_and_install_quiet(
     info: &ReleaseInfo,
     quiet: bool,
 ) -> anyhow::Result<PathBuf> {
-    let tmp = download_verified(ctx, &info.asset_url, &info.checksums_url).await?;
     let current_exe = std::env::current_exe().context("resolving current exe")?;
-    if is_cargo_build_artifact(&current_exe) {
-        let message = format!(
-            "refusing to self-replace a cargo build artifact ({}) — install it first",
-            current_exe.display()
-        );
+    // Admission precedes the network: a forbidden installation is refused
+    // before any asset/checksum request or download temp file.
+    if let Some(message) = self_replace_refusal(&current_exe) {
         if quiet {
             tracing::warn!("{message}");
         } else {
             note_update(&message);
         }
-        let _ = std::fs::remove_file(&tmp);
         return Ok(current_exe);
     }
+    let tmp = download_verified(ctx, &info.asset_url, &info.checksums_url).await?;
     let outcome = self_replace(&ctx.config_dir, &current_exe, &tmp, &info.tag)?;
     let _ = std::fs::remove_file(&tmp);
     let detail = match &outcome.old_version {
@@ -869,15 +890,27 @@ pub async fn selected_channel_release(ctx: &Ctx, force: bool) -> Option<ReleaseI
 }
 
 /// Background entry point (post-dispatch, whitelisted commands only):
-/// silent on every failure; never blocks past short timeouts.
+/// silent on every failure; never blocks past short timeouts. Never runs
+/// under the test-harness marker, and never from a cargo build artifact
+/// (both return before any release lookup).
 ///
 /// Channel-strict by law: a dev/nightly build tracks ONLY the rolling
 /// preview — a newer production base release must never be installed over
 /// it silently (a local/nightly install of the next version's work was
 /// reverted to the current prod release on the first `init` of the day).
 pub async fn maybe_auto_update(ctx: &Ctx) {
-    if disabled(ctx) {
+    // The test-harness marker suppresses every automatic route — the awaited
+    // one included; dedicated updater tests release it explicitly.
+    if disabled(ctx) || in_test_harness() {
         return;
+    }
+    // Automatic maintenance never touches a cargo build artifact — return
+    // before any release lookup. Explicit `self-update` keeps its own path:
+    // it still inspects metadata on demand.
+    if let Ok(exe) = std::env::current_exe() {
+        if self_replace_refusal(&exe).is_some() {
+            return;
+        }
     }
     if current_is_dev() {
         let Some(info) = check_nightly(ctx, false).await else {
@@ -1718,6 +1751,46 @@ mod tests {
         .await
         .expect("verified download");
         assert_eq!(std::fs::read(&path).expect("tmp"), asset_bytes);
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn cargo_artifact_refusal_precedes_any_download() {
+        // The install-eligibility gate fires before the network: no asset or
+        // checksum request is made and no download temp file is created.
+        let (_env, _home) = clean_token_env();
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().expect("tmp");
+        let ctx = test_ctx(dir.path());
+        let exe = std::env::current_exe().expect("current exe");
+        assert!(
+            is_cargo_build_artifact(&exe),
+            "the unit-test binary is itself a cargo build artifact"
+        );
+        let info = ReleaseInfo {
+            tag: "v9.9.9".into(),
+            name: String::new(),
+            asset_url: format!("{}/asset", server.uri()),
+            checksums_url: format!("{}/checksums.txt", server.uri()),
+            extension_manifest_url: None,
+            extension_vsix_url: None,
+            extension_vsix_name: None,
+        };
+        let installed = download_and_install_quiet(&ctx, &info, true)
+            .await
+            .expect("the refusal is a documented Ok result, not an error");
+        assert_eq!(installed, exe);
+        assert!(
+            !dir.path()
+                .join(format!("update-download-{}", std::process::id()))
+                .exists(),
+            "no download temp file created"
+        );
         server.verify().await;
     }
 

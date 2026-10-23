@@ -2,37 +2,21 @@
 //! transfer, over hermetic homes and fixture session stores (pi via
 //! `PI_CODING_AGENT_DIR`, dsh via `DSH_HOME`; zero real harness data).
 
+// Each test binary includes this module but uses a subset of its helpers.
+#[path = "support/mod.rs"]
+mod support;
+
 use std::path::Path;
 
 use assert_cmd::Command;
+use support::{homes, init_project};
 
+/// The shared contract plus the delegation-depth guard: a spawned test
+/// command must never inherit an ambient nesting depth.
 fn stateroot(config_home: &Path, user_home: &Path, cwd: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("stateroot").expect("binary");
-    cmd.env("STATEROOT_HOME", config_home)
-        .env("STATEROOT_TEST_HOME", user_home)
-        .env("STATEROOT_TEST_CMD_PROBES", "")
-        .env_remove("DEEPSEEK_API_KEY")
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_BASE")
-        .env_remove("STATEROOT_DELEGATION_DEPTH")
-        .current_dir(cwd);
+    let mut cmd = support::stateroot(config_home, user_home, cwd);
+    cmd.env_remove("STATEROOT_DELEGATION_DEPTH");
     cmd
-}
-
-fn homes() -> (tempfile::TempDir, tempfile::TempDir) {
-    let config_home = tempfile::tempdir().expect("config home");
-    std::fs::create_dir_all(config_home.path()).expect("config home");
-    let user_home = tempfile::tempdir().expect("user home");
-    (config_home, user_home)
-}
-
-fn init_project(config_home: &Path, user_home: &Path, project: &Path) {
-    std::fs::create_dir_all(project).expect("project dir");
-    stateroot(config_home, user_home, project)
-        .arg("init")
-        .assert()
-        .success();
 }
 
 fn write_lines(path: &Path, lines: &[String]) {

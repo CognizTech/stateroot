@@ -24,14 +24,12 @@ const CRON_MARKER: &str = "# stateroot-selfupdate";
 const DAY_SECS: u64 = 86_400;
 
 /// `stateroot install` hook point: register the daily schedule, best-effort.
-pub fn ensure_registered(ctx: &Ctx) {
+/// The caller owns reporting so machine-mode stdout stays a JSON document.
+pub fn ensure_registered(ctx: &Ctx) -> Option<Result<String>> {
     if skip(ctx) {
-        return;
+        return None;
     }
-    match register(ctx) {
-        Ok(detail) => println!("  auto-update schedule: {detail}"),
-        Err(err) => super::note!("warning: could not register the auto-update schedule ({err:#})"),
-    }
+    Some(register(ctx))
 }
 
 /// `stateroot self-update --schedule <install|remove|status>`.

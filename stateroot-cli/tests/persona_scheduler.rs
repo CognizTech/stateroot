@@ -2,17 +2,20 @@
 //! FULL on boundaries/change, COMPRESSED on the 8th, dedupe window,
 //! per-harness start detection, state in the user-global local dir.
 
+// Each test binary includes this module but uses a subset of its helpers.
+#[path = "support/mod.rs"]
+mod support;
+
 use std::path::Path;
 
 use assert_cmd::Command;
+use support::init_project;
 
+/// The shared contract plus a released hook clock: tests drive
+/// `STATEROOT_HOOK_NOW` per call, never from an ambient environment.
 fn stateroot(config_home: &Path, user_home: &Path, cwd: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("stateroot").expect("binary");
-    cmd.env("STATEROOT_HOME", config_home)
-        .env("STATEROOT_TEST_HOME", user_home)
-        .env("STATEROOT_TEST_CMD_PROBES", "")
-        .env_remove("STATEROOT_HOOK_NOW")
-        .current_dir(cwd);
+    let mut cmd = support::stateroot(config_home, user_home, cwd);
+    cmd.env_remove("STATEROOT_HOOK_NOW");
     cmd
 }
 
@@ -27,14 +30,6 @@ fn seed_identity(user_home: &Path) {
     let user_dir = user_home.join(".stateroot/user");
     std::fs::create_dir_all(&user_dir).expect("user dir");
     std::fs::write(user_dir.join("USER.md"), "# User\n\nName: Lin\n").expect("user");
-}
-
-fn init_project(config_home: &Path, user_home: &Path, project: &Path) {
-    std::fs::create_dir_all(project).expect("project dir");
-    stateroot(config_home, user_home, project)
-        .arg("init")
-        .assert()
-        .success();
 }
 
 fn hook_event(
@@ -290,31 +285,4 @@ fn kimi_compact_arms_full_on_next_prompt() {
         out.contains(MARKER),
         "post-compaction prompt re-injects FULL: {out}"
     );
-}
-
-#[test]
-fn no_state_first_call_is_full_and_dedupe_blocks_immediate_repeat() {
-    let config_home = tempfile::tempdir().expect("config home");
-    let user_home = tempfile::tempdir().expect("user home");
-    let project = tempfile::tempdir().expect("project");
-    seed_identity(user_home.path());
-    init_project(config_home.path(), user_home.path(), project.path());
-
-    let out = hook_prompt(
-        config_home.path(),
-        user_home.path(),
-        project.path(),
-        "s1",
-        100,
-    );
-    assert!(out.contains(MARKER), "no-state first call → FULL: {out}");
-    // Immediate repeat (same minute, prompt 2): dedupe → silent.
-    let out = hook_prompt(
-        config_home.path(),
-        user_home.path(),
-        project.path(),
-        "s1",
-        110,
-    );
-    assert!(out.trim().is_empty(), "immediate repeat deduped: {out}");
 }

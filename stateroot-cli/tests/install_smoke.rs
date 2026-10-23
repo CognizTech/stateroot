@@ -4,22 +4,14 @@
 //! artifact identity (hook commands reference the tested binary) and the
 //! typed `install --json` / `doctor --json` contracts.
 
+// Each test binary includes this module but uses a subset of its helpers.
+#[path = "support/mod.rs"]
+mod support;
+
 use std::path::Path;
 
+use support::stateroot;
 use tempfile::TempDir;
-
-fn stateroot(config_home: &Path, user_home: &Path, cwd: &Path) -> assert_cmd::Command {
-    let mut cmd = assert_cmd::Command::cargo_bin("stateroot").expect("binary");
-    cmd.env("STATEROOT_HOME", config_home)
-        .env("STATEROOT_TEST_HOME", user_home)
-        .env("STATEROOT_TEST_CMD_PROBES", "")
-        .env_remove("DEEPSEEK_API_KEY")
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_BASE")
-        .current_dir(cwd);
-    cmd
-}
 
 fn homes() -> (TempDir, TempDir, TempDir) {
     (

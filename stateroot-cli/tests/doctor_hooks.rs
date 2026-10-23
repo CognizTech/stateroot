@@ -2,25 +2,16 @@
 //! shape: hooks.json points at a bare `stateroot` that resolves to a stale
 //! binary on PATH; doctor must name the version (fail-open hooks never do).
 
+// Each test binary includes this module but uses a subset of its helpers.
+#[cfg(unix)]
+#[path = "support/mod.rs"]
+mod support;
+
 #[cfg(unix)]
 use std::path::Path;
 
-#[cfg(unix)]
-use assert_cmd::Command;
-
 #[cfg(unix)] // only the unix-gated exec-stub tests invoke the binary
-fn stateroot(config_home: &Path, user_home: &Path, cwd: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("stateroot").expect("binary");
-    cmd.env("STATEROOT_HOME", config_home)
-        .env("STATEROOT_TEST_HOME", user_home)
-        .env("STATEROOT_TEST_CMD_PROBES", "")
-        .env_remove("DEEPSEEK_API_KEY")
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_BASE")
-        .current_dir(cwd);
-    cmd
-}
+use support::stateroot;
 
 /// Temp `bin/` with an executable bare `stateroot` stub printing the given
 /// version on `--version`; returns (dir, PATH) with the dir prepended.

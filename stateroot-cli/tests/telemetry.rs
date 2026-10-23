@@ -8,23 +8,20 @@
 //! invoked directly (`_drain-telemetry`) because detached spawns are
 //! suppressed under `STATEROOT_TEST_CMD_PROBES`.
 
+// Each test binary includes this module but uses a subset of its helpers.
+#[path = "support/mod.rs"]
+mod support;
+
 use std::path::Path;
 
 use assert_cmd::Command;
 
+/// The shared contract plus telemetry forcing: dev builds emit nothing by
+/// default, and the ambient ping opt-out must not leak into the suite.
 fn stateroot(config_home: &Path, user_home: &Path, cwd: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("stateroot").expect("binary");
-    cmd.env("STATEROOT_HOME", config_home)
-        .env("STATEROOT_TEST_HOME", user_home)
-        .env("STATEROOT_TEST_CMD_PROBES", "")
-        .env("STATEROOT_TELEMETRY_FORCE", "1")
-        .env("STATEROOT_NO_AUTO_UPDATE", "1")
-        .env_remove("STATEROOT_NO_PING")
-        .env_remove("DEEPSEEK_API_KEY")
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_BASE")
-        .current_dir(cwd);
+    let mut cmd = support::stateroot(config_home, user_home, cwd);
+    cmd.env("STATEROOT_TELEMETRY_FORCE", "1")
+        .env_remove("STATEROOT_NO_PING");
     cmd
 }
 

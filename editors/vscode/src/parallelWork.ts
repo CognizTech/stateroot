@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { cliPath, runCli } from "./cli";
-import type { DelegationRecord } from "./store";
+import { liveStatus, type DelegationRecord } from "./store";
 
 export interface LineageRoot {
   id: string;
@@ -40,6 +40,7 @@ export type ParallelWorkPhase =
   | "running"
   | "cancelling"
   | "capturing"
+  | "unknown"
   | "attention"
   | "ready"
   | "merged"
@@ -64,23 +65,28 @@ export function deriveParallelWork(
   return lineage.forks.map((fork) => {
     const attempts = delegations.filter((row) => row.fork_id === fork.name);
     const latest = attempts[0];
+    const status = latest ? liveStatus(latest) : undefined;
     const outcomeRoot = attempts.find((row) => row.outcome_root)?.outcome_root;
     const captureError = attempts.some((row) => row.events?.some((event) => event.event === "capture-error"));
     const phase: ParallelWorkPhase = fork.cleanup?.state === "pending"
       ? "cleanup_pending"
       : fork.contained
         ? "merged"
-        : latest?.status === "cancelling"
+        : status === "cancelling"
           ? "cancelling"
-          : latest?.status === "running"
+          : status === "running"
             ? "running"
-            : captureError || (["failed", "lost", "timed_out"].includes(latest?.status || "") && !outcomeRoot)
-              ? "attention"
-              : outcomeRoot
-                ? "ready"
-                : latest?.outcome
-                  ? "capturing"
-                  : "provisioning";
+            // Explicitly unverified current work must not inherit readiness
+            // from an older capture. Legacy root-only rows remain usable.
+            : status === "unknown" && latest?.status !== undefined
+              ? "unknown"
+              : captureError || (["failed", "lost", "timed_out"].includes(status || "") && !outcomeRoot)
+                ? "attention"
+                : outcomeRoot
+                  ? "ready"
+                  : latest?.outcome
+                    ? "capturing"
+                    : "provisioning";
     const cleanupCommand =
       phase === "cleanup_pending" ? `stateroot merge --cleanup ${fork.name}` : undefined;
     return { fork, attempts, phase, outcomeRoot, cleanupCommand };

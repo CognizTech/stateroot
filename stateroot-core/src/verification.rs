@@ -32,6 +32,32 @@ fn directory(project: &Path) -> PathBuf {
     local_store::root(project).join("plans/verification")
 }
 
+/// Candidate output is already in its owner's local lane, so publishing or
+/// removing the candidate never discards the command's raw evidence.
+pub fn output_directory(project: &Path) -> Result<PathBuf, String> {
+    let owner = roots::repository_owner(project).map_err(|error| error.to_string())?;
+    Ok(local_store::root(&owner).join("local/verification"))
+}
+
+fn retain_product_tree(project: &Path, record: &CommandObservation) -> Result<(), String> {
+    let repo = roots::ensure_repo(project).map_err(|error| error.to_string())?;
+    let tree = record
+        .product_tree
+        .parse()
+        .map_err(|error: git2::Error| error.to_string())?;
+    repo.find_tree(tree).map_err(|error| error.to_string())?;
+    // Tree refs retain all source objects through GC even when the same
+    // source-only top-level tree never appears in a rich root snapshot.
+    repo.reference(
+        &format!("refs/stateroot/verification/{}", record.id),
+        tree,
+        false,
+        "retain command observation source",
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 fn valid_id(id: &str) -> bool {
     id.strip_prefix("v_")
         .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
@@ -109,6 +135,7 @@ pub fn start(
         output_digests: Vec::new(),
         error: None,
     };
+    retain_product_tree(project, &record)?;
     save(project, &record, "started")?;
     Ok(record)
 }

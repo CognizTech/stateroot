@@ -376,10 +376,17 @@ async fn synthesize_handoff(
             "context_summary truncated to {summary_max} characters"
         ));
     }
+    let seq = match stateroot_core::handoff_continuity::reserve_sequence(&ctx.cwd) {
+        Ok(seq) => seq,
+        Err(error) => {
+            note!("warning: could not number the imported handoff: {error}");
+            return;
+        }
+    };
     let mut packet = json!({
         "schema_version": SCHEMA_HANDOFF_V1,
         "project_id": project_id,
-        "seq": 1,
+        "seq": seq,
         "task": task,
         "current_phase": "",
         "last_harness": from,

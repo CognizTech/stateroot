@@ -251,7 +251,12 @@ pub async fn install(ctx: &Ctx, json_out: bool) -> Result<()> {
     // OS-level daily self-update schedule (Task Scheduler / cron / launchd)
     // — the passive install base never runs an eligible command, so this is
     // what keeps it current. Best-effort; honors every updater opt-out.
-    super::update_schedule::ensure_registered(ctx);
+    if let Some(result) = super::update_schedule::ensure_registered(ctx) {
+        match result {
+            Ok(detail) => line!("  auto-update schedule: {detail}"),
+            Err(err) => note!("warning: could not register the auto-update schedule ({err:#})"),
+        }
+    }
 
     // The per-user continuity service keeps every registered project
     // reconciled between harness sessions. Best-effort: hooks/CLI
@@ -259,7 +264,7 @@ pub async fn install(ctx: &Ctx, json_out: bool) -> Result<()> {
     // the machine channel (`--json`).
     super::service::ensure_installed(ctx, json_out);
 
-    super::editor_extensions::reconcile_after_install(ctx).await;
+    super::editor_extensions::reconcile_after_install(ctx, json_out).await;
 
     // Record for `init`'s one-time global install + `uninstall`.
     let mut config = ctx.config.clone();

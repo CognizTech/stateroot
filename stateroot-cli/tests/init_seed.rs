@@ -2,29 +2,13 @@
 //! behind `--synthesize` (wiremock for the API path, a PATH fixture script
 //! for the harness-CLI path; zero real network).
 
+// Each test binary includes this module but uses a subset of its helpers.
+#[path = "support/mod.rs"]
+mod support;
+
 use std::path::Path;
 
-use assert_cmd::Command;
-
-fn stateroot(config_home: &Path, user_home: &Path, cwd: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("stateroot").expect("binary");
-    cmd.env("STATEROOT_HOME", config_home)
-        .env("STATEROOT_TEST_HOME", user_home)
-        .env("STATEROOT_TEST_CMD_PROBES", "")
-        .env_remove("DEEPSEEK_API_KEY")
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_BASE")
-        .current_dir(cwd);
-    cmd
-}
-
-fn homes() -> (tempfile::TempDir, tempfile::TempDir) {
-    let config_home = tempfile::tempdir().expect("config home");
-    std::fs::create_dir_all(config_home.path()).expect("config home");
-    let user_home = tempfile::tempdir().expect("user home");
-    (config_home, user_home)
-}
+use support::{homes, stateroot};
 
 fn write(dir: &Path, rel: &str, body: &str) {
     let path = dir.join(rel);

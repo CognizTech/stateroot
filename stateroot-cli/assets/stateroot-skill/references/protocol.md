@@ -40,7 +40,28 @@ Handoff carries **session continuity**. **Root lineage** records verified projec
 4. Run `stateroot fork <root>` when work should diverge from an earlier root.
 5. Use `stateroot log`, `stateroot show`, `stateroot diff`, and `stateroot compare` to inspect lineage — do not invent history the CLI has not verified.
 
-To recall prior decisions or failures, use `stateroot memory recall "<query>"` (not a separate search command).
+## Scoped audit and evidence reuse
+
+Use this procedure for non-trivial changes, before proposing additions. Scale effort to task risk, the actual contract and uncertainty; reuse valid intelligence first and widen only as evidence warrants. Routine small edits need no new command ritual or full inventory.
+
+1. **Locate the responsibility.** Start with the digest and relevant retained findings, decisions and failures; recall missing context with `stateroot memory recall "<query>"`. Use root/working-tree differences, cheap broad searches and targeted reads of relevant callers, consumers and sibling implementations. Trace who owns the behavior, duplicate decisions, reuse opportunities and obsolete paths. Read actual producer output and consumer expectations, not only types or mocks. A product direction statement does not authorize invented UI or other features.
+2. **Repair the cause.** Prefer the existing owner or mechanism when it fits. Remove superseded paths and consolidate duplicate responsibility in the same scoped change. Preserve necessary compatibility and independent failure boundaries, recording why each exception remains. Similar code can serve different contracts; no deletion quota, blanket DRY rule, speculative refactor or compulsory generic abstraction.
+3. **Evolve coverage.** Update tests with the accepted contract. Consolidate duplicated setup and policy matrices; retire obsolete assertions. For a removed meaningful case, identify the retained check that covers it or explain why the contract no longer requires it. Preserve real process, wire, persistence, platform and interrupted-work checks wherever those boundaries matter. Passing mocks and test counts cannot establish integration. Run focused checks while iterating; broaden when changed dependencies or remaining uncertainty warrant it, including any required final combined gate. Do not reread the whole repository with an LLM or rerun every suite after each edit.
+4. **Retain and reuse evidence.** In existing checkpoints/handoffs, keep concise findings with source paths/locations and root or working-tree identity, relevant dependencies/configuration/tools, assumptions, accepted exceptions, and check commands/outcomes/limits. Keep full evidence and context available at their existing sources and retrieve details progressively through locators; this is retrieval, not data pruning, and preserves required full resume ingestion. Another harness starts from this record and the current delta rather than replaying all discovery. Reuse a finding only after checking its validity boundary: a changed caller, dependency/interface, configuration, tool or assumption can invalidate it even when the named file is unchanged. Recheck affected conclusions and checks, reusing the rest. Notes are context, not automatic verification authority; exact-source command observations retain the stricter semantics below.
+5. **Account for total cost.** Include token use, runtime and avoidable rework in the result. Use measured native usage/timing when available; otherwise label proxies (such as bytes, words, tool calls or scoped command timing) and unavailable data. Compare against the starting point and explain necessary net increases. Savings never justify hiding failures, omitting relevant context or silently skipping validation. Reasoning belongs in the native harness; local StateRoot only stores and executes deterministic continuity operations. Use existing records, not a new audit subsystem or local AI service.
+
+Examples of applying the procedure:
+
+- **Producer/parser mismatch:** a producer emits a shorter degraded-status row than its consumer expects. Trace the shifted fields through downstream views; exercise actual output through the consumer. Preserve degraded evidence and the shared status owner's semantics. Repair the boundary rather than invent a dashboard or duplicate status policy.
+- **Small dependency change:** the parser file is unchanged, but its producer's format changes. Invalidate the affected compatibility finding, inspect the delta and rerun that boundary check. Reuse unrelated findings whose assumptions still hold; prior exact-source verification does not cover the changed tree.
+
+## Verification and publication
+
+Run `stateroot plan verify <id> -- <project-check-command> [args...]` on the actual source to retain command evidence. The observation binds eligible source bytes and the plan body; its source-root pointer may predate unsnapped edits, so compare the observed product tree, not just the root pointer. Exit zero is command evidence, not semantic acceptance.
+
+For a reconciliation candidate, verify there using its owning repository, then restage the observation metadata and publish from the owner. Do not snapshot the candidate or create a private repository. Unchanged source may reuse evidence across metadata-only restaging; changed source needs new checks. Raw stdout/stderr stay in the owner's local verification lane after publication and candidate cleanup.
+
+When automating installation, parse the complete stdout of `stateroot install --json` as one document and inspect its `install` outcome. Human scheduling and editor-reconciliation messages belong to stderr. Malformed output is not success and must not be repaired by stripping arbitrary text or recording a Ready receipt.
 
 ## Handoff Packet Fields
 

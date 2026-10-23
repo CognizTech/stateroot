@@ -1,5 +1,8 @@
 //! Editor discovery / VSIX reconciliation (network mocked via wiremock).
 
+#[path = "support/mod.rs"]
+mod support;
+
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
@@ -14,17 +17,22 @@ const EXT_VER: &str = "0.2.19";
 const VSIX_NAME: &str = "stateroot-vscode-0.2.19.vsix";
 
 fn stateroot(config_home: &Path, user_home: &Path, cwd: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("stateroot").expect("binary");
-    cmd.env("STATEROOT_HOME", config_home)
-        .env("STATEROOT_TEST_HOME", user_home)
-        .env("STATEROOT_TEST_CMD_PROBES", "")
-        .env("STATEROOT_DISABLE_SCHEDULED_UPDATE", "1")
-        .env("STATEROOT_TEST_BUILD_VERSION", "0.2.2")
-        .env_remove("DEEPSEEK_API_KEY")
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_KEY")
-        .current_dir(cwd);
+    let mut cmd = support::stateroot(config_home, user_home, cwd);
+    // Pin the production channel so the mock release v0.2.2 reads as current.
+    cmd.env("STATEROOT_TEST_BUILD_VERSION", "0.2.2");
     cmd
+}
+
+/// The status-driven repair path flows through the automatic update gate,
+/// which refuses a cargo build artifact before any lookup (M4) — so these
+/// run from an installed copy (the accepted M4 fixture contract).
+fn installed_stateroot(
+    install_dir: &Path,
+    config_home: &Path,
+    user_home: &Path,
+    cwd: &Path,
+) -> Command {
+    support::installed_stateroot(install_dir, config_home, user_home, cwd)
 }
 
 fn seed_config(home: &Path) {
@@ -189,6 +197,50 @@ async fn mount_release(tag: &str, vsix: &[u8], manifest: &[u8], vsix_expect: u64
 
 fn wanted() -> String {
     ext_line(EXT_VER)
+}
+
+#[tokio::test]
+async fn install_keeps_editor_progress_off_the_json_channel_without_skipping_reconciliation() {
+    for json_out in [true, false] {
+        let manifest = manifest_body(&sha256_hex(VSIX_BYTES));
+        let mock = mount_release("v0.2.2", VSIX_BYTES, manifest.as_bytes(), 1).await;
+        let config = tempfile::tempdir().unwrap();
+        seed_config(config.path());
+        let user = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let code_dir = tempfile::tempdir().unwrap();
+        let code = write_stub(code_dir.path(), "code", None, Some(&wanted()), false);
+        let mut cmd = stateroot(config.path(), user.path(), cwd.path());
+        cmd.env("STATEROOT_GITHUB_API_BASE", mock.server.uri())
+            .env("STATEROOT_TEST_EDITOR_CODE", &code)
+            .arg("install");
+        if json_out {
+            cmd.arg("--json");
+        }
+        let out = cmd.assert().success();
+        let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+        let stderr = String::from_utf8_lossy(&out.get_output().stderr);
+        let progress = if json_out {
+            let doc: serde_json::Value = serde_json::from_str(&stdout)
+                .unwrap_or_else(|err| panic!("install --json: {err}; stdout: {stdout}"));
+            assert_eq!(doc["schema_version"], "stateroot.integration-health.v1");
+            assert_eq!(doc["install"]["failed"], json!([]));
+            &stderr
+        } else {
+            assert!(stdout.contains("Installed for:"), "human install: {stdout}");
+            &stdout
+        };
+        assert!(progress.contains("editor reconciliation:"), "{progress}");
+        assert!(progress.contains("(updated)"), "{progress}");
+        assert!(code_dir.path().join("installs.txt").is_file());
+        assert_eq!(
+            std::fs::read_to_string(code_dir.path().join("list.txt"))
+                .unwrap()
+                .trim(),
+            wanted()
+        );
+        mock.server.verify().await;
+    }
 }
 
 #[tokio::test]
@@ -503,9 +555,13 @@ async fn already_current_status_repairs_stale_editor() {
         Some(&wanted()),
         false,
     );
-    stateroot(config.path(), user.path(), project.path())
+    // An already-current INSTALLED cli repairs the stale editor on `status`
+    // (the automatic gate refuses a cargo artifact before the lookup — M4).
+    let install = tempfile::tempdir().unwrap();
+    installed_stateroot(install.path(), config.path(), user.path(), project.path())
         .env("STATEROOT_GITHUB_API_BASE", mock.server.uri())
         .env("STATEROOT_TEST_EDITOR_CODE", &code)
+        .env("STATEROOT_TEST_BUILD_VERSION", "0.2.2")
         .arg("status")
         .assert()
         .success();

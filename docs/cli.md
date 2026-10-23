@@ -15,7 +15,7 @@ into placeholder/empty slots (user content is never overwritten; re-running
   + first paragraph, next actions from `TODO.md` checkboxes / roadmap
   bullets, memory facts (top-level layout, observed docs, git origin remote,
   recent commits) into `memories/MEMORY.md` under `## Seed (observed at
-  init)`, and a seq-1 `handoffs/current.json` labeled `"provenance":
+  init)`, and a numbered `handoffs/current.json` labeled `"provenance":
   "observed"`. Empty repo → `nothing to seed` and no handoff.
 - **`--synthesize` (opt-in LLM enrichment)** — asks a backend for a richer
   seed. Auto backend order: local harness CLIs first (`claude`, `codex`,
@@ -90,6 +90,10 @@ stateroot delegate status <id>             # the record + a bounded log tail
   running-forever; `unknown` means the recorded pid belongs to a foreign or
   legacy process namespace this host cannot verify — only the worker's own
   final outcome is authoritative.
+  CLI and continuity use the same interpretation. Unknown status does not
+  establish worker failure, absence of an executor, or plan completion.
+  Malformed, unreadable and unsupported records remain intact and appear as
+  degraded entries rather than disappearing from the status view.
 - **Completions surface asynchronously** — the digest gains a
   `## Recent Delegations` section (last few with status + task), so a parent
   harness learns on its next session or prompt that labor finished.
@@ -188,6 +192,33 @@ then stage and check it again. `--stage <attempt> --keep-main <path>` retains
 one specifically reviewed live operational record that staging would
 otherwise overwrite (repeat the flag for additional exact paths). Publish
 only the gated candidate with `--continue <attempt>`.
+
+Run `plan verify` inside the reconciliation worktree to bind observations to
+the candidate's eligible source. The recorded attempt identifies its owning
+repository; verification uses that repository without creating a private
+`.git` directory or advancing the frozen trunk or fork tips. Run `--stage`
+and `--continue` from the owning project. Candidate snapshots, restoration,
+fork creation and merge mutations refuse; the owner publishes the result.
+Restage newly recorded verification metadata before publication. Metadata-only
+changes preserve the observed source identity; changed source requires new checks.
+
+A legacy candidate with its own `.git` directory is rejected with recovery
+guidance. Preserve that attempt and its evidence, prepare a new attempt from
+the owning project, and rerun verification in the new candidate.
+
+New snapshot, merge and restoration roots derive provenance for the resulting
+state; immutable parents retain their original declarations. Restoration
+records its historical source without claiming that the old environment was
+reproduced. Supported generated declarations need no manual conflict choice;
+unsupported declarations and genuine authored conflicts still refuse.
+
+Fork bindings remain retained as exact historical versions without replacing
+the receiver's live session routing. Receiving-checkout cursors and current
+projections retain their own state, including absence. Captured evidence,
+verification records and immutable acknowledgement frontiers remain retained;
+different bodies under one immutable identity require explicit reconciliation.
+New bindings carry checkout ownership; existing unqualified trunk bindings
+remain readable, and the binding API used by hooks is unchanged.
 
 `stateroot handoff write --worktree <path>` is PARENT-side routing: run from
 the trunk (or any other) checkout, it binds the handoff to a registered fork
@@ -424,6 +455,9 @@ jobs parked for manual attention, an unhealthy continuity service,
 registry projects missing from disk. Attention IDs are stable
 (`<kind>:<entity>`); nothing is derived from keyword classifiers or model
 calls. `stateroot status` renders the same projection (human or `--json`).
+`delegation_status_unknown` requests inspection from the original runtime;
+`delegation_record_degraded` identifies a preserved record that cannot be
+interpreted. Neither is evidence that the worker failed or completed its plan.
 
 ## Optional plan command observations and state compatibility
 
@@ -433,6 +467,12 @@ complete a plan or certify semantic acceptance. Bindings cover project
 identity, exact plan body and eligible before/after project bytes using current
 ignore declarations. Raw stdout/stderr remains under excluded
 `.stateroot/local/verification/`; shared records contain digests and outcomes.
+For a reconciliation candidate, that directory belongs to the owning project,
+and the command prints its actual location. Candidate publication and cleanup
+therefore preserve the local output. Verification source trees are retained in
+the owning repository so ordinary Git garbage collection preserves their objects.
+Source fingerprinting reads eligible project bytes without traversing the
+StateRoot store; full snapshots continue to capture the retained project state.
 Argument metadata is bounded; oversized metadata is rejected before execution.
 Snapshots and checkpoints never run verification commands automatically.
 
@@ -518,6 +558,14 @@ not evidence of real quota-exhaustion or native-harness recovery in the wild.
 
 ## `stateroot handoff` — write flags and accept gates
 
+New handoffs reserve a project-wide number across checkouts sharing the same
+Git common directory. The counter is machine-local, locked and atomically
+updated; failed publication may leave a harmless gap. Initial allocation (or
+recovery of a missing counter) starts above known checkout and retained fork
+history. Existing packets are never renumbered. All writers must run the
+updated CLI: older writers and disconnected clones can still produce duplicate
+numbers, so packet IDs remain the exact identity across those histories.
+
 `handoff list` shows each distinct packet's full body SHA256, with only the
 exact current packet pinned and marked. Identical copies from merged forks
 are collapsed in this read view; immutable history files are unchanged.
@@ -598,6 +646,12 @@ active plan, next actions, handoff fields) stays fully inline.
 
 ## The digest's freshness lines — Latest Activity & update notice
 
+Hook delivery is decided before rendering the full context. A deduplicated
+event does not build a discarded full digest; a delivered full injection
+builds it once. Session-boundary maintenance remains active even when the
+identity output is intentionally silent. Silence alone is not a reason to
+force another resume or disable maintenance.
+
 Two one-line sections keep every arriving harness oriented:
 
 - **Latest Activity** — the `## Latest Activity` section names the newest
@@ -625,6 +679,12 @@ agent is asked to act. One worker at a time (`update-in-progress` lock, one
 hour liveness); the child updates the binary and re-arms harness wiring as
 usual, logging to `update-scheduled.log`. The digest's update notice is the
 visible layer; this is the layer that acts.
+
+Automatic update routes skip Cargo build artifacts and the existing test-harness
+marker before release lookup or worker launch. An explicit `self-update --check`
+still inspects metadata; a forbidden development-binary installation refuses
+before downloading assets/checksums or creating a download temporary file.
+Normal installed-CLI automatic updating is unchanged.
 
 The swap itself is fail-closed and journaled. `self-update` fingerprints the
 running binary before anything in its directory is touched — a binary whose
@@ -658,7 +718,8 @@ are read with each format's real grammar (TOML is TOML-decoded, so escaped
 quoted `stateroot.exe` paths with spaces/Unicode resolve correctly).
 `stateroot install --json` prints the same integration document plus an
 `install` outcome (`configured` / `failed` / `cli_only`) — the actual
-result of the pass; human progress moves to stderr, and a partial install
+result of the pass; human progress (including daily update scheduling and
+VS Code/Cursor reconciliation) moves to stderr, and a partial install
 is explicit in the document rather than a prose summary. `stateroot init`
 closes with the one-line integration summary. The editor setup flow
 consumes `install --json`: a partial integration fails without a Ready

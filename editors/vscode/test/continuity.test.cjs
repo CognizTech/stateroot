@@ -3,7 +3,7 @@ const test = require("node:test");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const vm = require("node:vm");
+const { loadWorkbench } = require("./support/workbench.cjs");
 
 // out/store and out/sidebarProvider require "vscode" at load time (module
 // scope only, never dereferenced by the paths under test). Stub it like
@@ -21,7 +21,6 @@ const {
 } = require("../out/continuity");
 const { assembleInbox } = require("../out/inbox");
 const { readContinuity, readContinuityAdvisory } = require("../out/store");
-const { workbenchHtml } = require("../out/ui");
 const { SidebarProvider } = require("../out/sidebarProvider");
 Module._load = originalLoad;
 
@@ -261,49 +260,6 @@ test("the advisory shows only when its inputs_hash matches the projection", () =
   );
   assert.equal(readContinuityAdvisory(tempProject()), undefined, "missing advisory reads as absent");
 });
-
-/** Run the real workbench client script with a minimal DOM stub — same
- * harness as work-view.test.cjs. */
-function loadWorkbench() {
-  const html = workbenchHtml("testnonce");
-  const match = html.match(/<script nonce="testnonce">([\s\S]*?)<\/script>/);
-  assert.ok(match, "workbench HTML carries a nonce'd script");
-  const panel = {
-    innerHTML: "",
-    listeners: {},
-    scrollTop: 0,
-    scrollLeft: 0,
-    querySelector: () => null,
-    addEventListener(type, fn) {
-      this.listeners[type] = fn;
-    },
-  };
-  const posted = [];
-  let messageHandler;
-  const sandbox = {
-    acquireVsCodeApi: () => ({
-      postMessage: (msg) => posted.push(msg),
-      getState: () => ({}),
-      setState: () => {},
-    }),
-    window: {
-      addEventListener: (type, fn) => {
-        if (type === "message") messageHandler = fn;
-      },
-    },
-    document: {
-      querySelectorAll: () => [],
-      getElementById: (id) => (id === "panel" ? panel : null),
-    },
-  };
-  vm.runInNewContext(match[1], sandbox);
-  assert.equal(typeof messageHandler, "function");
-  const push = (data) => {
-    messageHandler({ data });
-    return panel.innerHTML;
-  };
-  return { panel, posted, push };
-}
 
 function controlState(extra) {
   const continuity = parseContinuityProjection(PROJECTION);

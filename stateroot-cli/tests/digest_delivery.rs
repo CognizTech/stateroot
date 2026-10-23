@@ -1,24 +1,21 @@
 //! Cross-harness identity delivery: first usable prompt gets the digest,
 //! missed session-start recovers on first prompt, and sessions stay independent.
 
+// Each test binary includes this module but uses a subset of its helpers.
+#[path = "support/mod.rs"]
+mod support;
+
 use std::path::Path;
 
 use assert_cmd::Command;
+use support::init_project;
 
 fn stateroot(config_home: &Path, user_home: &Path, cwd: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("stateroot").expect("binary");
-    cmd.env("STATEROOT_HOME", config_home)
-        .env("STATEROOT_TEST_HOME", user_home)
-        .env("STATEROOT_TEST_CMD_PROBES", "")
-        // Two sequential spawned commands can exceed the production 5s
-        // debounce on slow filesystems/CI; widen it so the suite measures
-        // the dedupe decision, not machine latency.
-        .env("STATEROOT_TEST_RETRY_DEBOUNCE_MS", "120000")
-        .env_remove("DEEPSEEK_API_KEY")
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_BASE")
-        .current_dir(cwd);
+    let mut cmd = support::stateroot(config_home, user_home, cwd);
+    // Two sequential spawned commands can exceed the production 5s
+    // debounce on slow filesystems/CI; widen it so the suite measures
+    // the dedupe decision, not machine latency.
+    cmd.env("STATEROOT_TEST_RETRY_DEBOUNCE_MS", "120000");
     cmd
 }
 
@@ -35,14 +32,6 @@ fn seed_marid(config_home: &Path, user_home: &Path) {
         "Human: Lin. Prefers short answers unless asked for depth.\n",
     )
     .expect("USER.md");
-}
-
-fn init_project(config_home: &Path, user_home: &Path, project: &Path) {
-    std::fs::create_dir_all(project).expect("project dir");
-    stateroot(config_home, user_home, project)
-        .arg("init")
-        .assert()
-        .success();
 }
 
 fn stdout_of(cmd: &assert_cmd::assert::Assert) -> String {

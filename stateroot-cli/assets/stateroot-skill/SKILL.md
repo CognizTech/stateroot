@@ -58,6 +58,8 @@ At the start of every session in a stateroot project, before doing any work:
 5. do not run resume again in the same session unless the user explicitly asks (`--force` reprints)
 6. do not re-derive project state by scanning the tree when resume already answers the question
 
+A silent repeat hook can be intentional delivery deduplication, not missing continuity. Session-boundary maintenance still runs; do not force another resume solely because a hook emitted no digest.
+
 ### 2) State-changing step -> checkpoint
 
 After completing ANY step that changes project state (files written, decisions made, milestones reached, blockers discovered, approaches abandoned):
@@ -65,11 +67,9 @@ After completing ANY step that changes project state (files written, decisions m
 2. keep the note specific: what changed, why, and what it unblocks
 3. checkpoint the finished step BEFORE starting the next one; never batch several finished steps into one checkpoint
 
-### 3) Before attempting an approach -> check failed approaches
+### 3) Before additions -> audit and reuse
 
-Before attempting any non-trivial approach:
-1. run `scripts/search.sh "failed approach <topic>"` (wraps `stateroot memory recall`) or read `failed_approaches` in the current handoff
-2. if a matching failure exists, do not repeat it — state explicitly why the new attempt differs
+Before a non-trivial approach, consult retained findings and failed approaches (`scripts/search.sh "failed approach <topic>"` or the current handoff). Explain how a retry differs. Follow the [scoped audit and evidence reuse procedure](references/protocol.md#scoped-audit-and-evidence-reuse): trace existing owners and real producers/consumers before proposing additions; repair causes, remove superseded mechanisms, and evolve tests with the accepted contract. Reuse valid findings after checking their dependencies and assumptions. Scale investigation and checks to the change; record evidence and token/runtime/rework cost through existing checkpoints and handoffs. Preserve product capability and necessary compatibility boundaries.
 
 ### The flagship flow: plan in one harness, implement in another
 
@@ -89,11 +89,13 @@ When implementation and its acceptance checks are finished, run `stateroot plan 
 
 Attach completion handoffs explicitly with `stateroot handoff write --plan <completed-id> ...`. Otherwise, automatic plan selection can attach an unrelated older approved plan after the current plan closes.
 
-For an optional machine-observed command, run `stateroot plan verify <id> -- <command> [args...]`. The command runs only when explicitly requested; its immutable started/finished records bind the plan and eligible project bytes before and after execution. An observed successful command may be attached with `stateroot plan done <id> --evidence "..." --verification <observation-id>`. Changed inputs, failed commands, and foreign or unsupported records cannot complete the plan. A command exit of zero is evidence of that observation, not proof of semantic acceptance or an isolated, reproducible environment. Ordinary author-declared evidence remains supported. Raw command output stays in `.stateroot/local/verification/`; consult `docs/cli.md` for scope and limits.
+For an optional machine-observed command, run `stateroot plan verify <id> -- <command> [args...]`. The command runs only when explicitly requested; its immutable started/finished records bind the plan and eligible project bytes before and after execution. An observed successful command may be attached with `stateroot plan done <id> --evidence "..." --verification <observation-id>`. Changed inputs, failed commands, and foreign or unsupported records cannot complete the plan. A command exit of zero is evidence of that observation, not proof of semantic acceptance or an isolated, reproducible environment. Ordinary author-declared evidence remains supported. Raw command output stays in `.stateroot/local/verification/` of the owning project (including when verification runs in a reconciliation candidate); the command prints the actual destination. Local output and retained source objects survive candidate publication and cleanup. Consult `docs/cli.md` for scope and limits.
 
 ### Attend to unresolved work
 
 `## Needs Attention` in the digest and `stateroot status` surface due obligations, plan closure, routed handoffs, service health, and other deterministic obligations. Inspect and resolve the named item; do not restart a completed plan. Use `stateroot obligation add/list/show/done/snooze/cancel` for durable follow-ups and `stateroot service status` to check background reconciliation. The local service does not run an AI agent.
+
+Unknown delegation status is not worker failure, a missing executor or plan completion: inspect it from its original runtime. Degraded records stay preserved and visible; process completion alone never replaces a plan's evidence-bearing completion receipt.
 
 ### Integrating parallel forks (appointed coordinator)
 
@@ -106,6 +108,8 @@ When fork lineages are ready to fold into the trunk and the user appoints you to
 5. Merged fork worktrees are marked `cleanup_pending` (the merge never waits on deletion); `stateroot merge --cleanup <fork>…` is bounded and idempotent.
 6. `stateroot merge <fork>…` without `--prepare` still runs the one-shot deterministic fold; conflicts report paths and create no root.
 7. For a reviewed reconciliation, `stateroot merge --stage <attempt>` folds the candidate without publishing and seals its tree for gates and exact `--continue`. If a fully staged candidate would overwrite a reviewed live operational record, add `--keep-main <path>` for each exact path. After editing the candidate, stage and gate it again.
+8. Run `plan verify` inside the candidate to observe its source, then restage verification metadata and publish from the owning project. Candidate lineage mutations refuse; verification never creates a private repository or moves the frozen trunk/fork tips. Metadata-only changes preserve source identity. If a legacy candidate already has a private `.git`, preserve its evidence and prepare a new attempt from the owner before rerunning verification.
+9. Generated provenance describes the published result; parent declarations and fork binding versions remain history. Receiver routing/cursors stay receiver-owned, including absence. Immutable acknowledgement identities retain their exact frontier; conflicting bodies require reconciliation, not routine per-file picks.
 
 ### 2b) Work-state lineage -> automatic snap
 
@@ -153,7 +157,7 @@ The CLI is offline-safe: when the server is unreachable it queues operations in 
 | `stateroot handoff write --from CURRENT_HARNESS [--to H] [--task …] [--context-summary …] [--next …]` | session end / harness switch | prefer flags near limits; `--to` optional (routing only); `--input` for large payloads; `--failed-approach "<approach> → <outcome>: <reason>"` and `--context-only "<fact>"` (both repeatable) carry structured failed approaches and background facts |
 | `stateroot handoff accept [--by H]` | claim the current handoff | fail-closed when newer observed activity postdates the handoff boundary — re-read with `resume`, or `--force` (recorded as `forced`); `--operation-id <id>` makes a retried accept an idempotent no-op; acceptances are append-only and carry the packet body hash |
 | `stateroot handoff finalize [--from H]` | hook missed / quota exit | observed continuity from verified transcript; no routing |
-| `stateroot handoff list` / `stateroot handoff show` | inspect prior handoffs | read-only; list is newest-first with the current packet pinned at top. When a merged history has duplicate sequence numbers, use the exact `handoff show --id <body-sha256>` selector shown by list; numeric lookup refuses ambiguity |
+| `stateroot handoff list` / `stateroot handoff show` | inspect prior handoffs | read-only; new handoffs share numbering across project worktrees using the updated CLI, with harmless gaps after failed publication. Old writers/disconnected clones can still share numbers; use the exact `handoff show --id <body-sha256>` selector shown by list for duplicates. Numeric lookup refuses ambiguity; current packet is pinned at top |
 | `stateroot handoff repair` | corrupt `current.json` | quarantines corrupt bytes (hash-stamped), restores the newest valid history packet, or says none exists — never fabricates |
 | `stateroot delegate --to H --task "…"` | detached subagent in another harness (async-only) | cli-mode harnesses only; spawn returns a `running` record immediately — observe via `stateroot delegate list` / `status <id>` and the `## Recent Delegations` digest section; nothing is ever killed or blocked; depth-capped — a subagent cannot delegate further |
 | `stateroot ext list` | extensions discovered on PATH | any `stateroot-<name>` executable on PATH runs as `stateroot <name>` — you can add commands yourself by writing one |
@@ -181,6 +185,7 @@ The CLI is offline-safe: when the server is unreachable it queues operations in 
 | `stateroot skill install [--harness H]` | install this skill into harness dirs | writes stubs from `assets/` |
 | `stateroot status` / `stateroot doctor` | continuity brief and diagnostics | status surfaces current work and attention; doctor checks setup, sync, capture, metadata compatibility, retained-root availability, restoration limits, and editor extension state. Read its authoritative-state summary separately from base setup health |
 | `stateroot editor status` / `editor reconcile` | VS Code/Cursor extension state | status is read-only (installed vs release-declared version); reconcile installs/updates from the verified release VSIX, never downgrades |
+| `stateroot install --json` | machine-level integration outcome | stdout is one integration-health document; scheduling/editor progress goes to stderr. Check `install.failed`; command success alone is not a Ready receipt |
 | `stateroot init` | one-time per project | creates `.stateroot/`, registers the workspace, installs harness integrations, seeds objective/memory/first handoff from repo docs (observed; `--synthesize` opts into unverified LLM enrichment) |
 
 ## Failure Modes
@@ -203,7 +208,7 @@ The CLI is offline-safe: when the server is unreachable it queues operations in 
 ## References And Assets
 
 Read as needed:
-- `references/protocol.md` — checkpoint cadence, handoff packet fields, offline outbox semantics
+- `references/protocol.md` — scoped audit and evidence reuse, checkpoint cadence, handoff fields, offline semantics
 - `references/learnings.md` — quality bar, examples, anti-examples for `learn record`
 - `references/harnesses.md` — per-harness install layout
 - `assets/` — harness stub templates used by `stateroot skill install`

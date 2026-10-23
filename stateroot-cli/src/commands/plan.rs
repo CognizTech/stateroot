@@ -270,7 +270,7 @@ pub fn verify(ctx: &Ctx, id: &str, command: &[String], from: Option<&str>) -> an
     ctx.require_project()?;
     let record = verification::start(&ctx.cwd, id, &harness(ctx, from), command)
         .map_err(anyhow::Error::msg)?;
-    let logs = local_store::root(&ctx.cwd).join("local/verification");
+    let logs = verification::output_directory(&ctx.cwd).map_err(anyhow::Error::msg)?;
     std::fs::create_dir_all(&logs)?;
     let stdout = logs.join(format!("{}.stdout", record.id));
     let stderr = logs.join(format!("{}.stderr", record.id));

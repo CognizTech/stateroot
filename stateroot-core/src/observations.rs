@@ -1596,6 +1596,30 @@ pub fn recent_brief(
 
 /// Acknowledge exactly the frozen frontier after ingestion, without scanning or
 /// deleting evidence and without acknowledging captures appended afterwards.
+pub(crate) fn acknowledgement_segment(bytes: &[u8], key: &str) -> std::io::Result<String> {
+    let value: Value = serde_json::from_slice(bytes).map_err(std::io::Error::other)?;
+    let harness = value["harness"].as_str().unwrap_or_default();
+    let session = value["session_id"].as_str().unwrap_or_default();
+    let watermark: CaptureWatermark =
+        serde_json::from_value(value["watermark"].clone()).map_err(std::io::Error::other)?;
+    let expected = segment_file(harness, Some(session));
+    if value["schema"] != "stateroot.observations.ack.v1"
+        || value["ingest_key"] != key
+        || harness.is_empty()
+        || session.is_empty()
+        || key.is_empty()
+        || key.contains(['/', '\\'])
+        || watermark.segment.as_deref() != Some(expected.as_str())
+        || watermark.last_capture_id.is_none()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "capture acknowledgement binding invalid",
+        ));
+    }
+    Ok(expected)
+}
+
 pub fn acknowledge_frontier(
     project_dir: &Path,
     harness: &str,
@@ -1603,24 +1627,14 @@ pub fn acknowledge_frontier(
     ingest_key: &str,
     watermark: &CaptureWatermark,
 ) -> std::io::Result<PathBuf> {
-    let expected = segment_file(harness, Some(session_id));
-    if watermark.segment.as_deref() != Some(expected.as_str())
-        || watermark.last_capture_id.is_none()
-        || ingest_key.is_empty()
-        || ingest_key.contains(['/', '\\'])
-    {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "capture acknowledgement binding invalid",
-        ));
-    }
+    let receipt = serde_json::json!({"schema":"stateroot.observations.ack.v1","ingest_key":ingest_key,"harness":harness,"session_id":session_id,"watermark":watermark});
+    let expected = acknowledgement_segment(&serde_json::to_vec(&receipt)?, ingest_key)?;
     let segment = segments_dir(project_dir).join(&expected);
     let _lock =
         ResourceLock::acquire(segment.with_extension("lock")).map_err(std::io::Error::other)?;
     let path = local_store::root(project_dir)
         .join("spool/acknowledgements")
         .join(format!("{ingest_key}.json"));
-    let receipt = serde_json::json!({"schema":"stateroot.observations.ack.v1","ingest_key":ingest_key,"harness":harness,"session_id":session_id,"watermark":watermark});
     if path.is_file() {
         let existing: Value = serde_json::from_slice(&bounded_metadata(&path, 16 * 1024)?)
             .map_err(std::io::Error::other)?;

@@ -367,7 +367,7 @@ fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
                 // A reservation whose spawn never landed: resubmit under the
                 // same key (recover-before-cancel pattern).
             } else {
-                if !owns_process_namespace(&existing) {
+                if !stateroot_core::delegation_status::owns_namespace(&existing) {
                     anyhow::bail!(
                         "delegation key `{record_id}` has unverified process ownership on this host; observe or retry it from its original runtime"
                     );
@@ -434,7 +434,7 @@ fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
         "attempt": attempt,
         "fingerprint": fingerprint,
         "log": log_rel,
-        "process_namespace": process_namespace(),
+        "process_namespace": stateroot_core::delegation_status::process_namespace(),
     });
     if !retries.is_empty() {
         record["retries"] = Value::Array(retries);
@@ -824,31 +824,11 @@ fn load_record(project_dir: &Path, id: &str) -> Option<(PathBuf, Value)> {
     }
 }
 
-/// Every delegation record file, newest first.
+/// Every delegation record file, newest first — parsed records only
+/// (id-keyed lookups); degraded entries stay visible through
+/// `delegation_status::read_entries` in the observational surfaces.
 pub(crate) fn read_records(project_dir: &Path) -> Vec<(PathBuf, Value)> {
-    let dir = delegations_dir(project_dir);
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    let mut out: Vec<(PathBuf, Value)> = entries
-        .flatten()
-        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-        .filter_map(|e| {
-            let path = e.path();
-            let value: Value = serde_json::from_str(&std::fs::read_to_string(&path).ok()?).ok()?;
-            Some((path, value))
-        })
-        .collect();
-    out.sort_by(|a, b| {
-        let ts_of = |r: &Value| {
-            r.get("ts")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string()
-        };
-        ts_of(&b.1).cmp(&ts_of(&a.1))
-    });
-    out
+    stateroot_core::delegation_status::read_records(project_dir)
 }
 
 /// pid liveness: `/proc` on Linux/WSL, `kill -0` elsewhere on unix,
@@ -890,84 +870,37 @@ fn pid_alive(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-/// An opaque identity for the host PID namespace. Windows and WSL can read
-/// the same project store, but cannot interpret each other's process IDs.
-fn process_namespace() -> Option<String> {
-    static ID: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    ID.get_or_init(|| {
-        #[cfg(target_os = "linux")]
-        let identity = {
-            let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
-            let namespace = std::fs::read_link("/proc/self/ns/pid").ok()?;
-            format!("linux:{}:{}", boot.trim(), namespace.display())
-        };
-        #[cfg(windows)]
-        let identity = format!("windows:{}", std::env::var("COMPUTERNAME").ok()?);
-        #[cfg(not(any(target_os = "linux", windows)))]
-        let identity = {
-            let host = std::process::Command::new("hostname").output().ok()?;
-            let boot = std::process::Command::new("sysctl")
-                .args(["-n", "kern.boottime"])
-                .output()
-                .ok()?;
-            if !host.status.success() || !boot.status.success() {
-                return None;
-            }
-            format!(
-                "{}:{:?}:{:?}",
-                std::env::consts::OS,
-                host.stdout,
-                boot.stdout
-            )
-        };
-        Some(format!("sha256:{:x}", Sha256::digest(identity.as_bytes())))
-    })
-    .clone()
-}
-
-fn owns_process_namespace(record: &Value) -> bool {
-    match (
-        record.get("process_namespace").and_then(Value::as_str),
-        process_namespace(),
-    ) {
-        (Some(recorded), Some(current)) => recorded == current,
-        _ => false,
-    }
-}
-
-/// Status reads never rewrite a worker record. A foreign or legacy PID has
-/// unknown liveness; only the worker's own final outcome is authoritative.
-pub(crate) fn live_status(_path: &Path, record: &Value) -> String {
-    if let Some(outcome) = record.get("outcome").and_then(Value::as_str) {
-        return outcome.to_string();
-    }
-    if record.get("status").and_then(Value::as_str) == Some("running") {
-        if !owns_process_namespace(record) {
-            return "unknown".to_string();
-        }
-        let pid = record.get("pid").and_then(Value::as_u64).unwrap_or(0) as u32;
-        if pid != 0 && pid_alive(pid) {
-            return "running".to_string();
-        }
-        return "lost".to_string();
-    }
-    "unknown".to_string()
-}
-
 /// Run `stateroot delegate list`.
 fn list(ctx: &Ctx) -> Result<()> {
     ctx.require_project()?;
-    let records = read_records(&ctx.cwd);
-    if records.is_empty() {
+    let entries = stateroot_core::delegation_status::read_entries(&ctx.cwd);
+    if entries.is_empty() {
         println!("no delegations recorded");
         return Ok(());
     }
-    for (path, record) in &records {
-        let status = live_status(path, record);
-        let id = record.get("id").and_then(Value::as_str).unwrap_or("");
-        let harness = record.get("harness").and_then(Value::as_str).unwrap_or("");
-        let task = record.get("task").and_then(Value::as_str).unwrap_or("");
-        println!("{} · {} · {} · {}", id, harness, status, truncate(task, 60));
+    for entry in &entries {
+        match entry {
+            stateroot_core::delegation_status::DelegationEntry::Record(_, record) => {
+                let status = stateroot_core::delegation_status::interpret(record);
+                let id = record.get("id").and_then(Value::as_str).unwrap_or("");
+                let harness = record.get("harness").and_then(Value::as_str).unwrap_or("");
+                let task = record.get("task").and_then(Value::as_str).unwrap_or("");
+                println!(
+                    "{} · {} · {} · {}",
+                    id,
+                    harness,
+                    status.as_str(),
+                    truncate(task, 60)
+                );
+            }
+            stateroot_core::delegation_status::DelegationEntry::Degraded { path, reason } => {
+                let file = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                println!("{file} · degraded · {reason} (bytes preserved)");
+            }
+        }
     }
     Ok(())
 }
@@ -975,10 +908,11 @@ fn list(ctx: &Ctx) -> Result<()> {
 /// Run `stateroot delegate status <id>` — the record plus a bounded log tail.
 fn status(ctx: &Ctx, id: &str) -> Result<()> {
     ctx.require_project()?;
-    let Some((path, record)) = load_record(&ctx.cwd, id) else {
+    let Some((_path, record)) = load_record(&ctx.cwd, id) else {
         anyhow::bail!("no delegation matches `{id}` — run `stateroot delegate list`");
     };
-    let live = live_status(&path, &record);
+    let live = stateroot_core::delegation_status::interpret(&record);
+    let live = live.as_str();
     let harness = record.get("harness").and_then(Value::as_str).unwrap_or("");
     let task = record.get("task").and_then(Value::as_str).unwrap_or("");
     println!(
@@ -1069,7 +1003,7 @@ fn cancel(ctx: &Ctx, id: &str) -> Result<()> {
     }
     let pid = record.get("pid").and_then(Value::as_u64).unwrap_or(0) as u32;
 
-    if !owns_process_namespace(&record) {
+    if !stateroot_core::delegation_status::owns_namespace(&record) {
         anyhow::bail!("cannot cancel delegation {record_id}: its process ownership is unverified on this host; use the original runtime");
     }
 
@@ -1205,25 +1139,40 @@ fn group_alive(pid: u32) -> bool {
     pid_alive(pid)
 }
 
-/// The last N delegation records for the digest section.
+/// The last N delegation entries for the digest section. Records render
+/// with the shared status interpretation; degraded entries stay visible as
+/// concise preserved-record notes (never silently omitted).
 pub(crate) fn recent_delegations(
     project_dir: &Path,
     count: usize,
 ) -> Vec<(String, String, String)> {
-    read_records(project_dir)
+    stateroot_core::delegation_status::read_entries(project_dir)
         .iter()
         .take(count)
-        .map(|(path, record)| {
-            let ts = record.get("ts").and_then(Value::as_str).unwrap_or("");
-            let short_ts: String = ts.chars().take(16).collect();
-            let harness = record.get("harness").and_then(Value::as_str).unwrap_or("");
-            let task = record.get("task").and_then(Value::as_str).unwrap_or("");
-            let status = live_status(path, record);
-            (
-                short_ts,
-                format!("{harness} · {status}"),
-                truncate(task, 120),
-            )
+        .map(|entry| match entry {
+            stateroot_core::delegation_status::DelegationEntry::Record(_, record) => {
+                let ts = record.get("ts").and_then(Value::as_str).unwrap_or("");
+                let short_ts: String = ts.chars().take(16).collect();
+                let harness = record.get("harness").and_then(Value::as_str).unwrap_or("");
+                let task = record.get("task").and_then(Value::as_str).unwrap_or("");
+                let status = stateroot_core::delegation_status::interpret(record);
+                (
+                    short_ts,
+                    format!("{harness} · {}", status.as_str()),
+                    truncate(task, 120),
+                )
+            }
+            stateroot_core::delegation_status::DelegationEntry::Degraded { path, reason } => {
+                let file = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                (
+                    "undated".to_string(),
+                    "record · degraded".to_string(),
+                    truncate(&format!("{file} ({reason}, bytes preserved)"), 120),
+                )
+            }
         })
         .collect()
 }
@@ -1606,48 +1555,72 @@ mod tests {
         );
     }
 
+    /// Consumer composition: the CLI's digest surface renders the shared
+    /// status decision, degraded records stay visible, and reads never
+    /// rewrite worker evidence. (The status cases themselves live in the
+    /// core contract matrix — this pins the CLI to it.)
     #[test]
-    fn dead_local_worker_is_reported_without_rewriting_its_record() {
+    fn recent_delegations_render_shared_status_and_preserve_all_records() {
         let dir = tempfile::tempdir().expect("dir");
         let project = dir.path().join("proj");
-        std::fs::create_dir_all(project.join(".stateroot/delegations")).expect("mkdir");
-        let record = json!({
-            "schema_version": "stateroot.delegation.v1",
-            "id": "2026-test-claude",
-            "ts": "2026-08-26T10:00:00Z",
-            "depth": 0,
-            "harness": "claude",
-            "task": "never finishes",
-            "command": "claude",
-            "status": "running",
-            // A pid that cannot be alive (well past any real pid).
-            "pid": 4_000_000u32,
-            "process_namespace": process_namespace(),
-            "log": ".stateroot/delegations/2026-test-claude-d0.log",
-        });
-        let dir_path = project.join(".stateroot/delegations");
-        write_record(&dir_path, &record).expect("write");
-        let (path, loaded) = load_record(&project, "2026-test-claude").expect("record");
-        assert_eq!(live_status(&path, &loaded), "lost");
-        let (_, retained) = load_record(&project, "2026-test-claude").expect("record");
-        assert_eq!(
-            retained, loaded,
-            "a status read must preserve worker evidence"
+        let delegations = project.join(".stateroot/delegations");
+        std::fs::create_dir_all(&delegations).expect("mkdir");
+        // Owned, running, live pid → running.
+        write_record(
+            &delegations,
+            &json!({
+                "schema_version": "stateroot.delegation.v2",
+                "id": "d-live", "ts": "2026-10-22T00:00:02Z", "harness": "codex", "task": "live work",
+                "status": "running", "pid": std::process::id(),
+                "process_namespace": stateroot_core::delegation_status::process_namespace(),
+                "log": ".stateroot/delegations/d-live.log",
+            }),
+        )
+        .expect("write");
+        // Foreign namespace with a dead-pid coincidence → unknown, never lost.
+        write_record(
+            &delegations,
+            &json!({
+                "schema_version": "stateroot.delegation.v2",
+                "id": "d-foreign", "ts": "2026-10-22T00:00:01Z", "harness": "kimi", "task": "foreign work",
+                "status": "running", "pid": 4_000_000u32,
+                "process_namespace": "another-host",
+                "log": ".stateroot/delegations/d-foreign.log",
+            }),
+        )
+        .expect("write");
+        // Malformed bytes → degraded observation, bytes preserved.
+        std::fs::write(delegations.join("broken.json"), b"{not json".as_slice()).expect("broken");
+
+        let rows = recent_delegations(&project, 5);
+        let rendered: Vec<String> = rows
+            .iter()
+            .map(|(ts, who, task)| format!("{ts}|{who}|{task}"))
+            .collect();
+        assert!(
+            rendered.iter().any(|row| row.contains("codex · running")),
+            "{rendered:?}"
         );
-    }
-
-    #[test]
-    fn foreign_and_legacy_pids_are_unknown_even_if_the_pid_is_live() {
-        for namespace in [Value::Null, json!("other-host-pid-namespace")] {
-            let record = json!({"status": "running", "pid": std::process::id(), "process_namespace": namespace});
-            assert_eq!(live_status(Path::new("unused"), &record), "unknown");
-        }
-    }
-
-    #[test]
-    fn terminal_worker_outcome_survives_cross_host_reads() {
-        let record = json!({"outcome": "completed", "process_namespace": "another-host"});
-        assert_eq!(live_status(Path::new("unused"), &record), "completed");
+        assert!(
+            rendered.iter().any(|row| row.contains("kimi · unknown")),
+            "{rendered:?}"
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|row| row.contains("degraded") && row.contains("broken.json")),
+            "{rendered:?}"
+        );
+        assert_eq!(
+            std::fs::read(delegations.join("broken.json")).expect("bytes"),
+            b"{not json".as_slice()
+        );
+        let (_, retained) = load_record(&project, "d-foreign").expect("record");
+        assert_eq!(retained["status"], "running");
+        assert!(
+            retained.get("outcome").is_none(),
+            "status reads never reap a record"
+        );
     }
 
     /// The delegation log's fds must be O_APPEND end-to-end: a late worker

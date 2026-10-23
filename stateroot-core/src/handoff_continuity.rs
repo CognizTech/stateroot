@@ -14,6 +14,160 @@ pub const EXPLICIT_HANDOFF_MARKER: &str = "local/explicit-handoff-marker.json";
 pub const FINALIZE_WARNING: &str =
     "finalized from verified transcript — observed, not author-written handoff";
 
+fn sequence_path(repo: &git2::Repository, project_id: &str) -> PathBuf {
+    repo.commondir()
+        .join("stateroot/handoff-sequences")
+        .join(format!(
+            "{}.json",
+            blake3::hash(project_id.as_bytes()).to_hex()
+        ))
+}
+
+fn local_sequence_floor(project: &Path) -> Result<i64, String> {
+    Ok(local_store::read_handoff_local(project)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .chain(local_store::list_handoffs_local(project).map_err(|error| error.to_string())?)
+        .filter_map(|packet| packet["seq"].as_i64())
+        .max()
+        .unwrap_or(0))
+}
+
+/// Bootstrap from sibling checkout histories and retained fork tips. This
+/// also recovers a missing counter after worktree cleanup; history is never
+/// renumbered. Ordinary reservations need only inspect the caller's history.
+fn initial_sequence_floor(
+    repo: &git2::Repository,
+    project: &Path,
+    project_id: &str,
+) -> Result<i64, String> {
+    let mut checkouts = std::collections::BTreeSet::from([project.to_path_buf()]);
+    let common = git2::Repository::open(repo.commondir()).map_err(|error| error.to_string())?;
+    if let Some(main) = common.workdir() {
+        checkouts.insert(main.to_path_buf());
+    }
+    for name in repo
+        .worktrees()
+        .map_err(|error| error.to_string())?
+        .iter()
+        .flatten()
+    {
+        let worktree = repo
+            .find_worktree(name)
+            .map_err(|error| error.to_string())?;
+        checkouts.insert(worktree.path().to_path_buf());
+    }
+    let mut floor = 0;
+    for checkout in checkouts {
+        let manifest = local_store::read_manifest(&checkout).map_err(|error| error.to_string())?;
+        if manifest
+            .as_ref()
+            .and_then(|value| value["project_id"].as_str())
+            == Some(project_id)
+        {
+            floor = floor.max(local_sequence_floor(&checkout)?);
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    for reference in repo
+        .references_glob("refs/stateroot/*")
+        .map_err(|error| error.to_string())?
+    {
+        let reference = reference.map_err(|error| error.to_string())?;
+        let name = reference.name().unwrap_or_default();
+        if name != roots::LATEST_REF && !name.starts_with(roots::FORKS_REF_PREFIX) {
+            continue;
+        }
+        let tree = reference
+            .peel_to_commit()
+            .and_then(|commit| commit.tree())
+            .map_err(|error| error.to_string())?;
+        let Ok(entry) = tree.get_path(Path::new(".stateroot/handoffs")) else {
+            continue;
+        };
+        let tree = repo
+            .find_tree(entry.id())
+            .map_err(|error| error.to_string())?;
+        let mut failure = None;
+        tree.walk(git2::TreeWalkMode::PreOrder, |directory, entry| {
+            if entry.kind() != Some(git2::ObjectType::Blob)
+                || !seen.insert(entry.id())
+                || !(directory == "history/"
+                    || (directory.is_empty() && entry.name() == Some("current.json")))
+            {
+                return git2::TreeWalkResult::Ok;
+            }
+            let result = repo
+                .find_blob(entry.id())
+                .map_err(|error| error.to_string())
+                .and_then(|blob| {
+                    serde_json::from_slice::<Value>(blob.content())
+                        .map_err(|error| error.to_string())
+                });
+            match result {
+                Ok(packet) if packet["project_id"].as_str() == Some(project_id) => {
+                    floor = floor.max(packet["seq"].as_i64().unwrap_or(0));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    failure = Some(error);
+                    return git2::TreeWalkResult::Abort;
+                }
+            }
+            git2::TreeWalkResult::Ok
+        })
+        .map_err(|error| error.to_string())?;
+        if let Some(error) = failure {
+            return Err(error);
+        }
+    }
+    Ok(floor)
+}
+
+/// Reserve one project number across all worktrees sharing this Git common
+/// directory. Reservation precedes publication, so failed writes can leave
+/// gaps but cannot reuse a number. Disconnected clones still use packet IDs.
+pub fn reserve_sequence(project: &Path) -> Result<i64, String> {
+    let manifest = local_store::read_manifest(project)
+        .map_err(|error| error.to_string())?
+        .ok_or("missing project manifest for handoff numbering")?;
+    let project_id = manifest["project_id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or("missing project identity for handoff numbering")?;
+    let repo = roots::ensure_repo(project).map_err(|error| error.to_string())?;
+    let path = sequence_path(&repo, project_id);
+    let _guard =
+        crate::safe_io::ResourceLock::acquire_with_budget(path.with_extension("lock"), 2000, 15)
+            .map_err(|error| error.to_string())?;
+    let reserved = match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str::<i64>(&text)
+            .ok()
+            .filter(|value| *value >= 0)
+            .ok_or_else(|| {
+                format!(
+                    "invalid shared handoff counter at {}; retained unchanged",
+                    path.display()
+                )
+            })?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            initial_sequence_floor(&repo, project, project_id)?
+        }
+        Err(error) => {
+            return Err(format!(
+                "read shared handoff counter {}: {error}",
+                path.display()
+            ))
+        }
+    };
+    let next = reserved
+        .max(local_sequence_floor(project)?)
+        .checked_add(1)
+        .ok_or("handoff sequence exhausted")?;
+    crate::safe_io::atomic_replace_json(&path, &json!(next)).map_err(|error| error.to_string())?;
+    Ok(next)
+}
+
 fn session_order(left: &TranscriptSession, right: &TranscriptSession) -> std::cmp::Ordering {
     let left_latest = session_latest_time(left);
     let right_latest = session_latest_time(right);
@@ -195,12 +349,13 @@ fn full_tail(session: &TranscriptSession) -> Vec<Value> {
         .collect()
 }
 
-/// Build a transcript-finalized handoff packet (caller persists + bounds).
+/// Build a transcript-finalized packet with an explicit sequence. The caller
+/// reserves its number before publication, then bounds and persists it.
 pub fn build_finalize_packet(
     project_id: &str,
     project_dir: &Path,
     harness: &str,
-    current_seq: i64,
+    seq: i64,
     session: &TranscriptSession,
     state_objective: &str,
     state_phase: &str,
@@ -242,7 +397,7 @@ pub fn build_finalize_packet(
     let mut packet = json!({
         "schema_version": SCHEMA_HANDOFF_V1,
         "project_id": project_id,
-        "seq": current_seq + 1,
+        "seq": seq,
         "task": task,
         "current_phase": state_phase,
         "last_harness": harness,
@@ -417,6 +572,80 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shared_sequence_recovers_missing_counter_and_refuses_corruption_or_exhaustion() {
+        let project = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(project.path(), "numbered-project", "test", "owner").unwrap();
+        let repo = roots::ensure_repo(project.path()).unwrap();
+        let old = json!({"project_id":"numbered-project","seq":183,"created_by_harness":"kimi","created_at":"2026-10-21T11:00:00Z"});
+        local_store::write_handoff_local(project.path(), &old).unwrap();
+        assert_eq!(reserve_sequence(project.path()).unwrap(), 184);
+        assert_eq!(
+            reserve_sequence(project.path()).unwrap(),
+            185,
+            "an unpublished reservation leaves a gap, not a reusable number"
+        );
+        let path = sequence_path(&repo, "numbered-project");
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            reserve_sequence(project.path()).unwrap(),
+            184,
+            "recover above retained history, not above unobservable lost reservations"
+        );
+        std::fs::write(&path, b"not a counter").unwrap();
+        assert!(reserve_sequence(project.path())
+            .unwrap_err()
+            .contains("invalid shared handoff counter"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"not a counter");
+        std::fs::write(&path, i64::MAX.to_string()).unwrap();
+        assert!(reserve_sequence(project.path())
+            .unwrap_err()
+            .contains("exhausted"));
+        assert_eq!(
+            local_store::read_handoff_local(project.path())
+                .unwrap()
+                .unwrap(),
+            old
+        );
+    }
+
+    #[test]
+    fn shared_sequence_bootstraps_other_checkout_and_retained_fork_history() {
+        let project = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(project.path(), "same-project", "test", "owner").unwrap();
+        let (base, _) = roots::create_root(project.path(), "codex", "base", None).unwrap();
+        roots::fork_root(project.path(), &base.id, Some("numbering"), "codex").unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let checkout = directory.path().join("checkout");
+        roots::fork_materialize(project.path(), "numbering", &checkout, None).unwrap();
+        let old = json!({"project_id":"same-project","seq":183,"created_by_harness":"kimi","created_at":"2026-10-21T11:00:00Z"});
+        local_store::write_handoff_local(&checkout, &old).unwrap();
+        assert_eq!(
+            reserve_sequence(project.path()).unwrap(),
+            184,
+            "main discovers the return written only in a sibling checkout"
+        );
+        assert_eq!(reserve_sequence(&checkout).unwrap(), 185);
+        roots::create_root(&checkout, "kimi", "retain return", None).unwrap();
+        let repo = roots::ensure_repo(project.path()).unwrap();
+        std::fs::remove_file(sequence_path(&repo, "same-project")).unwrap();
+        std::fs::remove_file(local_store::root(&checkout).join(local_store::HANDOFF_CURRENT_PATH))
+            .unwrap();
+        std::fs::remove_dir_all(
+            local_store::root(&checkout).join(local_store::HANDOFF_HISTORY_DIR),
+        )
+        .unwrap();
+        assert_eq!(
+            reserve_sequence(project.path()).unwrap(),
+            184,
+            "retained fork objects recover numbering when local packet files are gone"
+        );
+        assert_eq!(
+            local_store::read_handoff_local(project.path()).unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn registry_aliases_resolve_capability_without_borrowing_unknown_readers() {
         for (alias, expected) in [
             ("claude", "claude"),
@@ -480,6 +709,7 @@ mod tests {
         );
         assert_eq!(packet["objective"], "Current competitive review");
         assert_eq!(packet["task"], "Review competitors");
+        assert_eq!(packet["seq"], 1, "the builder must not allocate a number");
     }
 
     #[test]

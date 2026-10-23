@@ -2,23 +2,14 @@
 //! reconciliation, heartbeat, restart safety, bounded log, and graceful
 //! degradation when OS registration is unavailable.
 
+// Each test binary includes this module but uses a subset of its helpers.
+#[path = "support/mod.rs"]
+mod support;
+
 use std::path::Path;
 use std::process::{Child, Command};
 
-use tempfile::TempDir;
-
-fn stateroot(config_home: &Path, user_home: &Path, cwd: &Path) -> assert_cmd::Command {
-    let mut cmd = assert_cmd::Command::cargo_bin("stateroot").expect("binary");
-    cmd.env("STATEROOT_HOME", config_home)
-        .env("STATEROOT_TEST_HOME", user_home)
-        .env("STATEROOT_TEST_CMD_PROBES", "")
-        .env_remove("DEEPSEEK_API_KEY")
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_BASE")
-        .current_dir(cwd);
-    cmd
-}
+use support::{homes, init_project, stateroot};
 
 /// Raw spawn (the resident loop never returns, so assert_cmd's run-to-
 /// completion API does not fit).
@@ -37,13 +28,6 @@ fn spawn_service(config_home: &Path, user_home: &Path, cwd: &Path) -> Child {
         .stdin(std::process::Stdio::null())
         .spawn()
         .expect("spawn service")
-}
-
-fn homes() -> (TempDir, TempDir) {
-    (
-        tempfile::tempdir().expect("config home"),
-        tempfile::tempdir().expect("user home"),
-    )
 }
 
 #[cfg(target_os = "linux")]
@@ -161,14 +145,6 @@ fn same_path_replacement_rearms_verified_predecessor() {
         after["config_home"],
         config_home.path().display().to_string()
     );
-}
-
-fn init_project(config_home: &Path, user_home: &Path, project: &Path) {
-    std::fs::create_dir_all(project).expect("project dir");
-    stateroot(config_home, user_home, project)
-        .arg("init")
-        .assert()
-        .success();
 }
 
 fn heartbeat_path(config_home: &Path) -> std::path::PathBuf {

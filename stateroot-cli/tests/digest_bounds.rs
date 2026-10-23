@@ -1,22 +1,11 @@
 //! Digest budget regression — oversized rules/pack fixtures must still
 //! produce a bounded resume digest (the 67KB-digest backlog item).
 
-use std::path::Path;
+// Each test binary includes this module but uses a subset of its helpers.
+#[path = "support/mod.rs"]
+mod support;
 
-use assert_cmd::Command;
-
-fn stateroot(config_home: &Path, user_home: &Path, cwd: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("stateroot").expect("binary");
-    cmd.env("STATEROOT_HOME", config_home)
-        .env("STATEROOT_TEST_HOME", user_home)
-        .env("STATEROOT_TEST_CMD_PROBES", "")
-        .env_remove("DEEPSEEK_API_KEY")
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_BASE")
-        .current_dir(cwd);
-    cmd
-}
+use support::stateroot;
 
 #[test]
 fn digest_stays_bounded_with_oversized_content() {

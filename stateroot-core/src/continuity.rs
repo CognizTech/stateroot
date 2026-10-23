@@ -33,6 +33,8 @@ pub const KIND_PLAN_RECEIPT_PENDING: &str = "plan_receipt_pending";
 pub const KIND_PLAN_CLOSURE: &str = "plan_closure";
 pub const KIND_HANDOFF_ROUTED: &str = "handoff_routed";
 pub const KIND_DELEGATION_FAILED: &str = "delegation_failed";
+pub const KIND_DELEGATION_STATUS_UNKNOWN: &str = "delegation_status_unknown";
+pub const KIND_DELEGATION_RECORD_DEGRADED: &str = "delegation_record_degraded";
 pub const KIND_BOUNDARY_JOB_MANUAL: &str = "boundary_journal_manual";
 pub const KIND_PLAN_UNASSIGNED: &str = "plan_unassigned";
 pub const KIND_HANDOFF_STALE: &str = "handoff_stale";
@@ -157,80 +159,60 @@ fn latest_activity_at(project_dir: &Path) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------
-// delegation records (minimal core reader — the CLI owns the writer)
+// delegation records (minimal core consumer — the CLI owns the writer;
+// `delegation_status` is the ONE shared status interpretation)
 // ---------------------------------------------------------------------
 
 #[derive(Debug)]
 struct DelegationView {
     id: String,
     plan_id: Option<String>,
-    /// Terminal outcome when finalized (completed/failed/lost/…).
-    outcome: Option<String>,
-    running: bool,
-    failed: bool,
+    status: crate::delegation_status::DelegationStatus,
 }
 
-fn delegations_dir(project_dir: &Path) -> PathBuf {
-    local_store::root(project_dir).join("delegations")
+/// A store entry that is not interpretable as a delegation record —
+/// preserved and surfaced as a concise observation, never silently
+/// equated with absence.
+#[derive(Debug)]
+struct DegradedDelegation {
+    file: String,
+    reason: String,
 }
 
-fn read_delegations(project_dir: &Path) -> Vec<DelegationView> {
-    let Ok(entries) = std::fs::read_dir(delegations_dir(project_dir)) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().is_none_or(|x| x != "json") {
-            continue;
+fn read_delegations(project_dir: &Path) -> (Vec<DelegationView>, Vec<DegradedDelegation>) {
+    let mut views = Vec::new();
+    let mut degraded = Vec::new();
+    for entry in crate::delegation_status::read_entries(project_dir) {
+        match entry {
+            crate::delegation_status::DelegationEntry::Record(_, record) => {
+                let Some(id) = record
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .filter(|id| !id.is_empty())
+                else {
+                    continue;
+                };
+                views.push(DelegationView {
+                    id: id.to_string(),
+                    plan_id: record
+                        .get("plan_id")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    status: crate::delegation_status::interpret(&record),
+                });
+            }
+            crate::delegation_status::DelegationEntry::Degraded { path, reason } => {
+                degraded.push(DegradedDelegation {
+                    file: path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    reason,
+                });
+            }
         }
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(record) = serde_json::from_str::<serde_json::Value>(&text) else {
-            continue;
-        };
-        let schema = record.get("schema").and_then(|v| v.as_str()).unwrap_or("");
-        if schema != "stateroot.delegation.v2" && schema != "stateroot.delegation.v1" {
-            continue;
-        }
-        let id = record
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        if id.is_empty() {
-            continue;
-        }
-        let plan_id = record
-            .get("plan_id")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        let outcome = record
-            .get("outcome")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        let status = record.get("status").and_then(|v| v.as_str()).unwrap_or("");
-        let pid = record.get("pid").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        let live = pid > 0 && safe_io::pid_alive(pid);
-        let running = outcome.is_none() && matches!(status, "starting" | "running") && live;
-        // A record with no outcome whose worker pid is dead is lost, exactly
-        // as the delegate module's live reaping would classify it on read.
-        let lost =
-            outcome.is_none() && matches!(status, "starting" | "running") && pid > 0 && !live;
-        let failed = matches!(
-            outcome.as_deref(),
-            Some("failed") | Some("lost") | Some("timed_out")
-        ) || lost;
-        out.push(DelegationView {
-            id,
-            plan_id,
-            outcome,
-            running,
-            failed,
-        });
     }
-    out
+    (views, degraded)
 }
 
 // ---------------------------------------------------------------------
@@ -493,13 +475,19 @@ pub fn plan_directive(project_dir: &Path, plan: &PlanMeta) -> PlanDirective {
     if todos_structurally_done || closure_obligation_open {
         return PlanDirective::Close;
     }
-    let delegations = read_delegations(project_dir);
+    let delegations = read_delegations(project_dir).0;
     if plan.status() == PlanStatus::Active {
         let running_bound = delegations
             .iter()
-            .any(|d| d.plan_id.as_deref() == Some(plan.id.as_str()) && d.running);
+            .any(|d| d.plan_id.as_deref() == Some(plan.id.as_str()) && d.status.is_running());
+        // Unknown evidence must never become proof that the work finished:
+        // an unverifiable bound delegation suppresses closure.
+        let unknown_bound = delegations
+            .iter()
+            .any(|d| d.plan_id.as_deref() == Some(plan.id.as_str()) && d.status.is_unknown());
         let incomplete_todos = matches!(todos, Some((done, total)) if done < total);
         if !running_bound
+            && !unknown_bound
             && !incomplete_todos
             && handoff_declares_no_remaining_work(project_dir, &plan.id, &plan.updated_at)
         {
@@ -509,9 +497,15 @@ pub fn plan_directive(project_dir: &Path, plan: &PlanMeta) -> PlanDirective {
     if plan.status() == PlanStatus::Approved {
         let has_executor = delegations.iter().any(|d| {
             d.plan_id.as_deref() == Some(plan.id.as_str())
-                && (d.running || d.outcome.as_deref() == Some("completed"))
+                && (d.status.is_running() || d.status.is_completed())
         });
-        if !has_executor {
+        // Unknown evidence must never prove the absence of an executor:
+        // suppress a false "assign" when a bound delegation cannot be
+        // verified from this host.
+        let unverified_executor = delegations
+            .iter()
+            .any(|d| d.plan_id.as_deref() == Some(plan.id.as_str()) && d.status.is_unknown());
+        if !has_executor && !unverified_executor {
             return PlanDirective::Assign;
         }
     }
@@ -564,7 +558,7 @@ pub fn assess(
     }
 
     let plan_list = plans::list(project_dir);
-    let delegations = read_delegations(project_dir);
+    let (delegations, degraded_delegations) = read_delegations(project_dir);
     let handoff = local_store::read_handoff_local(project_dir).ok().flatten();
 
     // 2/3/4. Plan-derived attention.
@@ -604,12 +598,18 @@ pub fn assess(
             // remaining actions (and is not older than the plan's current
             // status — an init handoff never speaks for a plan), no
             // plan-bound delegation is running, and no plan-bound todos are
-            // incomplete — yet the plan is still active.
+            // incomplete — yet the plan is still active. A bound delegation
+            // whose status is UNKNOWN suppresses this: unverifiable evidence
+            // is not proof that the work finished.
             let running_bound = delegations
                 .iter()
-                .any(|d| d.plan_id.as_deref() == Some(plan.id.as_str()) && d.running);
+                .any(|d| d.plan_id.as_deref() == Some(plan.id.as_str()) && d.status.is_running());
+            let unknown_bound = delegations
+                .iter()
+                .any(|d| d.plan_id.as_deref() == Some(plan.id.as_str()) && d.status.is_unknown());
             let incomplete_todos = matches!(todos, Some((done, total)) if done < total);
             if !running_bound
+                && !unknown_bound
                 && !incomplete_todos
                 && handoff_declares_no_remaining_work(project_dir, &plan.id, &plan.updated_at)
             {
@@ -636,9 +636,14 @@ pub fn assess(
         if plan.status() == PlanStatus::Approved {
             let has_executor = delegations.iter().any(|d| {
                 d.plan_id.as_deref() == Some(plan.id.as_str())
-                    && (d.running || d.outcome.as_deref() == Some("completed"))
+                    && (d.status.is_running() || d.status.is_completed())
             });
-            if !has_executor {
+            // A bound delegation whose status is unknown here (foreign or
+            // legacy process evidence) must never read as "no executor".
+            let unverified_executor = delegations
+                .iter()
+                .any(|d| d.plan_id.as_deref() == Some(plan.id.as_str()) && d.status.is_unknown());
+            if !has_executor && !unverified_executor {
                 let mut item = AttentionItem::new(
                     KIND_PLAN_UNASSIGNED,
                     40,
@@ -654,9 +659,13 @@ pub fn assess(
             }
         }
 
-        // Failed/lost/timed-out delegations against this still-open plan.
+        // Proven-failed delegations against this still-open plan (terminal
+        // failure outcome, or an owned worker observed dead). Unknown
+        // evidence is NEVER a failure signal.
         for delegation in &delegations {
-            if delegation.plan_id.as_deref() == Some(plan.id.as_str()) && delegation.failed {
+            if delegation.plan_id.as_deref() == Some(plan.id.as_str())
+                && delegation.status.is_failed()
+            {
                 let mut item = AttentionItem::new(
                     KIND_DELEGATION_FAILED,
                     30,
@@ -676,6 +685,54 @@ pub fn assess(
                 attention.push(item);
             }
         }
+
+        // The honest counterpart: bound delegations whose status cannot be
+        // verified from this host are surfaced AS unknown — replacing the
+        // false failure/executor guidance they used to generate.
+        for delegation in &delegations {
+            if delegation.plan_id.as_deref() == Some(plan.id.as_str())
+                && delegation.status.is_unknown()
+            {
+                let mut item = AttentionItem::new(
+                    KIND_DELEGATION_STATUS_UNKNOWN,
+                    33,
+                    &delegation.id,
+                    format!(
+                        "Delegation for plan '{}' cannot be status-verified from this host",
+                        plan.title
+                    ),
+                );
+                item.detail = format!(
+                    "delegation {} · foreign or legacy process evidence",
+                    delegation.id
+                );
+                item.action = format!(
+                    "stateroot delegate status {} (from its original runtime)",
+                    delegation.id
+                );
+                item.plan_id = Some(plan.id.clone());
+                item.delegation_id = Some(delegation.id.clone());
+                attention.push(item);
+            }
+        }
+    }
+
+    // Degraded delegation records (unreadable, unparseable, unsupported
+    // schema, id-less): preserved bytes, concise observation — never
+    // silently equated with absence.
+    for degraded in &degraded_delegations {
+        let mut item = AttentionItem::new(
+            KIND_DELEGATION_RECORD_DEGRADED,
+            34,
+            &degraded.file,
+            format!(
+                "Delegation record '{}' is degraded and preserved",
+                degraded.file
+            ),
+        );
+        item.detail = degraded.reason.clone();
+        item.action = "stateroot delegate list (record preserved; reads never rewrite it)".into();
+        attention.push(item);
     }
 
     // 5. Routed handoff awaiting acceptance / handoff stale by newer activity.

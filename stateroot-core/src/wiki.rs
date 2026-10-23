@@ -48,7 +48,7 @@ pub const OKF_VERSION: &str = "0.2";
 /// How many leading log lines (newest first) to inject into the digest.
 pub const DIGEST_LOG_LINES: usize = 30;
 
-const LOG_HEADER: &str = "# Directory Update Log";
+pub(crate) const LOG_HEADER: &str = "# Directory Update Log";
 
 const DEFAULT_SCHEMA: &str = r#"---
 type: Reference
@@ -88,6 +88,14 @@ pub enum WikiError {
     /// Filesystem failure.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+fn existing_text(path: &Path) -> Result<Option<String>, WikiError> {
+    match fs::read_to_string(path) {
+        Ok(body) => Ok(Some(body)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// One lint finding.
@@ -429,7 +437,7 @@ pub fn migrate_okf(project_dir: &Path) -> Result<(), WikiError> {
 fn migrate_okf_locked(project_dir: &Path) -> Result<(), WikiError> {
     let root = local_store::root(project_dir);
     let index_path = root.join(WIKI_DIR).join(INDEX_FILE);
-    let raw = fs::read_to_string(&index_path).unwrap_or_default();
+    let raw = existing_text(&index_path)?.unwrap_or_default();
     if index_declares_okf(&raw) {
         return Ok(());
     }
@@ -540,7 +548,7 @@ fn upsert_index_locked(
     ensure_layout_locked(project_dir)?;
     let index_path = wiki_path(project_dir, INDEX_FILE);
     let bullet = render_index_entry(path, summary, kind);
-    let existing = fs::read_to_string(&index_path).unwrap_or_else(|_| DEFAULT_INDEX.to_string());
+    let existing = existing_text(&index_path)?.unwrap_or_else(|| DEFAULT_INDEX.to_string());
     let mut lines: Vec<String> = existing.lines().map(|l| l.to_string()).collect();
     let mut replaced = false;
     for line in &mut lines {
@@ -587,7 +595,7 @@ pub fn append_log(project_dir: &Path, summary: &str) -> Result<(), WikiError> {
 fn append_log_locked(project_dir: &Path, summary: &str) -> Result<(), WikiError> {
     ensure_layout_locked(project_dir)?;
     let path = wiki_path(project_dir, LOG_FILE);
-    let body = fs::read_to_string(&path).unwrap_or_default();
+    let body = existing_text(&path)?.unwrap_or_default();
     let now = local_store::now_rfc3339();
     let today = now.get(..10).unwrap_or(now.as_str()).to_string();
     let entry = format!("* **Update**: {}", summary.trim());
@@ -757,12 +765,12 @@ pub fn append_inbox_bullets(project_dir: &Path, bullets: &[String]) -> Result<us
 fn append_inbox_bullets_locked(project_dir: &Path, bullets: &[String]) -> Result<usize, WikiError> {
     ensure_layout_locked(project_dir)?;
     let path = pages_dir(project_dir).join(INBOX_PAGE);
-    let existing = fs::read_to_string(&path).unwrap_or_default();
+    let existing = existing_text(&path)?.unwrap_or_default();
     let mut seen: std::collections::BTreeSet<String> = existing
         .lines()
         .filter_map(|l| {
             let l = l.trim().strip_prefix("- ")?.trim();
-            (!l.is_empty()).then(|| normalize(l))
+            (!l.is_empty()).then(|| normalize_inbox_bullet(l))
         })
         .collect();
     let mut added = 0usize;
@@ -775,7 +783,7 @@ fn append_inbox_bullets_locked(project_dir: &Path, bullets: &[String]) -> Result
         if bullet.len() < 8 {
             continue;
         }
-        let key = normalize(bullet);
+        let key = normalize_inbox_bullet(bullet);
         if !seen.insert(key) {
             continue;
         }
@@ -794,11 +802,87 @@ fn append_inbox_bullets_locked(project_dir: &Path, bullets: &[String]) -> Result
     Ok(added)
 }
 
-fn normalize(s: &str) -> String {
+pub(crate) fn normalize_inbox_bullet(s: &str) -> String {
     s.split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase()
+}
+
+/// Supported evolution of the native inbox writer: unchanged base followed
+/// by complete bullet lines. Authored edits/deletions are not this format.
+pub(crate) fn native_inbox_appended(base: &str, text: &str) -> Option<Vec<String>> {
+    if !text.ends_with('\n') {
+        return None;
+    }
+    let rest = text
+        .strip_prefix(base.trim_end_matches('\n'))?
+        .strip_prefix('\n')?;
+    rest.lines()
+        .map(|line| {
+            let bullet = line.strip_prefix("- ")?.trim();
+            (bullet.len() >= 8).then(|| bullet.to_string())
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct NativeLogBlock {
+    pub(crate) date: String,
+    pub(crate) lines: Vec<String>,
+}
+
+fn is_log_date(heading: &str) -> bool {
+    let bytes = heading.as_bytes();
+    bytes.len() == 10
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit())
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+}
+
+/// Native log groups retain their opaque historical lines, including legacy
+/// tails. Unknown headings/preambles remain unsupported merge input.
+pub(crate) fn parse_native_log(text: &str) -> Option<Vec<NativeLogBlock>> {
+    if text.is_empty() {
+        return Some(Vec::new());
+    }
+    let body = text.strip_prefix(LOG_HEADER)?.strip_prefix('\n')?;
+    let mut blocks: Vec<NativeLogBlock> = Vec::new();
+    for line in body.lines() {
+        if let Some(heading) = line.strip_prefix("## ") {
+            if !is_log_date(heading) {
+                return None;
+            }
+            blocks.push(NativeLogBlock {
+                date: heading.into(),
+                lines: Vec::new(),
+            });
+        } else if let Some(block) = blocks.last_mut() {
+            block.lines.push(line.into());
+        } else if !line.trim().is_empty() {
+            return None;
+        }
+    }
+    for block in &mut blocks {
+        while block
+            .lines
+            .first()
+            .is_some_and(|line| line.trim().is_empty())
+        {
+            block.lines.remove(0);
+        }
+        while block
+            .lines
+            .last()
+            .is_some_and(|line| line.trim().is_empty())
+        {
+            block.lines.pop();
+        }
+    }
+    Some(blocks)
 }
 
 /// List page paths under wiki/pages (relative to `.stateroot/`).
@@ -1204,6 +1288,40 @@ mod tests {
         assert!(second_pos < first_pos, "newest entry first: {text}");
         let recent = recent_log(p.path(), 10);
         assert!(recent.contains("second entry"));
+    }
+
+    #[test]
+    fn native_append_preserves_unreadable_existing_bytes_and_allows_absence() {
+        for lane in ["log", "inbox", "index"] {
+            let p = project();
+            ensure_layout(p.path()).unwrap();
+            let path = match lane {
+                "log" => wiki_path(p.path(), LOG_FILE),
+                "inbox" => pages_dir(p.path()).join(INBOX_PAGE),
+                _ => wiki_path(p.path(), INDEX_FILE),
+            };
+            let original = b"existing bytes\xff\xfe";
+            fs::write(&path, original).unwrap();
+            let append = || match lane {
+                "log" => append_log(p.path(), "new native entry"),
+                _ => append_inbox_bullets(p.path(), &["new native inbox note".into()]).map(|_| ()),
+            };
+            assert!(
+                append().is_err(),
+                "{lane}: unreadable content cannot become empty success"
+            );
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                original,
+                "{lane}: preserve exact original bytes"
+            );
+            fs::remove_file(&path).unwrap();
+            append().unwrap();
+            assert!(
+                path.is_file(),
+                "{lane}: ordinary absence still permits creation"
+            );
+        }
     }
 
     #[test]

@@ -1,10 +1,6 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const vm = require("node:vm");
-
-// out/ui.js is vscode-free at runtime (its only import chain is type-only),
-// so it loads directly like out/setup does in setup.test.cjs.
-const { workbenchHtml } = require("../out/ui");
+const { loadWorkbench } = require("./support/workbench.cjs");
 const { isStaleIntegrationCli, parseMergeAttempt } = require("../out/mergeAttempt");
 
 // The release contract pins this compatibility copy verbatim.
@@ -13,49 +9,6 @@ const STALE_INTEGRATION_CLI_MESSAGE =
 
 function occurrences(haystack, needle) {
   return haystack.split(needle).length - 1;
-}
-
-/** Run the real workbench client script with a minimal DOM stub, then drive
- * it with posted snapshot state and inspect the rendered panel HTML. */
-function loadWorkbench() {
-  const html = workbenchHtml("testnonce");
-  const match = html.match(/<script nonce="testnonce">([\s\S]*?)<\/script>/);
-  assert.ok(match, "workbench HTML carries a nonce'd script");
-  const panel = {
-    innerHTML: "",
-    listeners: {},
-    scrollTop: 0,
-    scrollLeft: 0,
-    querySelector: () => null,
-    addEventListener(type, fn) {
-      this.listeners[type] = fn;
-    },
-  };
-  const posted = [];
-  let messageHandler;
-  const sandbox = {
-    acquireVsCodeApi: () => ({
-      postMessage: (msg) => posted.push(msg),
-      getState: () => ({}),
-      setState: () => {},
-    }),
-    window: {
-      addEventListener: (type, fn) => {
-        if (type === "message") messageHandler = fn;
-      },
-    },
-    document: {
-      querySelectorAll: () => [],
-      getElementById: (id) => (id === "panel" ? panel : null),
-    },
-  };
-  vm.runInNewContext(match[1], sandbox);
-  assert.equal(typeof messageHandler, "function");
-  const push = (data) => {
-    messageHandler({ data });
-    return panel.innerHTML;
-  };
-  return { panel, posted, push };
 }
 
 const BASE = {

@@ -953,16 +953,7 @@ pub(crate) fn write_project_only(project_dir: &Path, input_path: &Path) -> anyho
     let project_id = manifest["project_id"]
         .as_str()
         .context("manifest requires project_id")?;
-    // Include immutable history so restored/repaired current never reuses a seq.
-    let current_seq = local_store::read_handoff_local(project_dir)?
-        .into_iter()
-        .chain(local_store::list_handoffs_local(project_dir)?)
-        .filter_map(|packet| packet["seq"].as_i64())
-        .max()
-        .unwrap_or(0);
-    let seq = current_seq
-        .checked_add(1)
-        .context("handoff sequence exhausted")?;
+    let seq = handoff_continuity::reserve_sequence(project_dir).map_err(anyhow::Error::msg)?;
     let (state_objective, state_phase) = local_state_fields(project_dir)?;
     let packet = assemble_packet(
         input,
@@ -1051,14 +1042,7 @@ pub async fn write_with_origin(
         None => source.clone(),
     };
     let input = apply_write_flags(read_input(input_path)?, write_flags)?;
-    // Read directly so malformed state cannot silently reset the sequence.
-    let current = local_store::read_handoff_local(&ctx.cwd)?;
-    let current_seq = std::iter::once(current)
-        .flatten()
-        .chain(local_store::list_handoffs_local(&ctx.cwd)?)
-        .filter_map(|packet| packet.get("seq").and_then(|value| value.as_i64()))
-        .max()
-        .unwrap_or(0);
+    let seq = handoff_continuity::reserve_sequence(&ctx.cwd).map_err(anyhow::Error::msg)?;
 
     // `project/state.json` holds the objective recorded at init; nothing
     // refreshes it as work progresses, so an explicit restatement wins.
@@ -1072,7 +1056,7 @@ pub async fn write_with_origin(
         PacketContext {
             project_dir: &ctx.cwd,
             project_id: &project.project_id,
-            seq: current_seq + 1,
+            seq,
             source: &source,
             routing_dest: if handing_to_another {
                 Some(destination.as_str())
@@ -1223,12 +1207,6 @@ pub fn finalize_bound_job(
         )
     })?;
     let current = local_store::read_handoff_local(&ctx.cwd)?;
-    let seq = history
-        .iter()
-        .chain(current.iter())
-        .filter_map(|packet| packet["seq"].as_i64())
-        .max()
-        .unwrap_or(0);
     let (objective, phase) = local_state_fields(&ctx.cwd)?;
     let project = ctx.require_project()?;
     let intent_path =
@@ -1248,7 +1226,7 @@ pub fn finalize_bound_job(
             &project.project_id,
             &ctx.cwd,
             &job.harness,
-            seq,
+            0,
             &session,
             &objective,
             &phase,
@@ -1271,8 +1249,10 @@ pub fn finalize_bound_job(
         stateroot_core::safe_io::atomic_replace_json(&intent_path, &packet)?;
         packet
     };
-    // A saved intent can be older than another writer's committed sequence.
-    packet["seq"] = serde_json::json!(seq + 1);
+    // Crash replay of an already published boundary returned above. A saved
+    // but unpublished intent gets a fresh shared reservation, never reuse.
+    let seq = handoff_continuity::reserve_sequence(&ctx.cwd).map_err(anyhow::Error::msg)?;
+    packet["seq"] = serde_json::json!(seq);
     let publish = current
         .as_ref()
         .is_none_or(|current| can_publish_boundary(&ctx.cwd, job, current));
@@ -1287,7 +1267,7 @@ pub fn finalize_bound_job(
             &format!("{}\n", serde_json::to_string_pretty(&packet)?),
         )?;
     }
-    Ok(seq + 1)
+    Ok(seq)
 }
 
 fn can_publish_boundary(
@@ -1384,17 +1364,14 @@ fn finalize_current(
     let home = super::install::home_dir()?;
     let session = handoff_continuity::latest_verified_session(&home, &ctx.cwd, harness)
         .ok_or_else(|| anyhow::anyhow!("no verified {harness} transcript to finalize"))?;
-    let current_seq = current
-        .and_then(|p| p.get("seq"))
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
     let (state_objective, phase) = local_state_fields(&ctx.cwd)?;
     let project = ctx.require_project()?;
+    let seq = handoff_continuity::reserve_sequence(&ctx.cwd).map_err(anyhow::Error::msg)?;
     let mut packet = handoff_continuity::build_finalize_packet(
         &project.project_id,
         &ctx.cwd,
         harness,
-        current_seq,
+        seq,
         &session,
         &state_objective,
         &phase,
@@ -1405,10 +1382,7 @@ fn finalize_current(
     packet = bound_packet(packet);
     validate_packet(&packet, false)?;
     write_packet_durable(&ctx.cwd, &packet)?;
-    Ok(packet
-        .get("seq")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(current_seq + 1))
+    Ok(seq)
 }
 
 /// `stateroot handoff finalize [--from H]` — manual recovery when hooks missed.

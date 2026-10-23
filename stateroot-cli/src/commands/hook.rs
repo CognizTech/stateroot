@@ -574,31 +574,26 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
                         .unwrap_or_else(|_| ctx.config_dir.clone());
                     let identity =
                         hook_identity_prefix(&ctx.config_dir, &home, Some(project_dir), quirk.id);
-                    if let Some(digest) = scheduled_identity_output(
-                        &ctx.config_dir,
-                        quirk,
+                    let key = format!(
+                        "{}:{}",
+                        quirk.id,
+                        stateroot_core::persona_injection::session_key(project_dir, &payload)
+                    );
+                    // Compact boundaries never print: the core operation
+                    // records the armed flag and resolves Nothing here — the
+                    // next deliverable event carries the re-anchoring FULL.
+                    // (The old orchestration carried a print branch that was
+                    // unreachable: compaction events never resolve to a
+                    // delivery by contract.)
+                    let _ = stateroot_core::persona_injection::resolve_injection(
+                        &home,
+                        &key,
                         canonical,
-                        project_dir,
-                        &payload,
                         &identity,
-                        &|identity| {
-                            hook_digest_with_identity(
-                                &ctx.config_dir,
-                                project_dir,
-                                quirk.id,
-                                identity,
-                            )
-                        },
-                    ) {
-                        print_hook_injection(quirk, canonical, &digest);
-                        // Compact-boundary digest delivery counts as
-                        // continuity delivery (deduped per day/install).
-                        crate::telemetry::continuity_delivered(
-                            &ctx.config_dir,
-                            project_dir,
-                            quirk.id,
-                        );
-                    }
+                        hook_now(),
+                        true,
+                        false,
+                    );
                 }
                 Ok(code)
             }
@@ -660,17 +655,33 @@ fn resume_identity_only(
     if !identity_event_prints(quirk, canonical) {
         return Ok(0);
     }
-    let digest = scheduled_identity_output(
-        &ctx.config_dir,
-        quirk,
-        canonical,
-        &ctx.cwd,
-        payload,
-        &digest,
-        &|identity| Some(identity.to_string()),
+    let home =
+        stateroot_core::harness_install::home_dir().unwrap_or_else(|_| ctx.config_dir.clone());
+    let key = format!(
+        "{}:{}",
+        quirk.id,
+        stateroot_core::persona_injection::session_key(&ctx.cwd, payload)
     );
-    let Some(digest) = digest else {
-        return Ok(0);
+    let mark = match canonical {
+        "session_start" => identity_event_marks(quirk, canonical),
+        _ => true,
+    };
+    let deliverable = identity_event_marks(quirk, canonical);
+    // The identity-only digest IS the whole content outside a project — no
+    // project context exists to build; the scheduler decides full block,
+    // compressed pointer, or silence.
+    let text = match stateroot_core::persona_injection::resolve_injection(
+        &home,
+        &key,
+        canonical,
+        &digest,
+        hook_now(),
+        mark,
+        deliverable,
+    ) {
+        stateroot_core::persona_injection::InjectionResolution::Full => digest,
+        stateroot_core::persona_injection::InjectionResolution::Compressed(pointer) => pointer,
+        stateroot_core::persona_injection::InjectionResolution::Nothing => return Ok(0),
     };
     match quirk.injection {
         Injection::None => Ok(0),
@@ -681,7 +692,7 @@ fn resume_identity_only(
         | Injection::StdoutText
         | Injection::McpPull
         | Injection::UserPromptSubmit => {
-            print_hook_injection(quirk, canonical, &digest);
+            print_hook_injection(quirk, canonical, &text);
             Ok(0)
         }
     }
@@ -728,21 +739,32 @@ fn cursor_post_tool_needs_identity(
     }
 }
 
-/// The scheduler's answer for one resume/identity event: what (if anything)
-/// the hook prints. FULL → the digest as-is; COMPRESSED → the pointer;
-/// NOTHING → None. State lives in the user-global local dir.
-fn scheduled_identity_output(
-    config_dir: &Path,
+/// DECISION (persona scheduling only — no project context is built here):
+/// what this event carries, if anything. Silent covers events this harness
+/// never prints, `Injection::None` harnesses, and a scheduler Nothing alike.
+/// State lives in the user-global local dir and is recorded by the core
+/// operation exactly as before (delivery cadence, compaction arming).
+enum DeliveryDecision {
+    Silent,
+    /// Render the full context carrying this identity section (the full
+    /// persona prefix for a FULL, the compressed pointer for a cadence
+    /// delivery).
+    Render(String),
+}
+
+fn decide_delivery(
+    ctx: &Ctx,
     quirk: &registry::HarnessQuirk,
     canonical: &str,
     project_dir: &Path,
     payload: &Value,
-    identity: &str,
-    digest_builder: &dyn Fn(&str) -> Option<String>,
-) -> Option<String> {
+) -> DeliveryDecision {
+    if !identity_event_prints(quirk, canonical) || quirk.injection == Injection::None {
+        return DeliveryDecision::Silent;
+    }
     let home =
-        stateroot_core::harness_install::home_dir().unwrap_or_else(|_| config_dir.to_path_buf());
-    let hash = stateroot_core::persona_injection::content_hash(identity);
+        stateroot_core::harness_install::home_dir().unwrap_or_else(|_| ctx.config_dir.clone());
+    let identity = hook_identity_prefix(&ctx.config_dir, &home, Some(project_dir), quirk.id);
     // Per project + harness + session: every harness gets its own start
     // injection even inside a shared conversation.
     let key = format!(
@@ -762,30 +784,22 @@ fn scheduled_identity_output(
     // policy injects, and Cursor postToolUse (its only post-compaction
     // additional_context channel). An armed FULL waits for one of these.
     let deliverable = identity_event_marks(quirk, canonical);
-    let decision = stateroot_core::persona_injection::decide_and_record(
+    match stateroot_core::persona_injection::resolve_injection(
         &home,
         &key,
         canonical,
-        &hash,
+        &identity,
         hook_now(),
         mark,
         deliverable,
-    );
-    match decision {
-        stateroot_core::persona_injection::Decision::Full => digest_builder(identity),
-        stateroot_core::persona_injection::Decision::Compressed => {
-            let name = stateroot_core::persona_injection::persona_name(identity);
-            let tagline = stateroot_core::persona_injection::persona_tagline(identity);
-            let pointer = stateroot_core::persona_injection::compressed_pointer(
-                &name,
-                &tagline,
-                &home
-                    .join(stateroot_core::soul::SOUL_DIR)
-                    .join(stateroot_core::soul::CANONICAL_FILE),
-            );
-            digest_builder(&pointer)
+    ) {
+        stateroot_core::persona_injection::InjectionResolution::Full => {
+            DeliveryDecision::Render(identity)
         }
-        stateroot_core::persona_injection::Decision::Nothing => None,
+        stateroot_core::persona_injection::InjectionResolution::Compressed(pointer) => {
+            DeliveryDecision::Render(pointer)
+        }
+        stateroot_core::persona_injection::InjectionResolution::Nothing => DeliveryDecision::Silent,
     }
 }
 
@@ -918,6 +932,38 @@ pub fn hook_digest(config_dir: &Path, project_dir: &Path, harness_id: &str) -> O
     hook_digest_with_identity(config_dir, project_dir, harness_id, &identity)
 }
 
+// Test seam (M3, the stable in-process seam handed to M5): every FULL
+// context build increments a thread-local counter. A silent delivery
+// decision must never reach this function; a full delivery reaches it at
+// most once. Thread-local because tests run multi-threaded.
+#[cfg(test)]
+thread_local! {
+    static FULL_DIGEST_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+// Test seam (M3): session-boundary maintenance runs. Maintenance is
+// eligible at the boundary whether or not the event printed.
+#[cfg(test)]
+thread_local! {
+    static SESSION_MAINTENANCE_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn observed_digest_builds() -> usize {
+    FULL_DIGEST_BUILDS.with(|c| c.get())
+}
+
+#[cfg(test)]
+pub(crate) fn observed_maintenance_runs() -> usize {
+    SESSION_MAINTENANCE_RUNS.with(|c| c.get())
+}
+
+#[cfg(test)]
+pub(crate) fn reset_delivery_counters() {
+    FULL_DIGEST_BUILDS.with(|c| c.set(0));
+    SESSION_MAINTENANCE_RUNS.with(|c| c.set(0));
+}
+
 /// [`hook_digest`] with an explicit identity block (the scheduler decides
 /// what the identity section carries: full prefix, compressed pointer, or
 /// nothing).
@@ -927,6 +973,8 @@ pub fn hook_digest_with_identity(
     harness_id: &str,
     identity: &str,
 ) -> Option<String> {
+    #[cfg(test)]
+    FULL_DIGEST_BUILDS.with(|c| c.set(c.get() + 1));
     let _ = (config_dir, harness_id);
     let identity = identity.to_string();
     let handoff = local_store::read_handoff_local(project_dir).ok().flatten();
@@ -1170,35 +1218,42 @@ async fn resume_output(
         // a fresh projection.
         reconcile_boundary(ctx, project_dir);
     }
-    // Empty check only — the scheduler decides the printable content below.
-    if hook_digest(&ctx.config_dir, project_dir, quirk.id).is_none() {
-        return Ok(0); // nothing worth injecting — silent
+    // One coherent delivery operation with explicit effects:
+    //   DECIDE  — persona scheduling only; never builds project context.
+    //   RENDER  — at most one full context build, only for a full delivery.
+    //   OUTPUT  — serialized here at the command boundary; effects follow a
+    //             successful print, never precede one.
+    if let DeliveryDecision::Render(identity) =
+        decide_delivery(ctx, quirk, canonical, project_dir, payload)
+    {
+        if let Some(digest) =
+            hook_digest_with_identity(&ctx.config_dir, project_dir, quirk.id, &identity)
+        {
+            print_hook_injection(quirk, canonical, &digest);
+            record_delivery_effects(ctx, quirk, canonical, project_dir, payload);
+        }
     }
-    if !identity_event_prints(quirk, canonical) {
-        return Ok(0);
+    // Maintenance is eligible at the session boundary whether or not this
+    // event printed — a silent dedupe repeat must not skip the intended
+    // automatic syncs or boundary recovery. It still runs AFTER any output:
+    // harnesses kill slow hooks (cursor's default timeout), and a killed
+    // process must not take the injection with it.
+    if canonical == "session_start" {
+        session_start_maintenance(ctx, project_dir).await;
     }
-    if quirk.injection == Injection::None {
-        return Ok(0);
-    }
-    // Persona injection scheduler (authoritative for what prints): FULL on
-    // boundaries/change/first-call, COMPRESSED on the 15-prompt cadence,
-    // NOTHING inside the dedupe window or off-cycle.
-    let home =
-        stateroot_core::harness_install::home_dir().unwrap_or_else(|_| ctx.config_dir.clone());
-    let identity = hook_identity_prefix(&ctx.config_dir, &home, Some(project_dir), quirk.id);
-    let digest = scheduled_identity_output(
-        &ctx.config_dir,
-        quirk,
-        canonical,
-        project_dir,
-        payload,
-        &identity,
-        &|identity| hook_digest_with_identity(&ctx.config_dir, project_dir, quirk.id, identity),
-    );
-    let Some(digest) = digest else {
-        return Ok(0);
-    };
-    print_hook_injection(quirk, canonical, &digest);
+    Ok(0)
+}
+
+/// The effects of a successful print, in the established order: telemetry,
+/// the delivery ledger, the session→plan binding. Never called without
+/// output — a failed render/output must not claim delivery.
+fn record_delivery_effects(
+    ctx: &Ctx,
+    quirk: &registry::HarnessQuirk,
+    canonical: &str,
+    project_dir: &Path,
+    payload: &Value,
+) {
     // Telemetry: a non-empty continuity digest was just emitted in a
     // recognized harness attached to an initialized project. Local append
     // only — hooks never wait on the network. Dedup makes compaction
@@ -1219,68 +1274,66 @@ async fn resume_output(
             bind_session_plan(project_dir, quirk.id, &session_id, "hook-delivery");
         }
     }
-    // Heavy session-boundary work runs AFTER the digest is printed: harnesses
-    // kill slow hooks (cursor's default timeout), and a killed process must
-    // not take the injection with it. All of it is best-effort and fresh
-    // enough one step behind (discovery reads sources live anyway).
-    if canonical == "session_start" {
-        // Skill federation sync (best-effort, never fails the hook).
-        let options = stateroot_core::skill_federation::SyncOptions {
-            dry_run: false,
-            push: false,
-            pull: true,
-            cmd_probe: None,
-        };
-        if let Err(err) =
-            stateroot_core::skill_federation::sync_project(project_dir, &options, None)
-        {
-            note!("warning: skill federation sync skipped: {err}");
-        }
-        // MCP federation (pull + project; never fails the hook).
-        let mcp_options = stateroot_core::mcp_federation::SyncOptions {
-            dry_run: false,
-            pull: true,
-            push: true,
-            cmd_probe: None,
-        };
-        if let Err(err) =
-            stateroot_core::mcp_federation::sync(None, Some(project_dir), &mcp_options)
-        {
-            note!("warning: MCP federation sync skipped: {err}");
-        }
-        // Rules federation (product-intent + harness imports).
-        if let Ok(home) = stateroot_core::harness_install::home_dir() {
-            if let Err(err) = stateroot_core::rules::sync(project_dir, &home) {
-                note!("warning: rules sync skipped: {err}");
-            }
-        }
-        // Soul federation: one sync pass per hour of agent activity —
-        // harness-native persona edits are adopted into the canonical soul
-        // and pushed outward; conflicts surface in the digest.
-        super::soul::maybe_auto_sync(ctx, 1);
-        // Automatic update path: fire a detached self-update when the release
-        // cache is stale — scheduled by activity, never blocking, never
-        // asking an agent to act. (The digest notice stays as the visible
-        // layer; this is the layer that actually keeps machines current.)
-        super::update::maybe_spawn_scheduled_update(
-            &ctx.config_dir,
-            ctx.config.update.check_interval_hours,
-        );
-        // Session-start is a safe entrypoint for the boundary journal: kick
-        // recovery for any job whose last drainer died (cheap due-scan only).
-        super::drain_finalize::kick(project_dir);
-        // Dual-mode compiler: agentic when keyed/logged-in; never fails the hook.
-        let hook_ctx = Ctx {
-            cwd: project_dir.to_path_buf(),
-            config_dir: ctx.config_dir.clone(),
-            config: ctx.config.clone(),
-        };
-        match super::compiler::try_agentic(&hook_ctx, false).await {
-            Ok(_) => {}
-            Err(err) => note!("warning: compiler skipped: {err}"),
+}
+
+/// MAINTENANCE at the session boundary — explicitly eligible independent of
+/// whether the event printed. All of it is best-effort and fresh enough one
+/// step behind (discovery reads sources live anyway), self-throttles where
+/// interval-gated, and never fails the hook. Kept callable separately from
+/// decision/rendering so policy tests never invoke it.
+async fn session_start_maintenance(ctx: &Ctx, project_dir: &Path) {
+    #[cfg(test)]
+    SESSION_MAINTENANCE_RUNS.with(|c| c.set(c.get() + 1));
+    // Skill federation sync (best-effort, never fails the hook).
+    let options = stateroot_core::skill_federation::SyncOptions {
+        dry_run: false,
+        push: false,
+        pull: true,
+        cmd_probe: None,
+    };
+    if let Err(err) = stateroot_core::skill_federation::sync_project(project_dir, &options, None) {
+        note!("warning: skill federation sync skipped: {err}");
+    }
+    // MCP federation (pull + project; never fails the hook).
+    let mcp_options = stateroot_core::mcp_federation::SyncOptions {
+        dry_run: false,
+        pull: true,
+        push: true,
+        cmd_probe: None,
+    };
+    if let Err(err) = stateroot_core::mcp_federation::sync(None, Some(project_dir), &mcp_options) {
+        note!("warning: MCP federation sync skipped: {err}");
+    }
+    // Rules federation (product-intent + harness imports).
+    if let Ok(home) = stateroot_core::harness_install::home_dir() {
+        if let Err(err) = stateroot_core::rules::sync(project_dir, &home) {
+            note!("warning: rules sync skipped: {err}");
         }
     }
-    Ok(0)
+    // Soul federation: one sync pass per hour of agent activity —
+    // harness-native persona edits are adopted into the canonical soul
+    // and pushed outward; conflicts surface in the digest.
+    super::soul::maybe_auto_sync(ctx, 1);
+    // Automatic update path: fire a detached self-update when the release
+    // cache is stale — scheduled by activity, never blocking, never
+    // asking an agent to act. (The digest notice stays as the visible
+    // layer; this is the layer that actually keeps machines current.)
+    super::update::maybe_spawn_scheduled_update(
+        &ctx.config_dir,
+        ctx.config.update.check_interval_hours,
+    );
+    // Session-start is a safe entrypoint for the boundary journal: kick
+    // recovery for any job whose last drainer died (cheap due-scan only).
+    super::drain_finalize::kick(project_dir);
+    // Dual-mode compiler: agentic when keyed/logged-in; never fails the hook.
+    let hook_ctx = Ctx {
+        cwd: project_dir.to_path_buf(),
+        config_dir: ctx.config_dir.clone(),
+        config: ctx.config.clone(),
+    };
+    if let Err(err) = super::compiler::try_agentic(&hook_ctx, false).await {
+        note!("warning: compiler skipped: {err}");
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -2658,5 +2711,158 @@ mod tests {
             .expect("stop");
         assert_eq!(code, 0);
         assert_eq!(journal_jobs(project.path()).len(), 1);
+    }
+
+    // -----------------------------------------------------------------
+    // M3 delivery-structure contract: silent decisions build NO full
+    // context, a full delivery builds it AT MOST once, and session
+    // maintenance is eligible at the boundary whether or not output
+    // printed. Measured by the thread-local counter seams, never timing.
+    // -----------------------------------------------------------------
+
+    /// Hermetic resume_output fixture: temp home/config/project, cursor
+    /// quirk (native JSON injection, session_start prints+marks).
+    struct DeliveryFixture {
+        _home: tempfile::TempDir,
+        _config: tempfile::TempDir,
+        project: tempfile::TempDir,
+        ctx: Ctx,
+        prior_home: Option<std::ffi::OsString>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl DeliveryFixture {
+        fn new() -> Self {
+            let guard = crate::test_env::env_lock();
+            let home = tempfile::tempdir().expect("home");
+            let config = tempfile::tempdir().expect("config");
+            let project = tempfile::tempdir().expect("project");
+            local_store::init_skeleton(project.path(), "p-test", "proj", "local")
+                .expect("skeleton");
+            std::fs::write(
+                config
+                    .path()
+                    .join(super::super::persona::PERSONA_CACHE_FILE),
+                "## Persona\n\nYou are YinYue.\n",
+            )
+            .expect("persona");
+            let prior_home = std::env::var_os("STATEROOT_TEST_HOME");
+            unsafe {
+                std::env::set_var("STATEROOT_TEST_HOME", home.path());
+            }
+            let ctx = Ctx {
+                cwd: project.path().to_path_buf(),
+                config_dir: config.path().to_path_buf(),
+                config: stateroot_core::config::AppConfig::default(),
+            };
+            reset_delivery_counters();
+            Self {
+                _home: home,
+                _config: config,
+                project,
+                ctx,
+                prior_home,
+                _guard: guard,
+            }
+        }
+
+        fn payload(&self) -> Value {
+            json!({"session_id": "m3-counter-fixture", "cwd": self.project.path()})
+        }
+    }
+
+    impl Drop for DeliveryFixture {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.prior_home {
+                    Some(prior) => std::env::set_var("STATEROOT_TEST_HOME", prior),
+                    None => std::env::remove_var("STATEROOT_TEST_HOME"),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn full_delivery_builds_context_at_most_once() {
+        let fixture = DeliveryFixture::new();
+        let quirk = quirk_any("cursor").expect("cursor quirk");
+        resume_output(
+            &fixture.ctx,
+            quirk,
+            "session_start",
+            fixture.project.path(),
+            &fixture.payload(),
+        )
+        .await
+        .expect("resume_output");
+        assert_eq!(
+            observed_digest_builds(),
+            1,
+            "a full delivery builds the full context AT MOST once"
+        );
+    }
+
+    #[tokio::test]
+    async fn silent_repeat_builds_no_context() {
+        let fixture = DeliveryFixture::new();
+        let quirk = quirk_any("cursor").expect("cursor quirk");
+        let payload = fixture.payload();
+        // First delivery settles the session.
+        resume_output(
+            &fixture.ctx,
+            quirk,
+            "session_start",
+            fixture.project.path(),
+            &payload,
+        )
+        .await
+        .expect("first");
+        reset_delivery_counters();
+        // The unchanged repeat is deduped to silent — no build at all.
+        resume_output(
+            &fixture.ctx,
+            quirk,
+            "session_start",
+            fixture.project.path(),
+            &payload,
+        )
+        .await
+        .expect("repeat");
+        assert_eq!(
+            observed_digest_builds(),
+            0,
+            "a silent decision must perform ZERO full digest builds"
+        );
+    }
+
+    #[tokio::test]
+    async fn silent_repeat_still_runs_session_maintenance() {
+        let fixture = DeliveryFixture::new();
+        let quirk = quirk_any("cursor").expect("cursor quirk");
+        let payload = fixture.payload();
+        resume_output(
+            &fixture.ctx,
+            quirk,
+            "session_start",
+            fixture.project.path(),
+            &payload,
+        )
+        .await
+        .expect("first");
+        reset_delivery_counters();
+        resume_output(
+            &fixture.ctx,
+            quirk,
+            "session_start",
+            fixture.project.path(),
+            &payload,
+        )
+        .await
+        .expect("repeat");
+        assert_eq!(
+            observed_maintenance_runs(),
+            1,
+            "a silent session_start must still run its boundary maintenance"
+        );
     }
 }

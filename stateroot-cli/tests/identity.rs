@@ -1,19 +1,15 @@
+// Each test binary includes this module but uses a subset of its helpers.
+#[path = "support/mod.rs"]
+mod support;
+
 use std::path::Path;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn stateroot(config: &Path, home: &Path, cwd: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("stateroot").unwrap();
-    cmd.env("STATEROOT_HOME", config)
-        .env("STATEROOT_TEST_HOME", home)
-        .env("STATEROOT_TEST_CMD_PROBES", "")
-        .env_remove("DEEPSEEK_API_KEY")
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_BASE")
-        .env_remove("HERMES_HOME")
-        .current_dir(cwd);
+    let mut cmd = support::stateroot(config, home, cwd);
+    cmd.env_remove("HERMES_HOME");
     cmd
 }
 

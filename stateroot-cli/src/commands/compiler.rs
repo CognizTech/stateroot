@@ -369,7 +369,7 @@ pub fn merge_into_handoff_at(project_dir: &Path, synthesized: &Value) -> Result<
         let shell = json!({
             "schema_version": local_store::SCHEMA_HANDOFF_V1,
             "project_id": project_id,
-            "seq": 1,
+            "seq": stateroot_core::handoff_continuity::reserve_sequence(project_dir).map_err(anyhow::Error::msg)?,
             "from": "cli",
             "created_by_harness": "cli",
             "created_at": now_rfc3339(),

@@ -1,5 +1,4 @@
 import {
-  CLI_MODE_HARNESSES,
   liveStatus,
   type DelegationRecord,
   type HandoffPacket,
@@ -37,11 +36,13 @@ export function assembleInbox(input: {
   const thisHarness = input.thisHarness ?? "cursor";
   const dismissed = new Set(input.dismissed ?? []);
 
-  for (const plan of input.plans) {
+  // A valid projection owns plan/failure attention, including an empty
+  // result. Local derivation remains for older CLIs without that contract.
+  for (const plan of input.continuity ? [] : input.plans) {
     if (plan.status !== "active" && plan.status !== "approved") {
       continue;
     }
-    if (hasSuccessfulDelegation(plan.id, input.delegations)) {
+    if (hasExecutorEvidence(plan.id, input.delegations)) {
       continue;
     }
     items.push({
@@ -54,7 +55,7 @@ export function assembleInbox(input: {
     });
   }
 
-  for (const rec of input.delegations) {
+  for (const rec of input.continuity ? [] : input.delegations) {
     const status = liveStatus(rec);
     if (status !== "failed" && status !== "lost" && status !== "timed_out") {
       continue;
@@ -96,6 +97,8 @@ export function continuityItemTab(item: AttentionItem): InboxTab {
     case "plan_unassigned":
       return "plans";
     case "delegation_failed":
+    case "delegation_status_unknown":
+    case "delegation_record_degraded":
       return "crew";
     default:
       return "control";
@@ -120,8 +123,7 @@ export function continuityInboxItem(item: AttentionItem): InboxItem {
 /** Fold the CLI's continuity projection into the derived inbox. The
  * projection is the CLI's single assessment, so its items win over the
  * extension's local derivations of the same evidence (routed/stale handoff
- * over accept-handoff, failed delegation over reassign, plan attention over
- * choose-executor). */
+ * over accept-handoff). Plan/failure derivation only runs without it. */
 export function mergeContinuity(
   derived: InboxItem[],
   continuity?: ContinuityProjection
@@ -144,28 +146,6 @@ export function mergeContinuity(
     if (item.kind === "handoff_routed" || item.kind === "handoff_stale") {
       for (const row of derived) {
         if (row.kind === "accept-handoff") {
-          superseded.add(row.id);
-        }
-      }
-    } else if (item.kind === "delegation_failed" && item.delegationId) {
-      for (const row of derived) {
-        if (
-          row.kind === "reassign" &&
-          row.delegationId &&
-          (row.delegationId.startsWith(item.delegationId) ||
-            item.delegationId.startsWith(row.delegationId))
-        ) {
-          superseded.add(row.id);
-        }
-      }
-    } else if (
-      (item.kind === "plan_receipt_pending" ||
-        item.kind === "plan_closure" ||
-        item.kind === "plan_unassigned") &&
-      item.planId
-    ) {
-      for (const row of derived) {
-        if (row.kind === "choose-executor" && row.planId === item.planId) {
           superseded.add(row.id);
         }
       }
@@ -211,6 +191,9 @@ export function delegationTargetsClosedPlan(
   rec: DelegationRecord,
   plans: PlanMeta[]
 ): boolean {
+  if (rec.plan_id) {
+    return plans.some(plan => plan.id === rec.plan_id && isClosedPlanStatus(plan.status));
+  }
   const task = rec.task || "";
   if (
     plans.some(
@@ -232,17 +215,17 @@ export function delegationTargetsClosedPlan(
   return false;
 }
 
-export function hasSuccessfulDelegation(
+function hasExecutorEvidence(
   planId: string,
   delegations: DelegationRecord[]
 ): boolean {
   const needle = `.stateroot/plans/${planId}`;
   return delegations.some((rec) => {
-    if (liveStatus(rec) !== "completed") {
+    if (!["completed", "running", "starting", "unknown", "cancelling"].includes(liveStatus(rec))) {
       return false;
     }
     const task = rec.task || "";
-    return task.includes(planId) || task.includes(needle);
+    return rec.plan_id ? rec.plan_id === planId : task.includes(planId) || task.includes(needle);
   });
 }
 
@@ -266,8 +249,4 @@ export function handoffAcceptedBy(handoff: HandoffPacket, harness: string): bool
     return raw.includes(harness);
   }
   return false;
-}
-
-export function isCliMode(id: string): boolean {
-  return (CLI_MODE_HARNESSES as readonly string[]).includes(id);
 }

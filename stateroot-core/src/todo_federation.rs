@@ -277,6 +277,80 @@ pub struct PlanBinding {
     pub bound_at: String,
     /// Where the binding was verified (`hook-delivery` | `resume`).
     pub source: String,
+    /// Checkout owning current routing; absent legacy bindings are history in forks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout: Option<String>,
+}
+
+fn binding_checkout(project: &Path) -> Result<String, String> {
+    if local_store::fork_context(project)
+        .is_some_and(|context| context.schema != "stateroot.fork-context.v1")
+    {
+        return Err(
+            "unsupported fork context; current session routing cannot be established".into(),
+        );
+    }
+    let lineage =
+        crate::roots::lineage_refname_checked(project).map_err(|error| error.to_string())?;
+    if let Some(fork) = lineage.strip_prefix(crate::roots::FORKS_REF_PREFIX) {
+        return Ok(fork.into());
+    }
+    if let Ok(repo) = git2::Repository::open(project) {
+        if repo.is_worktree()
+            && repo
+                .path()
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    repo.refname_to_id(&format!("{}{name}", crate::roots::FORKS_REF_PREFIX))
+                        .is_ok()
+                })
+        {
+            return Err(
+                "StateRoot fork context unavailable; current session routing cannot be established"
+                    .into(),
+            );
+        }
+    }
+    Ok("trunk".into())
+}
+
+pub(crate) fn current_binding_path(path: &str) -> bool {
+    let parts: Vec<_> = path.split('/').collect();
+    matches!(parts.as_slice(), [".stateroot", "plan-bindings", harness, file] if *harness != "history" && !harness.is_empty() && file.ends_with(".json"))
+}
+
+pub(crate) fn binding_history_path(bytes: &[u8]) -> String {
+    format!(
+        ".stateroot/plan-bindings/history/{}.json",
+        blake3::hash(bytes).to_hex()
+    )
+}
+
+fn preserve_binding_bytes(project: &Path, bytes: &[u8]) -> Result<(), String> {
+    let relative = binding_history_path(bytes);
+    let path = project.join(&relative);
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|error| error.to_string())?;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            use std::io::Write;
+            file.write_all(bytes)
+                .and_then(|()| file.sync_all())
+                .map_err(|error| error.to_string())?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if std::fs::read(path).map_err(|error| error.to_string())? != bytes {
+                return Err("binding history identity conflict".into());
+            }
+        }
+        Err(error) => return Err(error.to_string()),
+    }
+    local_store::report_written(project, relative.strip_prefix(".stateroot/").unwrap());
+    Ok(())
 }
 
 fn binding_path(project_dir: &Path, harness: &str, session_id: &str) -> PathBuf {
@@ -295,6 +369,7 @@ pub fn record_binding(
     plan_id: &str,
     source: &str,
 ) -> Result<PlanBinding, String> {
+    let _guard = crate::plans::write_guard(project_dir)?;
     let Some((meta, _)) = crate::plans::load(project_dir, plan_id) else {
         return Err(format!("cannot bind to unknown plan `{plan_id}`"));
     };
@@ -314,13 +389,30 @@ pub fn record_binding(
         plan_id: plan_id.to_string(),
         bound_at: now_rfc3339(),
         source: source.to_string(),
+        checkout: Some(binding_checkout(project_dir)?),
     };
     let path = binding_path(project_dir, harness, session_id);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create bindings dir: {e}"))?;
     }
     let json = serde_json::to_string_pretty(&binding).map_err(|e| e.to_string())?;
-    std::fs::write(&path, format!("{json}\n")).map_err(|e| format!("write binding: {e}"))?;
+    let bytes = format!("{json}\n");
+    match std::fs::read(&path) {
+        Ok(previous) => preserve_binding_bytes(project_dir, &previous)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("existing binding unreadable: {error}")),
+    }
+    preserve_binding_bytes(project_dir, bytes.as_bytes())?;
+    crate::safe_io::atomic_replace(&path, bytes.as_bytes())
+        .map_err(|e| format!("write binding: {e}"))?;
+    local_store::report_written(
+        project_dir,
+        &format!(
+            "{BINDINGS_REL}/{}/{}.json",
+            sanitize_key(harness),
+            sanitize_key(session_id)
+        ),
+    );
     Ok(binding)
 }
 
@@ -330,6 +422,17 @@ pub fn bound_plan_id(project_dir: &Path, harness: &str, session_id: &str) -> Opt
     let text = std::fs::read_to_string(binding_path(project_dir, harness, session_id)).ok()?;
     let binding: PlanBinding = serde_json::from_str(&text).ok()?;
     if binding.schema_version != SCHEMA_BINDING_V1 {
+        return None;
+    }
+    let checkout = binding_checkout(project_dir).ok()?;
+    if binding.harness != harness
+        || binding.session_id != session_id
+        || binding
+            .checkout
+            .as_ref()
+            .is_some_and(|owner| *owner != checkout)
+        || (binding.checkout.is_none() && local_store::fork_context(project_dir).is_some())
+    {
         return None;
     }
     let (meta, _) = crate::plans::load(project_dir, &binding.plan_id)?;

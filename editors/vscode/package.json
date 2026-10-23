@@ -129,6 +129,7 @@
     "compile": "node scripts/prepare-installers.cjs && node ./node_modules/typescript/bin/tsc -p ./",
     "vscode:prepublish": "npm run compile",
     "test": "npm run compile && node --test test/*.test.cjs",
+    "test:cli": "npm run compile && node --test test/cli-contract.cjs",
     "watch": "tsc -watch -p ./",
     "package": "vsce package"
   },

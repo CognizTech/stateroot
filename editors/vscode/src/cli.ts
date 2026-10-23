@@ -218,14 +218,20 @@ async function offerDocsOnly(): Promise<void> {
   }
 }
 
-/** Parse `stateroot delegate list` lines: `id · harness · status · task`. */
-export function parseDelegateList(text: string): Array<{
-  id: string;
-  harness: string;
-  status: string;
-  task: string;
-}> {
-  const rows: Array<{ id: string; harness: string; status: string; task: string }> = [];
+export interface DelegateListReport {
+  records: Array<{
+    id: string;
+    harness: string;
+    status: string;
+    task: string;
+  }>;
+  degraded: Array<{ file: string; reason: string }>;
+}
+
+/** Ordinary rows are `id · harness · status · task`; degraded observations
+ * are `filename · degraded · reason`. A filename is never a worker id. */
+export function parseDelegateList(text: string): DelegateListReport {
+  const report: DelegateListReport = { records: [], degraded: [] };
   for (const line of text.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("no delegations")) {
@@ -235,12 +241,16 @@ export function parseDelegateList(text: string): Array<{
     if (parts.length < 3) {
       continue;
     }
-    rows.push({
+    if (parts[1] === "degraded") {
+      report.degraded.push({ file: parts[0], reason: parts.slice(2).join(" · ") });
+      continue;
+    }
+    report.records.push({
       id: parts[0],
       harness: parts[1],
       status: parts[2],
       task: parts.slice(3).join(" · "),
     });
   }
-  return rows;
+  return report;
 }

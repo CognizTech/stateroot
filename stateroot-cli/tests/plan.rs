@@ -1,37 +1,18 @@
 //! `stateroot plan` tests — central plan artifacts, lifecycle, digest
 //! directives, and handoff plan_ref. Hermetic homes/projects only.
 
+// Each test binary includes this module but uses a subset of its helpers.
+#[path = "support/mod.rs"]
+mod support;
+
 use std::path::Path;
 
-use assert_cmd::Command;
-
-fn stateroot(config_home: &Path, user_home: &Path, cwd: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("stateroot").expect("binary");
-    cmd.env("STATEROOT_HOME", config_home)
-        .env("STATEROOT_TEST_HOME", user_home)
-        .env("STATEROOT_TEST_CMD_PROBES", "")
-        .env_remove("DEEPSEEK_API_KEY")
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_BASE")
-        .current_dir(cwd);
-    cmd
-}
-
-fn homes() -> (tempfile::TempDir, tempfile::TempDir) {
-    let config_home = tempfile::tempdir().expect("config home");
-    std::fs::create_dir_all(config_home.path()).expect("config home");
-    let user_home = tempfile::tempdir().expect("user home");
-    (config_home, user_home)
-}
+use support::{homes, stateroot};
 
 fn init_project(config_home: &Path, user_home: &Path, project: &Path) {
     std::fs::create_dir_all(project).expect("project dir");
     std::fs::write(project.join("README.md"), "# Demo\n\nA demo project.\n").expect("readme");
-    stateroot(config_home, user_home, project)
-        .arg("init")
-        .assert()
-        .success();
+    support::init_project(config_home, user_home, project);
 }
 
 /// Record a plan from a file; returns the plan id parsed from stdout.
@@ -66,6 +47,257 @@ fn record_plan(
 
 fn episodic(project: &Path) -> String {
     std::fs::read_to_string(project.join(".stateroot/memories/episodic.jsonl")).expect("episodic")
+}
+
+#[test]
+fn candidate_verification_survives_restage_publication_cleanup_and_gc() {
+    let (config, home) = homes();
+    let project = tempfile::tempdir().unwrap();
+    init_project(config.path(), home.path(), project.path());
+    let id = record_plan(
+        config.path(),
+        home.path(),
+        project.path(),
+        "Candidate checks",
+        "# Check candidate source\n",
+    );
+    stateroot(config.path(), home.path(), project.path())
+        .args(["plan", "approve", &id])
+        .assert()
+        .success();
+    stateroot_core::todo_federation::record_binding(
+        project.path(),
+        "codex",
+        "shared-session",
+        &id,
+        "receiver",
+    )
+    .unwrap();
+    stateroot_core::wiki::append_inbox_bullets(
+        project.path(),
+        &["baseline retained inbox note".into()],
+    )
+    .unwrap();
+    stateroot_core::wiki::append_log(project.path(), "baseline retained event").unwrap();
+    std::fs::write(
+        project.path().join(".stateroot/ingest-gov.json"),
+        "{\"last_input_sha256\":\"receiver\"}",
+    )
+    .unwrap();
+    let routing = std::fs::read(
+        project
+            .path()
+            .join(".stateroot/plan-bindings/codex/shared-session.json"),
+    )
+    .unwrap();
+    stateroot(config.path(), home.path(), project.path())
+        .args(["snap", "--reason", "base"])
+        .assert()
+        .success();
+    let base = stateroot_core::roots::latest_root(project.path())
+        .unwrap()
+        .unwrap();
+    let checkout = tempfile::tempdir().unwrap();
+    let mut acknowledgements = Vec::new();
+    for name in ["candidate", "candidate-b"] {
+        let fork = checkout.path().join(name);
+        stateroot(config.path(), home.path(), project.path())
+            .args(["fork", &base, "--name", name, "--worktree"])
+            .arg(&fork)
+            .assert()
+            .success();
+        std::fs::write(fork.join(format!("{name}.txt")), name).unwrap();
+        if name == "candidate" {
+            std::fs::write(fork.join("Cargo.lock"), "result lockfile").unwrap();
+        }
+        stateroot_core::todo_federation::record_binding(
+            &fork,
+            "codex",
+            "shared-session",
+            &id,
+            name,
+        )
+        .unwrap();
+        stateroot_core::wiki::append_inbox_bullets(&fork, &[format!("{name} retained inbox note")])
+            .unwrap();
+        stateroot_core::wiki::append_log(&fork, &format!("{name} retained event")).unwrap();
+        std::fs::write(
+            fork.join(".stateroot/ingest-gov.json"),
+            serde_json::json!({"last_input_sha256":name}).to_string(),
+        )
+        .unwrap();
+        let session = format!("capture-{name}");
+        stateroot(config.path(), home.path(), &fork).args(["hook", "post_tool_use", "--harness", "codex"])
+            .write_stdin(serde_json::json!({"session_id":session,"tool_name":"Bash","tool_use_id":name,"tool_response":format!("{name} durable tool result")}).to_string()).assert().success();
+        let watermark =
+            match stateroot_core::observations::session_watermark(&fork, "codex", &session) {
+                stateroot_core::observations::SessionWatermark::Present(value) => value,
+                other => panic!("{other:?}"),
+            };
+        let key = uuid::Uuid::now_v7().to_string();
+        let path = stateroot_core::observations::acknowledge_frontier(
+            &fork, "codex", &session, &key, &watermark,
+        )
+        .unwrap();
+        acknowledgements.push((session, key, watermark, std::fs::read(path).unwrap()));
+        stateroot(config.path(), home.path(), &fork)
+            .args(["snap", "--reason", "fork"])
+            .assert()
+            .success();
+    }
+    let prepared = stateroot(config.path(), home.path(), project.path())
+        .args(["merge", "--prepare", "candidate", "candidate-b", "--json"])
+        .assert()
+        .success();
+    let attempt: serde_json::Value = serde_json::from_slice(&prepared.get_output().stdout).unwrap();
+    let attempt_id = attempt["id"].as_str().unwrap();
+    let staged = stateroot(config.path(), home.path(), project.path())
+        .args(["merge", "--stage", attempt_id, "--json"])
+        .assert()
+        .success();
+    let staged: serde_json::Value = serde_json::from_slice(&staged.get_output().stdout).unwrap();
+    let candidate = std::path::PathBuf::from(staged["worktree"].as_str().unwrap());
+    let before = stateroot_core::roots::latest_root(project.path()).unwrap();
+    let owner = git2::Repository::open(project.path()).unwrap();
+    let head = || {
+        let head = owner.find_reference("HEAD").unwrap();
+        (head.symbolic_target().map(str::to_owned), head.target())
+    };
+    let head_before = head();
+    let frozen_forks = || {
+        ["candidate", "candidate-b"].map(|name| {
+            owner
+                .refname_to_id(&format!("refs/stateroot/forks/{name}"))
+                .unwrap()
+        })
+    };
+    let fork_before = frozen_forks();
+    let verified = stateroot(config.path(), home.path(), &candidate)
+        .args(["plan", "verify", &id, "--"])
+        .arg(assert_cmd::cargo::cargo_bin("stateroot"))
+        .arg("--version")
+        .assert()
+        .success();
+    let output = String::from_utf8_lossy(&verified.get_output().stdout);
+    let observation = output
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("verification ")
+                .and_then(|line| line.split(':').next())
+        })
+        .unwrap()
+        .to_string();
+    stateroot(config.path(), home.path(), project.path())
+        .args(["merge", "--stage", attempt_id, "--json"])
+        .assert()
+        .success();
+    assert!(
+        !candidate.join(".git").exists(),
+        "verification must use the recorded owner repository"
+    );
+    assert_eq!(
+        stateroot_core::roots::latest_root(project.path()).unwrap(),
+        before
+    );
+    assert_eq!(head(), head_before);
+    assert_eq!(frozen_forks(), fork_before);
+    let record = stateroot_core::verification::load(&candidate, &observation).unwrap();
+    stateroot(config.path(), home.path(), project.path())
+        .args(["merge", "--continue", attempt_id, "--json"])
+        .assert()
+        .success();
+    assert!(!candidate.exists(), "publication removes the candidate");
+    assert_eq!(
+        std::fs::read(
+            project
+                .path()
+                .join(".stateroot/plan-bindings/codex/shared-session.json")
+        )
+        .unwrap(),
+        routing
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.path().join(".stateroot/ingest-gov.json")).unwrap(),
+        "{\"last_input_sha256\":\"receiver\"}"
+    );
+    assert!(
+        !project
+            .path()
+            .join(".stateroot/spool/current.json")
+            .exists(),
+        "foreign projections never become current"
+    );
+    let inbox = stateroot_core::wiki::show(project.path(), "_inbox").unwrap();
+    let log = stateroot_core::wiki::show(project.path(), "wiki/log.md").unwrap();
+    for name in ["candidate", "candidate-b"] {
+        assert!(inbox.contains(&format!("{name} retained inbox note")));
+        assert!(log.contains(&format!("{name} retained event")));
+    }
+    let gc = std::process::Command::new("git")
+        .args(["gc", "--prune=now"])
+        .current_dir(project.path())
+        .status()
+        .unwrap();
+    assert!(gc.success());
+    for (session, key, watermark, bytes) in acknowledgements {
+        let path = stateroot_core::observations::acknowledge_frontier(
+            project.path(),
+            "codex",
+            &session,
+            &key,
+            &watermark,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            bytes,
+            "replay retains exact acknowledged frontier"
+        );
+        assert!(std::fs::read_to_string(
+            project
+                .path()
+                .join(".stateroot/spool/segments")
+                .join(watermark.segment.unwrap())
+        )
+        .unwrap()
+        .contains("durable tool result"));
+    }
+    let repo = git2::Repository::open(project.path()).unwrap();
+    let published = stateroot_core::roots::latest_root(project.path())
+        .unwrap()
+        .unwrap();
+    let published = repo
+        .find_commit(published.parse().unwrap())
+        .unwrap()
+        .tree()
+        .unwrap();
+    let declaration = published
+        .get_path(Path::new(stateroot_core::fidelity::MANIFEST_PATH))
+        .unwrap();
+    let declaration: serde_json::Value =
+        serde_json::from_slice(repo.find_blob(declaration.id()).unwrap().content()).unwrap();
+    assert_eq!(declaration["publication"]["operation"], "merge");
+    assert!(declaration["lockfiles"]["Cargo.lock"].is_string());
+    let lockfile = published.get_path(Path::new("Cargo.lock")).unwrap();
+    assert_eq!(
+        repo.find_blob(lockfile.id()).unwrap().content(),
+        b"result lockfile"
+    );
+    repo.find_tree(record.product_tree.parse().unwrap())
+        .expect("retained verification source tree after GC");
+    let retained =
+        stateroot_core::verification::validate(project.path(), &id, &observation).unwrap();
+    assert_eq!(retained.product_tree, record.product_tree);
+    for (suffix, expected) in ["stdout", "stderr"].into_iter().zip(&record.output_digests) {
+        let path = project
+            .path()
+            .join(".stateroot/local/verification")
+            .join(format!("{observation}.{suffix}"));
+        assert_eq!(
+            &stateroot_core::verification::output_digest(&path).unwrap(),
+            expected
+        );
+    }
 }
 
 #[test]

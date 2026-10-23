@@ -2,37 +2,13 @@
 //! --worktree` validates against the registry and stores an opaque fork id;
 //! `resume` in the wrong directory fails closed with the exact recovery.
 
+// Each test binary includes this module but uses a subset of its helpers.
+#[path = "support/mod.rs"]
+mod support;
+
 use std::path::Path;
 
-use assert_cmd::Command;
-
-fn stateroot(config_home: &Path, user_home: &Path, cwd: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("stateroot").expect("binary");
-    cmd.env("STATEROOT_HOME", config_home)
-        .env("STATEROOT_TEST_HOME", user_home)
-        .env("STATEROOT_TEST_CMD_PROBES", "")
-        .env_remove("DEEPSEEK_API_KEY")
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_BASE")
-        .current_dir(cwd);
-    cmd
-}
-
-fn homes() -> (tempfile::TempDir, tempfile::TempDir) {
-    let config_home = tempfile::tempdir().expect("config home");
-    std::fs::create_dir_all(config_home.path()).expect("config home");
-    let user_home = tempfile::tempdir().expect("user home");
-    (config_home, user_home)
-}
-
-fn init_project(config_home: &Path, user_home: &Path, project: &Path) {
-    std::fs::create_dir_all(project).expect("project dir");
-    stateroot(config_home, user_home, project)
-        .arg("init")
-        .assert()
-        .success();
-}
+use support::{homes, init_project, stateroot};
 
 fn snap_root(config_home: &Path, user_home: &Path, project: &Path) -> String {
     std::fs::write(project.join("seed.txt"), "seed\n").expect("seed");

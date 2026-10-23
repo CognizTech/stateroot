@@ -35,6 +35,7 @@ import { advisoryTextFor, type ContinuityProjection } from "./continuity";
 import { handoffBoundary, handoffIsStale, staleHandoffNote } from "./freshness";
 import { deriveParallelWork, type LineageProjection, type ParallelWorkCard } from "./parallelWork";
 import type { MergeAttempt } from "./mergeAttempt";
+import type { DelegateListReport } from "./cli";
 
 export interface Snapshot {
   initialized: boolean;
@@ -63,6 +64,7 @@ export interface Snapshot {
   harnesses: string[];
   selectedHarness?: string;
   delegations: Array<DelegationRecord & { status: string; closedPlan?: boolean }>;
+  degradedDelegations: DelegateListReport["degraded"];
   roots: RootManifest[];
   lineage?: LineageProjection;
   work: ParallelWorkCard[];
@@ -88,7 +90,7 @@ export function snapshot(opts?: {
   rootA?: string;
   rootB?: string;
   compareText?: string;
-  liveDelegations?: Array<{ id: string; harness: string; status: string; task: string }>;
+  liveDelegations?: DelegateListReport;
   lineage?: LineageProjection;
   tab?: string;
   dismissedInbox?: string[];
@@ -111,11 +113,13 @@ export function snapshot(opts?: {
   const bound = planBoundIndex(todoRecords);
   const plans = listPlans(root).map((plan) => withPlanTodos(plan, bound.get(plan.id)));
   const storeDelegations = listDelegations(root);
-  const live = opts?.liveDelegations;
+  const live = opts?.liveDelegations?.records;
+  const degradedDelegations = opts?.liveDelegations?.degraded ?? [];
+  const degradedFiles = new Set(degradedDelegations.map(row => row.file));
   const delegations: Array<DelegationRecord & { status: string; closedPlan?: boolean }> =
-    storeDelegations.map((rec) => {
+    storeDelegations.filter(rec => !degradedFiles.has(rec.file ?? "")).map((rec) => {
       const fromLive = live?.find((row) => rec.id.startsWith(row.id) || row.id.startsWith(rec.id));
-      const row = { ...rec, status: fromLive?.status || liveStatus(rec) };
+      const row = { ...rec, status: rec.outcome || fromLive?.status || liveStatus(rec) };
       return { ...row, closedPlan: delegationTargetsClosedPlan(row, plans) };
     });
   if (live) {
@@ -205,6 +209,7 @@ export function snapshot(opts?: {
     harnesses: [...CLI_MODE_HARNESSES],
     selectedHarness: opts?.selectedHarness,
     delegations,
+    degradedDelegations,
     roots,
     lineage: opts?.lineage,
     work: lineageWork,

@@ -130,7 +130,7 @@ impl Drop for FileLock {
 /// `stateroot editor status` — read-only.
 pub async fn status(ctx: &Ctx) -> anyhow::Result<()> {
     let reports = inspect(ctx, Mode::Status).await?;
-    print_matrix(&reports, ctx);
+    print_matrix(&reports, ctx, false);
     Ok(())
 }
 
@@ -138,7 +138,7 @@ pub async fn status(ctx: &Ctx) -> anyhow::Result<()> {
 /// detected target fails to converge.
 pub async fn reconcile(ctx: &Ctx) -> anyhow::Result<i32> {
     let reports = inspect(ctx, Mode::Explicit).await?;
-    print_matrix(&reports, ctx);
+    print_matrix(&reports, ctx, false);
     if reports
         .iter()
         .any(|r| !matches!(r.state, ExtensionState::NotDetected) && !r.state.is_healthy())
@@ -150,7 +150,7 @@ pub async fn reconcile(ctx: &Ctx) -> anyhow::Result<i32> {
 }
 
 /// After `stateroot install`: best-effort, never fails the CLI install.
-pub async fn reconcile_after_install(ctx: &Ctx) {
+pub async fn reconcile_after_install(ctx: &Ctx, json_out: bool) {
     if !should_auto_reconcile() {
         return;
     }
@@ -160,7 +160,7 @@ pub async fn reconcile_after_install(ctx: &Ctx) {
                 .iter()
                 .any(|r| !matches!(r.state, ExtensionState::NotDetected))
             {
-                print_matrix(&reports, ctx);
+                print_matrix(&reports, ctx, json_out);
             }
         }
         Err(err) => note!(
@@ -1035,8 +1035,13 @@ fn status_detail(report: &EditorReport) -> String {
     }
 }
 
-fn print_matrix(reports: &[EditorReport], ctx: &Ctx) {
-    println!("editor reconciliation:");
+fn print_matrix(reports: &[EditorReport], ctx: &Ctx, json_out: bool) {
+    macro_rules! line {
+        ($($arg:tt)*) => {
+            if json_out { eprintln!($($arg)*); } else { println!($($arg)*); }
+        };
+    }
+    line!("editor reconciliation:");
     for report in reports {
         let mark = if report.state.is_healthy() {
             "ok"
@@ -1044,14 +1049,14 @@ fn print_matrix(reports: &[EditorReport], ctx: &Ctx) {
             "!!"
         };
         let extra = if report.mutated { " (updated)" } else { "" };
-        println!(
+        line!(
             "  [{mark}] {} — {}{extra}",
             report.kind.label(),
             status_detail(report)
         );
     }
     if let Some(line) = last_failure_line(ctx) {
-        println!("  {line}; retry: `stateroot editor reconcile`");
+        line!("  {line}; retry: `stateroot editor reconcile`");
     }
 }
 

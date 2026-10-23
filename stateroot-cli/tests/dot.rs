@@ -1,12 +1,14 @@
+// Each test binary includes this module but uses a subset of its helpers.
+#[path = "support/mod.rs"]
+mod support;
+
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::{fs, path::Path};
 
 fn dot(project: &Path, home: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("stateroot").unwrap();
-    cmd.env("STATEROOT_HOME", home.join("invalid-config"))
-        .env("STATEROOT_TEST_HOME", home)
-        .env("HOME", home)
+    let mut cmd = support::stateroot(&home.join("invalid-config"), home, project);
+    cmd.env("HOME", home)
         .env("USERPROFILE", home)
         .arg("dot")
         .arg("--portable")
@@ -201,12 +203,8 @@ fn snapshot_reuses_git_lineage_without_moving_user_head_and_skill_matches_source
 }
 
 fn ordinary(project: &Path, home: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("stateroot").unwrap();
-    cmd.current_dir(project)
-        .env("STATEROOT_HOME", home.join("config"))
-        .env("STATEROOT_TEST_HOME", home)
-        .env("STATEROOT_TEST_CMD_PROBES", "")
-        .env("STATEROOT_NO_PING", "1");
+    let mut cmd = support::stateroot(&home.join("config"), home, project);
+    cmd.env("STATEROOT_NO_PING", "1");
     cmd
 }
 
@@ -594,7 +592,6 @@ fn full_dot(project: &Path, home: &Path) -> Command {
     let mut cmd = ordinary(project, home);
     cmd.env("HOME", home)
         .env("USERPROFILE", home)
-        .env("STATEROOT_NO_AUTO_UPDATE", "1")
         .args(["dot", "--project"])
         .arg(project);
     cmd

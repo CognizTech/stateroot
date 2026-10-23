@@ -6,6 +6,7 @@ import {
   cliPath,
   isCliProbeAvailable,
   parseDelegateList,
+  type DelegateListReport,
   refreshCliProbe,
   runCliReport,
   runCli,
@@ -79,7 +80,7 @@ export function activate(context: vscode.ExtensionContext) {
   let rootA: string | undefined;
   let rootB: string | undefined;
   let compareText: string | undefined;
-  let liveDelegations: Array<{ id: string; harness: string; status: string; task: string }> | undefined;
+  let liveDelegations: DelegateListReport | undefined;
   let lineage: LineageProjection | undefined;
   let integrationStale = false;
   const selectedForks = new Set<string>();
@@ -286,13 +287,6 @@ export function activate(context: vscode.ExtensionContext) {
     if (type === "approvePlan" && typeof msg.id === "string") {
       await withProject(async (root) => {
         await runCliReport(["plan", "approve", msg.id as string], root, output);
-        push();
-      });
-      return;
-    }
-    if (type === "donePlan" && typeof msg.id === "string") {
-      await withProject(async (root) => {
-        await runCliReport(["plan", "done", msg.id as string], root, output);
         push();
       });
       return;

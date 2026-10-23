@@ -11,6 +11,7 @@ pub mod canonical;
 pub mod config;
 pub mod context_pack;
 pub mod continuity;
+pub mod delegation_status;
 pub mod digest_delivery;
 pub mod error;
 pub mod extensions;

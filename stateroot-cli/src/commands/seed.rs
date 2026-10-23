@@ -241,7 +241,7 @@ fn apply(
         }
     }
 
-    // handoffs/current.json — seq-1 init-seed shell when absent; the
+    // handoffs/current.json — numbered init-seed shell when absent; the
     // synthesized pass updates a same-origin init-seed handoff in place.
     let has_handoff_content = draft.objective.is_some()
         || draft.context_summary.is_some()
@@ -251,7 +251,7 @@ fn apply(
         let shell = json!({
             "schema_version": local_store::SCHEMA_HANDOFF_V1,
             "project_id": project_id,
-            "seq": 1,
+            "seq": stateroot_core::handoff_continuity::reserve_sequence(project_dir).map_err(anyhow::Error::msg)?,
             "from": "cli",
             "created_by_harness": "cli",
             "created_at": now_rfc3339(),

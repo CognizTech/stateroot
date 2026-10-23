@@ -1,25 +1,16 @@
 //! M3 integration tests — soul, learnings, proposals, review loop, memory
 //! scoping, and synthesis (wiremock for the provider call; zero real network).
 
+// Each test binary includes this module but uses a subset of its helpers.
+#[path = "support/mod.rs"]
+mod support;
+
 use std::path::Path;
 
-use assert_cmd::Command;
 use serde_json::json;
+use support::stateroot;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-
-fn stateroot(config_home: &Path, user_home: &Path, cwd: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("stateroot").expect("binary");
-    cmd.env("STATEROOT_HOME", config_home)
-        .env("STATEROOT_TEST_HOME", user_home)
-        .env("STATEROOT_TEST_CMD_PROBES", "")
-        .env_remove("DEEPSEEK_API_KEY")
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_BASE")
-        .current_dir(cwd);
-    cmd
-}
 
 fn seed_config_home(home: &Path, synthesis_toml: &str) {
     std::fs::create_dir_all(home).expect("config home");
@@ -31,11 +22,7 @@ fn seed_config_home(home: &Path, synthesis_toml: &str) {
 }
 
 fn init_project(config_home: &Path, user_home: &Path, project: &Path) {
-    std::fs::create_dir_all(project).expect("project dir");
-    stateroot(config_home, user_home, project)
-        .arg("init")
-        .assert()
-        .success();
+    support::init_project(config_home, user_home, project);
     std::fs::write(
         project.join("handoff-input.json"),
         r#"{"objective":"continue the project","task":"continue implementation","context_summary":"The project has captured local state ready for a receiving agent.","next_actions":["Continue from the captured state"],"failures":[]}"#,
@@ -754,128 +741,50 @@ async fn provider_transport_unicode_error_note_is_clean_and_keeps_content() {
     );
 }
 
+/// Cross-origin redirects never forward the prompt body or token to the
+/// redirect target — one journey per redirect status (302/307/308 cover the
+/// redirect family; the case count is unchanged, the journey is shared).
 #[tokio::test]
-async fn provider_transport_cross_origin_307_redirect_never_reaches_target() {
-    let target = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/chat/completions"))
-        .respond_with(valid_synthesis_response("redirected"))
-        .mount(&target)
-        .await;
+async fn provider_transport_cross_origin_redirects_never_reach_target() {
+    for status in [302u16, 307, 308] {
+        let target = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(valid_synthesis_response("redirected"))
+            .mount(&target)
+            .await;
 
-    let entry = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(307)
-                .insert_header("location", format!("{}/chat/completions", target.uri())),
-        )
-        .mount(&entry)
-        .await;
+        let entry = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(status)
+                    .insert_header("location", format!("{}/chat/completions", target.uri())),
+            )
+            .mount(&entry)
+            .await;
 
-    let config_home = tempfile::tempdir().expect("config home");
-    let user_home = tempfile::tempdir().expect("user home");
-    let project = marker_project(config_home.path(), user_home.path());
+        let config_home = tempfile::tempdir().expect("config home");
+        let user_home = tempfile::tempdir().expect("user home");
+        let project = marker_project(config_home.path(), user_home.path());
 
-    let out = stateroot(config_home.path(), user_home.path(), project.path())
-        .env("DEEPSEEK_API_KEY", "test-key")
-        .env("STATEROOT_SYNTHESIS_API_BASE", entry.uri())
-        .arg("synthesize")
-        .assert()
-        .success();
-    let observed = observed_requests_summary(&target).await;
-    eprintln!("cross-origin 307 target observed: {observed}");
-    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-    assert!(
-        stdout.contains("synthesis skipped or failed — deterministic digest intact"),
-        "cross-origin redirect must be refused, not followed: {stdout}"
-    );
-    assert_eq!(
-        observed, "<no requests>",
-        "307 redirect target must never receive the prompt body or token"
-    );
-}
-
-#[tokio::test]
-async fn provider_transport_cross_origin_308_redirect_never_reaches_target() {
-    let target = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/chat/completions"))
-        .respond_with(valid_synthesis_response("redirected"))
-        .mount(&target)
-        .await;
-
-    let entry = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(308)
-                .insert_header("location", format!("{}/chat/completions", target.uri())),
-        )
-        .mount(&entry)
-        .await;
-
-    let config_home = tempfile::tempdir().expect("config home");
-    let user_home = tempfile::tempdir().expect("user home");
-    let project = marker_project(config_home.path(), user_home.path());
-
-    let out = stateroot(config_home.path(), user_home.path(), project.path())
-        .env("DEEPSEEK_API_KEY", "test-key")
-        .env("STATEROOT_SYNTHESIS_API_BASE", entry.uri())
-        .arg("synthesize")
-        .assert()
-        .success();
-    let observed = observed_requests_summary(&target).await;
-    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-    assert!(
-        stdout.contains("synthesis skipped or failed — deterministic digest intact"),
-        "cross-origin redirect must be refused, not followed: {stdout}"
-    );
-    assert_eq!(
-        observed, "<no requests>",
-        "308 redirect target must never receive the prompt body or token"
-    );
-}
-
-#[tokio::test]
-async fn provider_transport_cross_origin_302_redirect_never_reaches_target() {
-    let target = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/chat/completions"))
-        .respond_with(valid_synthesis_response("redirected"))
-        .mount(&target)
-        .await;
-
-    let entry = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(302)
-                .insert_header("location", format!("{}/chat/completions", target.uri())),
-        )
-        .mount(&entry)
-        .await;
-
-    let config_home = tempfile::tempdir().expect("config home");
-    let user_home = tempfile::tempdir().expect("user home");
-    let project = marker_project(config_home.path(), user_home.path());
-
-    let out = stateroot(config_home.path(), user_home.path(), project.path())
-        .env("DEEPSEEK_API_KEY", "test-key")
-        .env("STATEROOT_SYNTHESIS_API_BASE", entry.uri())
-        .arg("synthesize")
-        .assert()
-        .success();
-    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
-    assert!(
-        stdout.contains("synthesis skipped or failed — deterministic digest intact"),
-        "cross-origin redirect must be refused, not followed: {stdout}"
-    );
-    let observed = observed_requests_summary(&target).await;
-    assert_eq!(
-        observed, "<no requests>",
-        "302 redirect target must never be contacted"
-    );
+        let out = stateroot(config_home.path(), user_home.path(), project.path())
+            .env("DEEPSEEK_API_KEY", "test-key")
+            .env("STATEROOT_SYNTHESIS_API_BASE", entry.uri())
+            .arg("synthesize")
+            .assert()
+            .success();
+        let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+        assert!(
+            stdout.contains("synthesis skipped or failed — deterministic digest intact"),
+            "{status}: cross-origin redirect must be refused, not followed: {stdout}"
+        );
+        let observed = observed_requests_summary(&target).await;
+        assert_eq!(
+            observed, "<no requests>",
+            "{status}: redirect target must never receive the prompt body or token"
+        );
+    }
 }
 
 #[tokio::test]

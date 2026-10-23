@@ -102,6 +102,27 @@ jobs:
               ;;
           esac
 
+      - uses: actions/setup-node@v4
+        if: matrix.shard == 'cli-c'
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+
+      - name: Install extension dependencies for CLI contract
+        if: matrix.shard == 'cli-c'
+        working-directory: editors/vscode
+        run: npm ci
+
+      - name: CLI to extension contract
+        if: matrix.shard == 'cli-c'
+        working-directory: editors/vscode
+        shell: bash
+        run: |
+          set -euo pipefail
+          cli_test_binary="$(node -p 'require("node:path").resolve("../../target/debug", process.platform === "win32" ? "stateroot.exe" : "stateroot")')"
+          STATEROOT_CLI_TEST_BINARY="$cli_test_binary" npm run test:cli
+
       - name: every CLI integration file is sharded
         shell: bash
         run: |

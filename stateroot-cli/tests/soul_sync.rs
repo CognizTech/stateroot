@@ -1,18 +1,13 @@
 //! `stateroot soul sync` — end-to-end through the binary: bootstrap link,
 //! native-edit adoption, canonical-edit push, conflict + accept.
 
+// Each test binary includes this module but uses a subset of its helpers.
+#[path = "support/mod.rs"]
+mod support;
+
 use std::path::Path;
 
-use assert_cmd::Command;
-
-fn stateroot(config_home: &Path, user_home: &Path, cwd: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("stateroot").expect("binary");
-    cmd.env("STATEROOT_HOME", config_home)
-        .env("STATEROOT_TEST_HOME", user_home)
-        .env("STATEROOT_TEST_CMD_PROBES", "")
-        .current_dir(cwd);
-    cmd
-}
+use support::stateroot;
 
 fn soul_sync(config_home: &Path, user_home: &Path, cwd: &Path, args: &[&str]) -> String {
     let out = stateroot(config_home, user_home, cwd)

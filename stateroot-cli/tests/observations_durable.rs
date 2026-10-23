@@ -2,39 +2,15 @@
 //! binary. Isolated homes per test; zero provider calls (capture has no
 //! network path); fixture processes are owned and killed, never real agents.
 
+// Each test binary includes this module but uses a subset of its helpers.
+#[path = "support/mod.rs"]
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use serde_json::{json, Value};
-use tempfile::TempDir;
-
-fn stateroot(config_home: &Path, user_home: &Path, cwd: &Path) -> assert_cmd::Command {
-    let mut cmd = assert_cmd::Command::cargo_bin("stateroot").expect("binary");
-    cmd.env("STATEROOT_HOME", config_home)
-        .env("STATEROOT_TEST_HOME", user_home)
-        .env("STATEROOT_TEST_CMD_PROBES", "")
-        .env_remove("DEEPSEEK_API_KEY")
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_KEY")
-        .env_remove("STATEROOT_SYNTHESIS_API_BASE")
-        .current_dir(cwd);
-    cmd
-}
-
-fn homes() -> (TempDir, TempDir) {
-    (
-        tempfile::tempdir().expect("config home"),
-        tempfile::tempdir().expect("user home"),
-    )
-}
-
-fn init_project(config_home: &Path, user_home: &Path, project: &Path) {
-    std::fs::create_dir_all(project).expect("project dir");
-    stateroot(config_home, user_home, project)
-        .arg("init")
-        .assert()
-        .success();
-}
+use support::{homes, init_project, stateroot};
 
 fn hook(
     config_home: &Path,

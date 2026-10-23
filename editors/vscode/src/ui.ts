@@ -662,7 +662,6 @@ document.getElementById('panel').addEventListener('click', (event) => {
   } else if (act === 'selectPlan') { vscode.postMessage({ type: 'selectPlan', id }); }
   else if (act === 'pickHarness') { state.selectedHarness = id; render(); }
   else if (act === 'approve') vscode.postMessage({ type: 'approvePlan', id });
-  else if (act === 'donePlan') vscode.postMessage({ type: 'donePlan', id });
   else if (act === 'delegate') vscode.postMessage({ type: 'delegatePlan', id, harness: state.selectedHarness });
   else if (act === 'openPlan') vscode.postMessage({ type: 'openPlan', id });
   else if (act === 'reassign') vscode.postMessage({ type: 'reassign', id });
@@ -818,7 +817,7 @@ function plans() {
     '<button class="chip' + (state.selectedHarness === h ? ' selected' : '') + '" data-act="pickHarness" data-id="' + esc(h) + '">' + esc(h) + '</button>'
   ).join('');
   const approve = plan.status === 'draft' ? '<button data-act="approve" data-id="' + esc(plan.id) + '">Approve</button>' : '';
-  const done = (plan.status === 'approved' || plan.status === 'active') ? '<button data-act="donePlan" data-id="' + esc(plan.id) + '">Mark done</button>' : '';
+  const done = (plan.status === 'approved' || plan.status === 'active') ? '<button data-act="planDoneEvidence" data-id="' + esc(plan.id) + '">Mark done</button>' : '';
   const todosLabel = (plan.todosTotal !== undefined) ? ' · todos ' + (plan.todosDone || 0) + '/' + plan.todosTotal : '';
   const planTodoBlock = (state.planTodos && state.planTodos.length)
     ? '<div class="kicker">Todos</div>' + todoList(state.planTodos)
@@ -838,6 +837,9 @@ function todos() {
 function work() {
   const rows = state.delegations || [];
   const forks = state.work || [];
+  const degraded = (state.degradedDelegations || []).map(row =>
+    '<div class="card"><div>degraded</div><div class="muted">' + esc(row.file) + '</div><div class="muted">' + esc(row.reason) + '</div></div>'
+  ).join('');
   const by = {};
   rows.forEach(r => { (by[r.harness] = by[r.harness] || []).push(r); });
   const harnesses = Object.keys(by);
@@ -873,7 +875,7 @@ function work() {
   const merge = ready.length ? '<div class="row"><button data-act="prepareMerge"' + (selected.length ? '' : ' disabled') + '>Prepare integration (' + selected.length + ')</button></div><div class="muted">A coordinating agent reviews conflicts and continues a prepared merge; this panel never chooses source resolutions.</div>' : '';
   const compat = renderIntegrationCompat(!!state.integrationStale);
   const attemptBlock = renderAttemptBlock(state.attempt);
-  return '<div class="muted">Work is the crew view: assigned agents and their independent lineages.</div>' + compat + work + branches + attemptBlock + merge;
+  return '<div class="muted">Work is the crew view: assigned agents and their independent lineages.</div>' + compat + work + degraded + branches + attemptBlock + merge;
 }
 function learningsPanel() {
   const rows = state.learnings || [];
