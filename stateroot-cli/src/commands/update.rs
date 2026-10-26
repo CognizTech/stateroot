@@ -297,7 +297,7 @@ fn release_api_url(repo: &str, tag: Option<&str>) -> String {
     }
 }
 
-fn assets_from_body(body: &Value) -> Option<ReleaseInfo> {
+fn assets_from_body(body: &Value, authenticated: bool) -> Option<ReleaseInfo> {
     let tag = body.get("tag_name").and_then(|v| v.as_str())?.to_string();
     let assets = body.get("assets").and_then(|v| v.as_array())?;
     let mut asset_url = None;
@@ -307,15 +307,17 @@ fn assets_from_body(body: &Value) -> Option<ReleaseInfo> {
     let mut extension_vsix_name = None;
     for asset in assets {
         let name = asset.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        // Prefer the API asset URL: downloads go through it with
-        // `Accept: application/octet-stream` (+ bearer when a token
-        // resolved), which keeps working when the unauthenticated rate
-        // limit is exhausted. `browser_download_url` is the fallback for
-        // lean fixtures that only carry the public URL.
+        // Public downloads do not consume REST API quota. Keep API assets
+        // for authenticated/private releases and older API-only records.
+        let (preferred, fallback) = if authenticated {
+            ("url", "browser_download_url")
+        } else {
+            ("browser_download_url", "url")
+        };
         let url = asset
-            .get("url")
+            .get(preferred)
             .and_then(|v| v.as_str())
-            .or_else(|| asset.get("browser_download_url").and_then(|v| v.as_str()))
+            .or_else(|| asset.get(fallback).and_then(|v| v.as_str()))
             .unwrap_or("");
         if name == asset_name() {
             asset_url = Some(url.to_string());
@@ -457,55 +459,45 @@ pub async fn check_latest(ctx: &Ctx, force: bool) -> Option<ReleaseInfo> {
         }
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
-        .build()
-        .ok()?;
-    let token = resolve_github_token(ctx);
-    let resp = github_get(
-        &client,
-        &release_api_url(repo, None),
-        token.as_deref(),
-        "application/vnd.github+json",
-    )
-    .send()
-    .await
-    .ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    let body: Value = resp.json().await.ok()?;
-    let info = assets_from_body(&body)?;
+    let info = fetch_release(ctx, None).await.ok()?;
+    cache_latest(ctx, &info);
+    Some(info)
+}
+
+fn cache_latest(ctx: &Ctx, info: &ReleaseInfo) {
     // Always record the check timestamp so a missing platform asset does not
     // re-hit the network on every invocation within the interval.
     let _ = std::fs::create_dir_all(&ctx.config_dir);
     let _ = std::fs::write(
         cache_path(ctx),
-        serde_json::to_string_pretty(&cache_json(
-            &info,
+        cache_json(
+            info,
             json!({ "checked_at": stateroot_core::local_store::now_rfc3339() }),
-        ))
-        .ok()?,
+        )
+        .to_string(),
     );
-    Some(info)
 }
 
 /// Fetch one GitHub release by tag (`nightly`, `v0.1.2`, …). Never writes the
 /// production `update-check.json` cache.
 pub async fn fetch_tagged_release(ctx: &Ctx, tag: &str) -> anyhow::Result<ReleaseInfo> {
+    let tag = normalize_release_tag(tag);
+    anyhow::ensure!(!tag.is_empty(), "release tag must not be empty");
+    fetch_release(ctx, Some(&tag)).await
+}
+
+/// Shared lookup for production, explicit tags and background updates.
+async fn fetch_release(ctx: &Ctx, tag: Option<&str>) -> anyhow::Result<ReleaseInfo> {
     let repo = ctx.config.update.repo.trim();
     if repo.is_empty() || repo.contains("OWNER") || repo.contains("placeholder") {
         anyhow::bail!("could not check for updates (no public release repo configured yet)");
     }
-    let tag = normalize_release_tag(tag);
-    if tag.is_empty() {
-        anyhow::bail!("release tag must not be empty");
-    }
+    let label = tag.unwrap_or("latest");
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()?;
     let token = resolve_github_token(ctx);
-    let url = release_api_url(repo, Some(&tag));
+    let url = release_api_url(repo, tag);
     let resp = github_get(
         &client,
         &url,
@@ -517,35 +509,102 @@ pub async fn fetch_tagged_release(ctx: &Ctx, tag: &str) -> anyhow::Result<Releas
     .with_context(|| format!("requesting {url}"))?;
     let status = resp.status();
     if status == reqwest::StatusCode::NOT_FOUND {
-        anyhow::bail!("no GitHub release tagged `{tag}`");
+        anyhow::bail!("no GitHub release `{label}`");
     }
     if !status.is_success() {
+        let remaining = resp.headers().get("x-ratelimit-remaining").cloned();
+        let reset = resp.headers().get("x-ratelimit-reset").cloned();
+        let retry = resp.headers().get("retry-after").cloned();
         let body = resp.text().await.unwrap_or_default();
         let body = body.trim();
-        if token.is_none() && status == reqwest::StatusCode::FORBIDDEN {
-            // Verified common cause: the unauthenticated 60/hr per-IP quota
-            // is shared per egress IP — behind a proxy it is gone fast.
-            anyhow::bail!(
-                "release lookup for `{tag}` failed (HTTP {status}): GitHub API rate limit \
-                 hit (60/hr unauthenticated). Set GH_TOKEN (e.g. `gh auth token`) for a \
-                 higher limit, or retry after the hourly window."
-            );
+        let limited = status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            || (status == reqwest::StatusCode::FORBIDDEN
+                && (remaining.as_ref().is_some_and(|v| v == "0")
+                    || body.to_ascii_lowercase().contains("rate limit")));
+        if limited {
+            // One public, unauthenticated fallback, not a retry loop. The
+            // publisher supplies the real nightly name/version and assets;
+            // never guess those or silently use stale cached metadata.
+            match fetch_public_release(&client, repo, tag).await {
+                Ok(info) => return Ok(info),
+                Err(error) => {
+                    let timing = retry
+                        .as_ref()
+                        .and_then(|v| v.to_str().ok())
+                        .map(|v| format!(" Retry after {v} seconds."))
+                        .or_else(|| {
+                            reset
+                                .as_ref()
+                                .and_then(|v| v.to_str().ok())
+                                .map(|v| format!(" Rate limit resets at Unix time {v}."))
+                        })
+                        .unwrap_or_default();
+                    anyhow::bail!(
+                        "release lookup for `{label}` failed (HTTP {status}): GitHub API rate limit; \
+                         public release metadata unavailable: {error}.{timing} \
+                         Set GH_TOKEN (PowerShell: $env:GH_TOKEN = gh auth token --hostname github.com) \
+                         or retry after the rate limit resets."
+                    );
+                }
+            }
         }
-        let detail = if body.is_empty() {
-            String::new()
-        } else {
-            let excerpt: String = body.chars().take(300).collect();
-            format!(" — {excerpt}")
-        };
-        anyhow::bail!("release lookup for `{tag}` failed (HTTP {status}){detail}");
+        let detail: String = body.chars().take(300).collect();
+        anyhow::bail!("release lookup for `{label}` failed (HTTP {status}): {detail}");
     }
     let body: Value = resp.json().await.context("parsing GitHub release JSON")?;
-    assets_from_body(&body).ok_or_else(|| {
+    assets_from_body(&body, token.is_some())
+        .ok_or_else(|| anyhow!("release `{label}` has no {} + checksums.txt", asset_name()))
+}
+
+async fn fetch_public_release(
+    client: &reqwest::Client,
+    repo: &str,
+    tag: Option<&str>,
+) -> anyhow::Result<ReleaseInfo> {
+    // The existing API override keeps both lookup paths on the local fixture
+    // server during tests. Production public assets live on github.com.
+    let api = api_base();
+    let base = if api == "https://api.github.com" {
+        "https://github.com".into()
+    } else {
+        api
+    };
+    let release = tag
+        .map(|tag| format!("download/{tag}"))
+        .unwrap_or_else(|| "latest/download".into());
+    let response = client
+        .get(format!(
+            "{base}/{repo}/releases/{release}/stateroot-release.json"
+        ))
+        .header("User-Agent", "stateroot-cli")
+        .send()
+        .await?
+        .error_for_status()?;
+    let body: Value = response
+        .json()
+        .await
+        .context("parsing public release metadata")?;
+    let info = assets_from_body(&body, false).ok_or_else(|| {
         anyhow!(
-            "release `{tag}` has no {asset} + checksums.txt",
-            asset = asset_name()
+            "public release metadata lacks {} + checksums.txt",
+            asset_name()
         )
-    })
+    })?;
+    if let Some(tag) = tag {
+        anyhow::ensure!(info.tag == tag, "public release tag does not match `{tag}`");
+    } else {
+        anyhow::ensure!(
+            parse_semver(&info.tag).is_some(),
+            "public latest release tag is not a version"
+        );
+    }
+    if is_rolling_preview_tag(&info.tag) {
+        anyhow::ensure!(
+            dev_update_order("0.0.0-dev.0", &info.name).is_some(),
+            "public nightly metadata has no comparable build version"
+        );
+    }
+    Ok(info)
 }
 
 /// The running binary's version. The env override exists so integration
@@ -965,13 +1024,14 @@ pub async fn self_update(ctx: &Ctx, check_only: bool, tag: Option<&str>) -> anyh
     } else {
         // A user explicitly asked to check or update. Never report stale
         // cached release metadata as the current production release.
-        match check_latest(ctx, true).await {
-            Some(info) => info,
-            None => {
-                println!("could not check for updates (no public release repo configured yet)");
-                return Ok(());
-            }
+        let repo = ctx.config.update.repo.trim();
+        if repo.is_empty() || repo.contains("OWNER") || repo.contains("placeholder") {
+            println!("could not check for updates (no public release repo configured yet)");
+            return Ok(());
         }
+        let info = fetch_release(ctx, None).await?;
+        cache_latest(ctx, &info);
+        info
     };
     let current = running_version();
     let channel = if is_rolling_preview_tag(&info.tag) {
@@ -1941,7 +2001,106 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_token_403_names_rate_limit_not_private() {
+    async fn rate_limit_fallback_preserves_identity_and_checksum_verification() {
+        use sha2::Digest as _;
+        let (_env, _home) = clean_token_env();
+        for (status, tag, token, corrupt) in [
+            (403, Some("nightly"), None, false),
+            (429, None, None, true),
+            (403, Some("v0.2.10"), Some("limited-token"), false),
+        ] {
+            let _ = set_env("GH_TOKEN", token);
+            let server = wiremock::MockServer::start().await;
+            let _ = set_env("STATEROOT_GITHUB_API_BASE", Some(&server.uri()));
+            let label = tag.unwrap_or("v0.2.10");
+            wiremock::Mock::given(wiremock::matchers::path(
+                reqwest::Url::parse(&release_api_url("o/r", tag))
+                    .unwrap()
+                    .path(),
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(status).insert_header("x-ratelimit-remaining", "0"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+            let mut body = release_json(&server, label);
+            let name = if label == "nightly" {
+                "StateRoot 0.2.10-dev.300 (rolling preview)"
+            } else {
+                "StateRoot v0.2.10"
+            };
+            body["name"] = json!(name);
+            let release = tag
+                .map(|v| format!("download/{v}"))
+                .unwrap_or_else(|| "latest/download".into());
+            let public_path = format!("/o/r/releases/{release}/stateroot-release.json");
+            wiremock::Mock::given(wiremock::matchers::path(public_path.clone()))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(body))
+                .expect(1)
+                .mount(&server)
+                .await;
+            wiremock::Mock::given(wiremock::matchers::path("/browser-asset"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(b"binary"))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let checksum = if corrupt {
+                "0".repeat(64)
+            } else {
+                format!("{:x}", sha2::Sha256::digest(b"binary"))
+            };
+            wiremock::Mock::given(wiremock::matchers::path("/browser-checksums"))
+                .respond_with(
+                    wiremock::ResponseTemplate::new(200)
+                        .set_body_string(format!("{checksum}  {}\n", asset_name())),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = test_ctx_with_repo(dir.path(), "o/r");
+            let info = fetch_release(&ctx, tag).await.expect("public fallback");
+            assert_eq!(info.tag, label);
+            assert_eq!(info.name, name);
+            assert!(info.asset_url.ends_with("/browser-asset"));
+            let dest = dir.path().join("installed");
+            std::fs::write(&dest, b"old").unwrap();
+            let result = download_verified_asset(
+                &ctx,
+                &info.asset_url,
+                &info.checksums_url,
+                asset_name(),
+                &dest,
+            )
+            .await;
+            if corrupt {
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("checksum mismatch"));
+                assert_eq!(std::fs::read(&dest).unwrap(), b"old");
+            } else {
+                result.unwrap();
+                assert_eq!(std::fs::read(&dest).unwrap(), b"binary");
+            }
+            let requests = server.received_requests().await.unwrap();
+            let public = requests
+                .iter()
+                .find(|r| r.url.path() == public_path)
+                .unwrap();
+            assert!(!public.headers.contains_key("authorization"));
+            assert_eq!(
+                requests.len(),
+                4,
+                "one API request, one fallback, two verified downloads"
+            );
+            server.verify().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_public_metadata_reports_limit_and_reset_without_guessing() {
         let (_env, _home) = clean_token_env();
         let server = wiremock::MockServer::start().await;
         let _ = set_env("STATEROOT_GITHUB_API_BASE", Some(&server.uri()));
@@ -1949,6 +2108,7 @@ mod tests {
             .and(wiremock::matchers::path("/repos/o/r/releases/tags/nightly"))
             .respond_with(
                 wiremock::ResponseTemplate::new(403)
+                    .insert_header("x-ratelimit-reset", "1900000000")
                     .set_body_string("{\"message\":\"API rate limit exceeded for 203.0.113.7.\"}"),
             )
             .expect(1)
@@ -1962,35 +2122,80 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("rate limit"), "{msg}");
         assert!(msg.contains("GH_TOKEN"), "{msg}");
+        assert!(msg.contains("1900000000"), "{msg}");
+        assert!(msg.contains("public release metadata unavailable"), "{msg}");
         assert!(!msg.contains("private"), "{msg}");
         server.verify().await;
     }
 
     #[tokio::test]
-    async fn token_present_403_surfaces_real_status_and_body() {
+    async fn public_metadata_rejects_wrong_tag_and_missing_nightly_identity() {
         let (_env, _home) = clean_token_env();
-        let _ = set_env("GH_TOKEN", Some("env-tok"));
-        let server = wiremock::MockServer::start().await;
-        let _ = set_env("STATEROOT_GITHUB_API_BASE", Some(&server.uri()));
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/repos/o/r/releases/tags/nightly"))
-            .respond_with(wiremock::ResponseTemplate::new(403).set_body_string(
-                "{\"message\":\"You have triggered an abuse detection mechanism.\"}",
+        for (tag, name, reason) in [
+            ("v0.2.10", "StateRoot 0.2.10", "does not match"),
+            ("nightly", "", "no comparable build version"),
+        ] {
+            let server = wiremock::MockServer::start().await;
+            let _ = set_env("STATEROOT_GITHUB_API_BASE", Some(&server.uri()));
+            let mut body = release_json(&server, tag);
+            body["name"] = json!(name);
+            wiremock::Mock::given(wiremock::matchers::path(
+                "/o/r/releases/download/nightly/stateroot-release.json",
             ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(body))
             .expect(1)
             .mount(&server)
             .await;
-        let dir = tempfile::tempdir().expect("tmp");
-        let ctx = test_ctx_with_repo(dir.path(), "o/r");
-        let err = fetch_tagged_release(&ctx, "nightly")
-            .await
-            .expect_err("403 must fail");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("HTTP 403"), "{msg}");
-        assert!(msg.contains("abuse detection"), "{msg}");
-        // The no-token rate-limit hint must NOT fire with a token attached.
-        assert!(!msg.contains("60/hr"), "{msg}");
-        server.verify().await;
+            let error = fetch_public_release(&reqwest::Client::new(), "o/r", Some("nightly"))
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains(reason), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn forbidden_without_rate_evidence_surfaces_real_status_and_body() {
+        let (_env, _home) = clean_token_env();
+        for token in [None, Some("env-tok")] {
+            let _ = set_env("GH_TOKEN", token);
+            let server = wiremock::MockServer::start().await;
+            let _ = set_env("STATEROOT_GITHUB_API_BASE", Some(&server.uri()));
+            wiremock::Mock::given(wiremock::matchers::method("GET"))
+                .and(wiremock::matchers::path("/repos/o/r/releases/tags/nightly"))
+                .respond_with(wiremock::ResponseTemplate::new(403).set_body_string(
+                    "{\"message\":\"You have triggered an abuse detection mechanism.\"}",
+                ))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let dir = tempfile::tempdir().expect("tmp");
+            let ctx = test_ctx_with_repo(dir.path(), "o/r");
+            let err = fetch_tagged_release(&ctx, "nightly")
+                .await
+                .expect_err("403 must fail");
+            let msg = format!("{err:#}");
+            assert!(msg.contains("HTTP 403"), "{msg}");
+            assert!(msg.contains("abuse detection"), "{msg}");
+            assert!(!msg.contains("rate limit"), "{msg}");
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+            server.verify().await;
+        }
+    }
+
+    #[test]
+    fn public_assets_avoid_api_quota_but_authenticated_assets_keep_api_support() {
+        let body = json!({"tag_name":"v0.2.10", "assets":[
+            {"name":asset_name(), "url":"https://api.github.com/asset", "browser_download_url":"https://github.com/asset"},
+            {"name":"checksums.txt", "url":"https://api.github.com/checksums", "browser_download_url":"https://github.com/checksums"}
+        ]});
+        assert_eq!(
+            assets_from_body(&body, false).unwrap().asset_url,
+            "https://github.com/asset"
+        );
+        assert_eq!(
+            assets_from_body(&body, true).unwrap().asset_url,
+            "https://api.github.com/asset"
+        );
     }
 
     #[tokio::test]

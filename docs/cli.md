@@ -686,6 +686,33 @@ still inspects metadata; a forbidden development-binary installation refuses
 before downloading assets/checksums or creating a download temporary file.
 Normal installed-CLI automatic updating is unchanged.
 
+Release lookups share one path for production, nightly and explicit tags.
+Anonymous downloads prefer public GitHub release URLs rather than consuming
+REST API quota for each asset. If GitHub confirms an API rate limit (`403`
+with rate-limit evidence, or `429`), the updater tries the public
+`stateroot-release.json` asset once. Release jobs publish its real tag, nightly
+build name and asset URLs; downloaded binaries and extension assets still
+require the existing checksum checks. An arbitrary `403` is not labeled a
+rate limit. Missing/invalid public metadata remains an error, with GitHub's
+retry/reset guidance when supplied; old releases may not have this asset.
+
+For an already-installed client blocked by API quota, this PowerShell workaround
+uses an existing GitHub CLI login without printing its token:
+
+```powershell
+# If needed first: gh auth login --hostname github.com --web
+$env:GH_TOKEN = gh auth token --hostname github.com
+if ($LASTEXITCODE -ne 0) { throw "GitHub CLI authentication is required for this workaround" }
+stateroot self-update
+```
+
+`GH_TOKEN` applies to this terminal and its child processes. GitHub CLI normally
+uses the OS credential store; merely being signed into VS Code, or having a
+GitHub CLI login with no plaintext token file, does not set this variable.
+Authentication is a workaround for older clients/release metadata, not a new
+requirement for public updates. New fallback behavior requires both the updated
+CLI and a release carrying `stateroot-release.json`.
+
 The swap itself is fail-closed and journaled. `self-update` fingerprints the
 running binary before anything in its directory is touched — a binary whose
 `--version` does not answer a `stateroot ` line is left completely untouched

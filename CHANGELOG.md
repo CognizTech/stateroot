@@ -3,6 +3,38 @@
 All notable changes to StateRoot. Format loosely follows Keep a Changelog;
 StateRoot is pre-1.0 and milestones land as minor versions.
 
+## v0.2.10 — 2026-10-26
+
+- **Self-update repair.** Release lookups share one fetch path across
+  production, tagged, and background checks; a rate-limited GitHub API
+  answer (403 with quota evidence or 429) falls back once to public release
+  metadata (`stateroot-release.json`, published by the release jobs), and
+  other HTTP failures report their real status instead of a mislabeled
+  quota message. Anonymous metadata downloads prefer browser download URLs;
+  authenticated API asset URLs remain supported.
+- **Retained-state ownership and root provenance.** Candidate/merge
+  bookkeeping now binds retained state to its owning repository and records
+  root provenance; fork/merge verification trees and owner-local raw
+  outputs survive cleanup and GC.
+- **Delegation status unification.** CLI listings, digests, continuity
+  attention, and plan directives share one read-only interpretation:
+  terminal outcomes take precedence, foreign or legacy process evidence
+  reads as unknown (never a false failure or a false "no executor"), and
+  malformed records surface as preserved degraded observations.
+- **Updater test isolation.** Automatic update routes honor the
+  test-harness marker on every path and never touch a cargo build artifact;
+  explicit `self-update` keeps its metadata inspection and actionable
+  refusal.
+- **Hook delivery separation.** Hook delivery now separates the persona
+  scheduling decision, the single context build, output, and session
+  maintenance; silent decisions build no context, and boundary maintenance
+  no longer depends on whether a digest printed.
+- **Shared handoff numbering.** Handoff sequence numbers allocate from one
+  project-wide counter shared by main and all forks.
+- **Test consolidation.** CLI integration tests share one fixture contract
+  (`tests/support`), including the installed-path update fixture; duplicated
+  helper copies and superseded seams removed.
+
 ## v0.2.9 — 2026-10-21
 
 - **Hermes and Antigravity integration.** Hermes gains native lifecycle and

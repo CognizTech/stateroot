@@ -63,6 +63,22 @@ For a reconciliation candidate, verify there using its owning repository, then r
 
 When automating installation, parse the complete stdout of `stateroot install --json` as one document and inspect its `install` outcome. Human scheduling and editor-reconciliation messages belong to stderr. Malformed output is not success and must not be repaired by stripping arbitrary text or recording a Ready receipt.
 
+## Update troubleshooting
+
+Release API quota is shared by public IP, so repeated Windows update failures
+can also affect other users behind the same network. Updated clients try the
+public `stateroot-release.json` asset on a confirmed API rate limit and retain
+checksum verification. Older clients/releases may lack this fallback; do not
+assume every `403` is a rate limit or retry in a loop before GitHub's reset.
+
+In PowerShell, an existing GitHub CLI login can supply a token without printing
+it: `$env:GH_TOKEN = gh auth token --hostname github.com`, then check
+`$LASTEXITCODE` before running `stateroot self-update`. If not signed in, the
+user can run `gh auth login --hostname github.com --web`. VS Code sign-in does
+not automatically authenticate the updater; GitHub CLI may store its token in
+the OS credential store rather than a readable `hosts.yml`. Do not ask users
+to paste tokens into chat. Keep login optional for normal public updates.
+
 ## Handoff Packet Fields
 
 Near usage limits or harness switches, prefer a **flag-first** write (one command, no temp JSON). Use `--input` only when the payload is large.

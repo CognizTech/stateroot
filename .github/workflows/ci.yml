@@ -296,6 +296,11 @@ jobs:
           sha256sum stateroot-* StateRootSetup-* > checksums.txt
           cat checksums.txt
 
+      - name: Generate public release metadata
+        env:
+          RELEASE_NAME: StateRoot ${{ needs.preview-version.outputs.display }} (rolling preview)
+        run: python3 packaging/release-metadata.py dist "$GITHUB_REPOSITORY" nightly "$RELEASE_NAME"
+
       - name: Move rolling tag to this commit
         run: |
           git tag -f nightly "$GITHUB_SHA"
@@ -554,6 +559,9 @@ jobs:
           sha256sum stateroot-* StateRootSetup-* > checksums.txt
           cat checksums.txt
 
+      - name: Generate public release metadata
+        run: python3 packaging/release-metadata.py dist "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "StateRoot $GITHUB_REF_NAME"
+
       - name: Attach to GitHub release
         uses: softprops/action-gh-release@v3
         with:
@@ -616,3 +624,7 @@ jobs:
           mv checksums.new checksums.txt
           cat checksums.txt
           gh release upload "$TAG" checksums.txt --clobber
+          # The API JSON is the same public metadata shape. Do not require
+          # a newer packaging script when this job checks out an older tag.
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > stateroot-release.json
+          gh release upload "$TAG" stateroot-release.json --clobber
