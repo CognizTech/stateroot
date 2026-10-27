@@ -570,6 +570,26 @@ fn mint_capture_id() -> String {
 // capture (write path)
 // ---------------------------------------------------------------------
 
+/// Acquire the session segment lock with bounded contention retries. A
+/// parallel hook burst on one session (parallel tool calls on a slow
+/// filesystem, e.g. Windows CI) can exhaust one 600ms spin even though the
+/// critical section is tiny — a contention timeout is precisely the
+/// retryable case, and a timed-out attempt never wrote anything, so the
+/// dedup counts are preserved. The per-try budget itself stays as-is.
+fn acquire_segment_lock(segment: &Path) -> Result<safe_io::ResourceLock, CaptureError> {
+    let mut attempt = 0;
+    loop {
+        match safe_io::ResourceLock::acquire(segment.with_extension("lock")) {
+            Ok(lock) => return Ok(lock),
+            Err(safe_io::LockError::Timeout { .. }) if attempt < 2 => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(50 * attempt));
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+}
+
 /// Durably store one observation: lock the session segment, dedup by
 /// verified native event identity, append + sync before acknowledging, then
 /// update the small current projection. Failures propagate — a capture is
@@ -579,7 +599,7 @@ pub fn capture(project_dir: &Path, req: CaptureRequest) -> Result<CaptureOutcome
     std::fs::create_dir_all(&dir)?;
     let file = segment_file(&req.harness, req.session_id.as_deref());
     let segment = dir.join(&file);
-    let _lock = ResourceLock::acquire(segment.with_extension("lock"))?;
+    let _lock = acquire_segment_lock(&segment)?;
 
     // Read existing lines for identity dedup (segment = dedup scope:
     // project/lineage + harness + session are the segment itself). Only an
@@ -2345,6 +2365,28 @@ mod tests {
             source_status: "complete".into(),
             meta: None,
         }
+    }
+
+    #[test]
+    fn capture_retries_segment_lock_contention() {
+        let dir = project();
+        // Hold the session segment lock longer than one 600ms acquisition
+        // budget but well inside the contention-retry window: a parallel
+        // hook burst (same session, e.g. parallel tool calls on a slow
+        // filesystem) must serialize, never fail the capture.
+        let segment = segments_dir(dir.path()).join(segment_file("cursor", Some("s-1")));
+        std::fs::create_dir_all(segment.parent().unwrap()).unwrap();
+        let held = safe_io::ResourceLock::acquire(segment.with_extension("lock")).expect("held");
+        let project = dir.path().to_path_buf();
+        let handle = std::thread::spawn(move || capture(&project, request("burst body")));
+        std::thread::sleep(std::time::Duration::from_millis(750));
+        drop(held);
+        handle
+            .join()
+            .expect("capture thread")
+            .expect("capture retries contention to success");
+        let text = std::fs::read_to_string(&segment).expect("segment written");
+        assert_eq!(text.lines().count(), 1, "exactly one durable record");
     }
 
     #[test]
