@@ -294,6 +294,28 @@ pub(crate) fn cwd_matches(session_cwd: &str, project_dir: &Path) -> bool {
         || (cwd.len() > project.len()
             && cwd.starts_with(&project)
             && cwd.as_bytes()[project.len()] == b'/')
+        || {
+            // Windows 8.3 short-name aliases defeat every string form
+            // (RUNNER~1 vs runneradmin): when both sides exist on this host,
+            // canonicalize resolves the alias, then compare again.
+            let canonical = |raw: &str| {
+                std::fs::canonicalize(raw)
+                    .ok()
+                    .map(|c| normalize_path(&c.to_string_lossy()))
+            };
+            match (
+                canonical(session_cwd),
+                canonical(&project_dir.to_string_lossy()),
+            ) {
+                (Some(cwd), Some(project)) => {
+                    cwd == project
+                        || (cwd.len() > project.len()
+                            && cwd.starts_with(&project)
+                            && cwd.as_bytes()[project.len()] == b'/')
+                }
+                _ => false,
+            }
+        }
 }
 
 /// Trim + truncate one extracted string (verbatim — never scrubbed).

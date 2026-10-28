@@ -125,10 +125,26 @@ fn operation_path(project: &Path, operation: &str) -> Result<PathBuf, String> {
         .join(format!("{operation}.json")))
 }
 
+/// Comparison-stable form for a path that exists on this host: canonicalize
+/// (resolves Windows 8.3 aliases like RUNNER~1 → runneradmin), then fold the
+/// UNC prefix/separators via the shared host-path normalization. Paths that
+/// do not exist keep their normalized lexical form.
+fn comparable_dir(path: &Path) -> PathBuf {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    PathBuf::from(crate::path_identity::normalize_host_path(
+        &canonical.to_string_lossy(),
+    ))
+}
+
 /// Fingerprints only: configuration/credentials are never copied or restored.
 /// This qualifies local file configuration at capture, not unknown historical
 /// launch arguments, remote policy, environment, or a reconstructed host.
 fn config_files(codex_home: &Path, cwd: &Path) -> Result<BTreeMap<String, String>, String> {
+    // Normalize both inputs first: the fingerprint map must not change when
+    // the same home/project arrives in a different host form (Windows short
+    // vs long vs UNC), or fingerprints stop being home-portable.
+    let codex_home = comparable_dir(codex_home);
+    let cwd = comparable_dir(cwd);
     let mut names = BTreeSet::from([
         codex_home.join("config.toml"),
         codex_home.join("managed_config.toml"),
@@ -147,7 +163,7 @@ fn config_files(codex_home: &Path, cwd: &Path) -> Result<BTreeMap<String, String
                 Err(e) => return Err(format!("config fingerprint {}: {e}", p.display())),
             };
             let label = p
-                .strip_prefix(codex_home)
+                .strip_prefix(&codex_home)
                 .map(|r| format!("native/{}", r.display()))
                 .unwrap_or_else(|_| p.to_string_lossy().into_owned());
             Ok((label, hash))
@@ -746,10 +762,10 @@ fn verify_prefix(
     {
         return Err("native destination identity/ancestry/workspace/version mismatch".into());
     }
-    let path = PathBuf::from(text(thread, "path")?)
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
-    if !path.starts_with(native_home) || path == archive.source_path {
+    let path = comparable_dir(&PathBuf::from(text(thread, "path")?));
+    let home = comparable_dir(native_home);
+    let source = comparable_dir(&archive.source_path);
+    if !path.starts_with(&home) || path == source {
         return Err("native destination is outside qualified home or aliases source".into());
     }
     let records = normalized_records(&std::fs::read(&path).map_err(|e| e.to_string())?)?;

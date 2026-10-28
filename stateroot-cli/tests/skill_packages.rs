@@ -181,13 +181,23 @@ fn legacy_requests_without_frontmatter_keep_canonical_package_identity() {
             "native_invocation",
             "identity_key",
             "package_digest",
-            "source_path",
         ] {
             assert_eq!(
                 discovered[field], package[field],
                 "{field} must survive publication"
             );
         }
+        // Paths compare by components, never as strings (Windows separators
+        // and drive forms differ legitimately across producers).
+        assert_eq!(
+            std::path::Path::new(discovered["source_path"].as_str().unwrap())
+                .components()
+                .collect::<Vec<_>>(),
+            std::path::Path::new(package["source_path"].as_str().unwrap())
+                .components()
+                .collect::<Vec<_>>(),
+            "source_path must survive publication"
+        );
         stateroot(config.path(), home.path(), project.path())
             .args([
                 "skill",
