@@ -55,6 +55,96 @@ Examples of applying the procedure:
 - **Producer/parser mismatch:** a producer emits a shorter degraded-status row than its consumer expects. Trace the shifted fields through downstream views; exercise actual output through the consumer. Preserve degraded evidence and the shared status owner's semantics. Repair the boundary rather than invent a dashboard or duplicate status policy.
 - **Small dependency change:** the parser file is unchanged, but its producer's format changes. Invalidate the affected compatibility finding, inspect the delta and rerun that boundary check. Reuse unrelated findings whose assumptions still hold; prior exact-source verification does not cover the changed tree.
 
+For optional Wiki compilation, declare relevant source/instruction/tool files
+and selected Skill resources with `stateroot wiki compile --dependencies
+'[...]'`; the array replaces the retained declarations (`[]` clears them).
+Use project-relative file references or the existing Skill selector/file
+contract. Resolved content enters the generation payload. Do not hand-edit
+inbox frontmatter. The completed deterministic floor and optional successful
+generation have separate identities. Failed or interrupted optional apply
+retains the previous success and can retry at the existing boundary; output
+conflicts preserve authored bytes. Once publication starts, recovery material
+survives later source/configuration changes and `--force`; archive preservation
+precedes apex demotion. Changed learning inputs still require actual mining.
+An optional output conflict does not block new notes from the keyless floor;
+its newer Wiki writes remain intact alongside the retained conflict journal.
+Optional log publication appends once; it never restores an older full log
+over newer floor entries, including when recovering previously saved journals.
+A successful apply is synthesized output,
+not semantic verification. Undeclared dependencies remain unknown.
+
+## Progressive Skill reuse and source-linked authoring
+
+Without shell access, local MCP `skill_inspect` reads package identity and
+resources; `skill_propose` supports optional evidence and base64 resources with
+immediate activation. MCP `root_inspect`, `root_compare`, `transition_inspect`,
+`handoff_list`, `handoff_inspect`, `verification_inspect`, `plan_inspect` and `plan_graph`
+expose existing continuity readers. Verification is an observation, not
+semantic acceptance; use exact handoff IDs when a sequence is ambiguous.
+MCP `native_session_inspect` reads an explicit retained archive and optional
+saved operation receipt without launching the native harness. Its operation
+state is the last recorded observation, not a fresh destination verification.
+
+The native agent chooses applicability from `stateroot skill list` or
+`stateroot skill scan --json`; StateRoot does not select Skills or judge
+whether completed work generalizes. Keep reference-only/native routes visible
+and delegate through their existing routes when appropriate.
+The existing workbench Intelligence view reads that inventory alongside
+`rules list --json`, `mcp status --json`, `mcp doctor --json`,
+`mcp tools --json`, and `doctor --json`.
+It shows configured state separately from observed use; unknown loading or
+invocation is never presented as success.
+
+1. Inspect a chosen Skill with `stateroot skill show <identity_key> --json`.
+   Read the needed entrypoint/resource using `--digest <package_digest>
+   --file <relative-path>`. A changed digest or ambiguous name requires a fresh
+   inspection; do not silently use different bytes. Full metadata/source
+   evidence is available on detail inspection, not repeated in the catalog.
+2. Report actual evidence: projection is availability, file delivery is not
+   proof of reading, and reading is not application or a successful outcome.
+   A missing or explicit inspection selector does not establish task-level
+   selection; report an actual choice separately through the normal handoff.
+   Name the native harness/model when known, the bounded task, resources read,
+   actual action, result and limitations. Only Pi currently declares isolated
+   Skill discovery for StateRoot-owned launches.
+3. When a useful procedure is worth preserving, `stateroot skill write
+   --input - --from <harness>` accepts the existing explicit authoring content
+   (`slug`, `skill_md`) plus optional `files_base64` resources and `evidence`
+   references. Preserve actual source plan/body/root/session/delegation/
+   verification locators and declared/observed/historical status. Historical
+   success is not current verification; missing or foreign references remain
+   context. Supplied status never makes an assertion authoritative.
+4. Explicit writing activates immediately, with no candidate/promotion gate.
+   Retain relevant resources and context; omitted resources survive updates.
+   Supplied resources carry bytes; new scripts need their interpreter unless
+   executable permissions are established separately. Existing modes survive
+   updates, but package hashes do not certify them.
+   Sidecar provenance is outside the package byte digest and has a separate
+   metadata digest. Inspect `hash_exclusions` before claiming complete hash
+   coverage. Checkpoint the actual result through the normal protocol.
+
+The current CLI uses the shared package writer; the legacy MCP `skill_propose`
+adapter is pending its separately owned integration. Keep that distinction
+visible when qualifying a particular transport.
+
+## Raw evidence in recall
+
+`memory recall` searches bounded raw observations even when the derived index
+is unavailable. Raw events are labeled `(raw observation)`, with stable
+`cap_…`/`obs_N` references for `observations show <id>`. Equal text does not
+mean the same captured event. Raw availability is not an index backlog claim.
+The requested hit limit includes up to three reserved raw-event slots.
+Source resolution preserves intact records among corrupt siblings and keeps
+legacy physical line locators. An unresolved ID with incomplete archive
+coverage is unavailable, not confirmed absent; inspect `observations health`.
+
+Read index degradation and raw coverage separately, including on no-match.
+Discovery, file/byte windows, unreadable/corrupt records, and result limits can
+make coverage partial. `observations search` and `observations health` inspect
+retained evidence beyond the recall window; recall never deletes that evidence.
+Core consumers use `memory_index::search_report` to carry these facts. Do not
+claim installed MCP coverage until its handler has adopted that report.
+
 ## Verification and publication
 
 Run `stateroot plan verify <id> -- <project-check-command> [args...]` on the actual source to retain command evidence. The observation binds eligible source bytes and the plan body; its source-root pointer may predate unsnapped edits, so compare the observed product tree, not just the root pointer. Exit zero is command evidence, not semantic acceptance.
@@ -62,6 +152,33 @@ Run `stateroot plan verify <id> -- <project-check-command> [args...]` on the act
 For a reconciliation candidate, verify there using its owning repository, then restage the observation metadata and publish from the owner. Do not snapshot the candidate or create a private repository. Unchanged source may reuse evidence across metadata-only restaging; changed source needs new checks. Raw stdout/stderr stay in the owner's local verification lane after publication and candidate cleanup.
 
 When automating installation, parse the complete stdout of `stateroot install --json` as one document and inspect its `install` outcome. Human scheduling and editor-reconciliation messages belong to stderr. Malformed output is not success and must not be repaired by stripping arbitrary text or recording a Ready receipt.
+
+## Dependency execution
+
+The plan sidecar is the sole declaration owner. `plan graph --json` exposes a
+stable observation identity and each plan's current revision; `plan declare
+<exact-id> --revision <revision>` reads a replacement declaration from stdin.
+Explicit edits use v2 metadata so older writers refuse them. Do not infer edges
+from Markdown or upgrade live programme records while testing schema changes.
+Completion edges bind the exact prerequisite body/receipt. Source edges also
+check declared output hashes against the completion root, executor publication
+and current files. A staged merge or a published merge retaining main's bytes
+is not proof of required output availability. Native compatibility judgment is
+recorded with `plan accept-source`, tied to unchanged published target source.
+
+Keep assignments separate from worker evidence. An authorized dispatch carries
+its existing authorization, task and stable operation identity in the assignment;
+service/hooks and `plan advance` use the same detached-worker key lock and
+revalidate readiness at launch. Automatic reservations belong to the verified
+trunk owner across registered executor forks; Git location, fork registration,
+project identity and current owner authorization must agree. Fork graphs read
+that shared reservation. Keep automatic programme declarations synchronized with
+the owner; a stale fork cannot revive an abandoned or reassigned operation.
+Manual delegation retains its caller-owned record. Observations never retry an existing attempt.
+Inspect unknown/starting attempts from the original runtime; do not invent a new
+key to bypass uncertainty. Manual retries of proven failed/lost workers retain
+the existing attempt history. Ownership overlap is visible for native judgment,
+not a promise that graph-independent work can edit the same files safely.
 
 ## Update troubleshooting
 
@@ -127,3 +244,38 @@ Full bar, examples, and anti-examples: `references/learnings.md`. Short version:
 3. Never edit, dedupe, or "clean up" outbox files by hand; the CLI owns them.
 4. `stateroot status` shows outbox depth and project attachment; `stateroot doctor` diagnoses sync and auth problems.
 5. After reconnecting, run `stateroot resume` to see synced state. If a write reports a conflict or stale revision, re-read with `resume` and retry the write exactly once.
+
+## Qualified native Codex recovery
+
+Existing session import automatically retains supported settled native Codex
+boundaries locally. A final handoff is not required. Use `session show <id>` to
+select the exact archive digest, then `session transfer <id> --to codex --archive
+<digest> --operation-id <stable-uuid>`. Reuse that UUID for an interrupted retry;
+uncertain outcomes reconcile without creating another native fork.
+
+Failed and interrupted turns retain their original status and do not prevent
+capturing a later settled turn. Partial capture explicitly names its older
+boundary and uncovered suffix; do not treat it as fresh full-source capture.
+Concurrent inspection refuses stale receipt publication, preserving newer
+observed continuation evidence.
+Standalone legacy error events stay in the raw archive but are explicitly
+unqualified for native recovery because Codex 0.149.1 drops them during fork
+persistence. Terminal task-completion errors remain supported.
+
+Qualification currently covers Codex CLI 0.149.1 experimental app-server on
+Linux x86_64, legacy rollout history and the original workspace path. A fresh
+native home/registry works with matching captured file configuration. The
+native model/provider/permission settings must match. A missing live rollout
+can recover from retained bytes; missing/corrupt retained bytes cannot. Do not
+substitute a newer live conversation or treat project-root restoration as
+native history recovery. Archives and receipts stay under local sessions and
+are not transported by roots.
+
+Transfer verifies raw SHA-256, source ancestry, full historical turn identities
+and the payload prefix before returning a native resume command. Its prefix
+digest excludes only the outer transport timestamp that native fork rewrites;
+new destination metadata and later turns need not equal source bytes. Native
+Codex performs continuation. `session show <id> --operation-id <uuid>` observes
+completed native output separately; assess useful retained context from the
+actual output, never file creation alone. StateRoot does not restore credentials,
+install software, switch accounts or reconstruct historical launch arguments.

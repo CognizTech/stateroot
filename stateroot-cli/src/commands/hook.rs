@@ -1177,6 +1177,14 @@ fn reconcile_boundary(ctx: &Ctx, project_dir: &Path) {
         stateroot_core::continuity::reconcile(project_dir, &ctx.config_dir, &ctx.config.continuity)
     {
         note!("continuity reconcile: {err}");
+    } else {
+        let mut project_ctx = ctx.clone();
+        project_ctx.cwd = project_dir.to_path_buf();
+        for outcome in super::plan::advance_authorized(&project_ctx) {
+            if outcome["status"] == "unavailable" {
+                note!("plan advancement: {}", outcome);
+            }
+        }
     }
 }
 

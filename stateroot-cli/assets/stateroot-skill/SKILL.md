@@ -85,6 +85,8 @@ When the user asks you to make a plan that another harness will implement — or
 3. The executor's digest then says **"execute this plan; do not re-plan or re-explore"** — approve with `stateroot plan approve <id>` when the user has reviewed. For parallel work, materialize one sibling fork per plan with `stateroot fork <root> --worktree <path> --plan <id>`, then activate that plan **inside its fork worktree**. Activation is one-per-checkout, not one-per-project: independent forks activate independently.
 4. Harness-native plans written in native plan mode DO federate in automatically at session boundaries (as drafts) — but the record-then-handoff path is immediate and deliberate; use it when the plan is meant for another harness NOW
 
+For declared multi-plan work, inspect `stateroot plan graph --json` / `plan ready --json`. Record exact dependencies and existing assignment/dispatch authorization with `plan declare <id> --revision <revision>` (JSON on stdin); legacy undeclared dependencies do not mean independence. Required source must exist in the executor's published and current outputs, or have an explicit source-bound native compatibility acceptance. Fork claims are assignments, not running workers. Hooks/service advance authorized ready bindings through the existing delegate; unknown attempts never justify a duplicate launch. See [dependency execution](references/protocol.md#dependency-execution). The CLI, local MCP `plan_graph`, and workbench Plans view expose readiness facts; the workbench displays blockers without making source or dispatch decisions.
+
 ### Complete a plan with an explicit receipt
 
 When implementation and its acceptance checks are finished, run `stateroot plan done <id> --evidence "<actual checks and result>"` in the same closure step. This records the exact plan-body digest and a completion root. Finished plan-bound todos alone leave the plan active and surface a closure obligation; they do not create the receipt. If work remains, keep the plan open and state what remains.
@@ -152,6 +154,11 @@ The CLI is offline-safe: when the server is unreachable it queues operations in 
 
 ## Command Reference
 
+Local MCP clients can inspect roots, transitions, handoffs, verification,
+plans and Skill packages, and author Skills with optional evidence and
+resources. `native_session_inspect` reads a saved native recovery observation
+without refreshing it. See the protocol reference for tool names and evidence limits.
+
 | Command | When | Notes |
 |---|---|---|
 | `stateroot resume [--harness H]` | last fallback at session start | prints the **full** digest when hooks did not inject. Never pipe through `head`/`tail` or any limiter |
@@ -164,8 +171,9 @@ The CLI is offline-safe: when the server is unreachable it queues operations in 
 | `stateroot delegate --to H --task "…"` | detached subagent in another harness (async-only) | cli-mode harnesses only; spawn returns a `running` record immediately — observe via `stateroot delegate list` / `status <id>` and the `## Recent Delegations` digest section; nothing is ever killed or blocked; depth-capped — a subagent cannot delegate further |
 | `stateroot ext list` | extensions discovered on PATH | any `stateroot-<name>` executable on PATH runs as `stateroot <name>` — you can add commands yourself by writing one |
 | `stateroot projects` / `--json` / `--prune` | every initialized project on this machine | the discovery half of cross-project work: list projects here (name, path, phase, active plan), then work the one requested; same listing via the `projects_list` MCP tool |
-| `stateroot session sync` / `list` / `show` | canonical session store | pi/DSH sessions → `.stateroot/local/sessions/` (local-only, idempotent) |
+| `stateroot session sync` / `list` / `show` | canonical session store | supported harness sessions → `.stateroot/local/sessions/`; qualified Codex boundaries retain local native archives automatically |
 | `stateroot session transfer <id> --to pi\|dsh` | resume a session in another harness | writes a real native session file; fidelity report (native/adapted/dropped); `--dry-run` previews |
+| `stateroot session transfer <id> --to codex --archive <digest> --operation-id <uuid>` | qualified native recovery | exact retained boundary → distinct native fork; retry the same UUID; no model prompt is sent. Continue with the returned native Codex resume command; `session show <id> --operation-id <uuid>` observes native output. See [native recovery](references/protocol.md#qualified-native-codex-recovery). |
 | `stateroot plan record` / `list` / `show` / `approve` / `activate` / `verify` / `done` / `abandon` | central plan artifact + lifecycle | plan/implement split: the planner records a draft, the user approves, the executor's digest points at `.stateroot/plans/<id>.md` with a state-aware directive; completion requires `done --evidence`, and `verify` is optional |
 | `stateroot obligation add` / `list` / `show` / `done` / `snooze` / `cancel` | durable future work | explicit due items and completion evidence shared across harnesses |
 | `stateroot service status` / `start` / `stop` | local continuity reconciler | inspect or control the per-user background service; hooks and CLI reconcile on activity too |
@@ -177,7 +185,7 @@ The CLI is offline-safe: when the server is unreachable it queues operations in 
 | `stateroot revert <root>` | verified restoration | append-only — creates a new root |
 | `stateroot fork <root>` | divergent work | branch lineage from an earlier root |
 | `stateroot merge <fork>…` / `--prepare` / `--continue` / `--status` / `--abort` / `--cleanup` | fold fork lineages into the trunk | one N+1-parent root; conflicts get a reconciliation worktree — see Integrating parallel forks |
-| `stateroot rules list` / `show` / `sync` | shared rules pool | product-intent always on; harness rules imported |
+| `stateroot rules list` / `list --json` / `show` / `sync` | shared rules pool | product-intent always on; harness rules imported; JSON exposes canonical origin and digest |
 | *(no stateroot pack command)* | — | resume already injects the observed context pack. Do not invent a truncated pack |
 | `stateroot learn record "…"` | durable project taste | judgment rule, not a fact — see Learnings below |
 | `stateroot learn record --user "…"` | durable global taste | follows the user across projects |

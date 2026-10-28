@@ -1035,6 +1035,28 @@ pub fn snap_if_changed(
     reason: &str,
     snap_ctx: Option<&crate::snap_context::SnapContext>,
 ) -> Result<SnapOutcome, RootsError> {
+    snap_if_changed_with_scan(project_dir, harness, reason, snap_ctx, true)
+}
+
+/// Snapshot for an explicit, evidence-bearing operation. It uses the same
+/// unchanged-tree and racing-writer reconciliation as automatic snapshots,
+/// but completes the full scan rather than applying the hook time budget.
+pub fn snap_if_changed_explicit(
+    project_dir: &Path,
+    harness: &str,
+    reason: &str,
+    snap_ctx: Option<&crate::snap_context::SnapContext>,
+) -> Result<SnapOutcome, RootsError> {
+    snap_if_changed_with_scan(project_dir, harness, reason, snap_ctx, false)
+}
+
+fn snap_if_changed_with_scan(
+    project_dir: &Path,
+    harness: &str,
+    reason: &str,
+    snap_ctx: Option<&crate::snap_context::SnapContext>,
+    automatic: bool,
+) -> Result<SnapOutcome, RootsError> {
     lineage_refname_checked(project_dir)?;
     let repo = ensure_repo(project_dir)?;
     // A racing snap can publish a tree built before another racer finished
@@ -1043,7 +1065,11 @@ pub fn snap_if_changed(
     // publish and append one reconciled root when real project files moved.
     const RECONCILE_RETRIES: usize = 8;
     for attempt in 0..=RECONCILE_RETRIES {
-        let build = match build_tree_automatic(&repo, project_dir) {
+        let build = match if automatic {
+            build_tree_automatic(&repo, project_dir)
+        } else {
+            build_tree(&repo, project_dir)
+        } {
             Err(RootsError::SnapshotBudget(detail)) => {
                 record_automatic_snapshot_skip(project_dir, &detail);
                 return Err(RootsError::SnapshotBudget(detail));
@@ -1052,7 +1078,9 @@ pub fn snap_if_changed(
         };
         if let Some(parent) = latest_oid_for(&repo, project_dir)? {
             if !project_files_changed(&repo, parent, build.tree)? {
-                clear_automatic_snapshot_skip(project_dir);
+                if automatic {
+                    clear_automatic_snapshot_skip(project_dir);
+                }
                 return Ok(SnapOutcome::Unchanged {
                     root: parent.to_string(),
                 });
@@ -1068,7 +1096,11 @@ pub fn snap_if_changed(
             snap_ctx,
         )?;
         let published = git2::Oid::from_str(&manifest.id)?;
-        let observed = match build_tree_automatic(&repo, project_dir) {
+        let observed = match if automatic {
+            build_tree_automatic(&repo, project_dir)
+        } else {
+            build_tree(&repo, project_dir)
+        } {
             Err(RootsError::SnapshotBudget(detail)) => {
                 record_automatic_snapshot_skip(project_dir, &detail);
                 return Err(RootsError::SnapshotBudget(detail));
@@ -1078,7 +1110,9 @@ pub fn snap_if_changed(
         if attempt < RECONCILE_RETRIES && project_files_changed(&repo, published, observed.tree)? {
             continue;
         }
-        clear_automatic_snapshot_skip(project_dir);
+        if automatic {
+            clear_automatic_snapshot_skip(project_dir);
+        }
         return Ok(SnapOutcome::Created(manifest, Box::new(transition)));
     }
     unreachable!("bounded reconciliation loop always returns")
@@ -2748,6 +2782,7 @@ fn fold_fork_index(
     let base = repo.find_commit(base)?.tree()?;
     let incoming = repo.find_commit(tip)?.tree()?;
     let mut index = repo.merge_trees(&base, current, &incoming, None)?;
+    preserve_plan_declaration_conflicts(repo, &mut index, &base, current, &incoming)?;
     resolve_control_plane_conflicts(repo, &mut index)?;
     apply_receiver_records(repo, &mut index, &base, current, &incoming, true)?;
     Ok(Some(index))
@@ -3899,6 +3934,7 @@ fn publish_merge(
     let live_tree = repo.find_tree(live.tree)?;
     verify_retained_main_paths(&live_tree, keep_main)?;
     let mut live_index = repo.merge_trees(&frozen, &folded, &live_tree, None)?;
+    preserve_plan_declaration_conflicts(repo, &mut live_index, &frozen, &folded, &live_tree)?;
     apply_receiver_records(repo, &mut live_index, &frozen, &live_tree, &folded, true)?;
     apply_retained_main_paths(&mut live_index, keep_main)?;
     let conflicts: Vec<_> = live_index.conflicts()?.collect::<Result<Vec<_>, _>>()?;
@@ -3995,6 +4031,11 @@ fn publish_merge(
             continue;
         }
         if !path.starts_with(".stateroot/plans/") || !path.ends_with(".json") {
+            continue;
+        }
+        // An active live plan does not override an unresolved execution
+        // declaration conflict merely by being the receiver's current plan.
+        if live_index.conflict_get(Path::new(path.as_ref())).is_ok() {
             continue;
         }
         let live_value: Value = serde_json::from_slice(repo.find_blob(entry.id)?.content())?;
@@ -5026,7 +5067,10 @@ fn resolve_control_plane_conflicts(
             // must never displace the trunk's continuity packet on merge.
             conflict.our
         } else if path_text.starts_with(".stateroot/plans/") && path_text.ends_with(".json") {
-            newest_plan_entry(repo, conflict.our, conflict.their)?
+            match newest_plan_entry(repo, conflict.our, conflict.their)? {
+                Some(entry) => Some(entry),
+                None => continue,
+            }
         } else if path_text == WIKI_INBOX_PATH || path_text == WIKI_LOG_PATH {
             // StateRoot's own generated records merge by content, but only
             // when both sides changed the shared base in exactly the shape
@@ -5209,6 +5253,76 @@ fn merge_native_log(base: &str, ours: &str, theirs: &str) -> Option<String> {
     Some(out)
 }
 
+/// Execution edit provenance is not another execution decision. Identical
+/// declarations from separate authors/times can merge; different constraints
+/// must never be combined by JSON's incidental line layout.
+fn plan_execution_declaration(value: &Value) -> Value {
+    let mut declaration = value["execution"].clone();
+    if let Some(object) = declaration.as_object_mut() {
+        for field in ["revision", "edited_at", "edited_by"] {
+            object.remove(field);
+        }
+    }
+    declaration
+}
+
+fn preserve_plan_declaration_conflicts(
+    repo: &Repository,
+    index: &mut git2::Index,
+    base: &git2::Tree,
+    ours: &git2::Tree,
+    theirs: &git2::Tree,
+) -> Result<(), RootsError> {
+    let mut sources = [
+        git2::Index::new()?,
+        git2::Index::new()?,
+        git2::Index::new()?,
+    ];
+    for (source, tree) in sources.iter_mut().zip([base, ours, theirs]) {
+        source.read_tree(tree)?;
+    }
+    let paths: BTreeSet<_> = sources
+        .iter()
+        .flat_map(|s| s.iter())
+        .filter_map(|e| String::from_utf8(e.path).ok())
+        .filter(|p| {
+            p.strip_prefix(".stateroot/plans/")
+                .is_some_and(|name| !name.contains('/') && name.ends_with(".json"))
+        })
+        .collect();
+    for path in paths {
+        let entries = sources.each_ref().map(|s| s.get_path(Path::new(&path), 0));
+        let mut declarations = Vec::new();
+        for entry in &entries {
+            let value = entry
+                .as_ref()
+                .and_then(|e| repo.find_blob(e.id).ok())
+                .and_then(|b| serde_json::from_slice::<Value>(b.content()).ok())
+                .unwrap_or(Value::Null);
+            declarations.push(plan_execution_declaration(&value));
+        }
+        if declarations[1] == declarations[0]
+            || declarations[2] == declarations[0]
+            || declarations[1] == declarations[2]
+        {
+            continue;
+        }
+        if index.conflict_get(Path::new(&path)).is_ok() {
+            index.conflict_remove(Path::new(&path))?;
+        }
+        if index.get_path(Path::new(&path), 0).is_some() {
+            index.remove_path(Path::new(&path))?;
+        }
+        for (stage, entry) in entries.into_iter().enumerate() {
+            if let Some(mut entry) = entry {
+                entry.flags = (entry.flags & !0x3000) | (((stage + 1) as u16) << 12);
+                index.add(&entry)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn newest_plan_entry(
     repo: &git2::Repository,
     ours: Option<git2::IndexEntry>,
@@ -5231,6 +5345,17 @@ fn newest_plan_entry(
         (Some(our), Some(their)) => {
             let our_value: Value = serde_json::from_slice(repo.find_blob(our.id)?.content())?;
             let their_value: Value = serde_json::from_slice(repo.find_blob(their.id)?.content())?;
+            // Execution declarations carry dependency/assignment authority.
+            // Timestamp or lifecycle precedence must not discard one fork's
+            // constraints. Unchanged-side cases were already handled by the
+            // three-way merge; divergent declarations require reconciliation.
+            if plan_execution_declaration(&our_value) != plan_execution_declaration(&their_value)
+                || ((our_value["schema_version"] == crate::plans::SCHEMA_PLAN_V2
+                    || their_value["schema_version"] == crate::plans::SCHEMA_PLAN_V2)
+                    && our_value["schema_version"] != their_value["schema_version"])
+            {
+                return Ok(None);
+            }
             if their_value["status"] == "done" && their_value["completion_receipt"].is_object() {
                 return Ok(theirs);
             }
@@ -6765,8 +6890,15 @@ mod tests {
         assert!(err.to_string().contains("visited entries"), "{err}");
         let skip_record = local_store::root(&dir).join("local/automatic-snapshot-skip.json");
         assert!(skip_record.is_file(), "skip is retained for doctor");
-        // An explicit user request remains intentionally unbounded.
-        create_root(&dir, "cli", "explicit", None).expect("explicit snap");
+        // Explicit completion still compares and publishes the current tree
+        // despite the automatic budget, without clearing its skip record.
+        let outcome = snap_if_changed_explicit(&dir, "cli", "completion", None)
+            .expect("explicit completion snap");
+        assert!(matches!(outcome, SnapOutcome::Created(..)));
+        assert!(
+            skip_record.is_file(),
+            "only a healthy auto scan clears the warning"
+        );
         // A later automatic snap that completes clears the retained skip —
         // doctor must not report yesterday's incident as today's state.
         TEST_AUTO_SNAPSHOT_ENTRY_LIMIT.with(|c| c.set(0));

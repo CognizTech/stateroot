@@ -56,6 +56,8 @@ import {
   type Preflight,
 } from "./editorTelemetry";
 import { anyCliBinaryExists } from "./cliInstall";
+import { emptyInventory, parseInventory, parseMcpDiagnosis, type IntelligenceInventory } from "./intelligence";
+import { parsePlanGraph, type PlanGraphView } from "./planGraph";
 import {
   classifySetupFailure,
   editorHarness,
@@ -83,6 +85,10 @@ export function activate(context: vscode.ExtensionContext) {
   let liveDelegations: DelegateListReport | undefined;
   let lineage: LineageProjection | undefined;
   let integrationStale = false;
+  let intelligence: IntelligenceInventory = emptyInventory();
+  let intelligenceRoot: string | undefined;
+  let planGraph: PlanGraphView | undefined;
+  let planGraphRoot: string | undefined;
   const selectedForks = new Set<string>();
   let poll: NodeJS.Timeout | undefined;
   let storePoll: NodeJS.Timeout | undefined;
@@ -112,6 +118,8 @@ export function activate(context: vscode.ExtensionContext) {
       selectedForks: [...selectedForks],
       attempt: root ? context.globalState.get<MergeAttempt>(attemptKey(root)) : undefined,
       integrationStale,
+      intelligence: intelligenceRoot === root ? intelligence : undefined,
+      planGraph: planGraphRoot === root ? planGraph : undefined,
       tab: selectedTab,
       dismissedInbox: dismissedFor(root),
       thisHarness: THIS_HARNESS,
@@ -189,6 +197,53 @@ export function activate(context: vscode.ExtensionContext) {
     push();
   });
 
+  // Catalogs are read only when requested. They are larger than the polling
+  // projection and must not be logged as full JSON in the extension output.
+  const refreshIntelligence = singleFlight(async () => {
+    const root = projectRoot();
+    if (!root) return;
+    intelligenceRoot = root;
+    const next = emptyInventory();
+    const commands = {
+      skills: ["skill", "scan", "--json"],
+      rules: ["rules", "list", "--json"],
+      mcp: ["mcp", "status", "--json"],
+      mcpHealth: ["mcp", "doctor", "--json"],
+      tools: ["mcp", "tools", "--json"],
+      health: ["doctor", "--json"],
+    } as const;
+    await Promise.all((Object.keys(commands) as Array<keyof typeof commands>).map(async (kind) => {
+      try {
+        const text = await runCli([...commands[kind]], root, 90_000, cliPath());
+        if (kind === "mcpHealth") {
+          Object.assign(next, parseMcpDiagnosis(text));
+        } else {
+          Object.assign(next, { [kind === "health" ? "harnesses" : kind]: parseInventory(kind, text)[kind === "health" ? "harnesses" : kind] });
+        }
+        next.sources[kind] = { state: "ready" };
+      } catch (error) {
+        next.sources[kind] = { state: "unavailable", detail: error instanceof Error ? error.message : String(error) };
+      }
+    }));
+    if (projectRoot() === root) {
+      intelligence = next;
+      push();
+    }
+  });
+
+  const refreshPlanGraph = singleFlight(async () => {
+    const root = projectRoot();
+    if (!root) return;
+    try {
+      const text = await runCli(["plan", "graph", "--json"], root, 30_000, cliPath());
+      planGraph = parsePlanGraph(text);
+    } catch (error) {
+      planGraph = { observationId: "", rows: [], unavailable: error instanceof Error ? error.message : String(error) };
+    }
+    planGraphRoot = root;
+    if (projectRoot() === root) push();
+  });
+
   const withProject = async (fn: (root: string) => Promise<void>) => {
     const root = projectRoot();
     if (!root) {
@@ -221,6 +276,8 @@ export function activate(context: vscode.ExtensionContext) {
       }
       workbench.reveal(tab);
       push();
+      if (tab === "intelligence") void refreshIntelligence();
+      if (tab === "plans" || tab === "work" || tab === "crew") void refreshPlanGraph();
       return;
     }
     if (type === "openTab") {
@@ -235,6 +292,24 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
       push();
+      if (selectedTab === "intelligence") void refreshIntelligence();
+      if (["plans", "work", "crew"].includes(selectedTab)) void refreshPlanGraph();
+      return;
+    }
+    if (type === "doctorHarness" && typeof msg.id === "string") {
+      const row = intelligenceRoot === projectRoot()
+        ? intelligence.harnesses.find((harness) => harness.harness === msg.id)
+        : undefined;
+      if (!row) return;
+      output.appendLine(`StateRoot integration: ${row.display} (${row.harness})`);
+      output.appendLine(`status: ${row.status}; config: ${row.config}; Skills: ${row.skills}; MCP: ${row.mcp}; hooks: ${row.hooks}; instructions: ${row.instructions}`);
+      for (const problem of row.problems) output.appendLine(`issue: ${problem}`);
+      for (const action of row.repair) output.appendLine(`repair: ${action}`);
+      output.show(true);
+      return;
+    }
+    if (type === "refreshIntelligence") {
+      void refreshIntelligence();
       return;
     }
     if (type === "dismiss" && typeof msg.id === "string") {
@@ -854,6 +929,8 @@ export function activate(context: vscode.ExtensionContext) {
       }
       workbench.reveal(selectedTab);
       push();
+      if (selectedTab === "intelligence") void refreshIntelligence();
+      if (["plans", "work", "crew"].includes(selectedTab)) void refreshPlanGraph();
     }),
     vscode.commands.registerCommand("stateroot.delegatePlan", async () => {
       await withProject(async (root) => {
@@ -884,6 +961,8 @@ export function activate(context: vscode.ExtensionContext) {
     }),
     vscode.commands.registerCommand("stateroot.refresh", () => {
       void refreshLive();
+      if (selectedTab === "intelligence") void refreshIntelligence();
+      if (["plans", "work", "crew"].includes(selectedTab)) void refreshPlanGraph();
     }),
     vscode.commands.registerCommand("stateroot.checkpoint", () =>
       withProject(async (root) => {

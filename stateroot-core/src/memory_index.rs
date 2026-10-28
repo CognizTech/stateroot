@@ -15,13 +15,13 @@ use crate::wiki;
 pub const INDEX_DB_REL: &str = "local/memory.sqlite";
 
 /// One recall hit.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct RecallHit {
     /// Native/canonical source locator retained for navigating omitted history.
     pub source: String,
     /// Returned from a committed previous generation while refresh was unavailable.
     pub stale: bool,
-    /// Source kind: memory | page | episodic | transcript | user.
+    /// Source kind: memory | page | episodic | transcript | user | observation.
     pub kind: String,
     /// Path or source id.
     pub path: String,
@@ -622,7 +622,35 @@ fn rrf_score(rank: usize) -> f64 {
     1.0 / (RRF_K + rank as f64 + 1.0)
 }
 
-/// Search. When `owner` is false, private docs are excluded.
+/// Derived-index availability for this recall, independent of raw coverage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecallIndexState {
+    /// Empty query or zero limit; no index or evidence search was attempted.
+    NotSearched,
+    /// Current derived sources were searched.
+    Current,
+    /// Refresh failed; unchanged committed/current authored sources were searched.
+    Stale,
+    /// The derived database could not be opened or queried.
+    Unavailable,
+}
+
+/// Existing recall owner result. Consumers must expose coverage even on no hits.
+#[derive(Debug, serde::Serialize)]
+pub struct RecallReport {
+    /// At most the requested limit; up to three slots reserved for matching raw events.
+    pub hits: Vec<RecallHit>,
+    /// State of the derived index, not of canonical captured evidence.
+    pub index_state: RecallIndexState,
+    /// Refresh/read failure when the index is stale or unavailable.
+    pub index_detail: Option<String>,
+    /// Bounds, omissions and unavailable raw sources for this query.
+    pub raw_coverage: crate::observations::EvidenceCoverage,
+}
+
+/// Compatibility API: bounded hits; use `search_report` for coverage facts.
+/// When `owner` is false, private docs are excluded before the fallback limit.
 pub fn search(
     project_dir: &Path,
     home: &Path,
@@ -630,12 +658,87 @@ pub fn search(
     limit: usize,
     owner: bool,
 ) -> Result<Vec<RecallHit>, MemoryIndexError> {
-    let q = query.trim();
-    if q.is_empty() || limit == 0 {
-        return Ok(Vec::new());
+    let report = search_report(project_dir, home, query, limit, owner);
+    if report.hits.is_empty() {
+        if let Some(detail) = report.index_detail {
+            return Err(MemoryIndexError::Source(detail));
+        }
     }
+    Ok(report.hits)
+}
+
+/// Search the index and bounded raw evidence independently. An unavailable
+/// derivative never prevents the raw rescue, and equal text never merges events.
+pub fn search_report(
+    project_dir: &Path,
+    home: &Path,
+    query: &str,
+    limit: usize,
+    owner: bool,
+) -> RecallReport {
+    let q = query.trim();
+    let mut report = RecallReport {
+        hits: Vec::new(),
+        index_state: RecallIndexState::NotSearched,
+        index_detail: None,
+        raw_coverage: Default::default(),
+    };
+    if q.is_empty() || limit == 0 {
+        return report;
+    }
+    report.index_state = RecallIndexState::Current;
     let refresh_error = rebuild_if_needed(project_dir, home).err();
     let stale = refresh_error.is_some();
+    if let Some(error) = refresh_error {
+        report.index_state = RecallIndexState::Stale;
+        report.index_detail = Some(error.to_string());
+    }
+    report.hits = match search_indexed(project_dir, home, q, limit, owner, stale) {
+        Ok(hits) => hits,
+        Err(error) => {
+            report.index_state = RecallIndexState::Unavailable;
+            report.index_detail = Some(match report.index_detail {
+                Some(refresh) => format!("{refresh}; index read unavailable: {error}"),
+                None => error.to_string(),
+            });
+            source_fallback_visible(project_dir, home, q, limit, owner)
+                .into_iter()
+                .map(|mut hit| {
+                    hit.stale = true;
+                    hit
+                })
+                .collect()
+        }
+    };
+    let raw = crate::observations::search_evidence(project_dir, q, limit.min(3));
+    report.raw_coverage = raw.coverage;
+    report.hits.truncate(limit.saturating_sub(raw.hits.len()));
+    report
+        .hits
+        .extend(raw.hits.into_iter().map(|obs| RecallHit {
+            source: format!(
+                "{} · session {}",
+                obs.harness,
+                obs.session_id.as_deref().unwrap_or("unknown")
+            ),
+            stale: false,
+            kind: "observation".into(),
+            path: obs.id,
+            text: excerpt_around(&obs.text, q),
+            score: 0.0,
+            private: false,
+        }));
+    report
+}
+
+fn search_indexed(
+    project_dir: &Path,
+    home: &Path,
+    q: &str,
+    limit: usize,
+    owner: bool,
+    stale: bool,
+) -> Result<Vec<RecallHit>, MemoryIndexError> {
     let conn = open_read(project_dir)?;
     let transaction = conn.unchecked_transaction()?;
     let stones =
@@ -717,13 +820,12 @@ pub fn search(
     }
     if stale {
         filtered.extend(
-            source_fallback(project_dir, home, q, limit)
+            source_fallback_visible(project_dir, home, q, limit, owner)
                 .into_iter()
                 .map(|mut hit| {
                     hit.stale = true;
                     hit
-                })
-                .filter(|hit| owner || !hit.private),
+                }),
         );
     }
     // Fuse the streams: a doc found by several streams sums its reciprocal-
@@ -747,29 +849,36 @@ pub fn search(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     merged.truncate(limit);
-    let mut filtered = merged;
-    for hit in &mut filtered {
+    for hit in &mut merged {
         hit.text = excerpt_around(&hit.text, q);
     }
-    if filtered.is_empty() {
-        if let Some(error) = refresh_error {
-            return Err(error);
-        }
-    }
-    Ok(filtered)
+    Ok(merged)
 }
 
-/// Bounded source fallback for degraded indexes; never pretends index freshness.
+/// Owner-view source fallback for degraded indexes; never pretends index freshness.
 pub fn source_fallback(
     project_dir: &Path,
     home: &Path,
     query: &str,
     limit: usize,
 ) -> Vec<RecallHit> {
+    source_fallback_visible(project_dir, home, query, limit, true)
+}
+
+fn source_fallback_visible(
+    project_dir: &Path,
+    home: &Path,
+    query: &str,
+    limit: usize,
+    owner: bool,
+) -> Vec<RecallHit> {
     let mut hits = Vec::new();
     let terms: Vec<_> = query.split_whitespace().map(str::to_lowercase).collect();
     let mut add = |kind: &str, path: String, text: String, private: bool| {
-        if terms.iter().any(|term| text.to_lowercase().contains(term)) && hits.len() < limit {
+        if (owner || !private)
+            && terms.iter().any(|term| text.to_lowercase().contains(term))
+            && hits.len() < limit
+        {
             hits.push(RecallHit {
                 source: path.clone(),
                 stale: false,
@@ -1229,7 +1338,16 @@ mod tests {
         assert!(fs::read_to_string(&transcript).unwrap().contains(middle));
 
         fs::write(&transcript, b"{malformed native source").unwrap();
-        assert!(search(project.path(), home.path(), early, 5, true).is_err());
+        // I1: with durable fresh evidence answering, an index outage no
+        // longer hard-errors — the answering hit is labeled as raw observation
+        // (never presented as a compiled fresh result). A total outage with
+        // no answering evidence still errors, per the outage test above.
+        let hits = search(project.path(), home.path(), early, 5, true)
+            .expect("fresh durable evidence answers during the outage");
+        assert!(
+            hits.iter().any(|hit| hit.kind == "observation"),
+            "the answering hit is labeled as raw observation: {hits:?}"
+        );
         assert!(crate::observations::filter_spool(
             project.path(),
             &crate::observations::ObservationFilter {
@@ -2051,6 +2169,198 @@ mod tests {
         assert!(
             percent.iter().all(|hit| !hit.text.contains("支付_服务")),
             "`%` acted as a LIKE wildcard: {percent:?}"
+        );
+    }
+
+    /// I1: capture one observation carrying a unique marker through the real
+    /// durable write path (the same path hooks use).
+    fn capture_marker(project: &Path, marker: &str) {
+        crate::observations::capture(
+            project,
+            crate::observations::CaptureRequest {
+                ts: "2026-10-27T00:00:00Z".into(),
+                event: "post_tool_use".into(),
+                harness: "codex".into(),
+                session_id: Some("s-fresh".into()),
+                session_identity: "native".into(),
+                event_identity: None,
+                text: marker.into(),
+                kind_hint: None,
+                tool: Some("Bash".into()),
+                excerpt: None,
+                source: None,
+                local_payload: None,
+                source_status: "complete".into(),
+                meta: None,
+            },
+        )
+        .expect("capture");
+    }
+
+    #[test]
+    fn fresh_capture_is_discoverable_via_recall_before_any_index() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(project.path(), "p", "P", "default").unwrap();
+        capture_marker(project.path(), "ZebraQuasar fresh evidence");
+        let hits = search(project.path(), home.path(), "ZebraQuasar", 8, true).expect("search");
+        assert!(
+            hits.iter().any(|hit| hit.text.contains("ZebraQuasar")),
+            "a fresh durable capture must be discoverable via recall: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn review_raw_rescue_survives_unopenable_index() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(project.path(), "p", "P", "default").unwrap();
+        capture_marker(project.path(), "ReviewCanary raw rescue");
+        fs::create_dir_all(db_path(project.path())).unwrap();
+        let hits = search(project.path(), home.path(), "ReviewCanary", 1, true)
+            .expect("an unopenable derived index cannot hide raw evidence");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].kind, "observation");
+    }
+
+    #[test]
+    fn review_report_exposes_corrupt_missing_and_stale_index_without_hiding_raw() {
+        for failure in ["corrupt", "missing", "stale"] {
+            let project = tempfile::tempdir().unwrap();
+            let home = tempfile::tempdir().unwrap();
+            local_store::init_skeleton(project.path(), "p", "P", "default").unwrap();
+            let file = native_file(home.path(), project.path(), "broken", "committed source");
+            rebuild(project.path(), home.path()).unwrap();
+            capture_marker(project.path(), "ReviewCanary raw rescue");
+            match failure {
+                "corrupt" => fs::write(db_path(project.path()), "not a sqlite database").unwrap(),
+                "missing" => {
+                    fs::remove_file(db_path(project.path())).unwrap();
+                    // Source inventory fails before SQLite can be recreated.
+                    fs::remove_file(&file).unwrap();
+                    fs::remove_dir_all(home.path().join(".codex/sessions")).unwrap();
+                    fs::write(
+                        home.path().join(".codex/sessions"),
+                        "unreadable source directory",
+                    )
+                    .unwrap();
+                }
+                _ => fs::write(file, "{malformed native source").unwrap(),
+            }
+            let report = search_report(project.path(), home.path(), "ReviewCanary", 1, true);
+            assert_eq!(report.hits.len(), 1, "{failure}: {report:?}");
+            assert_eq!(report.hits[0].kind, "observation");
+            assert!(report.index_detail.is_some(), "{failure}: {report:?}");
+            assert_ne!(report.index_state, RecallIndexState::Current);
+            assert_ne!(report.index_state, RecallIndexState::NotSearched);
+            let empty = search_report(project.path(), home.path(), "nomatch", 1, true);
+            assert!(empty.hits.is_empty());
+            assert!(empty.index_detail.is_some());
+            let json = serde_json::to_value(&report).unwrap();
+            assert!(json["raw_coverage"]["bytes_read"].is_number());
+            assert!(json["hits"][0].get("pending").is_none());
+        }
+    }
+
+    #[test]
+    fn review_raw_identity_and_limit_are_preserved() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(project.path(), "p", "P", "default").unwrap();
+        fs::write(
+            local_store::root(project.path()).join(local_store::MEMORY_CORE_PATH),
+            "ReviewCanary same text",
+        )
+        .unwrap();
+        capture_marker(project.path(), "ReviewCanary same text");
+        let hits = search(project.path(), home.path(), "ReviewCanary", 8, true).unwrap();
+        assert!(hits.iter().any(|hit| hit.kind == "observation"), "{hits:?}");
+        capture_marker(project.path(), "ReviewCanary second text");
+        assert_eq!(
+            search(project.path(), home.path(), "ReviewCanary", 1, true)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn review_degraded_fallback_filters_visibility_before_limit() {
+        for unavailable in [false, true] {
+            let project = tempfile::tempdir().unwrap();
+            let home = tempfile::tempdir().unwrap();
+            local_store::init_skeleton(project.path(), "p", "P", "default").unwrap();
+            write_memory_entries(
+                project.path(),
+                &[
+                    "VisibilityCanary private first <!-- visibility: private -->".into(),
+                    "VisibilityCanary shared second".into(),
+                ],
+            );
+            let native = native_file(home.path(), project.path(), "broken", "unrelated source");
+            rebuild(project.path(), home.path()).unwrap();
+            fs::write(native, "{malformed native source").unwrap();
+            if unavailable {
+                fs::remove_file(db_path(project.path())).unwrap();
+                fs::create_dir(db_path(project.path())).unwrap();
+            }
+            let external = search_report(project.path(), home.path(), "VisibilityCanary", 1, false);
+            assert_eq!(external.hits.len(), 1, "{external:?}");
+            assert!(!external.hits[0].private);
+            assert!(external.hits[0].text.contains("shared second"));
+            let owner = search_report(project.path(), home.path(), "VisibilityCanary", 1, true);
+            assert_eq!(owner.hits.len(), 1, "{owner:?}");
+            assert!(owner.hits[0].private);
+            assert!(owner.hits[0].text.contains("private first"));
+        }
+    }
+
+    #[test]
+    fn fresh_evidence_is_not_concealed_by_a_compiled_hit() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(project.path(), "p", "P", "default").unwrap();
+        native_file(
+            home.path(),
+            project.path(),
+            "s1",
+            "the QuartzLantern transcript text",
+        );
+        rebuild(project.path(), home.path()).unwrap();
+        capture_marker(project.path(), "QuartzLantern fresh capture");
+        let hits = search(project.path(), home.path(), "QuartzLantern", 8, true).expect("search");
+        assert!(
+            hits.iter().any(|hit| hit.kind == "transcript"),
+            "the compiled hit stays: {hits:?}"
+        );
+        assert!(
+            hits.iter().any(|hit| hit.text.contains("fresh capture")),
+            "a useful compiled hit must not conceal known pending evidence: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn fresh_evidence_survives_index_refresh_outage() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(project.path(), "p", "P", "default").unwrap();
+        let file = native_file(
+            home.path(),
+            project.path(),
+            "s1",
+            "committed evidence before the outage",
+        );
+        rebuild(project.path(), home.path()).unwrap();
+        // The source then breaks refresh (malformed native file): the
+        // committed generation persists, stale-marked — and the authored
+        // fallback covers learnings/curated memory only.
+        fs::write(&file, b"{malformed native source").unwrap();
+        capture_marker(project.path(), "ZebraQuasar outage evidence");
+        let hits = search(project.path(), home.path(), "ZebraQuasar", 8, true)
+            .expect("recall must answer from durable evidence during an index outage");
+        assert!(
+            hits.iter().any(|hit| hit.text.contains("ZebraQuasar")),
+            "fresh evidence must surface even while the index is stale: {hits:?}"
         );
     }
 }

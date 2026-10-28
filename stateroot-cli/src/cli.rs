@@ -271,16 +271,16 @@ pub struct SessionArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum SessionAction {
-    /// Import pi/DSH sessions into the canonical store
+    /// Import supported harness sessions into the canonical store
     /// (`.stateroot/local/sessions/` — local-only, never synced).
     Sync {
-        /// Restrict to one harness (pi, dsh).
+        /// Restrict to one harness (for example codex, pi, dsh).
         #[arg(long)]
         harness: Option<String>,
     },
     /// List canonical sessions (id, harness, span, entries, outcome).
     List {
-        /// Restrict to one harness (pi, dsh).
+        /// Restrict to one harness (for example codex, pi, dsh).
         #[arg(long)]
         harness: Option<String>,
     },
@@ -288,18 +288,27 @@ pub enum SessionAction {
     Show {
         /// Session id.
         id: String,
+        /// Inspect this exact native recovery operation and its native turns.
+        #[arg(long)]
+        operation_id: Option<String>,
     },
     /// Transfer a canonical session into another harness's native store —
-    /// writes a real, resumable session file (pi or dsh).
+    /// writes a real session file (pi/dsh) or forks a qualified Codex archive.
     Transfer {
         /// Session id (prefix allowed).
         id: String,
-        /// Target harness store: pi or dsh.
+        /// Target harness store: pi, dsh, or qualified native codex.
         #[arg(long)]
         to: String,
         /// Print the plan + fidelity report without writing anything.
         #[arg(long)]
         dry_run: bool,
+        /// Exact retained native archive digest, required for --to codex.
+        #[arg(long)]
+        archive: Option<String>,
+        /// Stable UUID for native restore retries, required for --to codex.
+        #[arg(long)]
+        operation_id: Option<String>,
     },
     /// Tombstone and delete one canonical session (file + derived index only).
     Purge {
@@ -322,6 +331,35 @@ pub struct PlanArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum PlanAction {
+    /// Reconcile already-authorized bindings and launch each ready operation once.
+    Advance,
+    /// Inspect the derived dependency graph and exact readiness reasons.
+    Graph {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the parallel-ready set; graph independence does not prove compatibility.
+    Ready {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Replace explicit execution declarations from JSON on stdin.
+    Declare {
+        /// Exact plan id (never a title or ambiguous prefix).
+        id: String,
+        /// Revision returned by plan graph; stale edits are rejected.
+        #[arg(long)]
+        revision: String,
+    },
+    /// Record native compatibility judgment for a source dependency.
+    AcceptSource {
+        id: String,
+        prerequisite: String,
+        #[arg(long)]
+        revision: String,
+        #[arg(long)]
+        evidence: String,
+    },
     /// Record a plan file (or stdin) as a new draft in `.stateroot/plans/`.
     Record {
         /// Plan markdown file.
@@ -779,10 +817,31 @@ pub enum SkillAction {
     Install,
     /// List skills (local federated inventory).
     List,
-    /// Print a skill's SKILL.md.
+    /// Inspect a skill or progressively read a file from its exact package.
     Show {
-        /// Skill slug.
+        /// Skill slug, name or exact identity from `skill scan --json`.
         slug: String,
+        /// Return metadata JSON (with --file, include delivered file bytes).
+        #[arg(long)]
+        json: bool,
+        /// Require this exact package digest before delivering bytes.
+        #[arg(long)]
+        digest: Option<String>,
+        /// Package-relative resource to read; plain output defaults to SKILL.md.
+        #[arg(long)]
+        file: Option<String>,
+        /// Inspect the declared native route/isolation for this harness.
+        #[arg(long)]
+        harness: Option<String>,
+    },
+    /// Write an immediately active skill and optional resources/source evidence.
+    Write {
+        /// JSON SkillWriteRequest path; '-' reads stdin.
+        #[arg(long, default_value = "-")]
+        input: String,
+        /// Author harness recorded in package provenance.
+        #[arg(long, default_value = "cli")]
+        from: String,
     },
     /// Scan all registered harness skill roots (dry discovery).
     Scan {
@@ -828,7 +887,11 @@ pub struct RulesArgs {
 #[derive(Debug, Subcommand)]
 pub enum RulesAction {
     /// List the shared rules pool (product-intent first, then imported).
-    List,
+    List {
+        /// Print canonical rule metadata as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print one rule's markdown.
     Show {
         /// Rule slug (`product-intent`, `cursor-no-foo`, …).
@@ -868,9 +931,15 @@ pub enum McpAction {
         json: bool,
     },
     /// Diagnose collisions and projection conflicts.
-    Doctor,
-    /// List the local stdio MCP server's tool surface (W8 tools).
-    Tools,
+    Doctor {
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the local stdio MCP server's tool surface.
+    Tools {
+        #[arg(long)]
+        json: bool,
+    },
     /// Remove a server from the canonical store(s) and projection ledger.
     Remove {
         /// Canonical server name to remove.
@@ -1337,6 +1406,9 @@ pub enum WikiAction {
     Compile {
         #[arg(long)]
         force: bool,
+        /// Replace persisted explicit input references (JSON array; [] clears).
+        #[arg(long)]
+        dependencies: Option<String>,
     },
 }
 

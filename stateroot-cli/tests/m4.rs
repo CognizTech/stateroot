@@ -48,6 +48,71 @@ struct McpClient {
     next_id: i64,
 }
 
+#[test]
+fn native_session_inspection_is_passive_and_rejects_foreign_or_unsupported_receipts() {
+    let config = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    init_project(config.path(), home.path(), project.path());
+    let archive_id = "a".repeat(64);
+    let operation_id = "8b69e8dd-af53-4a38-8efd-087543660781";
+    let operations =
+        stateroot_core::sessions::codex_native::archive_dir(project.path()).join("operations");
+    std::fs::create_dir_all(&operations).unwrap();
+    let path = operations.join(format!("{operation_id}.json"));
+    let receipt = json!({
+        "schema":"stateroot.codex-restore.v1", "operation_id":operation_id,
+        "archive_id":archive_id, "source_thread_id":"source", "stage":"prefix_verified",
+        "destination_thread_id":"destination", "destination_session_id":null,
+        "destination_path":null, "prefix_digest":"prefix", "native_turns_digest":null,
+        "effective_config_digest":null, "effective_envelope":null, "observed_continuation":null
+    });
+    let original = serde_json::to_vec(&receipt).unwrap();
+    std::fs::write(&path, &original).unwrap();
+    let mut client = mcp_client(config.path(), home.path(), project.path());
+    client.call(
+        "initialize",
+        json!({"clientInfo":{"name":"cursor","version":"1"}}),
+    );
+    let inspect = |client: &mut McpClient, arguments: Value| {
+        client.call(
+            "tools/call",
+            json!({"name":"native_session_inspect","arguments":arguments}),
+        )
+    };
+    let response = inspect(
+        &mut client,
+        json!({"archive_id":archive_id,"operation_id":operation_id}),
+    );
+    let value = McpClient::tool_text(&response);
+    assert_eq!(value["native_archive_verified"], false);
+    assert_eq!(value["historical_prefix_verified"], false);
+    assert!(value["unavailable"].is_string());
+    assert!(value["observation"]
+        .as_str()
+        .unwrap()
+        .contains("not reverified"));
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    let foreign = inspect(
+        &mut client,
+        json!({"archive_id":"b".repeat(64),"operation_id":operation_id}),
+    );
+    assert_eq!(foreign["result"]["isError"], true);
+    let missing = inspect(
+        &mut client,
+        json!({"archive_id":archive_id,"operation_id":"37bde2d0-7186-4bf4-8a92-e44815bac604"}),
+    );
+    assert_eq!(missing["result"]["isError"], true);
+    let mut unsupported = receipt;
+    unsupported["schema"] = json!("unsupported");
+    std::fs::write(&path, serde_json::to_vec(&unsupported).unwrap()).unwrap();
+    let response = inspect(
+        &mut client,
+        json!({"archive_id":archive_id,"operation_id":operation_id}),
+    );
+    assert_eq!(response["result"]["isError"], true);
+}
+
 impl McpClient {
     fn call(&mut self, method: &str, params: Value) -> Value {
         let id = self.next_id;
@@ -72,6 +137,294 @@ impl McpClient {
 impl Drop for McpClient {
     fn drop(&mut self) {
         let _ = self.child.kill();
+    }
+}
+
+#[test]
+fn structured_inspection_and_skill_authoring_roundtrip_over_stdio() {
+    let config = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    init_project(config.path(), home.path(), project.path());
+    std::fs::write(project.path().join("example.txt"), "first").unwrap();
+    let snap_context = stateroot_core::snap_context::SnapContext {
+        home: home.path().to_path_buf(),
+        components: vec![stateroot_core::fidelity::EnvironmentComponent {
+            name: "stateroot-cli".into(),
+            status: "available".into(),
+            observed_version: None,
+        }],
+        ..Default::default()
+    };
+    let (root, transition) =
+        stateroot_core::roots::create_root(project.path(), "cli", "test", Some(&snap_context))
+            .unwrap();
+    let mut client = mcp_client(config.path(), home.path(), project.path());
+    client.call(
+        "initialize",
+        json!({"clientInfo":{"name":"cursor","version":"1"}}),
+    );
+    let list = client.call("tools/list", json!({}));
+    let tools = list["result"]["tools"].as_array().unwrap();
+    for name in [
+        "root_inspect",
+        "native_session_inspect",
+        "root_compare",
+        "transition_inspect",
+        "handoff_inspect",
+        "handoff_list",
+        "verification_inspect",
+        "plan_inspect",
+        "plan_graph",
+        "skill_inspect",
+        "skill_propose",
+    ] {
+        assert!(
+            tools.iter().any(|tool| tool["name"] == name),
+            "missing {name}"
+        );
+    }
+    let call = |client: &mut McpClient, name: &str, args: Value| {
+        client.call("tools/call", json!({"name":name,"arguments":args}))
+    };
+    let root_reply = call(&mut client, "root_inspect", json!({"root":root.id}));
+    let value = McpClient::tool_text(&root_reply);
+    assert_eq!(value["root"]["id"], root.id);
+    assert_eq!(
+        value["root"],
+        serde_json::to_value(stateroot_core::roots::get_root(project.path(), &root.id).unwrap())
+            .unwrap()
+    );
+    let cli_fidelity = ProcCommand::new(assert_cmd::cargo::cargo_bin("stateroot"))
+        .args(["show", &root.id, "--fidelity", "--json"])
+        .env("STATEROOT_HOME", config.path())
+        .env("STATEROOT_TEST_HOME", home.path())
+        .env("STATEROOT_TEST_CMD_PROBES", "")
+        .current_dir(project.path())
+        .output()
+        .unwrap();
+    assert!(
+        cli_fidelity.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cli_fidelity.stderr)
+    );
+    let cli_fidelity: Value = serde_json::from_slice(&cli_fidelity.stdout).unwrap();
+    assert_eq!(value["fidelity"], cli_fidelity);
+    assert!(value["fidelity"]["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["current"].is_object()));
+    let diff = McpClient::tool_text(&call(
+        &mut client,
+        "root_compare",
+        json!({"from":root.id,"to":root.id}),
+    ));
+    assert_eq!(diff["from_root"], root.id);
+    let receipt = McpClient::tool_text(&call(
+        &mut client,
+        "transition_inspect",
+        json!({"id":transition.id}),
+    ));
+    assert_eq!(
+        receipt,
+        stateroot_core::roots::receipt_projection(project.path(), &transition.id).unwrap()
+    );
+    let missing = call(&mut client, "verification_inspect", json!({"id":"missing"}));
+    assert_eq!(missing["result"]["isError"], true);
+    let graph = McpClient::tool_text(&call(&mut client, "plan_graph", json!({})));
+    assert_eq!(
+        graph,
+        serde_json::to_value(stateroot_core::plans::graph(project.path())).unwrap()
+    );
+    let write = call(
+        &mut client,
+        "skill_propose",
+        json!({"slug":"demo","skill_md":"# Demo\nUseful procedure.","files_base64":{"references/example.txt":"aGVsbG8="},"evidence":[{"kind":"root","reference":root.id}]}),
+    );
+    assert_ne!(write["result"]["isError"], true, "{write}");
+    assert_eq!(McpClient::tool_text(&write)["lifecycle"], "active");
+    let inspect = McpClient::tool_text(&call(
+        &mut client,
+        "skill_inspect",
+        json!({"selector":"demo","file":"references/example.txt"}),
+    ));
+    assert_eq!(inspect["content_base64"], "aGVsbG8=");
+    assert!(!inspect["evidence_assessments"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let reference = home.path().join(".cursor/skills-cursor/native-only");
+    std::fs::create_dir_all(&reference).unwrap();
+    std::fs::write(
+        reference.join("SKILL.md"),
+        "---\nname: native-only\ndescription: native capability\n---\n# Native\n",
+    )
+    .unwrap();
+    let native = McpClient::tool_text(&call(
+        &mut client,
+        "skill_inspect",
+        json!({"selector":"native-only","file":"SKILL.md"}),
+    ));
+    assert_eq!(native["availability"], "reference_only");
+    assert_eq!(native["route"]["native_harness"], "cursor");
+    assert!(native["content_base64"].is_null());
+    let invalid = call(
+        &mut client,
+        "skill_propose",
+        json!({"slug":"../invalid","skill_md":"bad"}),
+    );
+    assert_eq!(invalid["result"]["isError"], true);
+}
+
+#[test]
+fn structured_receipts_report_ambiguity_and_stale_verification() {
+    let config = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    init_project(config.path(), home.path(), project.path());
+    let meta =
+        stateroot_core::plans::record(project.path(), "wire", "cli", None, "plan body").unwrap();
+    stateroot_core::plans::transition(
+        project.path(),
+        &meta.id,
+        stateroot_core::plans::PlanStatus::Approved,
+    )
+    .unwrap();
+    let record =
+        stateroot_core::verification::start(project.path(), &meta.id, "cli", &["example".into()])
+            .unwrap();
+    let record =
+        stateroot_core::verification::finish(project.path(), record, Some(0), None, vec![])
+            .unwrap();
+    stateroot_core::plans::complete_with_verification(
+        project.path(),
+        &meta.id,
+        "checked",
+        "cli",
+        None,
+        std::slice::from_ref(&record.id),
+    )
+    .unwrap();
+    let first = json!({"seq":77,"created_at":"2026-01-01T00:00:00Z","created_by_harness":"cli","task":"first"});
+    let second = json!({"seq":77,"created_at":"2026-01-01T00:00:01Z","created_by_harness":"codex","task":"second"});
+    stateroot_core::local_store::write_handoff_local(project.path(), &first).unwrap();
+    stateroot_core::local_store::write_handoff_local(project.path(), &second).unwrap();
+    let mut client = mcp_client(config.path(), home.path(), project.path());
+    client.call(
+        "initialize",
+        json!({"clientInfo":{"name":"cursor","version":"1"}}),
+    );
+    let call = |client: &mut McpClient, name: &str, args: Value| {
+        client.call("tools/call", json!({"name":name,"arguments":args}))
+    };
+    let plan = McpClient::tool_text(&call(&mut client, "plan_inspect", json!({"id":meta.id})));
+    assert_eq!(plan["plan"]["id"], meta.id);
+    assert_eq!(plan["plan"]["status"], "done");
+    assert_eq!(
+        plan["plan"]["completion_receipt"]["verification_ids"][0],
+        record.id
+    );
+    let observed = McpClient::tool_text(&call(
+        &mut client,
+        "verification_inspect",
+        json!({"id":record.id}),
+    ));
+    assert_eq!(observed["inputs_match"], true);
+    assert_eq!(observed["semantic_acceptance"], "not established");
+    std::fs::write(project.path().join("changed.txt"), "changed").unwrap();
+    let stale = McpClient::tool_text(&call(
+        &mut client,
+        "verification_inspect",
+        json!({"id":record.id}),
+    ));
+    assert_eq!(stale["inputs_match"], false);
+    let ambiguous = call(&mut client, "handoff_inspect", json!({"seq":77}));
+    assert_eq!(ambiguous["result"]["isError"], true);
+    assert!(McpClient::tool_text(&ambiguous)["error"]
+        .as_str()
+        .unwrap()
+        .contains("ambiguous"));
+    let page = McpClient::tool_text(&call(&mut client, "handoff_list", json!({"limit":1})));
+    assert_eq!(page["total"], 2);
+    assert_eq!(page["next_offset"], 1);
+    let id = page["entries"][0]["id"].as_str().unwrap();
+    let exact = McpClient::tool_text(&call(&mut client, "handoff_inspect", json!({"id":id})));
+    assert_eq!(exact["packet"]["task"], "second");
+    let next = McpClient::tool_text(&call(
+        &mut client,
+        "handoff_list",
+        json!({"limit":1,"offset":1}),
+    ));
+    assert!(next["next_offset"].is_null());
+    let exact = McpClient::tool_text(&call(
+        &mut client,
+        "handoff_inspect",
+        json!({"id":next["entries"][0]["id"]}),
+    ));
+    assert_eq!(exact["packet"]["task"], "first");
+    let bad_page = call(&mut client, "handoff_list", json!({"limit":0}));
+    assert_eq!(bad_page["result"]["isError"], true);
+    let current = McpClient::tool_text(&call(&mut client, "handoff_inspect", json!({})));
+    assert_eq!(current["packet"]["task"], "second");
+    stateroot_core::local_store::write_handoff_local(project.path(), &first).unwrap();
+    let restored = McpClient::tool_text(&call(&mut client, "handoff_list", json!({"limit":1})));
+    assert_eq!(restored["entries"][0]["is_current"], true);
+    assert_eq!(restored["entries"][0]["id"], restored["current_id"]);
+    let current = McpClient::tool_text(&call(&mut client, "handoff_inspect", json!({})));
+    assert_eq!(current["packet"]["task"], "first");
+    assert_eq!(current["id"], restored["current_id"]);
+    let malformed = call(&mut client, "handoff_inspect", json!({"seq":"77"}));
+    assert_eq!(malformed["result"]["isError"], true);
+    assert_eq!(
+        McpClient::tool_text(&malformed)["error"],
+        "seq must be an integer"
+    );
+    let unknown = call(&mut client, "root_inspect", json!({"root":"not-a-root"}));
+    assert_eq!(unknown["result"]["isError"], true);
+}
+
+#[test]
+fn degraded_memory_recall_preserves_visible_limit_over_stdio() {
+    let config = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    init_project(config.path(), home.path(), project.path());
+    let entries = vec![
+        "VisibilityCanary private first <!-- visibility: private -->".to_string(),
+        "VisibilityCanary shared second".to_string(),
+    ];
+    std::fs::write(
+        project.path().join(".stateroot/memories/MEMORY.md"),
+        stateroot_core::hot_apex::join_entries(&entries),
+    )
+    .unwrap();
+    let db = project.path().join(".stateroot/local/memory.sqlite");
+    if db.is_file() {
+        std::fs::remove_file(&db).unwrap();
+    }
+    std::fs::create_dir_all(db).unwrap();
+    for (caller, expected, visibility) in [
+        ("cursor", "shared second", "shared"),
+        ("cli", "private first", "private"),
+    ] {
+        let mut client = mcp_client(config.path(), home.path(), project.path());
+        client.call(
+            "initialize",
+            json!({"clientInfo": {"name": caller, "version": "1.0"}}),
+        );
+        let reply = client.call(
+            "tools/call",
+            json!({"name":"memory_recall", "arguments":{"query":"VisibilityCanary", "limit":1}}),
+        );
+        let result = McpClient::tool_text(&reply);
+        let hits = result["hits"].as_array().expect("fallback hits");
+        assert_eq!(hits.len(), 1, "{caller}: {result}");
+        assert!(
+            hits[0]["note"].as_str().unwrap().contains(expected),
+            "{caller}: {result}"
+        );
+        assert_eq!(hits[0]["visibility"], visibility);
     }
 }
 

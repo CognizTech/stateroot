@@ -147,32 +147,54 @@ pub fn recall(ctx: &Ctx, query: &str, limit: usize) -> Result<()> {
     ctx.require_project()?;
     let home = home()?;
     hot_apex::ensure_migrated(&ctx.cwd, &home);
-    let hits = match memory_index::search(&ctx.cwd, &home, query, limit, true) {
-        Ok(hits) => hits,
-        Err(error) => {
-            eprintln!("recall index stale/unavailable: {error}; bounded source fallback");
-            let hits = memory_index::source_fallback(&ctx.cwd, &home, query, limit);
-            if hits.is_empty() {
-                return Err(anyhow::anyhow!(error));
-            }
-            hits
+    let report = memory_index::search_report(&ctx.cwd, &home, query, limit, true);
+    if let Some(detail) = &report.index_detail {
+        eprintln!(
+            "recall index {:?}: {detail}; raw evidence searched independently",
+            report.index_state
+        );
+    }
+    if report.raw_coverage.partial {
+        eprintln!(
+            "raw observation coverage partial: {} files, {} bytes read",
+            report.raw_coverage.files_read, report.raw_coverage.bytes_read
+        );
+        for detail in &report.raw_coverage.diagnostics {
+            eprintln!("  {detail}");
         }
-    };
-    if hits.is_empty() {
-        println!("no hits for {query:?}");
+        if report.raw_coverage.diagnostics_omitted > 0 {
+            eprintln!(
+                "  {} further coverage details omitted",
+                report.raw_coverage.diagnostics_omitted
+            );
+        }
+    }
+    if report.hits.is_empty() {
+        println!("no hits for {query:?} in searched sources");
+        if let Some(detail) = report.index_detail {
+            return Err(anyhow::anyhow!(detail));
+        }
         return Ok(());
     }
-    if hits.iter().any(|hit| hit.stale) {
-        eprintln!("recall index stale: using unchanged committed sources and current authored-source fallback");
-    }
+    let hits = report.hits;
     for hit in hits {
         let priv_mark = if hit.private { " [private]" } else { "" };
+        let raw_mark = if hit.kind == "observation" {
+            " (raw observation)"
+        } else {
+            ""
+        };
         println!(
-            "[{} | {} | score={:.3}]{priv_mark}",
+            "[{} | {} | score={:.3}]{priv_mark}{raw_mark}",
             hit.kind, hit.path, hit.score
         );
         if hit.kind == "transcript" {
             println!("  source: {} · native session {}", hit.source, hit.path);
+        } else if hit.kind == "observation" {
+            println!(
+                "  source: {} · `observations show {}`",
+                hit.source, hit.path
+            );
         }
         // Core already bounds around the match; another prefix cap can hide it.
         println!("  {}\n", hit.text);

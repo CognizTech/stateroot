@@ -592,6 +592,100 @@ pub fn append_log(project_dir: &Path, summary: &str) -> Result<(), WikiError> {
     append_log_locked(project_dir, summary)
 }
 
+/// Recover an ingest log append from either a legacy whole-log proposal or a
+/// newer journal. Concurrent append-only entries are preserved; editing an
+/// existing entry is an explicit conflict. The marker makes replay idempotent.
+pub fn append_prepared_log_once(
+    project_dir: &Path,
+    operation: &str,
+    before_sha256: &str,
+    prepared_after: &str,
+) -> Result<(), WikiError> {
+    let _guard = write_guard(project_dir)?;
+    ensure_layout_locked(project_dir)?;
+    let path = wiki_path(project_dir, LOG_FILE);
+    let current = existing_text(&path)?;
+    if !prepared_log_needs_append(current.as_deref(), operation, before_sha256, prepared_after)? {
+        return Ok(());
+    }
+    let summary = prepared_after
+        .lines()
+        .find_map(|line| line.strip_prefix("* **Update**: "))
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "prepared ingest log has no entry",
+            )
+        })?;
+    append_log_locked(
+        project_dir,
+        &format!("{summary} <!-- ingest:{operation} -->"),
+    )
+}
+
+/// Pure preflight shared with the compiler's publication validation.
+pub fn prepared_log_needs_append(
+    current: Option<&str>,
+    operation: &str,
+    before_sha256: &str,
+    prepared_after: &str,
+) -> Result<bool, WikiError> {
+    use sha2::{Digest, Sha256};
+    let identity =
+        |text: Option<&str>| format!("{:x}", Sha256::digest(serde_json::to_vec(&text).unwrap()));
+    let current_text = current.unwrap_or_default();
+    if current_text.contains(&format!("<!-- ingest:{operation} -->")) {
+        return Ok(false);
+    }
+    let contains_lines = |whole: &str, retained: &str| {
+        let mut lines = whole.lines().filter(|line| !line.trim().is_empty());
+        retained
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .all(|wanted| lines.any(|line| line == wanted))
+    };
+    // Old journals may have already published their unmarked full log before
+    // interruption. Its complete ordered entries prove that append happened.
+    if contains_lines(current_text, prepared_after) {
+        return Ok(false);
+    }
+    if identity(current) == before_sha256 {
+        return Ok(true);
+    }
+    let entry_start = prepared_after.find("* **Update**: ").ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "prepared ingest log has no entry",
+        )
+    })?;
+    let entry_end = prepared_after[entry_start..]
+        .find('\n')
+        .map(|offset| entry_start + offset + 1)
+        .unwrap_or(prepared_after.len());
+    let rest = &prepared_after[entry_end..];
+    let same_day = format!("{}{}", &prepared_after[..entry_start], rest);
+    let prior_day = format!("{LOG_HEADER}\n\n{}", rest.trim_start_matches('\n'));
+    let candidates = [
+        String::new(),
+        same_day,
+        prior_day,
+        LOG_HEADER.to_string(),
+        format!("{LOG_HEADER}\n"),
+    ];
+    let before = candidates
+        .iter()
+        .find(|candidate| identity(Some(candidate)) == before_sha256);
+    if identity(None) == before_sha256
+        || before.is_some_and(|before| contains_lines(current_text, before))
+    {
+        return Ok(true);
+    }
+    Err(
+        std::io::Error::other("ingest output conflict: wiki/log.md (existing entries changed)")
+            .into(),
+    )
+}
+
 fn append_log_locked(project_dir: &Path, summary: &str) -> Result<(), WikiError> {
     ensure_layout_locked(project_dir)?;
     let path = wiki_path(project_dir, LOG_FILE);
@@ -1055,26 +1149,87 @@ pub fn lint(project_dir: &Path) -> Result<Vec<LintFinding>, WikiError> {
     Ok(findings)
 }
 
-/// Content hash of inbox + episodic + spool for skip-if-unchanged.
-///
-/// The observation store's contribution is the small current projection
-/// (`spool/current.json`), which changes on every capture; the legacy spool
-/// file is still hashed for pre-segment projects and import rows.
+/// Identity of the actual deterministic miner inputs. Observation projection
+/// timestamps, compiler governance and derived index/log writes are not miner
+/// inputs. The caller separately binds the active learning scopes and inbox.
 pub fn compile_input_hash(project_dir: &Path) -> String {
     use sha2::{Digest, Sha256};
     let root = local_store::root(project_dir);
     let mut hasher = Sha256::new();
-    for rel in [
-        local_store::EPISODIC_PATH,
-        "spool/observations.jsonl",
-        "spool/current.json",
-        &format!("{PAGES_DIR}/{INBOX_PAGE}"),
-    ] {
+    for rel in [local_store::EPISODIC_PATH, "spool/observations.jsonl"] {
         let text = fs::read_to_string(root.join(rel)).unwrap_or_default();
         hasher.update(rel.as_bytes());
-        hasher.update(text.as_bytes());
+        for line in text.lines() {
+            let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let note = if rel == local_store::EPISODIC_PATH {
+                record.get("note").and_then(|v| v.as_str())
+            } else {
+                if record
+                    .pointer("/origin/kind")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|kind| kind != "user")
+                {
+                    continue;
+                }
+                record
+                    .get("note")
+                    .or_else(|| record.get("content"))
+                    .and_then(|v| v.as_str())
+                    .and_then(crate::transcripts::codex::user_assertion)
+                    .filter(|note| !crate::transcripts::codex::is_injected(note))
+            };
+            if let Some(note) = note {
+                hasher.update((note.len() as u64).to_le_bytes());
+                hasher.update(note.as_bytes());
+            }
+        }
     }
     format!("{:x}", hasher.finalize())
+}
+
+/// Explicit compiler dependencies authored in the existing inbox frontmatter.
+/// These are declared references, never inferred task relevance or Skill use.
+pub fn compile_dependencies(project_dir: &Path) -> Result<serde_json::Value, WikiError> {
+    let text = show(project_dir, "wiki/pages/_inbox.md")?;
+    let Some(fm) = split_frontmatter(&text).0 else {
+        return Ok(serde_json::json!([]));
+    };
+    let value: serde_yaml::Value = serde_yaml::from_str(fm)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    let dependencies = value
+        .get("compile_dependencies")
+        .cloned()
+        .unwrap_or_else(|| serde_yaml::Value::Sequence(Vec::new()));
+    serde_json::to_value(dependencies)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err).into())
+}
+
+/// Replace explicit dependency references through the Wiki owner, preserving
+/// the inbox body and unrelated frontmatter. An empty array clears them.
+pub fn set_compile_dependencies(
+    project_dir: &Path,
+    dependencies: &serde_json::Value,
+) -> Result<(), WikiError> {
+    if !dependencies.is_array() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "compile dependencies must be an array",
+        )
+        .into());
+    }
+    let _guard = write_guard(project_dir)?;
+    ensure_layout_locked(project_dir)?;
+    let path = pages_dir(project_dir).join(INBOX_PAGE);
+    let text = fs::read_to_string(&path)?;
+    let (fm, body) = split_frontmatter(&text);
+    let mut map = fm.map(parse_frontmatter).unwrap_or_default();
+    let value = serde_yaml::to_value(dependencies)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    map.insert(yaml_str("compile_dependencies"), value);
+    atomic_replace(&path, render_page(&map, body).as_bytes())?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1085,6 +1240,74 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         local_store::init_skeleton(dir.path(), "p", "P", "default").unwrap();
         dir
+    }
+
+    #[test]
+    fn compile_sources_ignore_projection_bookkeeping_but_follow_actual_notes() {
+        let p = project();
+        let root = local_store::root(p.path());
+        let initial = compile_input_hash(p.path());
+        fs::create_dir_all(root.join("spool")).unwrap();
+        fs::write(root.join("spool/current.json"), r#"{"updated_at":"new"}"#).unwrap();
+        local_store::append_episodic(p.path(), &serde_json::json!({"kind":"query","at":"now"}))
+            .unwrap();
+        assert_eq!(compile_input_hash(p.path()), initial);
+        local_store::append_episodic(
+            p.path(),
+            &serde_json::json!({"note":"Actual source note changed"}),
+        )
+        .unwrap();
+        assert_ne!(compile_input_hash(p.path()), initial);
+    }
+
+    #[test]
+    fn prepared_log_recovers_legacy_journals_preserves_appends_and_rejects_edits() {
+        use sha2::{Digest, Sha256};
+        for prior in [
+            "",
+            "# Directory Update Log\n\n## 2000-01-01\n* **Update**: Author's existing entry\n",
+        ] {
+            let p = project();
+            ensure_layout(p.path()).unwrap();
+            let path = wiki_path(p.path(), LOG_FILE);
+            fs::write(&path, prior).unwrap();
+            let before_sha = format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(&Some(prior)).unwrap())
+            );
+            append_log(p.path(), "agentic ingest: pages=1 memory_facts=0").unwrap();
+            let prepared = fs::read_to_string(&path).unwrap();
+            fs::write(&path, prior).unwrap();
+            append_log(p.path(), "deterministic ingest: newer note").unwrap();
+            append_prepared_log_once(p.path(), "stable-operation", &before_sha, &prepared).unwrap();
+            let published = fs::read_to_string(&path).unwrap();
+            assert!(published.contains("newer note"));
+            assert_eq!(published.matches("agentic ingest:").count(), 1);
+            append_prepared_log_once(p.path(), "stable-operation", &before_sha, &prepared).unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), published);
+            // The older writer may have published its unmarked after-image.
+            fs::write(&path, &prepared).unwrap();
+            append_log(p.path(), "deterministic ingest: later boundary").unwrap();
+            let legacy_applied = fs::read_to_string(&path).unwrap();
+            append_prepared_log_once(p.path(), "legacy-operation", &before_sha, &prepared).unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), legacy_applied);
+            if !prior.is_empty() {
+                fs::write(
+                    &path,
+                    prior.replace("Author's existing entry", "Authored replacement"),
+                )
+                .unwrap();
+                let authored = fs::read_to_string(&path).unwrap();
+                assert!(append_prepared_log_once(
+                    p.path(),
+                    "conflicting-operation",
+                    &before_sha,
+                    &prepared
+                )
+                .is_err());
+                assert_eq!(fs::read_to_string(&path).unwrap(), authored);
+            }
+        }
     }
 
     #[test]

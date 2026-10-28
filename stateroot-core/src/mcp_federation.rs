@@ -459,9 +459,9 @@ fn pull_into_store(
                     .iter()
                     .any(|o| o.harness == origin.harness && o.path == origin.path)
                 {
-                    if !dry_run {
-                        existing.origins.push(origin);
-                    }
+                    // This store is an in-memory preview during dry runs. Keep
+                    // its later decisions faithful to the real pull sequence.
+                    existing.origins.push(origin);
                     actions.push(SyncAction {
                         action: "origin_added".into(),
                         name: item.name.clone(),
@@ -483,22 +483,20 @@ fn pull_into_store(
                 });
             }
             None => {
-                if !dry_run {
-                    store.servers.insert(
-                        item.name.clone(),
-                        CanonicalMcpServer {
-                            identity_key: identity_key(&item.name, &item.entry_digest),
-                            entry: item.entry.clone(),
-                            entry_digest: item.entry_digest.clone(),
-                            origins: vec![McpOrigin {
-                                harness: item.origin_harness.clone(),
-                                path: item.origin_path.clone(),
-                            }],
-                            ownership_class: "user_installed".into(),
-                            transport_hint: Some(item.transport_hint),
-                        },
-                    );
-                }
+                store.servers.insert(
+                    item.name.clone(),
+                    CanonicalMcpServer {
+                        identity_key: identity_key(&item.name, &item.entry_digest),
+                        entry: item.entry.clone(),
+                        entry_digest: item.entry_digest.clone(),
+                        origins: vec![McpOrigin {
+                            harness: item.origin_harness.clone(),
+                            path: item.origin_path.clone(),
+                        }],
+                        ownership_class: "user_installed".into(),
+                        transport_hint: Some(item.transport_hint),
+                    },
+                );
                 actions.push(SyncAction {
                     action: if dry_run {
                         "would_pull".into()
@@ -1209,6 +1207,31 @@ mod tests {
         );
         let claude = read_servers(&home.join(".claude.json"), "mcpServers").unwrap();
         assert_eq!(claude["shared"]["command"], json!("b"));
+    }
+
+    #[test]
+    fn dry_doctor_reports_distinct_origins_without_writing_a_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir_all(home.join(".cursor")).unwrap();
+        let cursor = home.join(".cursor/mcp.json");
+        let claude = home.join(".claude.json");
+        fs::write(&cursor, r#"{"mcpServers":{"shared":{"command":"a"}}}"#).unwrap();
+        fs::write(&claude, r#"{"mcpServers":{"shared":{"command":"b"}}}"#).unwrap();
+        let before_cursor = fs::read(&cursor).unwrap();
+        let before_claude = fs::read(&claude).unwrap();
+
+        let report = doctor_report(Some(&home), None).unwrap();
+        let issues = report["issues"].as_array().unwrap();
+        assert!(
+            issues
+                .iter()
+                .any(|row| row["name"] == "shared" && row["action"] == "collision"),
+            "{issues:?}"
+        );
+        assert_eq!(fs::read(&cursor).unwrap(), before_cursor);
+        assert_eq!(fs::read(&claude).unwrap(), before_claude);
+        assert!(!home.join(".stateroot/tools/mcp.json").exists());
     }
 
     #[test]

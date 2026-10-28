@@ -36,8 +36,11 @@ pub fn lint(ctx: &Ctx) -> Result<()> {
 }
 
 /// `stateroot wiki compile` — deterministic (and agentic when available) ingest.
-pub async fn compile(ctx: &Ctx, force: bool) -> Result<()> {
+pub async fn compile(ctx: &Ctx, force: bool, dependencies: Option<&str>) -> Result<()> {
     ctx.require_project()?;
+    if let Some(raw) = dependencies {
+        wiki::set_compile_dependencies(&ctx.cwd, &serde_json::from_str(raw)?)?;
+    }
     let outcome = super::compiler::try_ingest(ctx, force).await?;
     println!("{outcome}");
     Ok(())

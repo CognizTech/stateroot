@@ -31,6 +31,86 @@ fn episodic(ctx: &Ctx, note_text: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn graph(ctx: &Ctx, ready_only: bool, json_output: bool) -> anyhow::Result<()> {
+    ctx.require_project()?;
+    let graph = plans::graph(&ctx.cwd);
+    if json_output {
+        // Both endpoints return the same projection: consumers never reconstruct
+        // blockers or assignment semantics from a lossy ready-only list.
+        println!("{}", serde_json::to_string_pretty(&graph)?);
+        return Ok(());
+    }
+    for node in &graph.nodes {
+        if ready_only && node.readiness != "ready" {
+            continue;
+        }
+        println!(
+            "{} · {} · {} · worker {}{}",
+            node.id,
+            node.title,
+            node.readiness,
+            node.worker_state,
+            node.target_fork
+                .as_ref()
+                .map(|f| format!(" · fork {f}"))
+                .unwrap_or_default()
+        );
+        for blocker in &node.blockers {
+            println!("  {}: {}", blocker.code, blocker.detail);
+        }
+    }
+    if ready_only && graph.ready.is_empty() {
+        println!("no plans ready; `stateroot plan graph` explains blockers");
+    }
+    for overlap in &graph.ownership_overlaps {
+        println!(
+            "ownership overlap: {} · {}",
+            overlap.plans.join(", "),
+            overlap.paths.join(", ")
+        );
+    }
+    Ok(())
+}
+
+pub fn declare(ctx: &Ctx, id: &str, revision: &str, from: Option<&str>) -> anyhow::Result<()> {
+    use std::io::Read;
+    ctx.require_project()?;
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    let declaration: plans::ExecutionDeclaration = serde_json::from_str(&input)?;
+    let actor = harness(ctx, from);
+    let meta = plans::declare_execution(&ctx.cwd, id, revision, declaration, &actor)
+        .map_err(anyhow::Error::msg)?;
+    episodic(
+        ctx,
+        &format!("plan {} execution declaration revised by {actor}", meta.id),
+    )?;
+    super::reconcile_quiet(ctx);
+    println!("{}", serde_json::to_string(&meta)?);
+    Ok(())
+}
+
+pub fn accept_source(
+    ctx: &Ctx,
+    id: &str,
+    prerequisite: &str,
+    revision: &str,
+    evidence: &str,
+    from: Option<&str>,
+) -> anyhow::Result<()> {
+    ctx.require_project()?;
+    let actor = harness(ctx, from);
+    let meta = plans::accept_source(&ctx.cwd, id, prerequisite, revision, &actor, evidence)
+        .map_err(anyhow::Error::msg)?;
+    episodic(
+        ctx,
+        &format!("plan {id} source compatibility accepted by {actor}: {prerequisite}"),
+    )?;
+    super::reconcile_quiet(ctx);
+    println!("{}", serde_json::to_string(&meta)?);
+    Ok(())
+}
+
 /// Title fallback: the body's first markdown heading, then the file stem.
 fn derive_title(body: &str, file: Option<&str>) -> Option<String> {
     for line in body.lines() {
@@ -224,8 +304,12 @@ pub fn done_with_verification(
     // 1. Completion snapshot: capture the state of the work being closed.
     //    Failure here (or an unreadable plan body later) aborts before any
     //    lifecycle mutation.
-    let snap =
-        stateroot_core::roots::snap_if_changed(&ctx.cwd, &actor, "plan completion snapshot", None);
+    let snap = stateroot_core::roots::snap_if_changed_explicit(
+        &ctx.cwd,
+        &actor,
+        "plan completion snapshot",
+        None,
+    );
     let completion_root = match snap {
         Ok(stateroot_core::roots::SnapOutcome::Unchanged { root }) => Some(root),
         Ok(stateroot_core::roots::SnapOutcome::Created(manifest, _)) => {
@@ -343,5 +427,60 @@ pub fn sync(ctx: &Ctx) -> anyhow::Result<()> {
     if !any {
         println!("no new harness-native plans");
     }
+    Ok(())
+}
+
+/// Advance only bindings already authorized by the native coordinator. This
+/// observes and launches detached workers; it never waits for model execution.
+pub(crate) fn advance_authorized(ctx: &Ctx) -> Vec<serde_json::Value> {
+    let graph = plans::graph(&ctx.cwd);
+    let mut outcomes = Vec::new();
+    for node in graph.nodes.iter().filter(|n| n.readiness == "ready") {
+        let Some(assignment) = &node.assignment else {
+            continue;
+        };
+        let Some(dispatch) = &assignment.dispatch else {
+            continue;
+        };
+        let Some(key) = &node.dispatch_key else {
+            continue;
+        };
+        // Ownership is visible to the coordinator. No independent schedule or
+        // automatic conflict-resolution policy is invented here.
+        let target = plans::execution_target(&ctx.cwd, node.target_fork.as_deref());
+        let worktree = target
+            .filter(|p| p != &ctx.cwd)
+            .map(|p| p.to_string_lossy().into_owned());
+        let args = crate::cli::DelegateArgs {
+            action: None,
+            to: Some(assignment.harness.clone()),
+            task: Some(dispatch.task.clone()),
+            plan: None,
+            skills: Vec::new(),
+            ambient_skills: false,
+            json: false,
+            worktree,
+            key: Some(key.clone()),
+            _worker: false,
+            record_id: None,
+            record_in: None,
+            _quiet: true,
+        };
+        let result = super::delegate::spawn_ready(ctx, &args, node);
+        outcomes.push(match result {
+            Ok(_) => json!({"plan_id": node.id, "operation_key": key, "status": "observed_or_launched"}),
+            Err(error) => json!({"plan_id": node.id, "operation_key": key, "status": "unavailable", "detail": error.to_string()}),
+        });
+    }
+    outcomes
+}
+
+pub fn advance(ctx: &Ctx) -> anyhow::Result<()> {
+    ctx.require_project()?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&advance_authorized(ctx))?
+    );
+    super::reconcile_quiet(ctx);
     Ok(())
 }

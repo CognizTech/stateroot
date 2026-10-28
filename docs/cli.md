@@ -55,6 +55,178 @@ HTTP client, used only when an operator key (`DEEPSEEK_API_KEY` /
   observed context pack. No scanner, no capture restriction, no new
   approval, and no always-on LLM.
 
+## `stateroot wiki compile` — retained generation and retry
+
+The deterministic inbox stage remains keyless and automatic at the existing
+session-end/pre-compaction boundaries. It records its own completed input
+identity. Optional configured generation has a separate successful identity:
+provider or apply failures leave that baseline intact, and retrying does not
+repeat completed mining. Unchanged input skips generation. `--force` repeats
+optional generation; it does not require repeated deterministic mining.
+
+Native agents can declare relevant inputs through the Wiki owner:
+
+```sh
+stateroot wiki compile --dependencies '[{"kind":"source","path":"src/parser.rs"},{"kind":"instruction","path":"AGENTS.md"},{"kind":"tool_config","path":"tool-config.json"},{"kind":"skill","selector":"parser-check","file":"references/checks.md"}]'
+```
+
+This replaces the persisted `compile_dependencies` array in the inbox's
+frontmatter; `--dependencies '[]'` clears it. Omission retains it. File paths
+are project-relative. Skill selectors use the existing I2 package inspection
+contract, including package/resource digests, metadata and visible unavailable
+states. Only declared references are resolved; their content and identities
+enter the actual generation payload. Installing or editing an unrelated
+Skill does not invalidate it. References express native-authored dependencies,
+not observed Skill application, correctness, or automatic relevance selection.
+
+`ingest-gov.json` retains the floor identity/count, optional attempt count and
+status, prior successful provenance, generated response awaiting preparation,
+and any prepared apply. A valid generated response is reused after preparation
+failure; `--force` can request a new response. A prepared apply
+contains before/after content identities and exact prepared output bytes; publication uses the existing
+memory/wiki/episodic locks. The archive publishes before apex demotion, and
+durable publication intent is saved before the first output write. An
+interrupted retry completes that saved mutation without another provider call,
+even when keys/configuration or input sources have since changed. New episodic
+appends are preserved; the saved append operation is applied once. Changed
+inputs supersede a proposal only before publication starts. Changed authored
+outputs report a conflict and remain intact; a started recovery journal stays
+available even with `--force`. A fresh proposal can be requested after an
+unpublished output conflict. Changed learning-scope or source inputs remain
+due for actual deterministic mining after recovery. If authored output blocks
+optional recovery, new notes still pass through the keyless floor. Its newer
+inbox/catalog/log writes remain intact and do not rebase or discard the older
+optional journal; the optional conflict stays visible. The optional Wiki log
+entry publishes through an idempotent append, preserving newer floor entries.
+Saved journals from the whole-log writer remain recoverable: an already-applied
+old append is recognized, append-only extensions are preserved, and changed
+existing log entries remain explicit conflicts. Memory capacity and archive
+behavior use the existing memory mutators. Successful publication means the
+recorded synthesized outputs were applied, not that their meaning was verified.
+
+The identity covers the actual inbox/catalog payload, declared source and
+package bytes, and effective provider/model/endpoint/request configuration. Successful
+provenance separates prepared and observed output identities and includes
+copied/prepared/payload byte counts and stage elapsed times;
+these are local costs, not billed tokens or evidence of semantic savings.
+Output identities are SHA-256 of JSON-encoded optional UTF-8 text, so an absent
+file and an empty file remain distinct.
+It does not claim awareness of undeclared source dependencies or infer semantic
+impact from a root label. Output identities cover the existing Wiki catalog;
+materialization copies only proposed pages and the fixed memory/archive/index
+surfaces, with appended episodic history retained as a delta. This is one retained ingest assessment; it does not
+introduce a per-symbol dependency graph or schedule work on unrelated queries.
+
+Handoff synthesis also binds its effective request configuration and validates
+its frozen bundle before publication. Its compare/update uses the ordinary
+handoff lock, preserving a concurrently authored packet or newly created
+handoff. Incidental activity and acceptance stamps remain receiver-owned.
+
+## `stateroot skill` — native-agent discovery and progressive package reads
+
+Local `mcp-stdio` exposes `skill_inspect` for catalog, package digest, resource
+and native-route inspection. `skill_propose` accepts the existing `slug`,
+`skill_md`, `name` and `rationale`, plus optional `files_base64` and `evidence`.
+Package inspection records delivery, not whether an agent applied the Skill.
+
+Read-only MCP tools `root_inspect`, `root_compare`, `transition_inspect`,
+`handoff_list`, `handoff_inspect`, `verification_inspect`, `plan_inspect` and `plan_graph`
+expose canonical continuity readers. Handoff history accepts an exact packet
+ID or unambiguous sequence; paginated history lists IDs for older packets.
+`native_session_inspect` reads an explicit archive and optional saved operation
+receipt. It reports the last recorded native observation without contacting
+Codex or revalidating the current destination; missing archives remain unavailable.
+`stateroot rules list --json` emits canonical rule metadata, and
+`stateroot mcp tools --json` emits local StateRoot MCP tool descriptions.
+`stateroot mcp doctor --json` reports conflicts and dry-run projection actions.
+The extension reads these with `skill scan --json`, `mcp status --json`,
+`mcp doctor --json`, `doctor --json` and `plan graph --json` when the corresponding workbench
+view opens or is refreshed. Discovery does not establish that a harness
+read, invoked, or benefited from a capability.
+Verification reports observed commands and input
+freshness, not semantic acceptance. Tool failures set MCP `isError`.
+
+`skill list` and `skill scan --json` expose the full discovered catalog,
+including native/reference-only and incompatible capabilities. The native
+agent chooses applicability. An empty catalog, missing package and an agent
+choosing no Skill are different states; StateRoot does not select a top-k
+subset, call a model or infer use from a projection marker. Inspection reports
+`selector_state` as `no_selector` or `explicit_selector`; neither proves a
+task-level choice. `selection` stays `unobserved`. The native agent can record
+an actual selection or explicit no-selection decision in its normal handoff.
+
+`skill show <slug-or-identity> --json` inspects one package's metadata, source
+references, native route and observed projections. Default catalog entries
+omit full sidecar bodies. Use `identity_key` and `package_digest` from the scan
+for an exact progressive read:
+
+```sh
+stateroot skill show psi_<identity> --json
+stateroot skill show psi_<identity> --digest <package-digest> --file references/example.md
+stateroot skill show psi_<identity> --digest <package-digest> --file assets/example.bin --json
+```
+
+Plain `show <slug>` still prints SKILL.md when the current identity/version is
+unambiguous (including canonical directory aliases and legacy lower-case entrypoints). Ambiguous names expose
+all candidates through `--json`; a changed digest returns `changed_package`
+and no bytes. JSON file reads carry `content_base64`, including binary
+resources; plain reads write the original bytes. Missing files and hash-excluded
+resources remain visibly unavailable for a digest-bound read. Reference-only
+implementations remain in their native harness; inspection gives the existing
+delegation route. Compatibility is reported without hiding readable portable
+bytes. `--harness pi` reports the registry's isolation declaration for
+StateRoot-owned launches; other harnesses do not inherit that claim.
+
+`skill write --input - --from <harness>` consumes JSON and immediately writes
+and projects a canonical project Skill, using the same existing federation
+owner. It requires `slug` and `skill_md`; optional `files_base64` maps relative
+resource paths to complete base64 bytes. Omitted resources survive updates. Writes stage the complete package before
+publication, so invalid/conflicting resources leave an existing active package
+and its projections intact. Resource input carries bytes, not a portable mode,
+symlink or ACL manifest. Existing file permissions survive updates; new scripts
+should be invoked through their interpreter unless executable modes are set
+separately. The existing package digest covers bytes, not executable modes.
+Optional `name`, `rationale` and `evidence` preserve author context. No plan
+receipt, candidate queue or promotion step is required. For example:
+
+```json
+{
+  "slug": "check-fixture",
+  "skill_md": "---\nname: check-fixture\n---\nRead references/example.txt.\n",
+  "files_base64": {"references/example.txt": "ZXhhbXBsZQo="},
+  "evidence": [
+    {"kind": "plan", "reference": "plan_<exact-id>", "body_digest": "<sha256>", "status": "historical", "note": "Procedure derived by the native agent"},
+    {"kind": "session", "reference": "<exact-session-id>", "project_id": "<source-project>", "status": "declared"}
+  ]
+}
+```
+
+Evidence entries retain optional plan/body/root/delegation/session/verification
+references and unknown future fields. Their supplied status is an author
+claim. Detail inspection separately reports unavailable, foreign and stale
+references. Historical evidence stays historical; an exact available command
+observation can establish only that command's exit, never the Skill's
+applicability, generalizability or successful application. Delegation evidence
+is retained with `unavailable_delegation_inspection` because its record reader
+belongs to the CLI runtime. File delivery does not prove the agent read or
+applied it; application/outcome stay `unobserved` until supported by separate
+native-harness evidence. A projected wrapper proves only route projection.
+
+`package_digest` keeps its existing sorted file-path/file-SHA256 contract.
+`skill.federation.json` and managed projection metadata are excluded; other
+existing size/vendor exclusions remain listed in `hash_exclusions`. Full local
+resources survive canonical/projection copies; federation report content is
+the hashed file manifest, with exclusions visible. Sidecar metadata has a
+separate `metadata_digest` (identity, not a semantic certificate). Evidence
+updates bind to the current package digest; later procedure changes keep old
+evidence visible as a stale package binding. Unknown sidecar fields survive
+scanner, writer, sync, projection and explicit report/detail inspection.
+
+The shared Rust adapter is `skill_federation::{author_skill, inspect_package}`
+with `SkillWriteRequest` and `SkillInspection`. The CLI uses it now. The legacy
+MCP `skill_propose` writer remains pending the separately owned MCP adapter
+integration; its old arguments and immediate activation are unchanged.
+
 ## `stateroot delegate` — cross-harness subagents, async-only
 
 `stateroot delegate --to <harness> --task "<bounded task>"` spawns another
@@ -322,6 +494,78 @@ transferred session <id> → pi
 `--dry-run` prints the same plan with `would write:` and touches nothing.
 Every transfer appends an episodic lineage note.
 
+### Qualified native Codex recovery
+
+`session sync` also retains supported settled Codex history under
+`.stateroot/local/sessions/native-codex/`. This runs through the existing
+automatic session import; a final handoff is not required. `session list`
+and `session show <id>` list exact boundary archive IDs. The listing verifies
+manifest identity; selecting a boundary verifies its retained bytes.
+
+Settled boundaries include completed, failed and interrupted native turns.
+Their original statuses and error/abort payloads survive recovery; a later
+successful turn can be captured after a failed or interrupted one. An
+in-progress, malformed or otherwise unqualified suffix is reported as partial
+capture through the exact older boundary, separately from full capture counts.
+It is never silently presented as fresh capture of the newer source.
+Standalone legacy `event_msg.error` records are retained, but native recovery
+is unavailable for that source: the qualified runner drops those records when
+persisting a fork, violating the required exact historical payload prefix.
+Normal terminal `task_complete.error` records survive and remain supported.
+
+```text
+stateroot session transfer <codex-session-id> --to codex --archive <full-digest> --operation-id <stable-uuid>
+codex resume <returned-destination-id>
+stateroot session show <codex-session-id> --operation-id <stable-uuid>
+```
+
+The transfer invokes the installed native `codex app-server` fork API. It
+creates a distinct native session, checks source ancestry, every full historical
+turn ID, workspace, effective model and permissions, and the historical prefix
+before returning a resume command. StateRoot does not submit a model prompt.
+After work continues in native Codex, `session show --operation-id` reads the
+native turns and records completed output as observed evidence. The reviewing
+agent assesses whether that output demonstrates useful retained context.
+Concurrent inspections compare their entire receipt snapshot before publication;
+a stale inspection refuses to replace newer continuation evidence and can retry
+from the current receipt.
+
+The initial qualified envelope is **Codex CLI 0.149.1**, its experimental v2
+`thread/fork.path` API, legacy rollout history, and Linux x86_64. The original
+workspace path must exist. A fresh native home and empty native registry work
+when the captured configuration files match; the live source rollout is not
+required. Changed runner versions, file configuration, model, permissions,
+unsupported history, missing native evidence, and missing/corrupt retained
+archives report native recovery unavailable. Generic intelligence and project
+restoration remain available independently. Current configuration is never
+overwritten; credentials, software, remote policy, and historical launch
+arguments are not reconstructed.
+
+Each boundary binds the native source identities, configuration fingerprints,
+and known project/lineage/root context at capture. Raw SHA-256 checks the exact
+retained bytes. A separate BLAKE3 historical-prefix digest includes every JSON
+field except the outer transport timestamp, which the qualified native fork
+rewrites. It includes source metadata and all payload fields. Destination
+metadata and new turns do not have to equal the source container. Completed
+native turns, a verified archive, a verified native fork, generic intelligence,
+and project restoration are reported as separate facts; root fidelity never
+guesses a conversation from the latest archive.
+
+Source bytes append once as history grows. A native rewrite or divergent prefix
+creates a separate retained generation, preserving earlier boundaries. Restore
+materializes only the explicitly selected byte prefix, removes that temporary
+materialization after verification, and leaves the retained source unchanged.
+The stable operation UUID journals fork intent before the native request. Retry
+reconciles the same destination; an uncertain unlocated or ambiguous result does
+not launch another fork. `--dry-run` verifies the selected archive without
+starting the native runner. All archives and operation receipts remain local;
+project roots do not carry them to another device. `session purge` retains these
+native archives, just as it retains native harness transcripts.
+
+Protocol reference: [OpenAI Codex App Server](https://developers.openai.com/codex/app-server).
+The exact experimental schema was checked with
+`codex app-server generate-json-schema --experimental --out <temporary-dir>`.
+
 ## `stateroot plan` — central plan artifacts + lifecycle
 
 The plan/implement split, doctrine-shaped: StateRoot owns the plan
@@ -375,6 +619,73 @@ in the prompt path (token razor).
 - **v1 has no tool-gating** — hooks do not deny write tools while a draft
   exists. Enforcement is a policy decision for the user (optional hook
   hardening later); StateRoot ships the strings, not a runtime cage.
+
+### Explicit dependencies and readiness
+
+`stateroot plan graph --json` and `plan ready --json` return the same
+`stateroot.plan-graph.v1` projection: exact plan/body identities, prerequisites,
+blocker codes, declared assignments, observed workers, executor fork/root,
+parallel-ready IDs and declared ownership overlaps. Human `ready` output shows
+only the ready set. A fork claim means assigned/awaiting native activity;
+activation alone never proves a worker is running. Legacy plans remain usable
+and report `dependencies_not_declared`, rather than invented independence.
+
+Use `plan declare <exact-id> --revision <revision-from-graph>` with an
+`ExecutionDeclaration` JSON document on stdin. This replaces the declaration,
+preserves the plan body/approval, records the editor and increments its revision.
+Only the edited sidecar becomes `stateroot.plan.v2`; older writers refuse it.
+Stale revisions, self/cyclic edges and terminal declaration edits are rejected.
+Imported malformed/unsupported graphs remain visible and untouched. Divergent
+execution declarations from parallel forks require explicit reconciliation;
+line-based merging must not combine dependencies with a different assignment.
+
+```json
+{
+  "dependencies": [{
+    "plan_id": "<exact-prerequisite-id>",
+    "body_digest": "<sha256-of-prerequisite-body>",
+    "kind": "source",
+    "outputs": [{"path": "src/contract.rs", "sha256": "<required-file-sha256>"}]
+  }],
+  "assignment": {"harness": "codex", "fork": "consumer-fork"},
+  "owned_paths": ["src/consumer.rs"]
+}
+```
+
+A `completion` edge needs a matching evidence-bearing completion receipt. A
+`source` edge also needs the declared outputs in the completion root, the
+executor's **published** root and its current files. Completion elsewhere,
+retained objects, staged merges and ancestry alone cannot satisfy it. JSON
+`evidence_basis` distinguishes required-output identity from native compatibility
+acceptance. For compatible changed implementations, the native coordinator can
+use `plan accept-source <id> <prerequisite> --revision <revision> --evidence
+"<compatibility judgment>"`; this records an explicit judgment bound to the
+upstream completion root and unchanged published executor source. Dirty or
+unavailable source cannot silently pass. No similarly titled replacement is
+inferred for a missing, abandoned or explicitly superseded prerequisite.
+
+To advance existing authorization, an assignment can include `dispatch` with
+`operation_id` (stable across observations), `task` and `authorization` (the
+existing owner/programme instruction). The service and native hooks then
+launch ready approved/active bindings through the existing detached delegate.
+`plan advance` performs the same reconciliation immediately. Readiness does not
+grant new authority or spending. Drafts never dispatch; declared overlaps remain
+visible for native judgment. Launch rechecks the graph/source/assignment under
+the delegation key lock. Automatic operations use one reservation in the verified
+trunk owner's delegation store, including when triggered from an executor fork.
+The shared Git location, registered fork path and StateRoot project identity must
+agree; independent projects do not inherit that authority. The current owner
+must still approve the same declaration/body (approved-owner/active-fork is
+compatible). A stale fork cannot revive abandoned or reassigned owner work.
+Fork graphs read this same authoritative reservation; manual delegation keeps
+its caller-owned store. Automatic observations never retry existing attempts.
+Unknown/starting attempts require reconciliation from their original runtime;
+a deliberate manual invocation may still retry a proven failed/lost attempt
+under the same key, preserving its attempt history.
+
+CLI and native continuity consume this projection. Dedicated MCP inspection and
+workbench dependency views remain integration work; no separate UI readiness
+logic or store is implied.
 
 ## `stateroot obligation` — durable, federated obligations
 
@@ -517,9 +828,45 @@ capture routing, not secret-pattern scanning.
 `stateroot memory recall` indexes a bounded opening and recent window from
 long native sessions (4,096 opening characters plus 27,904 recent characters
 when a middle is omitted). Hits retain the native source reference and label
-the omitted middle. `stateroot observations search` and direct native sources
-remain available for details outside that index window; an index failure is
-reported, never presented as a complete search.
+the omitted middle. Recall also searches a bounded raw observation window,
+independently of the derived index. At most `--limit` hits are returned: up to
+three slots are reserved for matching raw events, with the remaining slots
+keeping the indexed ranking. Raw hits are labeled `(raw observation)` and
+retain their `cap_…` or legacy `obs_N` locator for `observations show <id>`.
+Identical text from different captures keeps distinct event locators. Raw
+availability does not mean a projection is pending or that the event is newer
+than every indexed source.
+
+The raw window uses existing recent-capture references plus at most 256
+directory entries and one overflow probe. Candidate modification times are
+sampled once; the newest eight discovered files contribute at most 512 KiB
+each, ending at the file length observed when opened. Complete records are
+aligned before UTF-8 decoding. Capture timestamps order matching raw events.
+Oversized records, omitted history, corrupt/unreadable sources, and result
+budget omissions are reported as partial coverage, including on no-match.
+Legacy tails cannot supply stable line numbers and are explicitly omitted.
+`stateroot observations search`, `observations health`, and direct native
+sources remain available for evidence outside these windows. Canonical
+capture files are never rewritten by recall.
+
+Source resolution decodes intact records individually, so a corrupt sibling
+does not invalidate a returned capture ID. Legacy `obs_N` references retain
+their physical line numbers. If corruption or a read failure prevents proving
+an unmatched capture absent, `observations show` reports it unavailable.
+`observations health` retains the corruption/read-failure diagnostics. The
+existing visibility rules apply before the fallback hit limit, so a private
+match cannot consume an external caller's shared-result slot.
+
+The core producer `memory_index::search_report` returns `RecallReport` with
+`hits`, `index_state` (`not_searched`, `current`, `stale`, or `unavailable`),
+`index_detail` (nullable failure detail), and `raw_coverage`. Coverage contains
+`partial`, `directory_entries`, `files_read`, `bytes_read`, `matches_omitted`,
+`diagnostics` (at most 16), and `diagnostics_omitted`. Hit `kind=observation`
+identifies raw evidence; `path` is the stable observation locator and `source`
+carries harness/session provenance. `stale` describes indexed-source fallback,
+not raw capture age. Consumers must expose index and raw coverage independently,
+even when there are no hits. The compatibility `search` API returns bounded
+hits without this report; MCP wire adoption is a separate integration step.
 
 Unspaced-script recall (Han/Kana/Hangul): the FTS tokenizer folds an unspaced
 run into ONE token, so a bare FTS query only matches exact run boundaries.

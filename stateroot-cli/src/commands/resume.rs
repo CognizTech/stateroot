@@ -99,6 +99,12 @@ pub(crate) fn central_plan_section(project_dir: Option<&Path>) -> Option<String>
         .map(|dir| stateroot_core::continuity::plan_directive(dir, &plan))
         .unwrap_or(stateroot_core::continuity::PlanDirective::Execute);
     match directive {
+        stateroot_core::continuity::PlanDirective::Wait => {
+            section.push_str("\nRecorded prerequisites or worker evidence need reconciliation. Read `stateroot plan graph --json` for exact blockers before execution.\n\n");
+        }
+        stateroot_core::continuity::PlanDirective::Assigned => {
+            section.push_str("\nAn executor is assigned; native activity has not yet been observed. Inspect the assigned runtime before launching another worker.\n\n");
+        }
         stateroot_core::continuity::PlanDirective::Plan => {
             section.push_str(&format!(
                 "\nA draft plan is being authored at `.stateroot/plans/{}.md` — refine the plan file; do not implement yet.\n\n",
@@ -393,6 +399,12 @@ pub fn render_handoff_digest_full(
                 (_, Some(stateroot_core::continuity::PlanDirective::Close)) => {
                     "It is structurally complete — do not restart implementation; record completion evidence (`stateroot plan done <id> --evidence \"…\"`) or state concrete remaining work."
                         .to_string()
+                }
+                (_, Some(stateroot_core::continuity::PlanDirective::Wait)) => {
+                    "Recorded prerequisites or worker evidence need reconciliation; read `stateroot plan graph --json` before execution.".to_string()
+                }
+                (_, Some(stateroot_core::continuity::PlanDirective::Assigned)) => {
+                    "An executor is assigned; native activity has not yet been observed. Inspect that runtime before launching another worker.".to_string()
                 }
                 (_, Some(stateroot_core::continuity::PlanDirective::Assign)) => {
                     "It has no executor — assign or claim execution.".to_string()
@@ -1773,6 +1785,7 @@ mod tests {
                 native_invocation: String::new(),
                 compatibility: Value::Null,
                 hash_exclusions: Vec::new(),
+                package_metadata: Value::Null,
             }
         }
         let skills = vec![

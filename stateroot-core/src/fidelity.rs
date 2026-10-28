@@ -341,6 +341,41 @@ pub fn report(project: &Path, hash: &str, home: &Path) -> Result<Value, roots::R
     report_with_components(project, hash, home, &[])
 }
 
+/// Exact native session evidence is local and selected explicitly. A project
+/// root report must never pick an arbitrary latest conversation as its history.
+pub fn native_session_report(
+    project: &Path,
+    archive_id: &str,
+    operation: Option<&crate::sessions::codex_native::RestoreReceipt>,
+) -> Value {
+    let archive = crate::sessions::codex_native::load(project, archive_id);
+    let verified = archive.is_ok();
+    let unavailable = archive.as_ref().err().cloned().or_else(|| {
+        archive
+            .as_ref()
+            .ok()
+            .and_then(|a| a.native_recovery_issue.clone())
+    });
+    let source = archive.as_ref().ok().map(|a| a.source_thread_id.as_str());
+    let intelligence = source.is_some_and(|id| {
+        crate::sessions::list(project)
+            .iter()
+            .any(|s| s.harness == "codex" && s.session_id == id)
+    });
+    let bound = operation
+        .filter(|o| o.archive_id == archive_id && source == Some(o.source_thread_id.as_str()));
+    json!({"schema_version":"stateroot.native-fidelity.v1","archive_id":archive_id,
+        "project_restoration":"not performed by native session transfer",
+        "intelligence_available":intelligence,"native_archive_verified":verified,
+        "native_fork_created":bound.is_some_and(|o|o.destination_thread_id.is_some()),
+        "historical_prefix_verified":verified && bound.is_some_and(|o|o.prefix_digest.is_some()),
+        "native_continuation_observed":verified && bound.is_some_and(|o|o.observed_continuation.is_some()),
+        "source":archive.as_ref().ok(),"operation":bound,"unavailable":unavailable,
+        "storage":"local sessions only; not pinned in project roots; a missing retained archive is unavailable",
+        "qualification":"Codex 0.149.1 experimental app-server, linux-x86_64, original workspace path, matching captured file configuration and native model/permission settings; remote policy and historical launch arguments not reconstructed",
+        "continuation":"performed by native Codex; completed native output is evidence for the reviewing agent, not an automatic semantic-correctness claim"})
+}
+
 pub fn report_with_components(
     project: &Path,
     hash: &str,
@@ -459,6 +494,7 @@ pub fn report_with_components(
         "current_platform":{"os":std::env::consts::OS,"arch":std::env::consts::ARCH},
         "platform_status":if !recorded["platform"]["os"].is_string() || !recorded["platform"]["arch"].is_string() { "unknown" } else if recorded["platform"]["os"] == std::env::consts::OS && recorded["platform"]["arch"] == std::env::consts::ARCH { "matching observed platform" } else { "changed platform; execution compatibility not established" },
         "native_history":"not pinned; inspect exact receipt source availability",
+        "native_recovery":{"selection":"explicit session archive and operation only; no conversation inferred from this root","inspect":"stateroot session show <id> --operation-id <uuid>","project_and_intelligence":"independent of local native archive availability"},
         "reconstructable":"pinned lockfile declarations; software and credentials are not installed or restored",
         "execution_reproduction":"not guaranteed"}),
     )

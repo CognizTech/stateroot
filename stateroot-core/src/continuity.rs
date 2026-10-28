@@ -37,6 +37,8 @@ pub const KIND_DELEGATION_STATUS_UNKNOWN: &str = "delegation_status_unknown";
 pub const KIND_DELEGATION_RECORD_DEGRADED: &str = "delegation_record_degraded";
 pub const KIND_BOUNDARY_JOB_MANUAL: &str = "boundary_journal_manual";
 pub const KIND_PLAN_UNASSIGNED: &str = "plan_unassigned";
+pub const KIND_PLAN_READINESS: &str = "plan_readiness";
+pub const KIND_PLAN_ASSIGNED: &str = "plan_assigned";
 pub const KIND_HANDOFF_STALE: &str = "handoff_stale";
 pub const KIND_SERVICE_UNHEALTHY: &str = "service_unhealthy";
 pub const KIND_REGISTRY_PROJECT_MISSING: &str = "registry_project_missing";
@@ -85,6 +87,8 @@ impl AttentionItem {
 /// The continuity projection document (machine-local).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContinuityAssessment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_graph: Option<plans::PlanGraph>,
     pub schema_version: String,
     pub generated_at: String,
     /// sha256 of the deterministic inputs — synthesis hash-idempotency key
@@ -395,6 +399,10 @@ pub fn service_beat_stale(beat_at: &str, now: &str, poll_interval_seconds: u64) 
 /// The state-aware plan directive for digests/handoffs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanDirective {
+    /// Recorded prerequisites need attention before execution.
+    Wait,
+    /// A declared executor is awaiting observed native activity.
+    Assigned,
     /// Draft — keep planning.
     Plan,
     /// Approved, no executor — assign or claim.
@@ -409,6 +417,8 @@ pub enum PlanDirective {
 impl PlanDirective {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Wait => "wait",
+            Self::Assigned => "assigned",
             Self::Plan => "plan",
             Self::Assign => "assign",
             Self::Execute => "execute",
@@ -463,6 +473,23 @@ fn handoff_declares_no_remaining_work(
 pub fn plan_directive(project_dir: &Path, plan: &PlanMeta) -> PlanDirective {
     if plan.status() == PlanStatus::Draft {
         return PlanDirective::Plan;
+    }
+    let readiness = plans::graph(project_dir)
+        .nodes
+        .into_iter()
+        .find(|n| n.id == plan.id);
+    if let Some(row) = &readiness {
+        if row.dependencies_declared && row.readiness == "blocked" && row.worker_state != "running"
+        {
+            return PlanDirective::Wait;
+        }
+        let own_fork = local_store::fork_context(project_dir).map(|c| c.fork);
+        if row.worker_state == "awaiting_activity"
+            && (row.assignment.is_some() || row.target_fork.is_some())
+            && (row.target_fork.is_none() || row.target_fork != own_fork)
+        {
+            return PlanDirective::Assigned;
+        }
     }
     let todos = todo_federation::plan_todo_progress(project_dir, &plan.id);
     let todos_structurally_done =
@@ -558,6 +585,7 @@ pub fn assess(
     }
 
     let plan_list = plans::list(project_dir);
+    let plan_graph = plans::graph(project_dir);
     let (delegations, degraded_delegations) = read_delegations(project_dir);
     let handoff = local_store::read_handoff_local(project_dir).ok().flatten();
 
@@ -565,6 +593,52 @@ pub fn assess(
     for plan in &plan_list {
         if !matches!(plan.status(), PlanStatus::Approved | PlanStatus::Active) {
             continue;
+        }
+        let readiness = plan_graph.nodes.iter().find(|n| n.id == plan.id);
+        if let Some(row) = readiness {
+            if row.dependencies_declared && matches!(row.readiness.as_str(), "blocked" | "ready") {
+                let mut item = AttentionItem::new(
+                    KIND_PLAN_READINESS,
+                    35,
+                    &plan.id,
+                    format!("Plan '{}' is {}", plan.title, row.readiness),
+                );
+                item.detail = row
+                    .blockers
+                    .iter()
+                    .map(|b| format!("{}: {}", b.code, b.detail))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                if item.detail.is_empty() {
+                    item.detail = "Declared prerequisites satisfied; parallel readiness does not prove ownership compatibility".into();
+                }
+                item.action = "stateroot plan graph --json".into();
+                item.plan_id = Some(plan.id.clone());
+                attention.push(item);
+            }
+            if row.worker_state == "awaiting_activity"
+                && (row.assignment.is_some() || row.target_fork.is_some())
+            {
+                let mut item = AttentionItem::new(
+                    KIND_PLAN_ASSIGNED,
+                    39,
+                    &plan.id,
+                    format!(
+                        "Plan '{}' is assigned; native activity not yet observed",
+                        plan.title
+                    ),
+                );
+                item.detail = row
+                    .target_fork
+                    .as_ref()
+                    .map(|f| format!("claimed fork {f}"))
+                    .unwrap_or_default();
+                item.action =
+                    "Inspect the assigned native runtime; activation alone is not worker liveness"
+                        .into();
+                item.plan_id = Some(plan.id.clone());
+                attention.push(item);
+            }
         }
         let todos = todo_federation::plan_todo_progress(project_dir, &plan.id);
         let todos_structurally_done =
@@ -643,7 +717,10 @@ pub fn assess(
             let unverified_executor = delegations
                 .iter()
                 .any(|d| d.plan_id.as_deref() == Some(plan.id.as_str()) && d.status.is_unknown());
-            if !has_executor && !unverified_executor {
+            if !has_executor
+                && !unverified_executor
+                && readiness.is_none_or(|r| r.worker_state == "unassigned")
+            {
                 let mut item = AttentionItem::new(
                     KIND_PLAN_UNASSIGNED,
                     40,
@@ -899,8 +976,13 @@ pub fn assess(
         None => (None, None, String::new()),
     };
 
-    let inputs_hash = inputs_hash(&attention, &obligations, corrupt_events);
+    let inputs_hash = crate::canonical::content_hash(&serde_json::json!({
+        "continuity": inputs_hash(&attention, &obligations, corrupt_events),
+        "plan_graph": plan_graph.observation_id,
+    }))
+    .unwrap_or_else(|_| "sha256:unknown".into());
     ContinuityAssessment {
+        plan_graph: Some(plan_graph),
         schema_version: SCHEMA_CONTINUITY_V1.into(),
         generated_at: now,
         inputs_hash,
@@ -1120,6 +1202,7 @@ mod tests {
 
     fn assessment(attention: Vec<AttentionItem>) -> ContinuityAssessment {
         ContinuityAssessment {
+            plan_graph: None,
             schema_version: "test".into(),
             generated_at: "2026-10-09T00:00:00Z".into(),
             inputs_hash: "sha256:test".into(),

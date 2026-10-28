@@ -3,6 +3,23 @@
 All notable changes to StateRoot. Format loosely follows Keep a Changelog;
 StateRoot is pre-1.0 and milestones land as minor versions.
 
+## v0.2.11 — 2026-10-28
+
+- **Fresh-evidence recall.** `memory recall` appends a bounded supplement of
+  recent hook-captured observations (never an index source), marked
+  `(pending index)` with their resolvable capture id — a compiled hit never
+  conceals known pending evidence, and an index refresh outage cannot hide
+  it.
+- **Capture resilience.** Observation capture retries segment-lock
+  contention with a bounded backoff instead of failing the hook under a
+  parallel burst.
+- **MCP and session surfaces.** The stdio MCP server, session federation
+  (including Codex native sessions), skill packages, plan graph, and the
+  workbench extension's intelligence surfaces are expanded; CLI docs and
+  the bundled skill protocol are updated to match.
+- **Qualification.** The installed-product surface is qualified on Linux
+  and Windows; the extension artifact is 0.2.24.
+
 ## v0.2.10 — 2026-10-26
 
 - **Self-update repair.** Release lookups share one fetch path across

@@ -393,7 +393,8 @@ pub enum ObservationLookup {
     /// Found and parseable.
     Found(Box<Observation>),
     /// The reference pointed at evidence that no longer exists (historical
-    /// clear/rotation) or at a line that is not a parseable record.
+    /// clear/rotation), at an unparseable line, or could not be resolved
+    /// because archive read/corruption failures prevent proving absence.
     Unavailable(String),
     /// No such reference.
     NotFound,
@@ -1337,6 +1338,289 @@ pub fn filter_spool(project_dir: &Path, filter: &ObservationFilter) -> Vec<Obser
     rows
 }
 
+/// Coverage of the bounded raw observation search, never a full-history claim.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EvidenceCoverage {
+    /// Some sources, bytes, records, or matches were omitted or unavailable.
+    pub partial: bool,
+    /// Directory entries inspected (including non-segment entries).
+    pub directory_entries: usize,
+    /// Segment/legacy bodies successfully read.
+    pub files_read: usize,
+    /// Actual body bytes read, before line alignment.
+    pub bytes_read: usize,
+    /// Matching events omitted by the raw result budget.
+    pub matches_omitted: usize,
+    /// Bounded explanations; unknown coverage is never treated as no match.
+    pub diagnostics: Vec<String>,
+    /// Further explanations omitted from this compact report.
+    pub diagnostics_omitted: usize,
+}
+
+impl EvidenceCoverage {
+    fn note(&mut self, detail: String) {
+        self.partial = true;
+        if self.diagnostics.len() < TRAIL_DIAGNOSED_MAX {
+            self.diagnostics.push(detail);
+        } else {
+            self.diagnostics_omitted += 1;
+        }
+    }
+}
+
+/// Raw results and their search coverage; capture ids remain event identities.
+#[derive(Debug, Default)]
+pub struct EvidenceSearch {
+    /// Distinct matching events, most recent timestamp first within the window.
+    pub hits: Vec<Observation>,
+    /// Bounds and unavailable evidence, including when no event matched.
+    pub coverage: EvidenceCoverage,
+}
+
+const RECALL_FILES_MAX: usize = 8;
+const RECALL_DIRECTORY_ENTRIES_MAX: usize = 256;
+const RECALL_BYTES_PER_FILE: u64 = 512 * 1024;
+
+/// Compatibility view. Call `search_evidence` when coverage must be surfaced.
+pub fn fresh_evidence(project_dir: &Path, query: &str, limit: usize) -> Vec<Observation> {
+    search_evidence(project_dir, query, limit).hits
+}
+
+/// Read raw evidence without requiring a derived index. Existing current refs
+/// seed discovery; a bounded directory sample also admits captures whose
+/// projection failed. This is a recent window, never a complete-history search.
+pub fn search_evidence(project_dir: &Path, query: &str, limit: usize) -> EvidenceSearch {
+    let mut result = EvidenceSearch::default();
+    let q = query.trim();
+    if q.is_empty() || limit == 0 {
+        return result;
+    }
+    let coverage = &mut result.coverage;
+    let mut paths = std::collections::BTreeSet::new();
+    let dir = segments_dir(project_dir);
+    match bounded_metadata(&projection_path(project_dir), 128 * 1024) {
+        Ok(bytes) => match serde_json::from_slice::<Projection>(&bytes) {
+            Ok(projection) if projection.schema == PROJECTION_SCHEMA_V1 => {
+                if let Some(segment) = projection.watermark.segment {
+                    // Projection data is a basename, never an arbitrary path.
+                    if Path::new(&segment)
+                        .file_name()
+                        .is_some_and(|name| name == segment.as_str())
+                    {
+                        paths.insert(dir.join(segment));
+                    } else {
+                        coverage.note("current projection has an invalid segment reference".into());
+                    }
+                }
+                for entry in projection.recent.iter().rev().take(PROJECTION_RECENT) {
+                    paths.insert(
+                        dir.join(segment_file(&entry.harness, entry.session_id.as_deref())),
+                    );
+                }
+            }
+            _ => coverage
+                .note("current projection corrupt or unsupported; recent discovery unknown".into()),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => coverage.note(format!("current projection unavailable: {error}")),
+    }
+    match std::fs::read_dir(&dir) {
+        Ok(mut entries) => {
+            for entry in entries.by_ref().take(RECALL_DIRECTORY_ENTRIES_MAX) {
+                coverage.directory_entries += 1;
+                match entry {
+                    Ok(entry) if entry.path().extension().is_some_and(|ext| ext == "jsonl") => {
+                        paths.insert(entry.path());
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        coverage.note(format!("segment directory entry unavailable: {error}"))
+                    }
+                }
+            }
+            if entries.next().is_some() {
+                coverage.directory_entries += 1; // One overflow probe, no metadata read.
+                coverage.note(format!("segment discovery limited to {RECALL_DIRECTORY_ENTRIES_MAX} directory entries; unsampled history unknown"));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => coverage.note(format!("segment directory unavailable: {error}")),
+    }
+    let legacy = legacy_spool_path(project_dir);
+    // Cache each candidate's typed mtime once; sort never performs filesystem IO.
+    let mut candidates = Vec::new();
+    for path in paths.into_iter().chain(std::iter::once(legacy.clone())) {
+        match path.metadata() {
+            Ok(metadata) if metadata.is_file() => {
+                let modified = match metadata.modified() {
+                    Ok(time) => Some(time),
+                    Err(error) => {
+                        coverage.note(format!("{} timestamp unavailable: {error}", path.display()));
+                        None
+                    }
+                };
+                candidates.push((modified, path));
+            }
+            Ok(_) => coverage.note(format!(
+                "{} is not a readable evidence file",
+                path.display()
+            )),
+            Err(error) if path == legacy && error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => coverage.note(format!("{} unavailable: {error}", path.display())),
+        }
+    }
+    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    if candidates.len() > RECALL_FILES_MAX {
+        coverage.note(format!(
+            "{} discovered files omitted by the {RECALL_FILES_MAX}-file window",
+            candidates.len() - RECALL_FILES_MAX
+        ));
+        candidates.truncate(RECALL_FILES_MAX);
+    }
+    let filter = ObservationFilter {
+        query: Some(q.to_string()),
+        ..Default::default()
+    };
+    let mut seen = std::collections::HashSet::new();
+    // Keep at most limit+1 records in memory. Sorting uses capture timestamps,
+    // not mtimes; a touched old segment does not make its events freshest.
+    for (_, path) in candidates {
+        let is_legacy = path == legacy;
+        let window = match read_tail_window(&path, RECALL_BYTES_PER_FILE) {
+            Ok(window) => window,
+            Err(error) => {
+                coverage.note(format!("{} unreadable: {error}", path.display()));
+                continue;
+            }
+        };
+        coverage.files_read += 1;
+        coverage.bytes_read += window.bytes.len();
+        if window.truncated {
+            coverage.note(format!(
+                "{} earlier bytes omitted by the {}-byte tail window",
+                path.display(),
+                RECALL_BYTES_PER_FILE
+            ));
+            if is_legacy {
+                coverage.note("legacy tail omitted: stable obs_N locators require whole-file line numbers; use observations search".into());
+                continue;
+            }
+        }
+        if window.short_read {
+            coverage.note(format!(
+                "{} changed or truncated during read",
+                path.display()
+            ));
+        }
+        let bytes = aligned_tail(&window.bytes, window.truncated);
+        for (index, line) in bytes.split_inclusive(|byte| *byte == b'\n').enumerate() {
+            if !line.ends_with(b"\n") {
+                coverage.note(format!(
+                    "{} incomplete final record omitted",
+                    path.display()
+                ));
+                continue;
+            }
+            let line = match std::str::from_utf8(line) {
+                Ok(line) => line.trim(),
+                Err(_) => {
+                    coverage.note(format!("{} invalid UTF-8 record omitted", path.display()));
+                    continue;
+                }
+            };
+            if line.is_empty() {
+                continue;
+            }
+            let observation = if is_legacy {
+                parse_legacy_line(project_dir, index + 1, line)
+            } else {
+                match serde_json::from_str::<ObservationRecord>(line) {
+                    Ok(record)
+                        if record.schema == OBSERVATION_SCHEMA_V2
+                            && record.capture_id.starts_with("cap_") =>
+                    {
+                        if record.capture.status == "replay" {
+                            continue;
+                        }
+                        Some(observation_from_record(project_dir, &record))
+                    }
+                    _ => None,
+                }
+            };
+            let Some(observation) = observation else {
+                coverage.note(format!(
+                    "{} corrupt or unsupported record omitted",
+                    path.display()
+                ));
+                continue;
+            };
+            if !matches_filter(&observation, &filter) || !seen.insert(observation.id.clone()) {
+                continue;
+            }
+            if chrono::DateTime::parse_from_rfc3339(&observation.ts).is_err() {
+                coverage.note(format!("{} capture timestamp unknown", observation.id));
+            }
+            result.hits.push(observation);
+            result.hits.sort_by(|a, b| {
+                let timestamp = |value: &str| chrono::DateTime::parse_from_rfc3339(value).ok();
+                timestamp(&b.ts)
+                    .cmp(&timestamp(&a.ts))
+                    .then_with(|| a.id.cmp(&b.id))
+            });
+            if result.hits.len() > limit {
+                result.hits.pop();
+                coverage.matches_omitted += 1;
+            }
+        }
+    }
+    if coverage.matches_omitted > 0 {
+        coverage.note(format!(
+            "{} matching raw events omitted by the result budget",
+            coverage.matches_omitted
+        ));
+    }
+    result
+}
+
+struct TailWindow {
+    bytes: Vec<u8>,
+    truncated: bool,
+    short_read: bool,
+}
+
+fn read_tail_window(path: &Path, budget: u64) -> std::io::Result<TailWindow> {
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    read_tail_at(&mut file, len, budget)
+}
+
+// Freeze the end offset as well as the read budget. Appends after metadata
+// sampling belong to the next recall, including when the original file is small.
+fn read_tail_at(file: &mut std::fs::File, len: u64, budget: u64) -> std::io::Result<TailWindow> {
+    use std::io::{Read, Seek, SeekFrom};
+    let size = len.min(budget);
+    file.seek(SeekFrom::Start(len - size))?;
+    let mut bytes = Vec::new();
+    file.take(size).read_to_end(&mut bytes)?;
+    let short_read = bytes.len() as u64 != size;
+    Ok(TailWindow {
+        bytes,
+        truncated: len > budget,
+        short_read,
+    })
+}
+
+fn aligned_tail(bytes: &[u8], truncated: bool) -> &[u8] {
+    if !truncated {
+        return bytes;
+    }
+    // Drop the partial leading record as bytes, before any UTF-8 decoding.
+    bytes
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map_or(&[], |end| &bytes[end + 1..])
+}
+
 /// Find one observation by id: `obs_<line>` resolves ONLY against the
 /// legacy spool (append-only, so the reference stays stable); `cap_…`
 /// resolves against the segments. No cross-mapping is ever invented.
@@ -1356,31 +1640,50 @@ pub fn resolve(project_dir: &Path, id: &str) -> ObservationLookup {
             return ObservationLookup::NotFound;
         };
         let path = legacy_spool_path(project_dir);
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            return ObservationLookup::Unavailable(format!(
-                "{id} is a legacy line reference but the legacy spool is gone — the evidence was cleared before immutable segments shipped"
-            ));
+        use std::io::BufRead;
+        let file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(error) => {
+                return ObservationLookup::Unavailable(format!(
+                    "{id}: legacy spool unavailable: {error}"
+                ))
+            }
         };
-        let lines: Vec<&str> = text.lines().collect();
-        let Some(line) = lines.get(line_no.wrapping_sub(1)) else {
-            return ObservationLookup::Unavailable(format!(
-                "{id} predates a historical clear/rotation — the legacy spool now holds {} line(s)",
-                lines.len()
-            ));
-        };
-        return match parse_legacy_line(project_dir, line_no, line.trim()) {
-            Some(obs) => ObservationLookup::Found(Box::new(obs)),
-            None => ObservationLookup::Unavailable(format!(
-                "{id} points at a line that is not a parseable legacy record (corrupt evidence, preserved on disk)"
-            )),
-        };
+        let mut count = 0;
+        for (index, line) in std::io::BufReader::new(file).split(b'\n').enumerate() {
+            let line = match line {
+                Ok(line) => line,
+                Err(error) => {
+                    return ObservationLookup::Unavailable(format!(
+                        "{id}: legacy spool read failed: {error}"
+                    ))
+                }
+            };
+            count = index + 1;
+            if index != line_no.wrapping_sub(1) {
+                continue;
+            }
+            let observation = std::str::from_utf8(&line)
+                .ok()
+                .and_then(|line| parse_legacy_line(project_dir, line_no, line.trim()));
+            return match observation {
+                Some(obs) => ObservationLookup::Found(Box::new(obs)),
+                None => ObservationLookup::Unavailable(format!(
+                    "{id} points at a line that is not a parseable legacy record (corrupt evidence, preserved on disk)"
+                )),
+            };
+        }
+        return ObservationLookup::Unavailable(format!(
+            "{id} predates a historical clear/rotation — the legacy spool now holds {count} line(s)"
+        ));
     }
     if id.starts_with("cap_") {
-        return match archive_lookup(project_dir, id) {
-            Some(record) => {
+        return match lookup_archive(project_dir, id) {
+            Ok(Some(record)) => {
                 ObservationLookup::Found(Box::new(observation_from_record(project_dir, &record)))
             }
-            None => ObservationLookup::NotFound,
+            Ok(None) => ObservationLookup::NotFound,
+            Err(error) => ObservationLookup::Unavailable(error),
         };
     }
     ObservationLookup::NotFound
@@ -1412,28 +1715,78 @@ fn observation_from_record(project_dir: &Path, record: &ObservationRecord) -> Ob
 /// Archive lookup: fetch a durable record by its stable capture id from any
 /// segment (including replay sighting rows).
 pub fn archive_lookup(project_dir: &Path, capture_id: &str) -> Option<ObservationRecord> {
-    let dir = segments_dir(project_dir);
-    let entries = std::fs::read_dir(&dir).ok()?;
-    let mut files: Vec<PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
-        .collect();
-    files.sort();
-    for file in files {
-        let Ok(text) = std::fs::read_to_string(&file) else {
-            continue;
-        };
-        for line in text.lines() {
-            let Ok(record) = serde_json::from_str::<ObservationRecord>(line) else {
-                continue;
-            };
-            if record.capture_id == capture_id {
-                return Some(record);
+    lookup_archive(project_dir, capture_id).ok().flatten()
+}
+
+// Full-source resolution is deliberately not the bounded recall window.
+// Decode each record strictly from its bytes: damage to a sibling must not
+// make an intact capture unavailable or turn replacement text into evidence.
+fn lookup_archive(
+    project_dir: &Path,
+    capture_id: &str,
+) -> Result<Option<ObservationRecord>, String> {
+    use std::io::BufRead;
+    let entries = match std::fs::read_dir(segments_dir(project_dir)) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("observation archive unavailable: {error}")),
+    };
+    let mut problem = None;
+    let mut files = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(entry)
+                if entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "jsonl") =>
+            {
+                files.push(entry.path())
+            }
+            Ok(_) => {}
+            Err(error) => {
+                problem.get_or_insert_with(|| format!("archive entry unreadable: {error}"));
             }
         }
     }
-    None
+    files.sort();
+    for path in files {
+        let file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(error) => {
+                problem.get_or_insert_with(|| format!("{} unreadable: {error}", path.display()));
+                continue;
+            }
+        };
+        for (index, line) in std::io::BufReader::new(file).split(b'\n').enumerate() {
+            let line = match line {
+                Ok(line) => line,
+                Err(error) => {
+                    problem
+                        .get_or_insert_with(|| format!("{} read failed: {error}", path.display()));
+                    break;
+                }
+            };
+            if line.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            match serde_json::from_slice::<ObservationRecord>(&line) {
+                Ok(record) if record.capture_id == capture_id => return Ok(Some(record)),
+                Ok(_) => {}
+                Err(error) => {
+                    problem.get_or_insert_with(|| {
+                        format!("{} line {} corrupt: {error}", path.display(), index + 1)
+                    });
+                }
+            }
+        }
+    }
+    match problem {
+        Some(problem) => Err(format!(
+            "{capture_id} not resolved; archive search incomplete: {problem}"
+        )),
+        None => Ok(None),
+    }
 }
 
 /// The capture watermark: read the projection, or derive it from the
@@ -2254,31 +2607,209 @@ const TRAIL_DIRECTORY_ENTRY_MAX: usize = SEGMENT_FRONTIER_SCAN_MAX * 4;
 /// file is larger, the first partial line of the window is dropped and the
 /// result is flagged truncated — the caller diagnoses the omitted history.
 fn bounded_tail(path: &Path, budget: u64) -> std::io::Result<(String, bool)> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(path)?;
-    let len = file.metadata()?.len();
-    let truncated = len > budget;
-    if truncated {
-        file.seek(SeekFrom::Start(len - budget))?;
-    }
-    let mut bytes = Vec::new();
-    file.take(budget).read_to_end(&mut bytes)?;
-    let mut text = String::from_utf8(bytes)
+    let window = read_tail_window(path, budget)?;
+    let text = std::str::from_utf8(aligned_tail(&window.bytes, window.truncated))
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-    if truncated {
-        match text.find('\n') {
-            Some(pos) => {
-                text.drain(..=pos);
-            }
-            None => text.clear(),
-        }
-    }
-    Ok((text, truncated))
+    Ok((text.to_string(), window.truncated))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn review_raw_tail_aligns_bytes_before_utf8() {
+        let dir = project();
+        let out = capture(dir.path(), request("ReviewCanary 尾部证据")).unwrap();
+        let record = std::fs::read(&out.segment).unwrap();
+        let budget = 512 * 1024;
+        let mut bytes = vec![b'x'; budget];
+        bytes.extend_from_slice("🙂".as_bytes());
+        bytes.extend(std::iter::repeat_n(b'x', budget - record.len() - 3));
+        bytes.push(b'\n');
+        bytes.extend_from_slice(&record);
+        // The retained window starts inside the emoji, before a complete record.
+        assert_eq!(bytes[bytes.len() - budget], 0x99);
+        std::fs::write(&out.segment, &bytes).unwrap();
+        assert_eq!(fresh_evidence(dir.path(), "ReviewCanary", 3).len(), 1);
+        assert!(bounded_tail(&out.segment, budget as u64).is_ok());
+    }
+
+    #[test]
+    fn review_raw_window_freezes_length_under_append() {
+        use std::io::Write;
+        for original in [b"old\n".as_slice(), b"old\nold\nold\n".as_slice()] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(file.path(), original).unwrap();
+            let mut reader = std::fs::File::open(file.path()).unwrap();
+            let initial_len = reader.metadata().unwrap().len();
+            let mut writer = std::fs::OpenOptions::new()
+                .append(true)
+                .open(file.path())
+                .unwrap();
+            writer.write_all(&vec![b'x'; 1024 * 1024]).unwrap();
+            let window = read_tail_at(&mut reader, initial_len, 8).unwrap();
+            assert_eq!(window.bytes.len(), original.len().min(8));
+            assert!(window.bytes.iter().all(|byte| *byte != b'x'));
+            assert!(!window.short_read);
+        }
+    }
+
+    #[test]
+    fn review_raw_discovery_is_bounded_and_recent_projection_is_reused() {
+        let dir = project();
+        std::fs::create_dir_all(segments_dir(dir.path())).unwrap();
+        for index in 0..RECALL_DIRECTORY_ENTRIES_MAX + 20 {
+            std::fs::write(
+                segments_dir(dir.path()).join(format!("unrelated-{index}")),
+                "",
+            )
+            .unwrap();
+        }
+        let output = capture(dir.path(), request("ReviewCanary recent capture")).unwrap();
+        let result = search_evidence(dir.path(), "ReviewCanary", 3);
+        assert!(result.coverage.partial);
+        assert_eq!(
+            result.coverage.directory_entries,
+            RECALL_DIRECTORY_ENTRIES_MAX + 1
+        );
+        assert!(result.coverage.files_read <= RECALL_FILES_MAX);
+        assert!(result.coverage.bytes_read <= RECALL_FILES_MAX * RECALL_BYTES_PER_FILE as usize);
+        assert_eq!(result.hits[0].id, output.record.capture_id);
+        assert!(matches!(
+            resolve(dir.path(), &result.hits[0].id),
+            ObservationLookup::Found(_)
+        ));
+    }
+
+    #[test]
+    fn review_raw_coverage_reports_omitted_corrupt_torn_and_unavailable_sources() {
+        use std::io::Write;
+        let dir = project();
+        let output = capture(dir.path(), request("ReviewCanary intact")).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&output.segment)
+            .unwrap();
+        file.write_all(b"{broken}\n\xff\n{\"torn\"").unwrap();
+        std::fs::write(projection_path(dir.path()), "broken projection").unwrap();
+        std::fs::create_dir(segments_dir(dir.path()).join("unreadable.jsonl")).unwrap();
+        let original = std::fs::read(&output.segment).unwrap();
+        let result = search_evidence(dir.path(), "ReviewCanary", 3);
+        assert_eq!(result.hits.len(), 1);
+        match resolve(dir.path(), &result.hits[0].id) {
+            ObservationLookup::Found(record) => assert_eq!(record.text, "ReviewCanary intact"),
+            other => {
+                panic!("an intact recall hit must resolve through damaged siblings: {other:?}")
+            }
+        }
+        assert!(archive_lookup(dir.path(), &result.hits[0].id).is_some());
+        assert!(
+            matches!(
+                resolve(dir.path(), "cap_missing"),
+                ObservationLookup::Unavailable(_)
+            ),
+            "corruption prevents proving that an unmatched id is absent"
+        );
+        assert!(!health(dir.path()).read_failures.is_empty());
+        assert!(result.coverage.partial);
+        let diagnostics = result.coverage.diagnostics.join("\n");
+        for reason in [
+            "projection corrupt",
+            "not a readable",
+            "corrupt or unsupported",
+            "invalid UTF-8",
+            "incomplete final",
+        ] {
+            assert!(diagnostics.contains(reason), "{diagnostics}");
+        }
+        let no_match = search_evidence(dir.path(), "unmatched", 3);
+        assert!(no_match.hits.is_empty());
+        assert!(no_match.coverage.partial);
+        assert_eq!(std::fs::read(&output.segment).unwrap(), original);
+    }
+
+    #[test]
+    fn review_legacy_locators_keep_physical_lines_across_invalid_utf8() {
+        let dir = project();
+        let bytes = b"{\"text\":\"ReviewCanary first\"}\n\xff\n{\"text\":\"ReviewCanary third\"}\n";
+        let path = legacy_spool_path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        let result = search_evidence(dir.path(), "ReviewCanary", 3);
+        assert!(result.coverage.partial);
+        assert_eq!(result.hits.len(), 2);
+        for (id, text) in [
+            ("obs_1", "ReviewCanary first"),
+            ("obs_3", "ReviewCanary third"),
+        ] {
+            assert!(result.hits.iter().any(|hit| hit.id == id));
+            match resolve(dir.path(), id) {
+                ObservationLookup::Found(hit) => assert_eq!(hit.text, text),
+                other => panic!("{id} must keep its original physical line: {other:?}"),
+            }
+        }
+        assert!(matches!(
+            resolve(dir.path(), "obs_2"),
+            ObservationLookup::Unavailable(_)
+        ));
+        assert!(matches!(
+            resolve(dir.path(), "obs_4"),
+            ObservationLookup::Unavailable(_)
+        ));
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn review_raw_oversized_records_and_legacy_tail_are_honestly_omitted() {
+        let dir = project();
+        let output = capture(dir.path(), request(&"ReviewCanary ".repeat(60_000))).unwrap();
+        let oversized = std::fs::read(&output.segment).unwrap();
+        let result = search_evidence(dir.path(), "ReviewCanary", 3);
+        assert!(result.hits.is_empty());
+        assert!(result.coverage.partial);
+        assert_eq!(result.coverage.bytes_read, RECALL_BYTES_PER_FILE as usize);
+        assert_eq!(std::fs::read(&output.segment).unwrap(), oversized);
+        std::fs::write(legacy_spool_path(dir.path()), &oversized).unwrap();
+        let result = search_evidence(dir.path(), "ReviewCanary", 3);
+        assert!(result
+            .coverage
+            .diagnostics
+            .iter()
+            .any(|detail| detail.contains("legacy tail omitted")));
+    }
+
+    #[test]
+    fn review_raw_distinct_sessions_and_typed_timestamps_survive() {
+        let dir = project();
+        let mut ids = Vec::new();
+        for (index, timestamp) in [
+            "2026-10-08T08:00:00+08:00",
+            "2026-10-08T01:00:00Z",
+            "2026-10-08T02:00:00Z",
+            "2026-10-08T03:00:00Z",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let mut input = request("ReviewCanary identical text");
+            input.ts = timestamp.to_string();
+            input.session_id = Some(format!("s-{index}"));
+            ids.push(capture(dir.path(), input).unwrap().record.capture_id);
+        }
+        let result = search_evidence(dir.path(), "ReviewCanary", 3);
+        assert_eq!(
+            result.hits.iter().map(|hit| &hit.id).collect::<Vec<_>>(),
+            vec![&ids[3], &ids[2], &ids[1]]
+        );
+        assert_eq!(result.coverage.matches_omitted, 1);
+        for hit in result.hits {
+            assert!(matches!(
+                resolve(dir.path(), &hit.id),
+                ObservationLookup::Found(_)
+            ));
+        }
+    }
 
     #[test]
     fn frozen_ack_replays_seal_recovery_without_acknowledging_later_capture() {
@@ -3442,5 +3973,65 @@ mod tests {
         let mut perms = out.segment.metadata().expect("meta").permissions();
         perms.set_mode(0o644);
         std::fs::set_permissions(&out.segment, perms).expect("restore");
+    }
+
+    /// I1 qualification: a torn tail (interrupted write) never hides its
+    /// sibling records, and health reports the torn line instead of silently
+    /// equating it with absence.
+    #[test]
+    fn torn_segment_tail_keeps_sibling_records_and_health_reports_it() {
+        let dir = project();
+        capture(dir.path(), request("first good")).unwrap();
+        let segment = segments_dir(dir.path()).join(segment_file("cursor", Some("s-1")));
+        // An interrupted append leaves a torn final line on disk.
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&segment)
+            .expect("open segment");
+        file.write_all(b"{\"schema\":\"stateroot.observation.v2\",\"text\":\"TOR")
+            .expect("torn write");
+        drop(file);
+        // The next capture after the interruption appends normally.
+        capture(dir.path(), request("second good")).unwrap();
+        let rows = load_segments(dir.path());
+        assert_eq!(
+            rows.len(),
+            2,
+            "good records survive a torn sibling: {}",
+            rows.len()
+        );
+        let health = health(dir.path());
+        assert!(
+            health
+                .corrupt
+                .iter()
+                .any(|line| line.raw.contains("\"text\":\"TOR")),
+            "the torn line is reported, never silently absent: {:?}",
+            health.corrupt
+        );
+    }
+
+    /// I1 qualification: replay after a restart (same verified identity
+    /// redelivered) is deduped, and a genuinely new event after it lands.
+    #[test]
+    fn replay_after_interruption_dedupes_and_new_events_land() {
+        let dir = project();
+        let mut first = request("original body");
+        first.event_identity = Some(("tool_use_id".into(), "tu-1".into()));
+        capture(dir.path(), first.clone()).unwrap();
+        // Simulate the interrupted session: the same verified identity is
+        // redelivered after a restart.
+        let mut replay = request("original body");
+        replay.event_identity = Some(("tool_use_id".into(), "tu-1".into()));
+        capture(dir.path(), replay).unwrap();
+        let rows = load_segments(dir.path());
+        assert_eq!(rows.len(), 1, "the replay is deduped");
+        let health = health(dir.path());
+        assert_eq!(health.replays, 1, "the replay sighting is recorded");
+        let mut second = request("a genuinely new body");
+        second.event_identity = Some(("tool_use_id".into(), "tu-2".into()));
+        capture(dir.path(), second).unwrap();
+        assert_eq!(load_segments(dir.path()).len(), 2, "the new event lands");
     }
 }

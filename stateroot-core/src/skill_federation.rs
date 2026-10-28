@@ -9,6 +9,11 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod package;
+pub use package::{
+    author_skill, inspect_package, SkillInspection, SkillWriteRequest, SkillWriteResult,
+};
+
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -283,6 +288,10 @@ pub struct DiscoveredSkill {
     /// covered by `package_digest`; surfaced so the loss is visible.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hash_exclusions: Vec<String>,
+    /// Lossless author/source sidecar. It is separate from the file/package
+    /// digest; metadata inspection reports its own digest and evidence claims.
+    #[serde(default, skip_serializing)]
+    pub package_metadata: Value,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -669,6 +678,7 @@ fn scan_skill_dir(
                 .unwrap_or(Value::Null),
         }),
         hash_exclusions,
+        package_metadata: package_meta.unwrap_or(Value::Null),
     })
 }
 
@@ -1256,10 +1266,10 @@ fn write_json(path: &Path, value: &Value) -> std::io::Result<()> {
     )
 }
 
-fn write_package_meta(skill_dir: &Path, skill: &DiscoveredSkill) -> std::io::Result<()> {
+fn package_metadata(skill: &DiscoveredSkill) -> Value {
     // D2 union schema — both writers (this client and the server's
     // `skill_federation_service`) emit the same full field set.
-    let mut meta = serde_json::json!({
+    let owned = serde_json::json!({
         "schema_version": "stateroot.skill_package.v1",
         "identity_key": skill.identity_key,
         "slug": skill.slug,
@@ -1277,12 +1287,49 @@ fn write_package_meta(skill_dir: &Path, skill: &DiscoveredSkill) -> std::io::Res
         "native_harness": skill.native_harness,
         "native_invocation": skill.native_invocation,
     });
+    // Retain optional evidence and future producer fields when refreshing a
+    // package. The former fixed-field writer silently discarded these.
+    let mut meta = skill
+        .package_metadata
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    let mut origin = meta
+        .get("origin")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    for (key, value) in owned["origin"].as_object().unwrap() {
+        origin.entry(key.clone()).or_insert_with(|| value.clone());
+    }
+    meta.extend(owned.as_object().unwrap().clone());
+    meta.insert("origin".into(), Value::Object(origin));
+    let mut meta = Value::Object(meta);
     // Wave-2 visibility gate: round-trip when set; absent means legacy
     // shareable, so never write an empty value.
     if !skill.visibility.is_empty() {
         meta["visibility"] = serde_json::json!(skill.visibility);
     }
-    write_json(&skill_dir.join(PACKAGE_META), &meta)
+    meta
+}
+
+fn metadata_digest(skill: &DiscoveredSkill) -> String {
+    sha256_hex(&serde_json::to_vec(&package_metadata(skill)).expect("JSON metadata"))
+}
+
+fn write_package_meta(skill_dir: &Path, skill: &DiscoveredSkill) -> std::io::Result<()> {
+    write_json(&skill_dir.join(PACKAGE_META), &package_metadata(skill))
+}
+
+fn projection_metadata_matches(path: &Path, skill: &DiscoveredSkill) -> bool {
+    read_json_file(&path.join(PROJECTION_META))
+        .and_then(|meta| {
+            meta.get("metadata_digest")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .as_deref()
+        == Some(metadata_digest(skill).as_str())
 }
 
 fn projection_digest(path: &Path) -> Option<String> {
@@ -1316,6 +1363,7 @@ fn materialize_managed_projection(
         match projection_digest(dst) {
             Some(existing_digest)
                 if existing_digest == skill.package_digest
+                    && projection_metadata_matches(dst, skill)
                     && (!is_product_owned_slug(&skill.slug)
                         || existing_package_digest(dst, &skill.scope).as_deref()
                             == Some(skill.package_digest.as_str())) =>
@@ -1368,6 +1416,9 @@ fn materialize_managed_projection(
             "identity_key": skill.identity_key,
             "slug": skill.slug,
             "package_digest": skill.package_digest,
+            "metadata_digest": metadata_digest(skill),
+            "package_metadata": package_metadata(skill),
+            "hash_exclusions": skill.hash_exclusions,
             "source_harness": skill.harness,
             "native_harness": skill.native_harness,
             "native_invocation": skill.native_invocation,
@@ -1443,6 +1494,9 @@ fn write_reference_wrapper(dst: &Path, skill: &DiscoveredSkill) -> std::io::Resu
             "identity_key": skill.identity_key,
             "slug": skill.slug,
             "package_digest": skill.package_digest,
+            "metadata_digest": metadata_digest(skill),
+            "package_metadata": package_metadata(skill),
+            "hash_exclusions": skill.hash_exclusions,
             "source_harness": skill.harness,
             "native_harness": skill.native_harness,
             "native_invocation": skill.native_invocation,
@@ -1570,7 +1624,9 @@ fn materialize_reference_projection(
         let version = projection_wrapper_version(dst).unwrap_or(1);
         match projection_digest(dst) {
             Some(existing_digest)
-                if existing_digest == skill.package_digest && version >= WRAPPER_VERSION =>
+                if existing_digest == skill.package_digest
+                    && projection_metadata_matches(dst, skill)
+                    && version >= WRAPPER_VERSION =>
             {
                 return Ok("unchanged");
             }
@@ -1769,6 +1825,7 @@ pub fn ensure_named_product_skill_package(
             native_invocation: "stateroot resume --harness <id>".into(),
             compatibility: serde_json::json!({"compatible": true, "reasons": []}),
             hash_exclusions: Vec::new(),
+            package_metadata: Value::Null,
         };
         write_package_meta(&dest, &skill)
             .map_err(|err| format!("update product package meta {}: {err}", dest.display()))?;
@@ -1821,6 +1878,7 @@ pub fn ensure_named_product_skill_package(
         native_invocation: "stateroot resume --harness <id>".into(),
         compatibility: serde_json::json!({"compatible": true, "reasons": []}),
         hash_exclusions: Vec::new(),
+        package_metadata: Value::Null,
     };
     write_package_meta(&tmp, &skill).map_err(|err| format!("write product package meta: {err}"))?;
     let action = if dest.exists() {
@@ -2358,6 +2416,9 @@ pub fn packages_for_report(skills: &[DiscoveredSkill]) -> Result<Value, String> 
             "lifecycle": skill.lifecycle,
             "package_digest": skill.package_digest,
             "files": skill.files,
+            "hash_exclusions": skill.hash_exclusions,
+            "package_metadata": package_metadata(skill),
+            "metadata_digest": metadata_digest(skill),
             "source_kind": skill.source_kind,
             "license": skill.license,
             "native_harness": skill.native_harness,
@@ -2373,14 +2434,25 @@ pub fn packages_for_report(skills: &[DiscoveredSkill]) -> Result<Value, String> 
                     "delegation_wrapper"
                 },
                 "status": "active",
+                "observation": "declared_target; delivery and use unobserved",
             }],
         });
         if skill.lifecycle != "reference_only"
             && content_emitted.insert(skill.package_digest.clone())
         {
             let root = Path::new(&skill.source_path);
+            let current = scan_skill_dir(root, &skill.harness, &skill.scope, &skill.source_kind)
+                .ok_or_else(|| {
+                    format!("package unavailable since discovery: {}", root.display())
+                })?;
+            if current.package_digest != skill.package_digest {
+                return Err(format!(
+                    "package changed since discovery: {}",
+                    root.display()
+                ));
+            }
             let mut contents = serde_json::Map::new();
-            for relative in skill.files.keys() {
+            for (relative, digest) in &skill.files {
                 if relative == PROJECTION_META || relative == PACKAGE_META {
                     continue;
                 }
@@ -2391,6 +2463,9 @@ pub fn packages_for_report(skills: &[DiscoveredSkill]) -> Result<Value, String> 
                         relative
                     )
                 })?;
+                if sha256_hex(&bytes) != *digest {
+                    return Err(format!("package changed since discovery: {relative}"));
+                }
                 contents.insert(
                     relative.clone(),
                     Value::String(base64::engine::general_purpose::STANDARD.encode(bytes)),
@@ -2495,7 +2570,7 @@ mod tests {
         assert!(!found.iter().any(|s| s.slug == "loop"));
     }
 
-    fn write_skill(root: &Path, name: &str, description: &str) {
+    pub(super) fn write_skill(root: &Path, name: &str, description: &str) {
         fs::create_dir_all(root).unwrap();
         fs::write(
             root.join("SKILL.md"),
@@ -2504,7 +2579,7 @@ mod tests {
         .unwrap();
     }
 
-    fn write_skill_with_metadata(root: &Path, name: &str, metadata: serde_json::Value) {
+    pub(super) fn write_skill_with_metadata(root: &Path, name: &str, metadata: serde_json::Value) {
         fs::create_dir_all(root).unwrap();
         fs::write(
             root.join("SKILL.md"),

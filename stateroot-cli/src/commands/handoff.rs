@@ -1452,7 +1452,7 @@ const ACCEPTANCE_BOOKKEEPING_KEYS: &[&str] = &["accepted_by", "acceptances", "la
 /// sha256 of the canonical handoff body: the packet minus local acceptance
 /// bookkeeping (serde_json objects serialize with sorted keys, so the digest
 /// is stable across in-place rewrites).
-fn handoff_body_sha256(packet: &Value) -> String {
+pub(crate) fn handoff_body_sha256(packet: &Value) -> String {
     let mut canonical = packet.clone();
     if let Some(obj) = canonical.as_object_mut() {
         for key in ACCEPTANCE_BOOKKEEPING_KEYS {
@@ -1602,7 +1602,7 @@ pub async fn accept(
 
 /// Identical history copies can arrive through multiple forks. Collapse only
 /// the read view, using the existing acceptance hash; never rewrite history.
-fn distinct_history_packets(packets: Vec<Value>) -> Vec<(String, Value)> {
+pub(crate) fn distinct_history_packets(packets: Vec<Value>) -> Vec<(String, Value)> {
     let mut seen = std::collections::BTreeSet::new();
     packets
         .into_iter()

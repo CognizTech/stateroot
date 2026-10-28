@@ -587,6 +587,12 @@ pub fn write_handoff_local(project_dir: &Path, packet: &Value) -> Result<(), Loc
     let _lock = crate::safe_io::ResourceLock::acquire(lock).map_err(|err| {
         io_err(&current)(std::io::Error::new(std::io::ErrorKind::WouldBlock, err))
     })?;
+    write_handoff_local_locked(project_dir, packet)
+}
+
+fn write_handoff_local_locked(project_dir: &Path, packet: &Value) -> Result<(), LocalStoreError> {
+    let root = root(project_dir);
+    let current = root.join(HANDOFF_CURRENT_PATH);
     let text = serde_json::to_string_pretty(packet).map_err(json_err(&current))?;
     crate::safe_io::atomic_replace(&current, format!("{text}\n").as_bytes())
         .map_err(io_err(&current))?;
@@ -707,23 +713,39 @@ pub fn update_handoff_current(
     project_dir: &Path,
     mutate: impl FnOnce(&mut Value) -> bool,
 ) -> Result<bool, LocalStoreError> {
+    update_or_create_handoff_current(project_dir, |current| {
+        let mut packet = current?.clone();
+        mutate(&mut packet).then_some(packet)
+    })
+}
+
+/// Compare/mutate the latest packet, or create a formal history-bearing shell
+/// when still absent. The closure runs under the same current-handoff lock as
+/// ordinary authored writes; returning None leaves all bytes untouched.
+pub fn update_or_create_handoff_current(
+    project_dir: &Path,
+    mutate: impl FnOnce(Option<&Value>) -> Option<Value>,
+) -> Result<bool, LocalStoreError> {
     let path = root(project_dir).join(HANDOFF_CURRENT_PATH);
     let lock = root(project_dir).join("local/locks/handoff-current.lock");
     let _lock = crate::safe_io::ResourceLock::acquire(lock)
         .map_err(|err| io_err(&path)(std::io::Error::new(std::io::ErrorKind::WouldBlock, err)))?;
-    let Some(mut packet) = (match std::fs::read_to_string(&path) {
+    let current: Option<Value> = match std::fs::read_to_string(&path) {
         Ok(text) => Some(serde_json::from_str(&text).map_err(json_err(&path))?),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
         Err(err) => return Err(io_err(&path)(err)),
-    }) else {
+    };
+    let Some(packet) = mutate(current.as_ref()) else {
         return Ok(false);
     };
-    if !mutate(&mut packet) {
-        return Ok(false);
+    if current.is_none() {
+        write_handoff_local_locked(project_dir, &packet)?;
+    } else {
+        let text = serde_json::to_string_pretty(&packet).map_err(json_err(&path))?;
+        crate::safe_io::atomic_replace(&path, format!("{text}\n").as_bytes())
+            .map_err(io_err(&path))?;
+        report_written(project_dir, HANDOFF_CURRENT_PATH);
     }
-    let text = serde_json::to_string_pretty(&packet).map_err(json_err(&path))?;
-    crate::safe_io::atomic_replace(&path, format!("{text}\n").as_bytes()).map_err(io_err(&path))?;
-    report_written(project_dir, HANDOFF_CURRENT_PATH);
     Ok(true)
 }
 

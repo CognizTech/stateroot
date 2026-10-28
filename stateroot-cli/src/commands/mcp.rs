@@ -149,8 +149,16 @@ pub fn accept_theirs(ctx: &Ctx, name: &str, from: Option<&str>) -> Result<()> {
 }
 
 /// `stateroot mcp tools` — the local stdio MCP server's tool surface (M4).
-pub fn tools(ctx: &Ctx) -> Result<()> {
+pub fn tools(ctx: &Ctx, json: bool) -> Result<()> {
     let _ = ctx;
+    if json {
+        let rows: Vec<_> = super::mcp_stdio::TOOL_DEFS
+            .iter()
+            .map(|(name, description, _)| serde_json::json!({"name": name, "description": description}))
+            .collect();
+        println!("{}", serde_json::to_string(&rows)?);
+        return Ok(());
+    }
     println!("local MCP tools (via `stateroot mcp-stdio`):");
     for (name, description, _) in super::mcp_stdio::TOOL_DEFS {
         let first = description.split('.').next().unwrap_or(description);
@@ -160,12 +168,16 @@ pub fn tools(ctx: &Ctx) -> Result<()> {
 }
 
 /// `stateroot mcp doctor`
-pub fn doctor(ctx: &Ctx) -> Result<()> {
+pub fn doctor(ctx: &Ctx, json: bool) -> Result<()> {
     let home = stateroot_core::harness_install::home_dir().map_err(|e| anyhow!(e))?;
     let project =
         stateroot_core::local_store::is_stateroot_dir(&ctx.cwd).then_some(ctx.cwd.as_path());
     let report = stateroot_core::mcp_federation::doctor_report(Some(&home), project)
         .map_err(|e| anyhow!(e))?;
+    if json {
+        println!("{}", serde_json::to_string(&report)?);
+        return Ok(());
+    }
     let issues = report
         .get("issues")
         .and_then(|v| v.as_array())

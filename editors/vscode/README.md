@@ -58,13 +58,18 @@ own runtime:
   You, the current root, and an Initialize action on empty workspaces.
 - **Workbench** (`StateRoot: Open workbench`) — the full board:
   - **Control** — inbox and delegation state, handoffs waiting on you.
-  - **Plans** — review, approve, assign a harness, or delegate a plan into
-    another agent.
+  - **Plans** — review prerequisites, assigned harness, readiness and blockers, approve, assign a
+    harness, or delegate a plan into another agent.
   - **Todos** — federated todo lists from every harness, plan-bound and
     standalone.
-  - **Crew** — reassign failed or timed-out delegations, inspect logs.
+  - **Crew** — see parallel-ready and blocked plans from the same CLI graph,
+    reassign failed delegations, and inspect logs.
   - **Learnings** — the shared taste pool: accept, edit, reject.
   - **Memory** — the curated hot-apex of facts.
+  - **Intelligence** — inspect discovered Skills and rules, canonical MCP
+    servers and local tools, plus named harness health and repair guidance.
+    Identity, origin, compatibility and native route come from the CLI;
+    unobserved loading and use remain labeled unknown.
   - **Lineage** — compare roots, native diff, restore, or fork the work
     itself.
 

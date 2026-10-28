@@ -50,6 +50,64 @@ fn episodic(project: &Path) -> String {
 }
 
 #[test]
+fn explicit_plan_completion_ignores_automatic_scan_budget_and_receipts_current_tree() {
+    let (config, home) = homes();
+    let project = tempfile::tempdir().expect("project");
+    init_project(config.path(), home.path(), project.path());
+    let id = record_plan(
+        config.path(),
+        home.path(),
+        project.path(),
+        "Explicit completion",
+        "# Explicit completion\n\nComplete the work.\n",
+    );
+    stateroot(config.path(), home.path(), project.path())
+        .args(["plan", "approve", &id])
+        .assert()
+        .success();
+    stateroot(config.path(), home.path(), project.path())
+        .args(["snap", "--reason", "before work"])
+        .assert()
+        .success();
+    let before = stateroot_core::roots::latest_root(project.path())
+        .expect("latest root")
+        .expect("base root");
+    std::fs::write(project.path().join("work.txt"), "verified work\n").expect("work");
+    stateroot(config.path(), home.path(), project.path())
+        .args(["snap", "--reason", "completed work"])
+        .assert()
+        .success();
+    let explicit = stateroot_core::roots::latest_root(project.path())
+        .expect("latest root")
+        .expect("completed work root");
+
+    // The same product tree exceeds this deliberately tiny hook budget.
+    // Explicit completion must verify the already-snapped tree and bind it.
+    stateroot(config.path(), home.path(), project.path())
+        .env("STATEROOT_TEST_AUTO_SNAPSHOT_ENTRY_LIMIT", "2")
+        .args(["plan", "done", &id, "--evidence", "work.txt inspected"])
+        .assert()
+        .success();
+    let (meta, _) = stateroot_core::plans::load(project.path(), &id).expect("completed plan");
+    assert_eq!(meta.status(), stateroot_core::plans::PlanStatus::Done);
+    let receipt = meta.completion_receipt.expect("completion receipt");
+    let completed = receipt.completion_root.expect("bound completion root");
+    assert_eq!(completed, explicit, "completion reuses the verified root");
+    assert_ne!(completed, before, "changed work needs a new root");
+    let diff =
+        stateroot_core::roots::diff_roots(project.path(), &before, &completed, false, 20, 100)
+            .expect("root diff");
+    assert!(
+        diff["files"]
+            .as_array()
+            .expect("files")
+            .iter()
+            .any(|entry| entry["path"] == "work.txt" && entry["status"] == "A"),
+        "completion root must contain current work: {diff}"
+    );
+}
+
+#[test]
 fn candidate_verification_survives_restage_publication_cleanup_and_gc() {
     let (config, home) = homes();
     let project = tempfile::tempdir().unwrap();

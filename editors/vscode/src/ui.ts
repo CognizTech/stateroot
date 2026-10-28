@@ -616,6 +616,7 @@ export function workbenchHtml(nonceVal: string): string {
     <button class="tab" data-tab="work">Work</button>
     <button class="tab" data-tab="learnings">Learnings</button>
     <button class="tab" data-tab="memory">Memory</button>
+    <button class="tab" data-tab="intelligence">Intelligence</button>
     <button class="tab" data-tab="lineage">Lineage</button>
   </div>
   <div class="panel" id="panel"></div>
@@ -695,6 +696,8 @@ document.getElementById('panel').addEventListener('click', (event) => {
   else if (act === 'removeMemory') vscode.postMessage({ type: 'removeMemory', index: Number(id) });
   else if (act === 'openMemoryFile') vscode.postMessage({ type: 'openMemoryFile' });
   else if (act === 'openWiki') vscode.postMessage({ type: 'openWiki', rel: id });
+  else if (act === 'doctorHarness') vscode.postMessage({ type: 'doctorHarness', id });
+  else if (act === 'refreshIntelligence') vscode.postMessage({ type: 'refreshIntelligence' });
 });
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 const STALE_INTEGRATION_CLI_MESSAGE = ${JSON.stringify(STALE_INTEGRATION_CLI_MESSAGE)};
@@ -720,6 +723,7 @@ function render() {
   else if (state.tab === 'work' || state.tab === 'crew') panel.innerHTML = work();
   else if (state.tab === 'learnings') panel.innerHTML = learningsPanel();
   else if (state.tab === 'memory') panel.innerHTML = memoryPanel();
+  else if (state.tab === 'intelligence') panel.innerHTML = intelligencePanel();
   else panel.innerHTML = lineage();
   panel.scrollTop = keepTop;
   panel.scrollLeft = keepLeft;
@@ -728,6 +732,13 @@ function render() {
     newList.scrollTop = keepListTop;
     newList.scrollLeft = keepListLeft;
   }
+  const filter = document.getElementById('inventory-filter');
+  if (filter) filter.oninput = () => {
+    const query = filter.value.trim().toLowerCase();
+    panel.querySelectorAll('[data-inventory-search]').forEach(row => {
+      row.style.display = row.getAttribute('data-inventory-search').includes(query) ? '' : 'none';
+    });
+  };
 }
 function todoMark(status) {
   if (status === 'completed') return '[x]';
@@ -783,6 +794,49 @@ function control() {
     '<div class="row" style="margin-top:8px">' + inboxActions(item, i) + '</div></div>'
   ).join('');
 }
+function intelligencePanel() {
+  const inventory = state.intelligence;
+  if (!inventory) return '<div class="muted">Open this view to inspect the current CLI inventory.</div>';
+  const source = (key) => {
+    const item = (inventory.sources || {})[key];
+    return item && item.state === 'ready' ? '' : '<div class="muted">' + esc(key) + ': unavailable' + (item && item.detail ? ' · ' + esc(item.detail) : '') + '</div>';
+  };
+  const empty = (key, label) => (inventory.sources || {})[key]?.state === 'ready'
+    ? '<div class="muted">No ' + esc(label) + ' reported.</div>' : '';
+  const search = value => esc(String(value).toLowerCase());
+  const skills = (inventory.skills || []).map(row => {
+    const compatible = row.compatible === true ? 'compatible' : row.compatible === false ? 'unavailable: ' + (row.compatibilityReasons || []).join('; ') : 'compatibility unknown';
+    const route = row.nativeRoute ? ' · native route: ' + esc(row.nativeRoute) : '';
+    return '<div class="card" data-inventory-search="' + search([row.slug,row.origin,row.scope,row.lifecycle,row.path].join(' ')) + '"><div>' + esc(row.slug) + '</div><div class="muted">' + esc(row.scope) + ' · ' + esc(row.lifecycle) + ' · origin ' + esc(row.origin) + ' · ' + esc(compatible) + route + '</div><div class="muted">identity ' + esc(row.identity) + ' · package ' + esc(row.digest || 'unknown') + '</div><div class="muted">source ' + esc(row.path || 'unknown') + ' · projection unknown · read/use/outcome unknown</div></div>';
+  }).join('') || empty('skills', 'Skills');
+  const rules = (inventory.rules || []).map(row =>
+    '<div class="card" data-inventory-search="' + search([row.slug,row.title,row.origin,row.scope].join(' ')) + '"><div>' + esc(row.title || row.slug) + '</div><div class="muted">' + esc(row.scope) + ' · origin ' + esc(row.origin) + ' · ' + esc(row.slug) + '</div><div class="muted">sha256 ' + esc(row.digest || 'unknown') + ' · source ' + esc(row.path || 'unknown') + '</div></div>'
+  ).join('') || empty('rules', 'rules');
+  const mcp = (inventory.mcp || []).map(row =>
+    '<div class="card" data-inventory-search="' + search([row.name,row.scope,row.transport,(row.origins || []).join(' ')].join(' ')) + '"><div>' + esc(row.name) + '</div><div class="muted">' + esc(row.scope) + ' · ' + esc(row.transport) + ' · canonical entry ' + esc(row.digest || 'unknown') + '</div><div class="muted">origins ' + esc((row.origins || []).join('; ') || 'unknown') + ' · projection/invocation/outcome unknown</div></div>'
+  ).join('') || empty('mcp', 'MCP servers');
+  const mcpIssues = (inventory.mcpIssues || []).map(row =>
+    '<div class="card" data-inventory-search="' + search([row.name,row.action,row.detail].join(' ')) + '"><div>' + esc(row.name) + ' · ' + esc(row.action) + '</div><div class="muted">' + esc(row.detail) + '</div></div>'
+  ).join('');
+  const mcpPreview = (inventory.mcpActions || []).filter(row => row.action !== 'unchanged').map(row =>
+    '<div class="muted" data-inventory-search="' + search([row.name,row.action,row.detail].join(' ')) + '">' + esc(row.action) + ' · ' + esc(row.name) + ': ' + esc(row.detail) + '</div>'
+  ).join('');
+  const tools = (inventory.tools || []).map(row =>
+    '<div class="card" data-inventory-search="' + search([row.name,row.description].join(' ')) + '"><div>' + esc(row.name) + '</div><div class="muted">' + esc(row.description) + '</div><div class="muted">available in local StateRoot MCP · invocation/outcome unknown</div></div>'
+  ).join('') || empty('tools', 'local tools');
+  const harnesses = (inventory.harnesses || []).map(row =>
+    '<div class="card" data-inventory-search="' + search([row.harness,row.display,row.status].join(' ')) + '"><div>' + esc(row.display) + ' <button class="secondary" data-act="doctorHarness" data-id="' + esc(row.harness) + '">Inspect repair</button></div><div class="muted">' + esc(row.status) + ' · config ' + esc(row.config) + ' · Skills ' + esc(row.skills) + ' · MCP ' + esc(row.mcp) + ' · hooks ' + esc(row.hooks) + ' · instructions ' + esc(row.instructions) + '</div><div class="muted">last capture ' + esc(row.lastCapture || 'unknown') + ' · last delivery ' + esc(row.lastDelivery || 'unknown') + '</div>' +
+    ((row.problems || []).length ? '<div class="muted">issues: ' + esc(row.problems.join('; ')) + '</div>' : '') +
+    ((row.repair || []).length ? '<div class="muted">repair: ' + esc(row.repair.join('; ')) + '</div>' : '') + '</div>'
+  ).join('') || empty('health', 'harness health');
+  return '<div class="row"><input id="inventory-filter" aria-label="Filter intelligence" placeholder="Filter Skills, rules, MCP and harnesses"><button data-act="refreshIntelligence">Recheck</button></div><div class="muted">These are discovered or configured records. Loading, reading, invocation and task benefit remain unknown without observed evidence.</div>' +
+    '<div class="kicker">Harness health (' + (inventory.harnesses || []).length + ')</div>' + source('health') + harnesses +
+    '<div class="kicker">Skills (' + (inventory.skills || []).length + ')</div>' + source('skills') + skills +
+    '<div class="kicker">Rules (' + (inventory.rules || []).length + ')</div>' + source('rules') + rules +
+    '<div class="kicker">MCP servers (' + (inventory.mcp || []).length + ')</div>' + source('mcp') + mcp +
+    '<div class="kicker">MCP conflicts and projection preview</div>' + source('mcpHealth') + (mcpIssues || empty('mcpHealth', 'conflicts')) + (mcpPreview ? '<div class="muted">Dry-run actions; nothing executed:</div>' + mcpPreview : '') +
+    '<div class="kicker">Local StateRoot MCP tools (' + (inventory.tools || []).length + ')</div>' + source('tools') + tools;
+}
 function inboxActions(item, i) {
   const open = '<button data-act="jump" data-i="' + i + '">' + esc(openLabel(item)) + '</button>';
   const dismiss = '<button class="secondary" data-act="dismiss" data-id="' + esc(item.id) + '">Dismiss</button>';
@@ -804,13 +858,29 @@ function openLabel(item) {
   if (item.kind === 'plan_receipt_pending' || item.kind === 'plan_closure') return 'Open plan';
   return 'Open';
 }
+function graphDetails(node) {
+  const assignment = node.assignment === null ? 'No harness assigned'
+    : node.assignment ? 'Assigned harness: ' + node.assignment.harness + (node.assignment.fork ? ' · assigned fork: ' + node.assignment.fork : '') + ' · automatic dispatch: ' + node.assignment.automaticDispatch
+    : 'Assignment unknown';
+  let dependencies = 'Prerequisites unknown';
+  if (node.dependenciesDeclared === false) dependencies = 'Prerequisites not declared';
+  else if (node.dependenciesDeclared === true && Array.isArray(node.dependencies)) {
+    dependencies = node.dependencies.length ? node.dependencies.map(item =>
+      '<div class="muted">' + esc(item.planId) + ' · ' + esc(item.kind) + ' · ' + esc(item.state) + (item.reason ? ': ' + esc(item.reason) : '') + '</div>'
+    ).join('') : 'No prerequisites declared';
+  }
+  return '<div class="muted">' + esc(assignment) + '</div><div class="kicker">Prerequisites</div>' + (dependencies.startsWith('<div ') ? dependencies : '<div class="muted">' + esc(dependencies) + '</div>');
+}
 function plans() {
   const list = state.plans || [];
+  const graphRows = state.planGraph && state.planGraph.rows || [];
+  const graphById = Object.fromEntries(graphRows.map(row => [row.id, row]));
   const sel = state.selectedPlanId;
   const plan = list.find(p => p.id === sel) || list[0];
   const left = list.map(p => {
     const todos = (p.todosTotal !== undefined) ? ' · todos ' + (p.todosDone || 0) + '/' + p.todosTotal : '';
-    return '<button class="item' + (plan && p.id === plan.id ? ' active' : '') + '" data-act="selectPlan" data-id="' + esc(p.id) + '"><div>' + esc(p.title) + '</div><div class="muted">' + esc(p.status) + ' · ' + esc(p.created_by_harness) + esc(todos) + '</div></button>';
+    const readiness = graphById[p.id] ? ' · ' + graphById[p.id].readiness : '';
+    return '<button class="item' + (plan && p.id === plan.id ? ' active' : '') + '" data-act="selectPlan" data-id="' + esc(p.id) + '"><div>' + esc(p.title) + '</div><div class="muted">' + esc(p.status) + ' · ' + esc(p.created_by_harness) + esc(readiness) + esc(todos) + '</div></button>';
   }).join('') || '<div class="muted">No plans recorded.</div>';
   if (!plan) return '<div class="split"><div class="list">' + left + '</div><div></div></div>';
   const chips = (state.harnesses || []).map(h =>
@@ -822,7 +892,11 @@ function plans() {
   const planTodoBlock = (state.planTodos && state.planTodos.length)
     ? '<div class="kicker">Todos</div>' + todoList(state.planTodos)
     : '';
-  return '<div class="split"><div class="list">' + left + '</div><div class="col"><div>' + esc(plan.title) + '</div><div class="muted">' + esc(plan.status) + ' · ' + esc(plan.id) + esc(todosLabel) + '</div><pre class="pre">' + esc(state.planExcerpt || '') + '</pre>' + planTodoBlock + '<div class="kicker">Assign execution</div><div>' + chips + '</div><div class="row">' + approve + done + '<button data-act="delegate" data-id="' + esc(plan.id) + '">Run in parallel</button><button class="secondary" data-act="openPlan" data-id="' + esc(plan.id) + '">Open full plan</button></div></div></div>';
+  const node = graphById[plan.id];
+  const readiness = node
+    ? '<div class="card"><div class="kicker">Dependency readiness</div><div>' + esc(node.readiness) + ' · worker ' + esc(node.workerState) + (node.targetFork ? ' · fork ' + esc(node.targetFork) : '') + '</div>' + graphDetails(node) + (node.blockers || []).map(item => '<div class="muted">' + esc(item.code) + ': ' + esc(item.detail) + '</div>').join('') + '<div class="muted">Readiness informs automatic dispatch; manual delegation remains an explicit choice.</div></div>'
+    : '<div class="muted">Dependency readiness unknown' + (state.planGraph && state.planGraph.unavailable ? ': ' + esc(state.planGraph.unavailable) : '') + '</div>';
+  return '<div class="split"><div class="list">' + left + '</div><div class="col"><div>' + esc(plan.title) + '</div><div class="muted">' + esc(plan.status) + ' · ' + esc(plan.id) + esc(todosLabel) + '</div>' + readiness + '<pre class="pre">' + esc(state.planExcerpt || '') + '</pre>' + planTodoBlock + '<div class="kicker">Assign execution</div><div>' + chips + '</div><div class="row">' + approve + done + '<button data-act="delegate" data-id="' + esc(plan.id) + '">Run in parallel</button><button class="secondary" data-act="openPlan" data-id="' + esc(plan.id) + '">Open full plan</button></div></div></div>';
 }
 function todos() {
   const lists = state.todos || [];
@@ -837,6 +911,22 @@ function todos() {
 function work() {
   const rows = state.delegations || [];
   const forks = state.work || [];
+  const graph = state.planGraph;
+  const graphRows = graph && graph.rows || [];
+  const readyPlans = graphRows.filter(row => row.readiness === 'ready');
+  const blockedPlans = graphRows.filter(row => (row.status === 'approved' || row.status === 'active') && row.readiness !== 'ready' && row.readiness !== 'complete');
+  const planCard = row => '<div class="card"><div>' + esc(row.title || row.id) + '</div><div class="muted">' + esc(row.readiness) + ' · worker ' + esc(row.workerState) + (row.targetFork ? ' · fork ' + esc(row.targetFork) : '') + '</div>' + graphDetails(row) +
+    (row.blockers || []).map(item => '<div class="muted">' + esc(item.code) + ': ' + esc(item.detail) + '</div>').join('') +
+    '<div class="row"><button class="secondary" data-act="openPlan" data-id="' + esc(row.id) + '">Open plan</button></div></div>';
+  const readiness = graph && graph.unavailable
+    ? '<div class="muted">Plan readiness unavailable: ' + esc(graph.unavailable) + '</div>'
+    : graph
+    ? '<div class="kicker">Parallel-ready plans (' + readyPlans.length + ')</div>' +
+      (readyPlans.map(planCard).join('') || '<div class="muted">No authorized plan is ready.</div>') +
+      '<div class="kicker">Blocked approved or active plans (' + blockedPlans.length + ')</div>' +
+      (blockedPlans.map(planCard).join('') || '<div class="muted">No recorded blockers.</div>') +
+      '<div class="muted">This is the CLI plan graph projection; manual delegation remains an explicit choice.</div>'
+    : '<div class="muted">Plan readiness has not been inspected.</div>';
   const degraded = (state.degradedDelegations || []).map(row =>
     '<div class="card"><div>degraded</div><div class="muted">' + esc(row.file) + '</div><div class="muted">' + esc(row.reason) + '</div></div>'
   ).join('');
@@ -875,7 +965,7 @@ function work() {
   const merge = ready.length ? '<div class="row"><button data-act="prepareMerge"' + (selected.length ? '' : ' disabled') + '>Prepare integration (' + selected.length + ')</button></div><div class="muted">A coordinating agent reviews conflicts and continues a prepared merge; this panel never chooses source resolutions.</div>' : '';
   const compat = renderIntegrationCompat(!!state.integrationStale);
   const attemptBlock = renderAttemptBlock(state.attempt);
-  return '<div class="muted">Work is the crew view: assigned agents and their independent lineages.</div>' + compat + work + degraded + branches + attemptBlock + merge;
+  return '<div class="muted">Work is the crew view: assigned agents and their independent lineages.</div>' + compat + readiness + work + degraded + branches + attemptBlock + merge;
 }
 function learningsPanel() {
   const rows = state.learnings || [];

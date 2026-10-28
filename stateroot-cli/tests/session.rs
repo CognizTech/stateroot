@@ -148,6 +148,173 @@ fn session_sync_list_show_flow() {
 }
 
 #[test]
+fn codex_native_archive_dry_run_survives_removed_live_history_and_refuses_corruption() {
+    use serde_json::{json, Value};
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().unwrap();
+    init_project(config_home.path(), user_home.path(), project.path());
+    let native = tempfile::tempdir().unwrap();
+    let cwd = project.path().canonicalize().unwrap();
+    let id = "01900000-0000-7000-8000-000000000011";
+    let turn = "01900000-0000-7000-8000-000000000012";
+    let source = native.path().join("sessions/rollout-native-test.jsonl");
+    let mut records = vec![
+        json!({"type":"session_meta","payload":{"id":id,"session_id":id,"cwd":cwd,"cli_version":"0.149.1","history_mode":"legacy","model_provider":"openai"}}),
+        json!({"type":"event_msg","payload":{"type":"task_started","turn_id":turn}}),
+        json!({"type":"turn_context","payload":{"turn_id":turn,"cwd":cwd,"model":"qualified-model"}}),
+        json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"remember synthetic context"}]}}),
+        json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":turn}}),
+    ];
+    write_lines(
+        &source,
+        &records.iter().map(ToString::to_string).collect::<Vec<_>>(),
+    );
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .env("CODEX_HOME", native.path())
+        .args(["session", "sync", "--harness", "codex"])
+        .assert()
+        .success();
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["session", "show", id])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let row: Value = serde_json::from_str(
+        stdout
+            .lines()
+            .find_map(|l| l.strip_prefix("native archive: "))
+            .expect("archive listed"),
+    )
+    .unwrap();
+    let archive = row["archive_id"].as_str().unwrap();
+    let failed_turn = "01900000-0000-7000-8000-000000000014";
+    let later_turn = "01900000-0000-7000-8000-000000000015";
+    records
+        .push(json!({"type":"event_msg","payload":{"type":"task_started","turn_id":failed_turn}}));
+    write_lines(
+        &source,
+        &records.iter().map(ToString::to_string).collect::<Vec<_>>(),
+    );
+    let partial = stateroot(config_home.path(), user_home.path(), project.path())
+        .env("CODEX_HOME", native.path())
+        .args(["session", "sync", "--harness", "codex"])
+        .assert()
+        .success();
+    assert!(!String::from_utf8_lossy(&partial.get_output().stdout)
+        .contains("native Codex boundaries retained locally: 1"));
+    let stderr = String::from_utf8_lossy(&partial.get_output().stderr);
+    assert!(
+        stderr.contains("native capture partial") && stderr.contains("in-progress native turn"),
+        "{stderr}"
+    );
+    records.extend([
+        json!({"type":"turn_context","payload":{"turn_id":failed_turn,"cwd":cwd,"model":"qualified-model"}}),
+        json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":failed_turn,"error":{"message":"native failure","codex_error_info":"other"}}}),
+        json!({"type":"event_msg","payload":{"type":"task_started","turn_id":later_turn}}),
+        json!({"type":"turn_context","payload":{"turn_id":later_turn,"cwd":cwd,"model":"qualified-model"}}),
+        json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":later_turn}}),
+    ]);
+    write_lines(
+        &source,
+        &records.iter().map(ToString::to_string).collect::<Vec<_>>(),
+    );
+    let advanced = stateroot(config_home.path(), user_home.path(), project.path())
+        .env("CODEX_HOME", native.path())
+        .args(["session", "sync", "--harness", "codex"])
+        .assert()
+        .success();
+    assert!(String::from_utf8_lossy(&advanced.get_output().stdout)
+        .contains("native Codex boundaries retained locally: 1"));
+    assert!(
+        !String::from_utf8_lossy(&advanced.get_output().stderr).contains("native capture partial")
+    );
+    let shown = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["session", "show", id])
+        .assert()
+        .success();
+    assert!(String::from_utf8_lossy(&shown.get_output().stdout).contains(later_turn));
+    let legacy_turn = "01900000-0000-7000-8000-000000000016";
+    records.extend([
+        json!({"type":"event_msg","payload":{"type":"task_started","turn_id":legacy_turn}}),
+        json!({"type":"turn_context","payload":{"turn_id":legacy_turn,"cwd":cwd,"model":"qualified-model"}}),
+        json!({"type":"event_msg","payload":{"type":"error","message":"standalone error","codex_error_info":"other"}}),
+        json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":legacy_turn}}),
+    ]);
+    write_lines(
+        &source,
+        &records.iter().map(ToString::to_string).collect::<Vec<_>>(),
+    );
+    let unavailable = stateroot(config_home.path(), user_home.path(), project.path())
+        .env("CODEX_HOME", native.path())
+        .args(["session", "sync", "--harness", "codex"])
+        .assert()
+        .success();
+    assert!(!String::from_utf8_lossy(&unavailable.get_output().stdout)
+        .contains("native Codex boundaries retained locally: 1"));
+    assert!(String::from_utf8_lossy(&unavailable.get_output().stderr)
+        .contains("raw archive retained but exact native recovery is unavailable"));
+    std::fs::remove_file(&source).unwrap();
+    let operation = "01900000-0000-7000-8000-000000000013";
+    let args = [
+        "session",
+        "transfer",
+        id,
+        "--to",
+        "codex",
+        "--archive",
+        archive,
+        "--operation-id",
+        operation,
+        "--dry-run",
+    ];
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .env("CODEX_HOME", native.path())
+        .args(args)
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("\"native_archive_verified\": true"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("\"native_fork_created\": false"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("\"native_continuation_observed\": false"),
+        "{stdout}"
+    );
+    // Canonical purge has always retained native evidence. Explicit native
+    // recovery uses the full identity even without a canonical projection.
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["session", "purge", id, "--yes"])
+        .assert()
+        .success();
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .env("CODEX_HOME", native.path())
+        .args(args)
+        .assert()
+        .success();
+    let sources = project
+        .path()
+        .join(".stateroot/local/sessions/native-codex/sources");
+    let retained = std::fs::read_dir(sources)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::write(retained, "corrupt retained bytes").unwrap();
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .env("CODEX_HOME", native.path())
+        .args(args)
+        .assert()
+        .failure();
+    assert!(String::from_utf8_lossy(&out.get_output().stderr).contains("native archive corrupt"));
+}
+
+#[test]
 fn session_transfer_to_pi_and_dsh_with_fidelity() {
     let (config_home, user_home) = homes();
     let project = tempfile::tempdir().expect("project");

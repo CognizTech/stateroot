@@ -37,8 +37,18 @@ pub const TOOL_DEFS: &[(&str, &str, &str)] = &[
     (
         "skill_propose",
         "Propose a reusable skill from a procedure that worked end-to-end. Activates and projects immediately.",
-        r#"{"type":"object","properties":{"slug":{"type":"string"},"name":{"type":"string"},"skill_md":{"type":"string"},"rationale":{"type":"string"}},"required":["slug","skill_md"]}"#,
+        r#"{"type":"object","properties":{"slug":{"type":"string"},"name":{"type":"string"},"skill_md":{"type":"string"},"rationale":{"type":"string"},"files_base64":{"type":"object","additionalProperties":{"type":"string"}},"evidence":{"type":"array","items":{"type":"object"}}},"required":["slug","skill_md"]}"#,
     ),
+    ("root_inspect", "Inspect a retained root and its restoration fidelity; omit root for current lineage tip.", r#"{"type":"object","properties":{"root":{"type":"string"}}}"#),
+    ("native_session_inspect", "Inspect a retained native session archive and optional saved recovery receipt. Reports the last recorded observation; does not contact the native harness or refresh the receipt.", r#"{"type":"object","properties":{"archive_id":{"type":"string"},"operation_id":{"type":"string"}},"required":["archive_id"]}"#),
+    ("root_compare", "Compare two retained roots using the canonical structured diff.", r#"{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"}},"required":["from","to"]}"#),
+    ("transition_inspect", "Inspect a transition receipt with its full identity and evidence.", r#"{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}"#),
+    ("handoff_inspect", "Read the current handoff or one history packet by exact id or unambiguous sequence.", r#"{"type":"object","properties":{"id":{"type":"string"},"seq":{"type":"integer"}}}"#),
+    ("handoff_list", "List distinct local history packet IDs and provenance, current first; use offset for later pages.", r#"{"type":"object","properties":{"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":200}}}"#),
+    ("verification_inspect", "Read an observed command and report whether its project, plan and source still match; this is not semantic acceptance.", r#"{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}"#),
+    ("plan_inspect", "Inspect recorded plan metadata and its declared completion receipt.", r#"{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}"#),
+    ("plan_graph", "Inspect the canonical dependency graph and readiness, without dispatching work.", r#"{"type":"object","properties":{}}"#),
+    ("skill_inspect", "Inspect the Skill catalog, exact package, resource or native route without asserting it was used.", r#"{"type":"object","properties":{"selector":{"type":"string"},"digest":{"type":"string"},"file":{"type":"string"},"harness":{"type":"string"}}}"#),
     (
         "soul_read",
         "Read the working-relationship projection for YOUR harness (tone/principles/boundaries). Call at session start to orient.",
@@ -189,13 +199,37 @@ fn call_tool(
     name: &str,
     args: &Value,
 ) -> Value {
+    if matches!(
+        name,
+        "root_inspect"
+            | "native_session_inspect"
+            | "root_compare"
+            | "transition_inspect"
+            | "handoff_inspect"
+            | "handoff_list"
+            | "verification_inspect"
+            | "plan_inspect"
+            | "plan_graph"
+            | "skill_inspect"
+            | "skill_propose"
+    ) {
+        return match structured_tool(ctx, home, caller, name, args) {
+            Ok(value) => ok(
+                id,
+                json!({"content":[{"type":"text","text":value.to_string()}]}),
+            ),
+            Err(error) => ok(
+                id,
+                json!({"isError":true,"content":[{"type":"text","text":json!({"error":error}).to_string()}]}),
+            ),
+        };
+    }
     let text = match name {
         "memory_save" => memory_save(ctx, home, args),
         "memory" => memory_tool(ctx, home, args),
         "memory_recall" => memory_recall(ctx, home, external, args),
         "wiki_show" => wiki_show(ctx, args),
         "learn_record" => learn_record(ctx, home, args),
-        "skill_propose" => skill_propose(ctx, home, caller, args),
         "soul_read" => soul_read(home, caller),
         "learnings_list" => learnings_list(ctx, home, external, args),
         "learnings_show" => {
@@ -219,6 +253,243 @@ fn call_tool(
         _ => return error_fallback(id, -32602, &format!("unknown tool: {name}")),
     };
     ok(id, json!({"content": [{"type": "text", "text": text}]}))
+}
+
+fn structured_tool(
+    ctx: &Ctx,
+    home: &std::path::Path,
+    caller: &str,
+    name: &str,
+    args: &Value,
+) -> Result<Value, String> {
+    use stateroot_core::{
+        fidelity, local_store, plans, roots, skill_federation as skills, verification,
+    };
+    ctx.require_project().map_err(|e| e.to_string())?;
+    if !args.is_object() {
+        return Err("tool arguments must be an object".into());
+    }
+    let string_fields: &[&str] = match name {
+        "root_inspect" => &["root"],
+        "native_session_inspect" => &["archive_id", "operation_id"],
+        "root_compare" => &["from", "to"],
+        "transition_inspect" | "verification_inspect" | "plan_inspect" => &["id"],
+        "handoff_inspect" => &["id"],
+        "skill_inspect" => &["selector", "digest", "file", "harness"],
+        _ => &[],
+    };
+    for field in string_fields {
+        if args.get(field).is_some_and(|value| !value.is_string()) {
+            return Err(format!("{field} must be a string"));
+        }
+    }
+    if name == "handoff_inspect"
+        && args
+            .get("seq")
+            .is_some_and(|value| value.as_i64().is_none())
+    {
+        return Err("seq must be an integer".into());
+    }
+    if name == "handoff_list" {
+        for field in ["offset", "limit"] {
+            if args
+                .get(field)
+                .is_some_and(|value| value.as_u64().is_none())
+            {
+                return Err(format!("{field} must be a nonnegative integer"));
+            }
+        }
+    }
+    let required = |key: &str| {
+        args.get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("{key} is required"))
+    };
+    match name {
+        "native_session_inspect" => {
+            let archive_id = required("archive_id")?;
+            let operation = match args.get("operation_id").and_then(Value::as_str) {
+                Some("") => return Err("operation_id must be nonempty".into()),
+                Some(id) => {
+                    let receipt = stateroot_core::sessions::codex_native::receipt(&ctx.cwd, id)?;
+                    if receipt.archive_id != archive_id {
+                        return Err("native operation belongs to a different archive".into());
+                    }
+                    Some(receipt)
+                }
+                None => None,
+            };
+            let mut report =
+                fidelity::native_session_report(&ctx.cwd, archive_id, operation.as_ref());
+            report["observation"] = json!("last recorded receipt; native harness not contacted and current state not reverified");
+            Ok(report)
+        }
+        "root_inspect" => {
+            let id = match args.get("root").and_then(Value::as_str) {
+                Some(id) if !id.is_empty() => id.to_owned(),
+                Some(_) => return Err("root must be nonempty".into()),
+                None => roots::latest_root(&ctx.cwd)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("no current root")?,
+            };
+            let root = roots::get_root(&ctx.cwd, &id).map_err(|e| e.to_string())?;
+            let fidelity = fidelity::report_with_components(
+                &ctx.cwd,
+                &root.id,
+                home,
+                &super::roots::integration_environment(ctx, home),
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(json!({"root":root,"fidelity":fidelity}))
+        }
+        "root_compare" => {
+            roots::diff_roots(&ctx.cwd, required("from")?, required("to")?, false, 0, 0)
+                .map_err(|e| e.to_string())
+        }
+        "transition_inspect" => {
+            roots::receipt_projection(&ctx.cwd, required("id")?).map_err(|e| e.to_string())
+        }
+        "handoff_list" => {
+            let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50);
+            if !(1..=200).contains(&limit) {
+                return Err("limit must be between 1 and 200".into());
+            }
+            let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0);
+            let offset = usize::try_from(offset).map_err(|_| "offset is too large")?;
+            let mut packets = super::handoff::distinct_history_packets(
+                local_store::list_handoffs_local(&ctx.cwd).map_err(|e| e.to_string())?,
+            );
+            let (current_id, current_status) = match local_store::read_handoff_local(&ctx.cwd) {
+                Ok(Some(packet)) => (
+                    Some(super::handoff::handoff_body_sha256(&packet)),
+                    "available",
+                ),
+                Ok(None) => (None, "absent"),
+                Err(_) => (None, "unavailable"),
+            };
+            if let Some(id) = &current_id {
+                if let Some(position) = packets.iter().position(|(packet_id, _)| packet_id == id) {
+                    let current = packets.remove(position);
+                    packets.insert(0, current);
+                }
+            }
+            let total = packets.len();
+            let entries: Vec<_> = packets
+                .into_iter()
+                .skip(offset)
+                .take(limit as usize)
+                .map(|(id, packet)| {
+                    json!({
+                        "is_current":current_id.as_ref() == Some(&id), "id":id, "seq":packet.get("seq"), "created_at":packet.get("created_at"),
+                        "created_by_harness":packet.get("created_by_harness"),
+                        "recommended_next_harness":packet.get("recommended_next_harness"),
+                        "fork_id":packet.get("fork_id"), "current_phase":packet.get("current_phase")
+                    })
+                })
+                .collect();
+            let end = offset.saturating_add(entries.len());
+            Ok(
+                json!({"entries":entries,"total":total,"offset":offset,"current_id":current_id,"current_status":current_status,"next_offset":if end < total {Some(end)} else {None}}),
+            )
+        }
+        "handoff_inspect" => {
+            let id = args.get("id").and_then(Value::as_str);
+            let seq = args.get("seq").and_then(Value::as_i64);
+            if id.is_some() && seq.is_some() {
+                return Err("select either id or seq".into());
+            }
+            if id.is_none() && seq.is_none() {
+                return local_store::read_handoff_local(&ctx.cwd)
+                    .map_err(|e| e.to_string())?
+                    .map(|packet| json!({"id":super::handoff::handoff_body_sha256(&packet),"packet":packet,"source":"current"}))
+                    .ok_or("no current handoff".into());
+            }
+            if let Some(id) = id {
+                if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    return Err("id must be an exact packet SHA256".into());
+                }
+            }
+            let packets = super::handoff::distinct_history_packets(
+                local_store::list_handoffs_local(&ctx.cwd).map_err(|e| e.to_string())?,
+            );
+            let matches: Vec<_> = packets
+                .into_iter()
+                .filter(|(key, packet)| {
+                    id.is_some_and(|id| key.eq_ignore_ascii_case(id))
+                        || seq.is_some_and(|seq| {
+                            packet.get("seq").and_then(Value::as_i64) == Some(seq)
+                        })
+                })
+                .collect();
+            if matches.is_empty() {
+                return Err("handoff not found".into());
+            }
+            if matches.len() != 1 {
+                return Err(format!(
+                    "ambiguous handoff sequence; exact packet ids: {}",
+                    matches
+                        .iter()
+                        .map(|(id, _)| id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            let (id, packet) = matches.into_iter().next().unwrap();
+            Ok(json!({"id":id,"packet":packet,"source":"history"}))
+        }
+        "verification_inspect" => {
+            let record = verification::load(&ctx.cwd, required("id")?)?;
+            let matches = verification::inputs_match(&ctx.cwd, &record.plan_id, &record);
+            Ok(
+                json!({"observation":record,"inputs_match":matches.is_ok(),"input_status":matches.err(),"semantic_acceptance":"not established"}),
+            )
+        }
+        "plan_inspect" => {
+            let (meta, _) =
+                plans::load(&ctx.cwd, required("id")?).ok_or("plan unavailable or unsupported")?;
+            Ok(json!({"plan":meta}))
+        }
+        "plan_graph" => Ok(json!(plans::graph(&ctx.cwd))),
+        "skill_inspect" => {
+            let field = |key: &str| args.get(key).and_then(Value::as_str);
+            let result = skills::inspect_package(
+                &ctx.cwd,
+                Some(home),
+                field("selector"),
+                field("digest"),
+                field("file"),
+                field("harness"),
+            )?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "skill_propose" => {
+            let request: skills::SkillWriteRequest =
+                serde_json::from_value(args.clone()).map_err(|e| e.to_string())?;
+            let result = skills::author_skill(
+                &ctx.cwd,
+                home,
+                caller,
+                &request,
+                &skills::SyncOptions::default(),
+            )?;
+            let _ = stateroot_core::proposals::create(
+                &ctx.cwd,
+                "skill",
+                &format!(
+                    "skill activated: {}",
+                    request.name.as_deref().unwrap_or(&request.slug)
+                ),
+                request.rationale.as_deref().unwrap_or("mcp skill_propose"),
+                json!({"slug":request.slug,"scope":"project"}),
+                json!({"route":"mcp skill_propose","status":"active"}),
+            );
+            Ok(
+                json!({"candidate":request.slug,"lifecycle":result.lifecycle,"quarantined":false,"activates":result.activates,"package":result.package,"actions":result.actions}),
+            )
+        }
+        _ => Err("unknown tool".into()),
+    }
 }
 
 fn mutation_json(r: stateroot_core::hot_apex::MutationResult) -> Value {
@@ -415,74 +686,6 @@ fn learn_record(ctx: &Ctx, home: &std::path::Path, args: &Value) -> String {
         .to_string(),
         Err(err) => json!({"error": format!("record failed: {err}")}).to_string(),
     }
-}
-
-fn skill_propose(ctx: &Ctx, home: &std::path::Path, caller: &str, args: &Value) -> String {
-    let slug = args
-        .get("slug")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
-    let skill_md = args
-        .get("skill_md")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
-    let name = args.get("name").and_then(|v| v.as_str()).unwrap_or(slug);
-    let rationale = args
-        .get("rationale")
-        .and_then(|v| v.as_str())
-        .unwrap_or("mcp skill_propose");
-    if slug.is_empty() || skill_md.is_empty() {
-        return json!({"error": "slug and skill_md are required"}).to_string();
-    }
-    let root = stateroot_core::local_store::root(&ctx.cwd)
-        .join("skills")
-        .join(slug);
-    if let Err(err) = std::fs::create_dir_all(&root) {
-        return json!({"error": format!("create skill dir: {err}")}).to_string();
-    }
-    if let Err(err) = std::fs::write(root.join("SKILL.md"), skill_md) {
-        return json!({"error": format!("write SKILL.md: {err}")}).to_string();
-    }
-    let meta = json!({
-        "schema_version": "stateroot.skill_package.v1",
-        "slug": slug,
-        "scope": "project",
-        "lifecycle": "active",
-        "origin": {"harness": caller, "source_kind": "mcp_proposal"},
-        "ownership_class": "harness_authored",
-        "native_harness": caller,
-    });
-    if let Err(err) = std::fs::write(
-        root.join("skill.federation.json"),
-        serde_json::to_string_pretty(&meta).unwrap(),
-    ) {
-        return json!({"error": format!("write sidecar: {err}")}).to_string();
-    }
-    let _ = stateroot_core::skill_federation::activate_skill(&ctx.cwd, home, "project", slug);
-    let options = stateroot_core::skill_federation::SyncOptions {
-        dry_run: false,
-        push: true,
-        pull: false,
-        cmd_probe: None,
-    };
-    let _ = stateroot_core::skill_federation::sync_project(&ctx.cwd, &options, Some(home));
-    let _ = stateroot_core::proposals::create(
-        &ctx.cwd,
-        "skill",
-        &format!("skill activated: {name}"),
-        rationale,
-        json!({"slug": slug, "name": name, "scope": "project"}),
-        json!({"route": "mcp skill_propose", "status": "active"}),
-    );
-    json!({
-        "candidate": slug,
-        "lifecycle": "active",
-        "quarantined": false,
-        "activates": "immediately",
-    })
-    .to_string()
 }
 
 fn soul_read(home: &std::path::Path, caller: &str) -> String {

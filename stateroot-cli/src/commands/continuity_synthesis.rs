@@ -201,6 +201,7 @@ mod tests {
     #[test]
     fn snapshot_is_bounded() {
         let assessment = ContinuityAssessment {
+            plan_graph: None,
             schema_version: continuity::SCHEMA_CONTINUITY_V1.into(),
             generated_at: "2026-10-01T00:00:00Z".into(),
             inputs_hash: "sha256:x".into(),

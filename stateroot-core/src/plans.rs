@@ -23,6 +23,11 @@ use crate::local_store::{self, now_rfc3339};
 
 /// Schema tag on the sidecar.
 pub const SCHEMA_PLAN_V1: &str = "stateroot.plan.v1";
+/// Explicit dependency declarations require a writer that understands them.
+/// v1 writers refuse this tag instead of silently losing execution constraints.
+pub const SCHEMA_PLAN_V2: &str = "stateroot.plan.v2";
+mod graph;
+pub use graph::*;
 /// Plans dir, relative to `.stateroot/`.
 pub const PLANS_REL: &str = "plans";
 
@@ -128,11 +133,20 @@ pub struct PlanMeta {
     /// Evidence-bearing completion receipt (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_receipt: Option<CompletionReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<PlanExecution>,
     /// Lifecycle notes (demotions are recorded here).
     pub notes: String,
 }
 
 impl PlanMeta {
+    fn supported(&self) -> bool {
+        match self.schema_version.as_str() {
+            SCHEMA_PLAN_V1 => self.execution.is_none(),
+            SCHEMA_PLAN_V2 => self.execution.is_some(),
+            _ => false,
+        }
+    }
     /// Typed status (unknown strings are treated as draft — honest default
     /// for a hand-edited sidecar).
     pub fn status(&self) -> PlanStatus {
@@ -193,7 +207,11 @@ fn write_meta(project_dir: &Path, meta: &PlanMeta) -> Result<(), String> {
         let previous: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).map_err(|e| e.to_string())?)
                 .map_err(|e| e.to_string())?;
-        if previous["schema_version"] != SCHEMA_PLAN_V1 || previous["id"] != meta.id {
+        if !serde_json::from_value::<PlanMeta>(previous.clone()).is_ok_and(|m| m.supported())
+            || previous["id"] != meta.id
+            || (previous["schema_version"] == SCHEMA_PLAN_V2
+                && meta.schema_version != SCHEMA_PLAN_V2)
+        {
             return Err("unsupported or mismatched plan metadata; nothing overwritten".into());
         }
         if let (Some(old), Some(new)) = (previous.as_object(), value.as_object_mut()) {
@@ -256,6 +274,7 @@ pub fn record(
         source_path: source_path.map(str::to_string),
         approved_digest: None,
         completion_receipt: None,
+        execution: None,
         notes: String::new(),
     };
     let body_file = body_path(project_dir, &id);
@@ -297,7 +316,7 @@ fn scan_plans(project_dir: &Path, bounded: bool) -> Vec<PlanMeta> {
             (e.path().file_stem().and_then(|stem| stem.to_str()) == Some(meta.id.as_str()))
                 .then_some(meta)
         })
-        .filter(|m: &PlanMeta| m.schema_version == SCHEMA_PLAN_V1)
+        .filter(PlanMeta::supported)
         .filter(|m| {
             matches!(
                 m.status.as_str(),
@@ -401,12 +420,18 @@ pub fn compatibility_report(project: &Path) -> serde_json::Value {
                     serde_json::from_slice(&bytes).ok()
                 })();
                 let reason = match record {
-                    Some(value) if value["schema_version"] != SCHEMA_PLAN_V1 => {
+                    Some(value)
+                        if !matches!(
+                            value["schema_version"].as_str(),
+                            Some(SCHEMA_PLAN_V1 | SCHEMA_PLAN_V2)
+                        ) =>
+                    {
                         unsupported += 1;
                         Some("unsupported schema")
                     }
                     Some(value)
-                        if serde_json::from_value::<PlanMeta>(value.clone()).is_ok()
+                        if serde_json::from_value::<PlanMeta>(value.clone())
+                            .is_ok_and(|m| m.supported())
                             && path.file_stem().and_then(|stem| stem.to_str())
                                 == value["id"].as_str()
                             && matches!(

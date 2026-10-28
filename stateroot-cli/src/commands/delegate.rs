@@ -278,6 +278,48 @@ fn key_lock(dir: &Path, record_id: &str) -> Result<stateroot_core::safe_io::Reso
 /// The spawn path: reserve `starting` with the request fingerprint under
 /// the key lock, launch the detached worker, transition to `running`.
 fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
+    spawn_observed(ctx, args, None)
+}
+
+/// Automatic observations use the SAME key reservation as manual delegation.
+/// They never carry retry intent; deliberate manual failed/lost retries retain
+/// their existing attempt history and ergonomics.
+pub(crate) fn spawn_ready(
+    ctx: &Ctx,
+    args: &DelegateArgs,
+    observed: &stateroot_core::plans::PlanReadiness,
+) -> Result<i32> {
+    let owner = stateroot_core::plans::automatic_dispatch_authority(&ctx.cwd, &observed.id)
+        .map_err(anyhow::Error::msg)?;
+    let target = stateroot_core::plans::execution_target(&ctx.cwd, observed.target_fork.as_deref())
+        .ok_or_else(|| anyhow::anyhow!("automatic dispatch target unavailable"))?
+        .canonicalize()?;
+    let mut owner_ctx = ctx.clone();
+    owner_ctx.cwd = owner;
+    let mut launch = args.clone();
+    // Equivalent trunk/fork entrypoints must fingerprint the same execution
+    // directory and reserve under the same existing delegation key lock.
+    launch.worktree = (target != owner_ctx.cwd).then(|| target.to_string_lossy().into_owned());
+    spawn_observed(
+        &owner_ctx,
+        &launch,
+        Some(AutomaticLaunch {
+            project: &ctx.cwd,
+            observed,
+        }),
+    )
+}
+
+struct AutomaticLaunch<'a> {
+    project: &'a Path,
+    observed: &'a stateroot_core::plans::PlanReadiness,
+}
+
+fn spawn_observed(
+    ctx: &Ctx,
+    args: &DelegateArgs,
+    automatic: Option<AutomaticLaunch<'_>>,
+) -> Result<i32> {
     ctx.require_project()?;
     let to = args
         .to
@@ -332,12 +374,21 @@ fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
     // once misread a retry as "already running" and silently no-opped it.
     // Terminal retries skip the pid check entirely.
     let mut terminal_retry = false;
-    if let Some((_path, existing)) = load_record(&ctx.cwd, &record_id) {
+    let existing = load_record(&ctx.cwd, &record_id);
+    if existing.is_none() && dir.join(format!("{record_id}.json")).exists() {
+        anyhow::bail!("delegation {record_id} has unreadable or unsupported evidence; preserve and reconcile it before launch");
+    }
+    if let Some((_path, existing)) = existing {
         let prior = existing.get("fingerprint").cloned().unwrap_or(json!(null));
         if prior != json!(null) && prior != fingerprint {
             anyhow::bail!(
                 "delegation key `{record_id}` exists with a different request — pick a new key"
             );
+        }
+        if automatic.is_some() {
+            // Includes failed/lost, starting and unknown: a periodic observation
+            // never authorizes another attempt, even after service restart.
+            return Ok(0);
         }
         if let Some(outcome) = existing.get("outcome").and_then(Value::as_str) {
             if !matches!(outcome, "failed" | "lost") {
@@ -363,9 +414,8 @@ fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
             terminal_retry = true;
         }
         if !terminal_retry {
-            if existing.get("status").and_then(Value::as_str) == Some("starting") {
-                // A reservation whose spawn never landed: resubmit under the
-                // same key (recover-before-cancel pattern).
+            if stateroot_core::delegation_status::interpret(&existing).is_unknown() {
+                anyhow::bail!("delegation {record_id} has an uncertain starting/unknown attempt; reconcile its original runtime before retrying");
             } else {
                 if !stateroot_core::delegation_status::owns_namespace(&existing) {
                     anyhow::bail!(
@@ -374,13 +424,51 @@ fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
                 }
                 let pid = existing.get("pid").and_then(Value::as_u64).unwrap_or(0) as u32;
                 if pid != 0 && pid_alive(pid) {
-                    println!(
-                        "delegation {record_id} already running (pid {pid}) — same key, no double-spawn"
-                    );
+                    if !args._quiet {
+                        println!("delegation {record_id} already running (pid {pid}) — same key, no double-spawn");
+                    }
                     return Ok(0);
                 }
                 // Lost worker: fall through and resubmit under the same key.
             }
+        }
+    }
+
+    // Recheck the exact graph/source/assignment observation while owning the
+    // existing delegation key, immediately before reserving a new attempt.
+    // This path never provisions another fork or infers an authorization.
+    if let Some(launch) = &automatic {
+        let expected = launch.observed;
+        let authority =
+            stateroot_core::plans::automatic_dispatch_authority(launch.project, &expected.id)
+                .map_err(anyhow::Error::msg)?;
+        if authority != ctx.cwd {
+            anyhow::bail!("automatic dispatch owner changed before launch");
+        }
+        let current = stateroot_core::plans::graph(launch.project)
+            .nodes
+            .into_iter()
+            .find(|node| node.id == expected.id)
+            .ok_or_else(|| anyhow::anyhow!("plan disappeared before dispatch"))?;
+        let target =
+            stateroot_core::plans::execution_target(launch.project, current.target_fork.as_deref())
+                .and_then(|p| p.canonicalize().ok());
+        let requested_target = args
+            .worktree
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| ctx.cwd.clone());
+        if target.as_ref() != Some(&requested_target)
+            || &current != expected
+            || current.readiness != "ready"
+            || current.dispatch_key.as_deref() != Some(record_id.as_str())
+            || current.assignment.as_ref().is_none_or(|a| {
+                a.harness != to || a.dispatch.as_ref().is_none_or(|d| d.task != task)
+            })
+        {
+            anyhow::bail!(
+                "plan readiness/source/assignment changed before launch; reconcile again"
+            );
         }
     }
 
@@ -436,6 +524,13 @@ fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
         "log": log_rel,
         "process_namespace": stateroot_core::delegation_status::process_namespace(),
     });
+    if let Some(launch) = &automatic {
+        let observed = launch.observed;
+        record["plan_id"] = json!(observed.id);
+        record["plan_revision"] = json!(observed.revision);
+        record["readiness_observation"] = serde_json::to_value(observed)?;
+        record["fork_id"] = json!(observed.target_fork);
+    }
     if !retries.is_empty() {
         record["retries"] = Value::Array(retries);
     }
@@ -556,10 +651,18 @@ fn worker(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
     // attempt while a slow capture from an earlier attempt may still be
     // in flight — the guard below stops that late write from clobbering
     // the newer reservation.
-    let my_attempt = load_record(&record_root, record_id)
-        .and_then(|(_, record)| record.get("attempt").and_then(Value::as_u64))
+    let reservation = load_record(&record_root, record_id).map(|(_, record)| record);
+    let my_attempt = reservation
+        .as_ref()
+        .and_then(|record| record.get("attempt").and_then(Value::as_u64))
         .unwrap_or(1);
-    let result = worker_run(ctx, args, to, task);
+    let bound_task = reservation
+        .as_ref()
+        .and_then(|record| record["plan_id"].as_str())
+        .map(|id| {
+            format!("Execute recorded plan {id}. Read .stateroot/plans/{id}.md first.\n\n{task}")
+        });
+    let result = worker_run(ctx, args, to, bound_task.as_deref().unwrap_or(task));
     match result {
         Ok((id, output)) => {
             let outcome = if output.status.success() {

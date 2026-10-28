@@ -36,6 +36,8 @@ import { handoffBoundary, handoffIsStale, staleHandoffNote } from "./freshness";
 import { deriveParallelWork, type LineageProjection, type ParallelWorkCard } from "./parallelWork";
 import type { MergeAttempt } from "./mergeAttempt";
 import type { DelegateListReport } from "./cli";
+import type { IntelligenceInventory } from "./intelligence";
+import type { PlanGraphView } from "./planGraph";
 
 export interface Snapshot {
   initialized: boolean;
@@ -82,6 +84,8 @@ export interface Snapshot {
   memory: MemoryStore;
   selectedMemoryIndex?: number;
   wikiPages: WikiPage[];
+  intelligence?: IntelligenceInventory;
+  planGraph?: PlanGraphView;
 }
 
 export function snapshot(opts?: {
@@ -100,6 +104,8 @@ export function snapshot(opts?: {
   selectedForks?: string[];
   attempt?: MergeAttempt;
   integrationStale?: boolean;
+  intelligence?: IntelligenceInventory;
+  planGraph?: PlanGraphView;
 }): Snapshot | { initialized: false } {
   const root = projectRoot();
   if (!root) {
@@ -225,6 +231,8 @@ export function snapshot(opts?: {
     memory,
     selectedMemoryIndex: opts?.selectedMemoryIndex,
     wikiPages,
+    intelligence: opts?.intelligence,
+    planGraph: opts?.planGraph,
   };
 }
 

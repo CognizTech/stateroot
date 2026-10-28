@@ -10,9 +10,17 @@ fn home() -> Result<std::path::PathBuf> {
 }
 
 /// `stateroot rules list`
-pub fn list(ctx: &Ctx) -> Result<()> {
+pub fn list(ctx: &Ctx, json: bool) -> Result<()> {
     let home = home()?;
     let _ = core::ensure_product_intent(&home);
+    if json {
+        // Inventory is scope-preserving: equal slugs in user and project
+        // stores are two origins, even when effective lookup picks one.
+        let mut rules = core::list_scope(&ctx.cwd, &home, "user");
+        rules.extend(core::list_scope(&ctx.cwd, &home, "project"));
+        println!("{}", serde_json::to_string(&rules)?);
+        return Ok(());
+    }
     for scope in ["user", "project"] {
         let rules = core::list_scope(&ctx.cwd, &home, scope);
         if rules.is_empty() {

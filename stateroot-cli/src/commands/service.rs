@@ -1011,6 +1011,16 @@ async fn scan_all_projects(ctx: &Ctx) -> usize {
         match continuity::reconcile(&dir, &ctx.config_dir, &ctx.config.continuity) {
             Ok(_) => {
                 scanned += 1;
+                let mut project_ctx = ctx.clone();
+                project_ctx.cwd = dir.clone();
+                for outcome in super::plan::advance_authorized(&project_ctx) {
+                    if outcome["status"] == "unavailable" {
+                        log_line(
+                            &log_path(&ctx.config_dir),
+                            &format!("plan advancement: {outcome}"),
+                        );
+                    }
+                }
                 // Optional advisory synthesis: hash-gated, advisory-only,
                 // never a blocker for the deterministic projection.
                 if ctx.config.continuity.synthesis {

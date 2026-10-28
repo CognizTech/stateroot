@@ -120,45 +120,101 @@ pub async fn list(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
-/// `stateroot skill show <slug>` — print the local SKILL.md, or fetch it
-/// from the server (slug → detail → skill-md).
-pub async fn show(ctx: &Ctx, slug: &str) -> Result<()> {
-    if let Some(text) = stateroot_core::local_store::read_local_skill(&ctx.cwd, slug) {
-        print!("{text}");
+/// Inspect metadata first; an optional exact digest binds progressive reads.
+pub fn show(
+    ctx: &Ctx,
+    slug: &str,
+    json: bool,
+    digest: Option<&str>,
+    file: Option<&str>,
+    harness: Option<&str>,
+) -> Result<()> {
+    use base64::Engine as _;
+    let requested = file.or(if json { None } else { Some("SKILL.md") });
+    let mut result = stateroot_core::skill_federation::inspect_package(
+        &ctx.cwd,
+        None,
+        Some(slug),
+        digest,
+        requested,
+        harness,
+    )
+    .map_err(|e| anyhow!(e))?;
+    // Legacy lower-case entrypoints remain readable without changing package
+    // identity or falling back to another matching skill.
+    if file.is_none()
+        && !json
+        && result.content_base64.is_none()
+        && result
+            .packages
+            .first()
+            .is_some_and(|s| s.files.contains_key("skill.md") && !s.files.contains_key("SKILL.md"))
+    {
+        result = stateroot_core::skill_federation::inspect_package(
+            &ctx.cwd,
+            None,
+            Some(slug),
+            digest,
+            Some("skill.md"),
+            harness,
+        )
+        .map_err(|e| anyhow!(e))?;
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
         return Ok(());
     }
-    if let Ok(found) = stateroot_core::skill_federation::discover_all(&ctx.cwd, None) {
-        if let Some(skill) = found.iter().find(|skill| {
-            skill.slug.eq_ignore_ascii_case(slug) || skill.name.eq_ignore_ascii_case(slug)
-        }) {
-            if skill.lifecycle == "reference_only" || skill.lifecycle == "external_only" {
-                println!("# {} via {}", skill.name, skill.native_harness);
-                println!();
-                println!("lifecycle: {}", skill.lifecycle);
-                println!("source harness: {}", skill.harness);
-                println!("invocation: {}", skill.native_invocation);
-                if let Some(reasons) = skill
-                    .compatibility
-                    .get("reasons")
-                    .and_then(|value| value.as_array())
-                {
-                    for reason in reasons.iter().filter_map(|value| value.as_str()) {
-                        println!("requirement: {reason}");
-                    }
-                }
-                return Ok(());
-            }
-            let source = Path::new(&skill.source_path);
-            for name in ["SKILL.md", "skill.md"] {
-                let path = source.join(name);
-                if path.is_file() {
-                    print!("{}", std::fs::read_to_string(&path)?);
-                    return Ok(());
-                }
-            }
-        }
+    if let Some(content) = result.content_base64 {
+        use std::io::Write as _;
+        std::io::stdout().write_all(&base64::engine::general_purpose::STANDARD.decode(content)?)?;
+        return Ok(());
     }
-    anyhow::bail!("skill '{slug}' not found locally");
+    if result.availability == "reference_only" {
+        println!("{}", serde_json::to_string_pretty(&result.route)?);
+        return Ok(());
+    }
+    anyhow::bail!(
+        "skill '{slug}': {}{}; use --json to inspect candidates and routes",
+        result.availability,
+        result.detail.map(|s| format!(": {s}")).unwrap_or_default()
+    );
+}
+
+/// Authoring is explicit and immediately active. MCP adopts this same core
+/// path in I4; its legacy writer is deliberately not changed in this fork.
+pub fn write(ctx: &Ctx, input: &str, caller: &str) -> Result<()> {
+    ctx.require_project()?;
+    let bytes = if input == "-" {
+        use std::io::Read as _;
+        let mut bytes = Vec::new();
+        std::io::stdin().read_to_end(&mut bytes)?;
+        bytes
+    } else {
+        std::fs::read(input)?
+    };
+    let request: stateroot_core::skill_federation::SkillWriteRequest =
+        serde_json::from_slice(&bytes)?;
+    let result = stateroot_core::skill_federation::author_skill(
+        &ctx.cwd,
+        &home(ctx)?,
+        caller,
+        &request,
+        &stateroot_core::skill_federation::SyncOptions::default(),
+    )
+    .map_err(|e| anyhow!(e))?;
+    let _ = stateroot_core::proposals::create(
+        &ctx.cwd,
+        "skill",
+        &format!(
+            "skill activated: {}",
+            request.name.as_deref().unwrap_or(&request.slug)
+        ),
+        request.rationale.as_deref().unwrap_or("skill write"),
+        serde_json::json!({"slug": request.slug, "scope": "project"}),
+        serde_json::json!({"route": "skill write", "status": "active"}),
+    );
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
 }
 
 /// `stateroot skill promote <slug>` — activate a skill package and project

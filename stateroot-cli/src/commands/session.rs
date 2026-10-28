@@ -39,6 +39,18 @@ pub fn sync(ctx: &Ctx, harness: Option<&str>) -> anyhow::Result<()> {
         per_harness_suffix(&report)
     );
     println!("{summary}");
+    if report.native_archives > 0 {
+        println!(
+            "  native Codex boundaries retained locally: {}",
+            report.native_archives
+        );
+    }
+    for unavailable in &report.native_unavailable {
+        eprintln!("  native recovery unavailable: {unavailable}");
+    }
+    for partial in &report.native_partial {
+        eprintln!("  native capture partial: {partial}");
+    }
     if report.skipped_tombstoned > 0 {
         println!("  skipped_tombstoned: {}", report.skipped_tombstoned);
     }
@@ -69,7 +81,6 @@ pub fn list(ctx: &Ctx, harness: Option<&str>) -> anyhow::Result<()> {
     }
     if all.is_empty() {
         println!("no canonical sessions — run `stateroot session sync` first");
-        return Ok(());
     }
     for session in &all {
         let (first, last, outcome) = sessions::summarize_stored(session);
@@ -88,12 +99,41 @@ pub fn list(ctx: &Ctx, harness: Option<&str>) -> anyhow::Result<()> {
             truncate(&session.cwd, 40),
         );
     }
+    if harness.is_none_or(|h| h == "codex") {
+        for archive in sessions::codex_native::inventory(&ctx.cwd) {
+            println!("native archive: {archive}");
+        }
+    }
     Ok(())
 }
 
 /// Run `stateroot session show <id>`.
-pub fn show(ctx: &Ctx, id: &str) -> anyhow::Result<()> {
+pub fn show(ctx: &Ctx, id: &str, operation_id: Option<&str>) -> anyhow::Result<()> {
     ctx.require_project()?;
+    if let Some(operation) = operation_id {
+        let state =
+            sessions::codex_native::receipt(&ctx.cwd, operation).map_err(anyhow::Error::msg)?;
+        if !native_source_matches(ctx, id, &state.source_thread_id) {
+            anyhow::bail!("native operation belongs to a different session");
+        }
+        let home = stateroot_core::harness_install::home_dir().map_err(anyhow::Error::msg)?;
+        let observed = sessions::codex_native::inspect_operation(
+            &ctx.cwd,
+            &home,
+            operation,
+            std::path::Path::new("codex"),
+        )
+        .map_err(anyhow::Error::msg)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&stateroot_core::fidelity::native_session_report(
+                &ctx.cwd,
+                &observed.archive_id,
+                Some(&observed)
+            ))?
+        );
+        return Ok(());
+    }
     let session = sessions::resolve(&ctx.cwd, id).map_err(anyhow::Error::msg)?;
     let (first, last, outcome) = sessions::summarize_stored(&session);
     println!(
@@ -137,6 +177,14 @@ pub fn show(ctx: &Ctx, id: &str) -> anyhow::Result<()> {
             println!("  {line}");
         }
     }
+    if session.harness == "codex" {
+        for archive in sessions::codex_native::inventory(&ctx.cwd)
+            .into_iter()
+            .filter(|a| a["source_thread_id"] == session.session_id)
+        {
+            println!("native archive: {archive}");
+        }
+    }
     Ok(())
 }
 
@@ -162,15 +210,77 @@ fn display_line(entry: &sessions::CanonicalEntry) -> String {
 }
 
 /// Run `stateroot session transfer <id> --to pi|dsh [--dry-run]`.
-pub fn transfer(ctx: &Ctx, id: &str, to: &str, dry_run: bool) -> anyhow::Result<()> {
+pub fn transfer(
+    ctx: &Ctx,
+    id: &str,
+    to: &str,
+    dry_run: bool,
+    archive: Option<&str>,
+    operation_id: Option<&str>,
+) -> anyhow::Result<()> {
     ctx.require_project()?;
-    let session = sessions::resolve(&ctx.cwd, id).map_err(anyhow::Error::msg)?;
     let home = stateroot_core::harness_install::home_dir().map_err(|e| anyhow::anyhow!(e))?;
+    if to == "codex" {
+        let archive_id=archive.ok_or_else(||anyhow::anyhow!("--to codex requires --archive <full digest>; session show lists retained boundaries"))?;
+        let retained =
+            sessions::codex_native::load(&ctx.cwd, archive_id).map_err(anyhow::Error::msg)?;
+        if !native_source_matches(ctx, id, &retained.source_thread_id) {
+            anyhow::bail!("native Codex recovery requires an archive of this exact Codex session");
+        }
+        if let Some(issue) = &retained.native_recovery_issue {
+            anyhow::bail!("{issue}");
+        }
+        let operation = operation_id.ok_or_else(|| {
+            anyhow::anyhow!(
+                "--to codex requires --operation-id <stable UUID> for retry reconciliation"
+            )
+        })?;
+        uuid::Uuid::parse_str(operation)?;
+        if dry_run {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&stateroot_core::fidelity::native_session_report(
+                    &ctx.cwd, archive_id, None
+                ))?
+            );
+            println!("would request native Codex fork for operation {operation}; runtime qualification has not run");
+            return Ok(());
+        }
+        let state = sessions::codex_native::restore(
+            &ctx.cwd,
+            &home,
+            archive_id,
+            operation,
+            std::path::Path::new("codex"),
+        )
+        .map_err(anyhow::Error::msg)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&stateroot_core::fidelity::native_session_report(
+                &ctx.cwd,
+                archive_id,
+                Some(&state)
+            ))?
+        );
+        println!(
+            "resume with: codex resume {}",
+            state.destination_thread_id.as_deref().unwrap_or_default()
+        );
+        local_store::append_episodic(
+            &ctx.cwd,
+            &json!({"ts":now_rfc3339(),"harness":"cli","note":format!("native session fork verified: operation {operation}; source {}",retained.source_thread_id),"files":[]}),
+        )?;
+        return Ok(());
+    }
+    if archive.is_some() || operation_id.is_some() {
+        anyhow::bail!("--archive and --operation-id apply only to --to codex");
+    }
+    let session = sessions::resolve(&ctx.cwd, id).map_err(anyhow::Error::msg)?;
     let new_id = uuid::Uuid::new_v4().to_string();
     let plan = match to {
         "pi" => sessions::transfer::plan_pi(&session, &home, &ctx.cwd, &new_id),
         "dsh" => sessions::transfer::plan_dsh(&session, &home, &ctx.cwd, &new_id),
-        other => anyhow::bail!("unknown transfer target '{other}' — supported: pi, dsh"),
+        other => anyhow::bail!("unknown transfer target '{other}' — supported: pi, dsh, codex (qualified native archive)"),
     }
     .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -197,6 +307,12 @@ pub fn transfer(ctx: &Ctx, id: &str, to: &str, dry_run: bool) -> anyhow::Result<
     });
     local_store::append_episodic(&ctx.cwd, &record)?;
     Ok(())
+}
+
+fn native_source_matches(ctx: &Ctx, id: &str, source: &str) -> bool {
+    id == source
+        || sessions::resolve(&ctx.cwd, id)
+            .is_ok_and(|s| s.harness == "codex" && s.session_id == source)
 }
 
 /// Run `stateroot session purge <id> [--harness H] [--yes]`.

@@ -134,15 +134,47 @@ async fn main() -> anyhow::Result<()> {
         Command::Session(args) => match args.action {
             SessionAction::Sync { harness } => commands::session::sync(&ctx, harness.as_deref())?,
             SessionAction::List { harness } => commands::session::list(&ctx, harness.as_deref())?,
-            SessionAction::Show { id } => commands::session::show(&ctx, &id)?,
-            SessionAction::Transfer { id, to, dry_run } => {
-                commands::session::transfer(&ctx, &id, &to, dry_run)?
+            SessionAction::Show { id, operation_id } => {
+                commands::session::show(&ctx, &id, operation_id.as_deref())?
             }
+            SessionAction::Transfer {
+                id,
+                to,
+                dry_run,
+                archive,
+                operation_id,
+            } => commands::session::transfer(
+                &ctx,
+                &id,
+                &to,
+                dry_run,
+                archive.as_deref(),
+                operation_id.as_deref(),
+            )?,
             SessionAction::Purge { id, harness, yes } => {
                 commands::session::purge(&ctx, &id, harness.as_deref(), yes)?
             }
         },
         Command::Plan(args) => match args.action {
+            PlanAction::Advance => commands::plan::advance(&ctx)?,
+            PlanAction::Graph { json } => commands::plan::graph(&ctx, false, json)?,
+            PlanAction::Ready { json } => commands::plan::graph(&ctx, true, json)?,
+            PlanAction::Declare { id, revision } => {
+                commands::plan::declare(&ctx, &id, &revision, actor.as_deref())?
+            }
+            PlanAction::AcceptSource {
+                id,
+                prerequisite,
+                revision,
+                evidence,
+            } => commands::plan::accept_source(
+                &ctx,
+                &id,
+                &prerequisite,
+                &revision,
+                &evidence,
+                actor.as_deref(),
+            )?,
             PlanAction::Record {
                 file,
                 stdin,
@@ -561,13 +593,32 @@ async fn main() -> anyhow::Result<()> {
         Command::Wiki(args) => match args.action {
             WikiAction::Show { path } => commands::wiki::show(&ctx, &path)?,
             WikiAction::Lint => commands::wiki::lint(&ctx)?,
-            WikiAction::Compile { force } => commands::wiki::compile(&ctx, force).await?,
+            WikiAction::Compile {
+                force,
+                dependencies,
+            } => commands::wiki::compile(&ctx, force, dependencies.as_deref()).await?,
         },
         Command::McpStdio => commands::mcp_stdio::run(&ctx).await?,
         Command::Skill(args) => match args.action {
             SkillAction::Install => commands::skill::install(&ctx)?,
             SkillAction::List => commands::skill::list(&ctx).await?,
-            SkillAction::Show { slug } => commands::skill::show(&ctx, &slug).await?,
+            SkillAction::Show {
+                slug,
+                json,
+                digest,
+                file,
+                harness,
+            } => {
+                commands::skill::show(
+                    &ctx,
+                    &slug,
+                    json,
+                    digest.as_deref(),
+                    file.as_deref(),
+                    harness.as_deref(),
+                )?;
+            }
+            SkillAction::Write { input, from } => commands::skill::write(&ctx, &input, &from)?,
             SkillAction::Scan { json } => commands::skill::scan(&ctx, json)?,
             SkillAction::Sync {
                 dry_run,
@@ -581,7 +632,7 @@ async fn main() -> anyhow::Result<()> {
             SkillAction::Doctor => commands::skill::doctor(&ctx)?,
         },
         Command::Rules(args) => match args.action {
-            RulesAction::List => commands::rules::list(&ctx)?,
+            RulesAction::List { json } => commands::rules::list(&ctx, json)?,
             RulesAction::Show { slug } => commands::rules::show(&ctx, &slug)?,
             RulesAction::Sync => commands::rules::sync(&ctx)?,
         },
@@ -593,8 +644,8 @@ async fn main() -> anyhow::Result<()> {
                 push,
             } => commands::mcp::sync(&ctx, dry_run, pull, push)?,
             McpAction::Status { json } => commands::mcp::status(&ctx, json)?,
-            McpAction::Doctor => commands::mcp::doctor(&ctx)?,
-            McpAction::Tools => commands::mcp::tools(&ctx)?,
+            McpAction::Doctor { json } => commands::mcp::doctor(&ctx, json)?,
+            McpAction::Tools { json } => commands::mcp::tools(&ctx, json)?,
             McpAction::Remove { name } => commands::mcp::remove(&ctx, &name)?,
             McpAction::AcceptTheirs { name, from } => {
                 commands::mcp::accept_theirs(&ctx, &name, from.as_deref())?

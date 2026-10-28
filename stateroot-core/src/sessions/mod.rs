@@ -10,6 +10,7 @@
 //! into roots (same rule as `local/memory.sqlite`). Promotion into synced
 //! state is a later, retention-tiered decision.
 
+pub mod codex_native;
 pub mod transfer;
 
 pub(crate) mod extract;
@@ -430,6 +431,12 @@ pub struct SyncReport {
     pub skipped_zstd: usize,
     /// Tombstoned session ids skipped (not rewritten).
     pub skipped_tombstoned: usize,
+    /// Qualified settled Codex boundaries retained locally.
+    pub native_archives: usize,
+    /// A historical prefix retained while a newer tail remains unqualified.
+    pub native_partial: Vec<String>,
+    /// Native qualification failures do not suppress generic continuity.
+    pub native_unavailable: Vec<String>,
 }
 
 /// What one canon-purge did.
@@ -547,6 +554,31 @@ pub fn import_from_readers_filtered(
             };
             if let Some(session) = extract::canonical_from_codex(&meta, &events, &file, project_dir)
             {
+                if !tombstones::contains(&stones, &session.session_id, &session.harness) {
+                    match codex_native::retain(project_dir, home, &file) {
+                        Ok(capture) => {
+                            if let Some(issue) = &capture.archive.native_recovery_issue {
+                                report.native_unavailable.push(format!(
+                                    "{}: archive {}: {issue}",
+                                    session.session_id, capture.archive.id
+                                ));
+                            }
+                            match capture.suffix_reason {
+                                Some(reason) => report.native_partial.push(format!(
+                                    "{}: archive {}: {reason}",
+                                    session.session_id, capture.archive.id
+                                )),
+                                None if capture.archive.native_recovery_issue.is_none() => {
+                                    report.native_archives += 1
+                                }
+                                None => {}
+                            }
+                        }
+                        Err(e) => report
+                            .native_unavailable
+                            .push(format!("{}: {e}", session.session_id)),
+                    }
+                }
                 import_one(session, &mut report);
             }
         }
