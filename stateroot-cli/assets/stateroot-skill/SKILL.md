@@ -1,22 +1,43 @@
 ---
 name: stateroot
-description: "Persistent, federated meta-harness for AI agents — shared working intelligence and versioned project state via the `stateroot` CLI. Use when working in a project that has a `.stateroot/` directory — consume the auto-injected identity/resume digest on the first usable prompt, run `stateroot resume --harness HARNESS` only if that digest is missing (unpiped; never `| head` / `| tail` / line limits — the full digest is the state of record), `stateroot checkpoint` after every state-changing step, check the failed-approaches log before attempting an approach, and run `stateroot handoff write` before ending a session or switching agent harnesses."
+description: "Explain StateRoot capabilities, workflows and limitations, including before installation or project initialization. Use also for setup and for continuing, planning, delegating, forking, merging or restoring work in a StateRoot project. StateRoot is a persistent, federated meta-harness: shared agent intelligence and versioned project state through the local CLI. For project work, consume the injected digest or resume once, checkpoint changes and hand off continuity."
 ---
 
 # StateRoot
 
-StateRoot gives a project one persistent state of record that any agent harness (Claude Code, Codex, Cursor, OpenCode, Kimi Code, OpenClaw, Hermes, StateSmith) can attach to. This skill is the behavioral contract for working in a stateroot project. Follow it mechanically, every session.
+StateRoot gives a project one persistent state of record that supported agent harnesses can attach to. Use this skill to explain the product and to follow its behavioral contract when doing StateRoot project work.
 
 ## When To Use
 
-1. the project root contains a `.stateroot/` directory, or `stateroot status` reports an attached project
-2. starting, continuing, or handing off work in such a project
+1. the user asks what StateRoot can do, how a capability works, or how to use it; no initialized project or installed CLI is required for an explanation
+2. the user requests StateRoot setup or initialization
+3. the project root contains `.stateroot/`, or the task starts, continues or hands off work in an attached project
 
 ## When Not To Use
 
-Do not use this skill when:
-1. the project is not stateroot-initialized and the user has not asked to initialize it (suggest `stateroot init` instead)
-2. the task is unrelated to project work (casual Q&A, one-off questions)
+Skip this skill for questions unrelated to StateRoot when no StateRoot project workflow applies. Project-state operations need an initialized project; a product question does not. Explain the product without initializing a directory, running resume, updating software or changing project state merely to answer it.
+
+## Explain StateRoot and discover capabilities
+
+For “What can StateRoot do?” or a complete overview, cover these capability groups in user-facing terms. This skill and its bundled references are sufficient for an overview; the user does not need this project's development history. Read the linked detail only when the question needs it.
+
+| Capability group | What the user can do | Detail |
+|---|---|---|
+| Continuity and identity | Continue across harnesses with persona, decisions, plans, handoffs and next actions; keep identity anchored through compaction | [Session workflow](#hard-rules) |
+| Shared knowledge | Retain facts, scoped preferences, native memories, instruction rules and a compiled wiki; recall indexed and bounded fresh evidence | [Recall](references/protocol.md#raw-evidence-in-recall), [learnings](references/learnings.md) |
+| Skills and tools | Discover complete packages, read exact resources, author evidence-linked procedures and use another harness's native capability through delegation | [Skill reuse](references/protocol.md#progressive-skill-reuse-and-source-linked-authoring) |
+| Plans and dependencies | Record and hand off plans, inspect prerequisites/assignments, identify ready or blocked work and advance existing authorized bindings | [Dependency execution](references/protocol.md#dependency-execution) |
+| Parallel work | Give agents independent fork worktrees and plan ownership; observe, cancel and reconcile delegated work | [Fork integration](#integrating-parallel-forks-appointed-coordinator) |
+| Versioned project state | Snapshot uncommitted files and project state, compare roots, restore earlier work and merge fork lineages while preserving ordinary Git branches | [Lineage](references/protocol.md#work-state-lineage-snap--revert--fork) |
+| Evidence and recovery | Inspect receipts, bind command results to source, retain interrupted-work evidence and distinguish unknown/degraded states from success | [Verification](references/protocol.md#verification-and-publication) |
+| Native sessions | Canonicalize supported sessions, transfer to Pi/DSH, or recover a qualified Codex archive with explicit fidelity and operation identity | [Native recovery](references/protocol.md#qualified-native-codex-recovery) |
+| Active continuity | Track durable follow-ups and unresolved work through status, digests, obligations and a deterministic per-user service | [Attention](#attend-to-unresolved-work) |
+| Human and tool interfaces | Use the editor workbench for plans, crew, lineage and intelligence; inspect canonical records through local MCP tools | [Command reference](#command-reference) |
+| Multiple projects and setup | Discover local projects, transplant supported evidence, share project artifacts through Git, add executable CLI extensions, and install/diagnose/update integrations | [Command reference](#command-reference) |
+
+Distinguish product capability from this machine's current inventory. For exact installed syntax/version use `stateroot --version`, `stateroot --help` and relevant subcommand help. When the user asks about actual setup or available native harnesses/third-party capabilities, use `stateroot doctor --json`, `stateroot skill scan --json`, `stateroot mcp status --json` or the relevant available MCP tools. `stateroot mcp tools --json` lists StateRoot's own local MCP tools. If no CLI/tool access is available, give the documented overview and leave machine-specific availability unverified.
+
+Keep the existing evidence limits in the answer: readiness is not authorization, discovery/projection is not observed use, root restoration is not native-session recovery, and Codex recovery has a qualified version/platform/configuration envelope. The local service contains no AI agent. Do not infer released cloud synchronization or an automatic code-audit engine from local federation or the audit procedure. For a specific request, explain only the relevant groups rather than repeating the entire catalog.
 
 ## Hard Rules
 
@@ -168,7 +189,8 @@ without refreshing it. See the protocol reference for tool names and evidence li
 | `stateroot handoff finalize [--from H]` | hook missed / quota exit | observed continuity from verified transcript; no routing |
 | `stateroot handoff list` / `stateroot handoff show` | inspect prior handoffs | read-only; new handoffs share numbering across project worktrees using the updated CLI, with harmless gaps after failed publication. Old writers/disconnected clones can still share numbers; use the exact `handoff show --id <body-sha256>` selector shown by list for duplicates. Numeric lookup refuses ambiguity; current packet is pinned at top |
 | `stateroot handoff repair` | corrupt `current.json` | quarantines corrupt bytes (hash-stamped), restores the newest valid history packet, or says none exists — never fabricates |
-| `stateroot delegate --to H --task "…"` | detached subagent in another harness (async-only) | cli-mode harnesses only; spawn returns a `running` record immediately — observe via `stateroot delegate list` / `status <id>` and the `## Recent Delegations` digest section; nothing is ever killed or blocked; depth-capped — a subagent cannot delegate further |
+| `stateroot delegate --to H --task "…" [--plan ID] [--worktree PATH] [--key KEY]` | detached subagent in another harness (async-only) | cli-mode harnesses only; spawn returns immediately; observe via `delegate list` / `status <id>` and the digest. Unknown or degraded evidence is not failure. Stable keys preserve attempt identity; plan delegation can provision an isolated fork. Depth-capped |
+| `stateroot delegate cancel <id>` | explicitly stop a qualified worker | two-phase cancellation preserves partial work and records its result; no automatic task timeout |
 | `stateroot ext list` | extensions discovered on PATH | any `stateroot-<name>` executable on PATH runs as `stateroot <name>` — you can add commands yourself by writing one |
 | `stateroot projects` / `--json` / `--prune` | every initialized project on this machine | the discovery half of cross-project work: list projects here (name, path, phase, active plan), then work the one requested; same listing via the `projects_list` MCP tool |
 | `stateroot session sync` / `list` / `show` | canonical session store | supported harness sessions → `.stateroot/local/sessions/`; qualified Codex boundaries retain local native archives automatically |
@@ -177,7 +199,7 @@ without refreshing it. See the protocol reference for tool names and evidence li
 | `stateroot plan record` / `list` / `show` / `approve` / `activate` / `verify` / `done` / `abandon` | central plan artifact + lifecycle | plan/implement split: the planner records a draft, the user approves, the executor's digest points at `.stateroot/plans/<id>.md` with a state-aware directive; completion requires `done --evidence`, and `verify` is optional |
 | `stateroot obligation add` / `list` / `show` / `done` / `snooze` / `cancel` | durable future work | explicit due items and completion evidence shared across harnesses |
 | `stateroot service status` / `start` / `stop` | local continuity reconciler | inspect or control the per-user background service; hooks and CLI reconcile on activity too |
-| `stateroot memory recall <query> [--limit N]` | find decisions, failures, memories | FTS over memory, wiki, episodic, transcripts |
+| `stateroot memory recall <query> [--limit N]` | find decisions, failures, memories | indexed memory/wiki/episodic/transcripts plus bounded raw observations; inspect index and raw coverage separately |
 | `stateroot memory sync [--harness H] [--dry-run]` | federate harness memory into the pool | pulls claude/codex/openclaw memories in as `observed` wiki pages / episodic; dedups by content hash, preserves conflicts; `--push` writes a curated brief into managed harness memory files |
 | `stateroot snap [--reason R]` | explicit milestones (checkpoints and turn ends auto-snap real changes) | records verified root under `refs/stateroot` |
 | `stateroot log` / `stateroot show <root>` | inspect lineage | current root, transitions, coverage |
@@ -192,7 +214,9 @@ without refreshing it. See the protocol reference for tool names and evidence li
 | `stateroot learn record --workspace "…"` | org/workspace taste | shared across projects in the same workspace |
 | `stateroot learn record --domain <slug> "…"` | domain taste | shared across repos bound to that domain slug |
 | `stateroot learnings list` / `--user` / `--workspace` / `--domain` | read before writing | update rather than duplicate |
-| `stateroot skill install [--harness H]` | install this skill into harness dirs | writes stubs from `assets/` |
+| `stateroot skill install` | refresh the project's convenience layer | writes project protocol stubs from `assets/`; machine-level product Skill seeding/projection belongs to install and federation |
+| `stateroot skill list` / `scan --json` / `show` / `write --input -` / `sync` / `doctor` | discover, inspect, author and federate packages | exact digest/resource reads and optional evidence; native/reference-only routes stay explicit; authoring activates immediately |
+| `stateroot mcp tools --json` / `mcp-stdio` | inspect the local tool surface or serve it | canonical root, handoff, plan/graph, verification, package, saved-session and intelligence readers; tool-domain failures remain explicit |
 | `stateroot status` / `stateroot doctor` | continuity brief and diagnostics | status surfaces current work and attention; doctor checks setup, sync, capture, metadata compatibility, retained-root availability, restoration limits, and editor extension state. Read its authoritative-state summary separately from base setup health |
 | `stateroot editor status` / `editor reconcile` | VS Code/Cursor extension state | status is read-only (installed vs release-declared version); reconcile installs/updates from the verified release VSIX, never downgrades |
 | `stateroot install --json` | machine-level integration outcome | stdout is one integration-health document; scheduling/editor progress goes to stderr. Check `install.failed`; command success alone is not a Ready receipt |

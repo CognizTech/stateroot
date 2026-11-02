@@ -3,6 +3,17 @@
 All notable changes to StateRoot. Format loosely follows Keep a Changelog;
 StateRoot is pre-1.0 and milestones land as minor versions.
 
+## v0.2.12 — 2026-11-02
+
+- **Windows path-form repairs.** Codex-native session qualification and
+  configuration fingerprints now compare canonicalized, host-normalized
+  paths on both sides, so Windows short-name (`RUNNER~1`) aliases, UNC
+  (`\\?\C:\…`) forms, and mixed separators no longer produce false refusals;
+  session-to-project binding resolves 8.3 aliases through an
+  existence-aware canonicalize fallback.
+- **Bundled skill refresh.** The CLI-embedded skill carries the capability
+  catalog, evidence-limit guidance, and the updated command reference.
+
 ## v0.2.11 — 2026-10-28
 
 - **Fresh-evidence recall.** `memory recall` appends a bounded supplement of
