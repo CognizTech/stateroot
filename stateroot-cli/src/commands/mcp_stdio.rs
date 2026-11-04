@@ -21,7 +21,7 @@ pub const TOOL_DEFS: &[(&str, &str, &str)] = &[
     ),
     (
         "memory_recall",
-        "Recall durable facts from curated memory, wiki pages, episodic, and transcripts (FTS). Call before answering from memory.",
+        "Recall indexed memory, wiki, episodic and transcripts plus bounded raw observations. Returns index_state, index_detail and raw_coverage even on no matches; partial coverage does not establish absence. Call before answering from memory.",
         r#"{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer"}},"required":["query"]}"#,
     ),
     (
@@ -214,14 +214,8 @@ fn call_tool(
             | "skill_propose"
     ) {
         return match structured_tool(ctx, home, caller, name, args) {
-            Ok(value) => ok(
-                id,
-                json!({"content":[{"type":"text","text":value.to_string()}]}),
-            ),
-            Err(error) => ok(
-                id,
-                json!({"isError":true,"content":[{"type":"text","text":json!({"error":error}).to_string()}]}),
-            ),
+            Ok(value) => tool_result(id, value),
+            Err(error) => tool_result(id, json!({"error":error})),
         };
     }
     let text = match name {
@@ -252,7 +246,23 @@ fn call_tool(
             .unwrap_or_else(|e| json!({"error": format!("{e:#}")}).to_string()),
         _ => return error_fallback(id, -32602, &format!("unknown tool: {name}")),
     };
-    ok(id, json!({"content": [{"type": "text", "text": text}]}))
+    let payload = serde_json::from_str(&text)
+        .unwrap_or_else(|error| json!({"error":format!("invalid tool response: {error}")}));
+    tool_result(id, payload)
+}
+
+/// Preserve each tool's JSON payload while exposing its declared failure at
+/// the MCP boundary. A successful no-op or a degraded recall with hits is not
+/// an operation failure.
+fn tool_result(id: Value, payload: Value) -> Value {
+    let failed = payload.get("error").is_some_and(|error| !error.is_null())
+        || payload.get("success").and_then(Value::as_bool) == Some(false)
+        || payload.get("saved").and_then(Value::as_bool) == Some(false);
+    let mut result = json!({"content":[{"type":"text","text":payload.to_string()}]});
+    if failed {
+        result["isError"] = json!(true);
+    }
+    ok(id, result)
 }
 
 fn structured_tool(
@@ -606,35 +616,38 @@ fn memory_recall(ctx: &Ctx, home: &std::path::Path, external: bool, args: &Value
     let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
     stateroot_core::hot_apex::ensure_migrated(&ctx.cwd, home);
-    match stateroot_core::memory_index::search(&ctx.cwd, home, query, limit, !external) {
-        Ok(hits) => {
-            let hits: Vec<Value> = hits
-                .into_iter()
-                .map(|h| {
-                    json!({
-                        "note": h.text,
-                        "kind": h.kind,
-                        "path": h.path,
-                        "scope": if matches!(h.kind.as_str(), "user" | "memory_user") {
-                            "user"
-                        } else {
-                            "project"
-                        },
-                        "visibility": if h.private { "private" } else { "shared" },
-                        "score": h.score,
-                        "source": h.source,
-                        "stale": h.stale,
-                    })
-                })
-                .collect();
-            json!({
-                "hits": hits,
-                "gates": if external { "shared only" } else { "owner" },
-            })
-            .to_string()
-        }
-        Err(err) => json!({"error": format!("{err}")}).to_string(),
+    let report =
+        stateroot_core::memory_index::search_report(&ctx.cwd, home, query, limit, !external);
+    // Keep the existing failure signal when no hits can rescue an index error,
+    // but retain coverage diagnostics instead of discarding the report.
+    let error = if report.hits.is_empty() {
+        report.index_detail.clone()
+    } else {
+        None
+    };
+    let hits: Vec<Value> = report.hits.into_iter().map(|h| {
+        json!({
+            "note": h.text,
+            "kind": h.kind,
+            "path": h.path,
+            "scope": if matches!(h.kind.as_str(), "user" | "memory_user") { "user" } else { "project" },
+            "visibility": if h.private { "private" } else { "shared" },
+            "score": h.score,
+            "source": h.source,
+            "stale": h.stale,
+        })
+    }).collect();
+    let mut payload = json!({
+        "hits": hits,
+        "gates": if external { "shared only" } else { "owner" },
+        "index_state": report.index_state,
+        "index_detail": report.index_detail,
+        "raw_coverage": report.raw_coverage,
+    });
+    if let Some(error) = error {
+        payload["error"] = json!(error);
     }
+    payload.to_string()
 }
 
 fn wiki_show(ctx: &Ctx, args: &Value) -> String {

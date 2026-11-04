@@ -123,9 +123,9 @@ invocation is never presented as success.
    metadata digest. Inspect `hash_exclusions` before claiming complete hash
    coverage. Checkpoint the actual result through the normal protocol.
 
-The current CLI uses the shared package writer; the legacy MCP `skill_propose`
-adapter is pending its separately owned integration. Keep that distinction
-visible when qualifying a particular transport.
+CLI `skill write` and MCP `skill_propose` use the same shared package writer,
+including optional resources and source-bound evidence. Existing MCP inputs
+remain valid; explicit authoring activates immediately.
 
 ## Raw evidence in recall
 
@@ -142,8 +142,12 @@ Read index degradation and raw coverage separately, including on no-match.
 Discovery, file/byte windows, unreadable/corrupt records, and result limits can
 make coverage partial. `observations search` and `observations health` inspect
 retained evidence beyond the recall window; recall never deletes that evidence.
-Core consumers use `memory_index::search_report` to carry these facts. Do not
-claim installed MCP coverage until its handler has adopted that report.
+CLI recall and MCP `memory_recall` use `memory_index::search_report` to carry
+these facts. MCP retains its `hits` and `gates` fields alongside `index_state`,
+`index_detail` and `raw_coverage`, even on no-match. Tool-domain failures set
+`isError` and preserve the JSON payload. Usable fallback hits report degradation
+without becoming a tool failure; no hits plus an index error sets `isError`.
+Check the installed CLI version when qualifying a transport.
 
 ## Verification and publication
 

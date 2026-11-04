@@ -3,6 +3,18 @@
 All notable changes to StateRoot. Format loosely follows Keep a Changelog;
 StateRoot is pre-1.0 and milestones land as minor versions.
 
+## v0.2.13 — 2026-11-04
+
+- **MCP tool failures are honest.** Tool results preserve the JSON payload
+  and set `isError` only for declared failures; a successful no-op or a
+  degraded-but-usable recall no longer reads as an operation failure.
+- **Recall coverage is explicit.** The MCP `memory_recall` tool returns
+  `hits`, `gates`, `index_state`, `index_detail` and `raw_coverage` even on
+  no match — partial coverage never reads as absence.
+- **Skill packages.** The MCP `skill_propose` path uses the shared package
+  writer; existing arguments remain valid.
+- Documentation and the bundled skill references updated to match.
+
 ## v0.2.12 — 2026-11-02
 
 - **Windows path-form repairs.** Codex-native session qualification and
@@ -10,7 +22,8 @@ StateRoot is pre-1.0 and milestones land as minor versions.
   paths on both sides, so Windows short-name (`RUNNER~1`) aliases, UNC
   (`\\?\C:\…`) forms, and mixed separators no longer produce false refusals;
   session-to-project binding resolves 8.3 aliases through an
-  existence-aware canonicalize fallback.
+  existence-aware canonicalize fallback. These repairs do not expand native
+  Codex recovery beyond its qualified Linux x86_64 envelope.
 - **Bundled skill refresh.** The CLI-embedded skill carries the capability
   catalog, evidence-limit guidance, and the updated command reference.
 
@@ -18,7 +31,7 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 - **Fresh-evidence recall.** `memory recall` appends a bounded supplement of
   recent hook-captured observations (never an index source), marked
-  `(pending index)` with their resolvable capture id — a compiled hit never
+  `(raw observation)` with their resolvable capture id — a compiled hit never
   conceals known pending evidence, and an index refresh outage cannot hide
   it.
 - **Capture resilience.** Observation capture retries segment-lock

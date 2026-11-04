@@ -418,6 +418,10 @@ fn degraded_memory_recall_preserves_visible_limit_over_stdio() {
             json!({"name":"memory_recall", "arguments":{"query":"VisibilityCanary", "limit":1}}),
         );
         let result = McpClient::tool_text(&reply);
+        assert_ne!(reply["result"]["isError"], true, "usable fallback: {reply}");
+        assert_eq!(result["index_state"], "unavailable");
+        assert!(result["index_detail"].is_string());
+        assert!(result["raw_coverage"].is_object());
         let hits = result["hits"].as_array().expect("fallback hits");
         assert_eq!(hits.len(), 1, "{caller}: {result}");
         assert!(
@@ -425,7 +429,79 @@ fn degraded_memory_recall_preserves_visible_limit_over_stdio() {
             "{caller}: {result}"
         );
         assert_eq!(hits[0]["visibility"], visibility);
+
+        let missing = client.call(
+            "tools/call",
+            json!({"name":"memory_recall", "arguments":{"query":"NoSuchRecallCanary"}}),
+        );
+        let result = McpClient::tool_text(&missing);
+        assert_eq!(missing["result"]["isError"], true);
+        assert_eq!(result["hits"], json!([]));
+        assert_eq!(result["index_state"], "unavailable");
+        assert!(result["index_detail"].is_string());
+        assert!(result["raw_coverage"].is_object());
+        assert!(result["error"].is_string());
     }
+}
+
+#[test]
+fn tool_domain_failures_set_error_flag_without_losing_payloads() {
+    let config = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    init_project(config.path(), home.path(), project.path());
+    let mut client = mcp_client(config.path(), home.path(), project.path());
+    client.call(
+        "initialize",
+        json!({"clientInfo":{"name":"cursor","version":"1"}}),
+    );
+    for (name, arguments) in [
+        ("wiki_show", json!({})),
+        ("wiki_show", json!({"path":"missing-doc-audit-page"})),
+        ("memory_save", json!({"content":""})),
+        (
+            "memory",
+            json!({"action":"replace","old_text":"absent-entry","content":"replacement"}),
+        ),
+        ("learn_record", json!({"note":""})),
+        ("learnings_show", json!({"id":"missing-learning"})),
+        ("root_inspect", json!({"root":"not-a-root"})),
+    ] {
+        let reply = client.call("tools/call", json!({"name":name,"arguments":arguments}));
+        assert!(
+            reply.get("error").is_none(),
+            "domain failure uses tool result: {reply}"
+        );
+        assert_eq!(reply["result"]["isError"], true, "{name}: {reply}");
+        let payload = McpClient::tool_text(&reply);
+        assert!(payload["error"].is_string(), "{name}: {payload}");
+        if name == "memory" {
+            assert_eq!(payload["success"], false);
+            assert_eq!(payload["saved"], false);
+            assert!(payload["usage"].is_string());
+        }
+    }
+    for _ in 0..2 {
+        let reply = client.call(
+            "tools/call",
+            json!({"name":"memory_save","arguments":{"content":"ErrorFlagCanary saved fact"}}),
+        );
+        assert_ne!(
+            reply["result"]["isError"], true,
+            "successful write/no-op: {reply}"
+        );
+        assert_eq!(McpClient::tool_text(&reply)["success"], true);
+    }
+    let missing = client.call(
+        "tools/call",
+        json!({"name":"memory_recall","arguments":{"query":"UnmatchedCoverageCanary"}}),
+    );
+    assert_ne!(missing["result"]["isError"], true);
+    let payload = McpClient::tool_text(&missing);
+    assert_eq!(payload["hits"], json!([]));
+    assert_eq!(payload["index_state"], "current");
+    assert!(payload["index_detail"].is_null());
+    assert!(payload["raw_coverage"].is_object());
 }
 
 #[test]

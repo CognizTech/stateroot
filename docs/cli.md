@@ -144,7 +144,11 @@ The extension reads these with `skill scan --json`, `mcp status --json`,
 view opens or is refreshed. Discovery does not establish that a harness
 read, invoked, or benefited from a capability.
 Verification reports observed commands and input
-freshness, not semantic acceptance. Tool failures set MCP `isError`.
+freshness, not semantic acceptance. Tool-domain failures set MCP `isError`
+while preserving the JSON error or mutation result in `content`. Recall returns
+`hits`, `gates`, `index_state`, `index_detail` and `raw_coverage`, including on
+no-match or index failure. Usable fallback hits remain successful results with
+degradation diagnostics; no hits plus an index error also sets `isError`.
 
 `skill list` and `skill scan --json` expose the full discovered catalog,
 including native/reference-only and incompatible capabilities. The native
@@ -223,15 +227,17 @@ evidence visible as a stale package binding. Unknown sidecar fields survive
 scanner, writer, sync, projection and explicit report/detail inspection.
 
 The shared Rust adapter is `skill_federation::{author_skill, inspect_package}`
-with `SkillWriteRequest` and `SkillInspection`. The CLI uses it now. The legacy
-MCP `skill_propose` writer remains pending the separately owned MCP adapter
-integration; its old arguments and immediate activation are unchanged.
+with `SkillWriteRequest` and `SkillInspection`. Both CLI `skill write` and MCP
+`skill_propose` use the shared package writer. Existing MCP arguments remain
+valid; optional resource and evidence fields use the same staged package
+publication contract and immediate activation.
 
 ## `stateroot delegate` — cross-harness subagents, async-only
 
 `stateroot delegate --to <harness> --task "<bounded task>"` spawns another
-harness's CLI as a **detached** subagent inside the current project, writes a
-`stateroot.delegation.v2` record with `status: "running"` and a pid, prints
+harness's CLI as a **detached** subagent inside the current project. It durably
+reserves a `stateroot.delegation.v2` record with `status: "starting"` before worker launch,
+then records `running` and a pid after a successful launch, prints
 the delegation id and exits 0 immediately. Async was always the right
 architecture: launch detached, observe until done, completions surface in the
 record and the digest. **There is no sync mode, and no automatic timeout
@@ -683,9 +689,9 @@ Unknown/starting attempts require reconciliation from their original runtime;
 a deliberate manual invocation may still retry a proven failed/lost attempt
 under the same key, preserving its attempt history.
 
-CLI and native continuity consume this projection. Dedicated MCP inspection and
-workbench dependency views remain integration work; no separate UI readiness
-logic or store is implied.
+CLI, native continuity, MCP `plan_graph`, and the editor Plans/Crew views
+consume the canonical dependency/readiness projection. These consumers do not
+maintain a separate authoritative readiness store.
 
 ## `stateroot obligation` — durable, federated obligations
 
@@ -967,11 +973,14 @@ The resume/hook digest is prompt-path real estate, so the bulky sections are
 bounded — pointer + shape, never silent loss. The work body (objective,
 active plan, next actions, handoff fields) stays fully inline.
 
-- **Shared Rules** — a rule whose body fits 1200 chars renders whole; a
-  larger rule renders as title + a deterministic outline (every markdown
-  heading, one indented line each) + `… full rule: \`stateroot rules show
-  <slug>\``. Past an 8000-char section budget, later rules collapse to
-  title + pointer. Never truncated mid-line.
+- **Shared Rules** — a rule whose body fits 1200 chars renders whole when
+  the section budget permits; a larger rule renders as title + a deterministic
+  outline (every markdown heading, one indented line each) + a
+  `stateroot rules show <slug>` pointer. An entry that would exceed the
+  8000-char inline section budget uses title + pointer instead. Pointers
+  remain visible, so this is not a hard total-output cap. This also applies
+  to product-intent: read its full body before behavioral changes. Persona
+  and USER.md retain their separate full-injection contract.
 - **Federated Skills** — the same package discovered from several scopes
   lists once (deduped by slug + route + description); the header count and
   the 40-line cap apply to the deduped list.

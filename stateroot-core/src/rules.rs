@@ -304,7 +304,7 @@ fn outline_of(body: &str) -> String {
     out
 }
 
-/// Full digest section: product-intent body plus every imported rule body.
+/// Bounded digest section for product-intent and every imported rule.
 ///
 /// Bounded (the token razor): a rule whose body fits `RULE_BODY_INLINE_CAP`
 /// renders whole; a larger body renders as title + outline + a

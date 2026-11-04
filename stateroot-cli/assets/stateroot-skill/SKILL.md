@@ -45,7 +45,7 @@ Keep the existing evidence limits in the answer: readiness is not authorization,
 
 StateRoot keeps a **shared rules pool** — same idea as skills and learnings. Product-intent ships by default. Rules from other harnesses (Cursor `.mdc`, Codex/Claude `AGENTS.md`/`CLAUDE.md`, …) are pulled in on `stateroot rules sync` (also run by `init` / `install`).
 
-Before any architectural or behavioral change, read `stateroot rules show product-intent`. Preserve product intent. Do not replace agent judgment with classifiers, approval gates, or generic architecture. Do not add friction "because it seems safer." Follow imported harness rules in the pool as well (`stateroot rules list`).
+The digest includes short rules inline and larger rules as outlines or pointers; a pointer does not deliver the full body. Before any architectural or behavioral change, read the full rule with `stateroot rules show product-intent`. Preserve product intent. Do not replace agent judgment with classifiers, approval gates, or generic architecture. Do not add friction "because it seems safer." Follow imported harness rules in the pool as well (`stateroot rules list`).
 
 ### Keep the tool fresh (updates)
 
