@@ -11,6 +11,7 @@ Automatic harnesses inject persona + USER.md + work context onto the first usabl
 | Harness | Delivery | Notes |
 | --- | --- | --- |
 | Claude Code, Codex, Kimi, Devin | Automatic | Session-start inject; first prompt retries if that missed |
+| CodeBuddy | Automatic | Session-start and prompt-submit JSON context; PreCompact injects, PostCompact stays observational |
 | Cursor | Automatic | `sessionStart` injects initially; the first successful `postToolUse` restores an armed identity after compaction (`beforeSubmitPrompt` and `preCompact` cannot inject context) |
 | Kimi Code | Automatic | Identity rides UserPromptSubmit |
 | OpenClaw | Automatic | `before_prompt_build` pulls digest stdout |
@@ -40,6 +41,17 @@ Automatic harnesses inject persona + USER.md + work context onto the first usabl
 - The block is delimited by `<!-- stateroot:begin -->` / `<!-- stateroot:end -->` so `stateroot skill install` can update it idempotently without touching hand-written content.
 - One block per `AGENTS.md`; re-installing replaces the block in place.
 - Kimi (and every other harness) must run `stateroot resume` **unpiped**. Never `2>&1 | head -N`. The CLI already sized the digest.
+
+## CodeBuddy
+
+- Global instruction block: `~/.codebuddy/CODEBUDDY.md`; the project convenience block in `AGENTS.md` is also native fallback memory when no project `CODEBUDDY.md` exists.
+- Hooks: `.codebuddy/settings.json` under the native home, relocated by `CODEBUDDY_CONFIG_DIR`. `SessionStart`, `UserPromptSubmit`, and `PreCompact` inject native `hookSpecificOutput.additionalContext`; `PostCompact` only records evidence.
+- MCP: user scope `~/.codebuddy/.mcp.json`; project scope `<project>/.mcp.json`, both under `mcpServers`.
+- Skills: native `.codebuddy/skills/` packages participate in discovery and projection alongside `.agents/skills/`.
+- Sessions: `session sync --harness codebuddy` imports native `projects/**/*.jsonl` message, tool-call/result, and metadata records into the canonical store.
+- Plans and todos: session-attributed `planFilePath` files under `.codebuddy/plans/` enter the central store as drafts; current per-session task files under `.codebuddy/tasks/` federate without inventing plan links.
+- Memory: global and native-session-linked project auto-memory plus project team memory are imported. `--push` writes the managed project brief to `.codebuddy/rules/stateroot.md`, including current learnings.
+- Delegation: `stateroot delegate --to codebuddy --task "…"` uses `codebuddy --print` with the registry's non-interactive permission policy.
 
 ## Hermes
 

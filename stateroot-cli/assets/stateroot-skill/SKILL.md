@@ -98,7 +98,7 @@ Before a non-trivial approach, consult retained findings and failed approaches (
 
 When the user asks you to make a plan that another harness will implement — or any time a plan should outlive your session:
 
-1. **Record the plan in the shared store, never only in your harness's native plan location** (`~/.claude/plans/`, `~/.cursor/plans/`, plan-mode files):
+1. **Record the plan in the shared store, never only in your harness's native plan location** (`~/.claude/plans/`, `~/.cursor/plans/`, `~/.codebuddy/plans/`, plan-mode files):
    - write the plan body and run `stateroot plan record --stdin --title "<title>"` (pipe the body), or `--from <your-harness>`
    - on harnesses with native plan mode: author in plan mode as usual, then record the same body into the store before exiting plan mode (`--file <path>` exists to ingest that existing plan-mode file)
    - never author a plan markdown inside the project repo just to hand it off — repo docs are project artifacts; the shared store carries the plan and the executor reads it with `stateroot plan show <id>`
@@ -200,7 +200,7 @@ without refreshing it. See the protocol reference for tool names and evidence li
 | `stateroot obligation add` / `list` / `show` / `done` / `snooze` / `cancel` | durable future work | explicit due items and completion evidence shared across harnesses |
 | `stateroot service status` / `start` / `stop` | local continuity reconciler | inspect or control the per-user background service; hooks and CLI reconcile on activity too |
 | `stateroot memory recall <query> [--limit N]` | find decisions, failures, memories | indexed memory/wiki/episodic/transcripts plus bounded raw observations; inspect index and raw coverage separately |
-| `stateroot memory sync [--harness H] [--dry-run]` | federate harness memory into the pool | pulls claude/codex/openclaw memories in as `observed` wiki pages / episodic; dedups by content hash, preserves conflicts; `--push` writes a curated brief into managed harness memory files |
+| `stateroot memory sync [--harness H] [--dry-run]` | federate harness memory into the pool | pulls claude/codex/codebuddy/openclaw memories in as `observed` wiki pages / episodic; dedups by content hash, preserves conflicts; `--push` writes a curated brief into managed harness memory files |
 | `stateroot snap [--reason R]` | explicit milestones (checkpoints and turn ends auto-snap real changes) | records verified root under `refs/stateroot` |
 | `stateroot log` / `stateroot show <root>` | inspect lineage | current root, transitions, coverage |
 | `stateroot diff` / `stateroot compare A B` | inspect tree deltas | verified git diff between roots |

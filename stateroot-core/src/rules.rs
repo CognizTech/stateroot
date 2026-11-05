@@ -32,21 +32,29 @@ const MIN_CHARS: usize = 1;
 
 const GLOBAL_FILES: &[(&str, &str)] = &[
     ("claude-code", ".claude/CLAUDE.md"),
+    ("codebuddy", ".codebuddy/CODEBUDDY.md"),
     ("codex", ".codex/AGENTS.md"),
     ("cursor", ".cursor/AGENTS.md"),
     ("gemini-cli", ".gemini/GEMINI.md"),
 ];
 const GLOBAL_DIRS: &[(&str, &str)] = &[
+    ("codebuddy", ".codebuddy/rules"),
     ("cursor", ".cursor/rules"),
     ("claude-code", ".claude/rules"),
 ];
 const PROJECT_FILES: &[(&str, &str)] = &[
     ("codex", "AGENTS.md"),
+    ("codebuddy", "CODEBUDDY.md"),
+    ("codebuddy", ".codebuddy/CODEBUDDY.md"),
+    ("codebuddy", "CODEBUDDY.local.md"),
     ("claude-code", "CLAUDE.md"),
     ("gemini-cli", "GEMINI.md"),
     ("github-copilot", ".github/copilot-instructions.md"),
 ];
-const PROJECT_DIRS: &[(&str, &str)] = &[("cursor", ".cursor/rules")];
+const PROJECT_DIRS: &[(&str, &str)] = &[
+    ("codebuddy", ".codebuddy/rules"),
+    ("cursor", ".cursor/rules"),
+];
 
 /// Errors from the rules store.
 #[derive(Debug, thiserror::Error)]
@@ -369,36 +377,47 @@ fn collect_file(path: &Path, harness: &str, scope: &'static str, out: &mut Vec<C
 }
 
 fn collect_dir(dir: &Path, harness: &str, scope: &'static str, out: &mut Vec<Candidate>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
+    for path in crate::transcripts::walk_files(dir, &|path| {
+        matches!(
+            path.extension().and_then(|ext| ext.to_str()).unwrap_or(""),
+            "md" | "mdc" | "txt"
+        )
+    }) {
         let name = path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default();
-        if skip_name(name) {
-            continue;
+        if !skip_name(name) {
+            collect_file(&path, harness, scope, out);
         }
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if !matches!(ext, "md" | "mdc" | "txt") {
-            continue;
-        }
-        collect_file(&path, harness, scope, out);
+    }
+}
+
+fn global_source_path(home: &Path, harness: &str, rel: &str) -> PathBuf {
+    if harness == "codebuddy" {
+        crate::harness_install::paths::resolve_registry_path(home, "codebuddy", rel)
+    } else {
+        home.join(rel)
     }
 }
 
 fn discover(project_dir: &Path, home: &Path) -> Vec<Candidate> {
     let mut out = Vec::new();
     for (harness, rel) in GLOBAL_FILES {
-        collect_file(&home.join(rel), harness, "user", &mut out);
+        collect_file(
+            &global_source_path(home, harness, rel),
+            harness,
+            "user",
+            &mut out,
+        );
     }
     for (harness, rel) in GLOBAL_DIRS {
-        collect_dir(&home.join(rel), harness, "user", &mut out);
+        collect_dir(
+            &global_source_path(home, harness, rel),
+            harness,
+            "user",
+            &mut out,
+        );
     }
     if local_store::is_stateroot_dir(project_dir) || project_dir.exists() {
         for (harness, rel) in PROJECT_FILES {
@@ -562,6 +581,23 @@ mod tests {
             "# Project agents\n\nPrefer the existing module layout.\n",
         )
         .unwrap();
+        std::fs::create_dir_all(home.path().join(".codebuddy/rules")).unwrap();
+        std::fs::write(
+            home.path().join(".codebuddy/CODEBUDDY.md"),
+            "# CodeBuddy user rules\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(project.path().join(".codebuddy/rules/nested")).unwrap();
+        std::fs::write(
+            project.path().join(".codebuddy/rules/nested/testing.md"),
+            "# CodeBuddy project rules\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join(".codebuddy/rules/stateroot.md"),
+            "# managed projection — must not be imported\n",
+        )
+        .unwrap();
 
         let report = sync(project.path(), home.path()).unwrap();
         assert!(report.seeded);
@@ -573,6 +609,8 @@ mod tests {
         assert!(slugs.iter().any(|s| s.contains("codex")));
         assert!(slugs.iter().any(|s| s.contains("no-foo")));
         assert!(slugs.iter().any(|s| s.contains("agents")));
+        assert!(slugs.iter().any(|s| s.contains("codebuddy")));
+        assert!(slugs.iter().any(|s| s.contains("testing")));
         assert!(!slugs.iter().any(|s| s.contains("stateroot")));
 
         let (_, codex) = show(project.path(), home.path(), "codex-agents").expect("codex");

@@ -13,7 +13,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use super::{CanonicalEntry, CanonicalSession};
-use crate::transcripts::{self, codex, copilot, cursor, hermes, openclaw};
+use crate::transcripts::{self, codebuddy, codex, copilot, cursor, hermes, openclaw};
 
 fn entry(kind: &str) -> CanonicalEntry {
     CanonicalEntry {
@@ -505,6 +505,150 @@ fn reasoning_text(payload: &Value) -> String {
         }
     }
     compact(payload)
+}
+
+// ---------------------------------------------------------------------
+// codebuddy — $CODEBUDDY_CONFIG_DIR/projects/**/*.jsonl
+// ---------------------------------------------------------------------
+
+/// Canonicalize one parsed CodeBuddy session. Unknown event and output
+/// shapes stay as native metadata instead of disappearing.
+pub(crate) fn canonical_from_codebuddy(
+    events: &[Value],
+    source_path: &Path,
+    project_dir: &Path,
+) -> Option<CanonicalSession> {
+    let cwd = events
+        .iter()
+        .filter_map(|event| event.get("cwd").and_then(|value| value.as_str()))
+        .find(|value| !value.is_empty())?
+        .to_string();
+    if !transcripts::cwd_matches(&cwd, project_dir) {
+        return None;
+    }
+    let session_id = events
+        .iter()
+        .filter_map(|event| event.get("sessionId").and_then(|value| value.as_str()))
+        .find(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            source_path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("unknown")
+                .to_string()
+        });
+    let mut entries = Vec::new();
+    for event in events {
+        let ts = event.get("timestamp").map(|value| match value {
+            Value::String(text) => text.clone(),
+            other => other.to_string(),
+        });
+        let native_id = event.get("id").and_then(|value| value.as_str());
+        let native_parent = event.get("parentId").and_then(|value| value.as_str());
+        match event.get("type").and_then(|kind| kind.as_str()) {
+            Some("message") => {
+                let role = event
+                    .get("role")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let text = codebuddy::message_text(event);
+                let skipped = event
+                    .pointer("/providerData/skipRun")
+                    .and_then(|value| value.as_bool())
+                    == Some(true);
+                let mut e = if text.is_empty() {
+                    meta_entry("message (non-text)", Some(compact(event)))
+                } else {
+                    entry("message")
+                };
+                if role == "user" && (skipped || codebuddy::is_injected_prompt(&text)) {
+                    e.kind = "meta".into();
+                    e.native_type = Some("injected".into());
+                }
+                if role == "assistant"
+                    && event.get("status").and_then(|value| value.as_str()) == Some("incomplete")
+                {
+                    e.native_type = Some("incomplete".into());
+                }
+                e.ts = ts;
+                e.id = native_id.map(str::to_string);
+                e.parent_id = native_parent.map(str::to_string);
+                e.role = Some(role.to_string());
+                e.content = Some(text);
+                entries.push(e);
+            }
+            Some("function_call") => {
+                let mut e = entry("tool_call");
+                e.ts = ts;
+                e.id = event
+                    .get("callId")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string);
+                e.parent_id = native_parent.map(str::to_string);
+                e.name = event
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string);
+                e.content = Some(
+                    event
+                        .get("arguments")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                );
+                entries.push(e);
+            }
+            Some("function_call_result") => {
+                let parent = event
+                    .get("callId")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string);
+                let output = event.get("output").unwrap_or(&Value::Null);
+                let mut e = match codebuddy::output_text(output) {
+                    Some(text) => {
+                        let mut e = entry("tool_result");
+                        e.content = Some(text);
+                        e
+                    }
+                    None => meta_entry(
+                        "function_call_result.output (shape unverified)",
+                        Some(compact(output)),
+                    ),
+                };
+                e.ts = ts;
+                e.id = native_id.map(str::to_string);
+                e.parent_id = parent;
+                entries.push(e);
+            }
+            Some("reasoning") => {
+                let mut e = meta_entry("reasoning", Some(compact(event)));
+                e.ts = ts;
+                e.id = native_id.map(str::to_string);
+                e.parent_id = native_parent.map(str::to_string);
+                entries.push(e);
+            }
+            Some(other) => {
+                let mut e = meta_entry(other, Some(compact(event)));
+                e.ts = ts;
+                e.id = native_id.map(str::to_string);
+                e.parent_id = native_parent.map(str::to_string);
+                entries.push(e);
+            }
+            None => {
+                let mut e = meta_entry("missing native type", Some(compact(event)));
+                e.ts = ts;
+                entries.push(e);
+            }
+        }
+    }
+    Some(CanonicalSession {
+        harness: "codebuddy".into(),
+        session_id,
+        cwd,
+        source_path: source_path.display().to_string(),
+        entries,
+    })
 }
 
 // ---------------------------------------------------------------------
@@ -1087,6 +1231,55 @@ mod tests {
             json!({"type":"user","message":{"role":"user","content":"hi"},"cwd":"/elsewhere","sessionId":"s2"}),
         ];
         assert!(canonical_from_claude(&other, Path::new("/x/s2.jsonl"), project.path()).is_none());
+    }
+
+    #[test]
+    fn codebuddy_preserves_native_tool_correlation_and_unknown_events() {
+        let project = tempfile::tempdir().expect("project");
+        let cwd = project.path().to_string_lossy().to_string();
+        let events = vec![
+            json!({"type":"message","id":"m1","role":"user","content":[{"type":"input_text","text":"hello"}],"sessionId":"cb1","cwd":cwd,"timestamp":1i64}),
+            json!({"type":"function_call","id":"f1","parentId":"m1","callId":"call-1","name":"Bash","arguments":"{\"command\":\"pwd\"}","sessionId":"cb1","cwd":cwd,"timestamp":2i64}),
+            json!({"type":"function_call_result","callId":"call-1","name":"Bash","status":"completed","output":{"type":"text","text":"done"},"sessionId":"cb1","cwd":cwd,"timestamp":3i64}),
+            json!({"type":"future_event","sessionId":"cb1","cwd":cwd,"timestamp":4i64,"value":1}),
+            json!({"type":"message","id":"m2","role":"assistant","status":"incomplete","content":[{"type":"output_text","text":"stopped"}],"sessionId":"cb1","cwd":cwd,"timestamp":5i64}),
+        ];
+        let session = canonical_from_codebuddy(&events, Path::new("/x/cb1.jsonl"), project.path())
+            .expect("session");
+        assert_eq!(session.harness, "codebuddy");
+        assert_eq!(session.session_id, "cb1");
+        assert_eq!(
+            kinds(&session),
+            vec!["message", "tool_call", "tool_result", "meta", "message"]
+        );
+        assert_eq!(session.entries[1].id.as_deref(), Some("call-1"));
+        assert_eq!(session.entries[1].parent_id.as_deref(), Some("m1"));
+        assert_eq!(session.entries[2].parent_id.as_deref(), Some("call-1"));
+        assert_eq!(session.entries[2].content.as_deref(), Some("done"));
+        assert_eq!(
+            session.entries[3].native_type.as_deref(),
+            Some("future_event")
+        );
+        assert_eq!(
+            session.entries[4].native_type.as_deref(),
+            Some("incomplete")
+        );
+        let stored = crate::sessions::StoredSession {
+            path: std::path::PathBuf::new(),
+            harness: session.harness.clone(),
+            session_id: session.session_id.clone(),
+            cwd: session.cwd.clone(),
+            imported_at: String::new(),
+            source_path: session.source_path.clone(),
+            entries: session.entries.clone(),
+        };
+        assert_eq!(crate::sessions::summarize_stored(&stored).2, "interrupted");
+        assert!(canonical_from_codebuddy(
+            &[json!({"type":"message","role":"user","content":[],"cwd":"/elsewhere"})],
+            Path::new("/x/other.jsonl"),
+            project.path(),
+        )
+        .is_none());
     }
 
     #[test]

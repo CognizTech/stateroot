@@ -19,7 +19,7 @@ into placeholder/empty slots (user content is never overwritten; re-running
   "observed"`. Empty repo → `nothing to seed` and no handoff.
 - **`--synthesize` (opt-in LLM enrichment)** — asks a backend for a richer
   seed. Auto backend order: local harness CLIs first (`claude`, `codex`,
-  `kimi`, `gemini`, `opencode`, `openclaw`, `hermes`, `pi`, `grok`, `zero`,
+  `codebuddy`, `kimi`, `gemini`, `opencode`, `openclaw`, `hermes`, `pi`, `grok`, `zero`,
   `antigravity`, `omp`, `devin` — first whose registry delegation spec is a
   CLI whose binary is on PATH, run non-interactively with piped stdout), then
   the `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` API path. `--synthesize-with
@@ -454,7 +454,8 @@ echo "checkpoint recorded in $STATEROOT_PROJECT_DIR"
 Sessions belong to StateRoot: standardized, shared, portable across
 harnesses. `stateroot session sync` canonicalizes sessions from every
 harness store — claude (`~/.claude/projects/**`), codex (rollout + archived
-stores), kimi (wire files + session index — stateroot's own harness,
+stores), codebuddy (`$CODEBUDDY_CONFIG_DIR` or `~/.codebuddy/projects/**`),
+kimi (wire files + session index — stateroot's own harness,
 dogfooded), openclaw, cursor and hermes (sqlite state stores, opened
 immutable), pi (`$PI_CODING_AGENT_DIR` or `~/.pi/agent/sessions`), and dsh
 (`$DSH_HOME` or `~/.dsh/sessions`) — into `.stateroot/local/sessions/` as
@@ -588,6 +589,11 @@ in the prompt path (token razor).
   path, notes). `stateroot plan record --file <path>` / `--stdin` creates a
   **draft**; `list` / `show <id>` inspect (show prints the raw markdown —
   that is how other harnesses read a plan).
+- **Native ingestion** — `stateroot plan sync` pulls attributed Cursor,
+  Claude and Kimi plans, plus CodeBuddy plans explicitly linked to a session
+  through `planFilePath`, into the store as drafts. CodeBuddy task files
+  under `.codebuddy/tasks/<sessionId>/` also federate current status without
+  inventing a plan binding.
 - **Lifecycle** — `draft → approved → active → done`; `abandoned` from any
   non-terminal state. Wrong-state transitions are clear errors (same-state
   included). At most one plan is **active**: `plan activate` demotes the
@@ -1149,8 +1155,8 @@ one; project state on disk is never touched — the dirs are already gone).
 
 ## `stateroot memory sync` — memory federation
 
-Harness-native memory systems (claude memory, codex memories, openclaw session
-logs) are both a conflict and an opportunity. `stateroot memory sync` makes
+Harness-native memory systems (claude memory, codex memories, CodeBuddy
+auto/team memory, openclaw session logs) are both a conflict and an opportunity. `stateroot memory sync` makes
 StateRoot the memory **pool**: pull harness memories in as `observed` tier, and
 push a curated brief back into harness-native formats so even hook-limited
 harnesses know the project.
@@ -1161,10 +1167,11 @@ harnesses know the project.
 | --- | --- | --- |
 | `claude` | `~/.claude/projects/<slug>/memory/*.md` (slug decodes to the cwd, matched with walk-up/walk-down tolerance) | wiki pages `wiki/pages/harness/claude/*.md` |
 | `codex` | `~/.codex/memories/*.md` (flat; the sqlite is pipeline state, never read) | wiki pages `wiki/pages/harness/codex/*.md` |
+| `codebuddy` | `~/.codebuddy/memories/global/`, native-session-linked project auto-memory, and project `.codebuddy/memories/` team memory (honors `CODEBUDDY_CONFIG_DIR`) | wiki pages `wiki/pages/harness/codebuddy/*.md` |
 | `openclaw` | `~/.openclaw/workspace/memory/*.md` (daily logs) | episodic records (`harness-memory:openclaw:<hash>` source id) |
 
-`stateroot memory sync [--harness claude|codex|openclaw] [--dry-run]` — no
-harness filter means all three.
+`stateroot memory sync [--harness claude|codex|codebuddy|openclaw] [--dry-run]` — no
+harness filter means all four.
 
 ### Dedup, conflicts, provenance
 
@@ -1183,6 +1190,7 @@ checkpoints, hot-apex memory — capped ~4000 chars) into:
 
 - `~/.claude/projects/<slug>/memory/stateroot.md`
 - `~/.codex/memories/stateroot.md`
+- `<project>/.codebuddy/rules/stateroot.md` (CodeBuddy native project rule)
 - `~/.openclaw/workspace/memory/stateroot.md`
 
 Managed files are written only when absent or already carrying the marker; an

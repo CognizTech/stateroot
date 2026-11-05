@@ -215,7 +215,7 @@ pub fn harness_detected_with(
         }
     }
     for marker in &entry.detect {
-        let path = home.join(marker);
+        let path = expand_harness_relative(&entry.id, marker, home);
         if path.is_dir() || path.is_file() {
             return true;
         }
@@ -359,6 +359,14 @@ fn expand_home_relative(rel: &str, home: &Path) -> PathBuf {
         PathBuf::from(rel)
     } else {
         home.join(rel)
+    }
+}
+
+fn expand_harness_relative(harness: &str, rel: &str, home: &Path) -> PathBuf {
+    if harness == "codebuddy" {
+        crate::harness_install::paths::resolve_registry_path(home, harness, rel)
+    } else {
+        expand_home_relative(rel, home)
     }
 }
 
@@ -1182,7 +1190,7 @@ fn discover_with_scope(
             if is_shared_federation_root(rel) {
                 continue;
             }
-            let root = expand_home_relative(rel, &home);
+            let root = expand_harness_relative(&entry.id, rel, &home);
             scan_tree(&root, &entry.id, "global", "package", &mut found);
         }
         if include_project_scope {
@@ -1941,7 +1949,7 @@ fn project_product_adapters(
                 continue;
             }
             let root = if skill.scope == "global" {
-                expand_home_relative(rel, home)
+                expand_harness_relative(&entry.id, rel, home)
             } else {
                 project_dir
                     .ok_or_else(|| {
@@ -2221,7 +2229,7 @@ fn sync_scoped(
                         continue;
                     }
                     let root = if skill.scope == "global" {
-                        expand_home_relative(rel, &home)
+                        expand_harness_relative(&entry.id, rel, &home)
                     } else {
                         project_dir
                             .expect("project-scoped portable skill requires project directory")
@@ -2516,6 +2524,47 @@ mod tests {
         assert!(reg.harnesses.len() >= 16);
         assert_eq!(normalize_harness("claude-code"), "claude");
         assert_eq!(display_name("statesmith"), "StateSmith");
+    }
+
+    #[test]
+    fn codebuddy_contract_covers_native_federation_and_delegation() {
+        let reg = load_registry().expect("registry");
+        let entry = reg
+            .harnesses
+            .iter()
+            .find(|entry| entry.id == "codebuddy")
+            .expect("CodeBuddy row");
+        assert_eq!(normalize_harness("codebuddy-code"), "codebuddy");
+        assert_eq!(normalize_harness("cbc"), "codebuddy");
+        assert!(entry
+            .skill_source_roots
+            .global
+            .iter()
+            .any(|root| Path::new(root) == Path::new(".codebuddy/skills")));
+        assert!(entry
+            .projection_roots
+            .project
+            .iter()
+            .any(|root| Path::new(root) == Path::new(".codebuddy/skills")));
+        assert_eq!(
+            Path::new(&entry.mcp_config.global[0].path),
+            Path::new(".codebuddy/.mcp.json")
+        );
+        assert_eq!(
+            Path::new(&entry.mcp_config.project[0].path),
+            Path::new(".mcp.json")
+        );
+        let argv = build_argv_from_spec(&entry.delegation, "do the thing").expect("argv");
+        assert_eq!(
+            argv,
+            vec![
+                "codebuddy",
+                "--print",
+                "--permission-mode",
+                "bypassPermissions",
+                "do the thing"
+            ]
+        );
     }
 
     #[test]

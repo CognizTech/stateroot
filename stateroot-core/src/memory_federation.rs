@@ -8,6 +8,8 @@
 //! - Codex: `~/.codex/memories/*.md` (flat, consolidated by codex's pipeline —
 //!   we read only the `.md`, never the sqlite).
 //! - OpenClaw: `~/.openclaw/workspace/memory/*.md` (daily logs → episodic).
+//! - CodeBuddy: global and session-linked project auto-memory, plus team
+//!   memory under the project's `.codebuddy/memories/` tree.
 //!
 //! Push-only: Copilot — `~/.copilot/instructions/stateroot.instructions.md`
 //! (user-level instructions honored by Copilot CLI + the VS Code agent). No
@@ -38,7 +40,7 @@ pub const IMPORT_KEY: &str = "stateroot_import";
 pub const PUSH_CAP: usize = 4000;
 
 /// Harness ids understood by this module (stable, lowercase).
-pub const HARNESSES: [&str; 3] = ["claude", "codex", "openclaw"];
+pub const HARNESSES: [&str; 4] = ["claude", "codex", "codebuddy", "openclaw"];
 
 /// One harness memory note read from a harness-native store.
 #[derive(Debug, Clone, PartialEq)]
@@ -209,6 +211,37 @@ fn truncate_chars(s: &str, max: usize) -> String {
 // Readers
 // ---------------------------------------------------------------------------
 
+fn read_memory_file(
+    harness: &'static str,
+    path: &Path,
+    memory_as_index: bool,
+) -> Option<HarnessMemoryNote> {
+    if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("md") {
+        return None;
+    }
+    let text = std::fs::read_to_string(path).ok()?.trim().to_string();
+    if text.is_empty() {
+        return None;
+    }
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    let title = if memory_as_index && stem == "MEMORY" {
+        "index".to_string()
+    } else {
+        stem
+    };
+    Some(HarnessMemoryNote {
+        harness,
+        source_path: path.to_string_lossy().to_string(),
+        title,
+        hash: content_hash(&text),
+        text,
+    })
+}
+
 /// Read `*.md` (non-recursive) from a memory dir.
 fn read_memory_dir(
     harness: &'static str,
@@ -218,38 +251,10 @@ fn read_memory_dir(
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    let mut out = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("md") {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let text = text.trim().to_string();
-        if text.is_empty() {
-            continue;
-        }
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string();
-        let title = if memory_as_index && stem == "MEMORY" {
-            "index".to_string()
-        } else {
-            stem
-        };
-        out.push(HarnessMemoryNote {
-            harness,
-            source_path: path.to_string_lossy().to_string(),
-            title,
-            hash: content_hash(&text),
-            text,
-        });
-    }
-    out
+    entries
+        .flatten()
+        .filter_map(|entry| read_memory_file(harness, &entry.path(), memory_as_index))
+        .collect()
 }
 
 /// Read claude memory for the project: every slug dir under
@@ -283,6 +288,29 @@ pub fn read_claude(home: &Path, project_dir: &Path) -> Vec<HarnessMemoryNote> {
 /// `~/.codex/memories/` (no recursion; the sqlite is pipeline state, not read).
 pub fn read_codex(home: &Path, _project_dir: &Path) -> Vec<HarnessMemoryNote> {
     read_memory_dir("codex", &home.join(".codex").join("memories"), false)
+}
+
+/// Read CodeBuddy auto-memory only for native project ids linked to this
+/// checkout by a session, plus global and project-local team memories.
+pub fn read_codebuddy(home: &Path, project_dir: &Path) -> Vec<HarnessMemoryNote> {
+    let root = crate::harness_install::paths::codebuddy_root(home);
+    let memories = root.join("memories");
+    let mut notes = read_memory_dir("codebuddy", &memories.join("global"), true);
+    for id in crate::transcripts::codebuddy::project_ids(home, project_dir) {
+        if id != "global" {
+            notes.extend(read_memory_dir("codebuddy", &memories.join(id), true));
+        }
+    }
+    for file in
+        crate::transcripts::walk_files(&project_dir.join(".codebuddy").join("memories"), &|path| {
+            path.extension().and_then(|ext| ext.to_str()) == Some("md")
+        })
+    {
+        if let Some(note) = read_memory_file("codebuddy", &file, true) {
+            notes.push(note);
+        }
+    }
+    notes
 }
 
 /// Read openclaw daily session logs: every `*.md` under
@@ -388,6 +416,7 @@ pub fn sync_pull(
         let notes = match id {
             "claude" => read_claude(home, project_dir),
             "codex" => read_codex(home, project_dir),
+            "codebuddy" => read_codebuddy(home, project_dir),
             _ => read_openclaw(home, project_dir),
         };
         let mut source = SourceReport {
@@ -591,6 +620,7 @@ fn harness_base(home: &Path, harness: &str) -> PathBuf {
     match harness {
         "claude" => home.join(".claude").join("projects"),
         "codex" => home.join(".codex"),
+        "codebuddy" => crate::harness_install::paths::codebuddy_root(home),
         _ => home.join(".openclaw").join("workspace"),
     }
 }
@@ -605,6 +635,10 @@ fn push_targets(home: &Path, project_dir: &Path) -> Vec<(String, PathBuf)> {
         let target = match id {
             "claude" => claude_slug_dir(home, project_dir).join("memory/stateroot.md"),
             "codex" => home.join(".codex").join("memories").join("stateroot.md"),
+            "codebuddy" => project_dir
+                .join(".codebuddy")
+                .join("rules")
+                .join("stateroot.md"),
             _ => home
                 .join(".openclaw")
                 .join("workspace")
@@ -1006,6 +1040,66 @@ mod tests {
             .path()
             .join(".stateroot/wiki/pages/harness/openclaw")
             .exists());
+    }
+
+    #[test]
+    fn codebuddy_memory_is_project_scoped_and_push_uses_native_rules() {
+        let p = project();
+        let home = tempfile::tempdir().unwrap();
+        let event = serde_json::json!({
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "remember this"}],
+            "sessionId": "cb-memory",
+            "cwd": p.path().to_string_lossy(),
+            "timestamp": 1i64,
+        });
+        write(
+            home.path(),
+            ".codebuddy/projects/native-project/cb-memory.jsonl",
+            &serde_json::to_string(&event).unwrap(),
+        );
+        write(
+            home.path(),
+            ".codebuddy/memories/global/MEMORY.md",
+            "global index",
+        );
+        write(
+            home.path(),
+            ".codebuddy/memories/native-project/decisions.md",
+            "project decision",
+        );
+        write(
+            home.path(),
+            ".codebuddy/memories/unrelated/other.md",
+            "must not cross projects",
+        );
+        write(
+            p.path(),
+            ".codebuddy/memories/@alice/team.md",
+            "team memory",
+        );
+
+        let notes = read_codebuddy(home.path(), p.path());
+        let titles: Vec<&str> = notes.iter().map(|note| note.title.as_str()).collect();
+        assert!(titles.contains(&"index"), "{titles:?}");
+        assert!(titles.contains(&"decisions"), "{titles:?}");
+        assert!(titles.contains(&"team"), "{titles:?}");
+        assert!(!titles.contains(&"other"), "{titles:?}");
+
+        let results = sync_push(p.path(), home.path(), false).expect("push");
+        let codebuddy = results
+            .iter()
+            .find(|result| result.harness == "codebuddy")
+            .expect("CodeBuddy target");
+        assert_eq!(codebuddy.status, "written");
+        assert_eq!(
+            codebuddy.target,
+            p.path().join(".codebuddy/rules/stateroot.md")
+        );
+        assert!(std::fs::read_to_string(&codebuddy.target)
+            .unwrap()
+            .starts_with(MANAGED_MARKER));
     }
 
     #[test]

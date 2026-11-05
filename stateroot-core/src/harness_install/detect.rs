@@ -126,15 +126,21 @@ fn detect_one(
         }
     }
 
-    let mut config_dir = detect.iter().any(|marker| {
-        let path = home.join(marker);
-        path.is_dir() || path.is_file()
-    });
+    let marker_path = |marker: &str| {
+        if id == "codebuddy" {
+            super::paths::resolve_registry_path(home, id, marker)
+        } else {
+            home.join(marker)
+        }
+    };
+    let mut config_dir = detect
+        .iter()
+        .any(|marker| marker_path(marker).is_dir() || marker_path(marker).is_file());
     if config_dir {
         let marker = detect
             .iter()
             .find(|marker| {
-                let path = home.join(marker);
+                let path = marker_path(marker);
                 path.is_dir() || path.is_file()
             })
             .map(String::as_str)

@@ -14,6 +14,8 @@ pub const ENV_CODEX_HOME: &str = "CODEX_HOME";
 pub const ENV_CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
 /// Kimi Code data dir override.
 pub const ENV_KIMI_CODE_HOME: &str = "KIMI_CODE_HOME";
+/// CodeBuddy config and data dir override.
+pub const ENV_CODEBUDDY_CONFIG_DIR: &str = "CODEBUDDY_CONFIG_DIR";
 /// Grok Build CLI config home override.
 pub const ENV_GROK_HOME: &str = "GROK_HOME";
 /// Pi agent config directory override (`$PI_CODING_AGENT_DIR`; default `~/.pi/agent`).
@@ -46,6 +48,16 @@ pub fn claude_config_root_in(env: Option<OsString>) -> Option<PathBuf> {
 /// Kimi Code data dir: `$KIMI_CODE_HOME` or `home/.kimi-code`.
 pub fn kimi_code_root_in(home: &Path, env: Option<OsString>) -> PathBuf {
     agent_config_home(env).unwrap_or_else(|| home.join(".kimi-code"))
+}
+
+/// CodeBuddy config root: `$CODEBUDDY_CONFIG_DIR` or `home/.codebuddy`.
+pub fn codebuddy_root_in(home: &Path, env: Option<OsString>) -> PathBuf {
+    agent_config_home(env).unwrap_or_else(|| home.join(".codebuddy"))
+}
+
+/// CodeBuddy config root using the process environment.
+pub fn codebuddy_root(home: &Path) -> PathBuf {
+    codebuddy_root_in(home, std::env::var_os(ENV_CODEBUDDY_CONFIG_DIR))
 }
 
 /// Grok config root: `$GROK_HOME` or `home/.grok`.
@@ -127,6 +139,7 @@ pub fn resolve_registry_path_in(
     kimi_code_home: Option<OsString>,
     grok_home: Option<OsString>,
     hermes_home: Option<OsString>,
+    codebuddy_home: Option<OsString>,
 ) -> PathBuf {
     match quirk_id {
         "codex" => resolve_prefixed(codex_root_in(home, codex_home), home, rel, ".codex"),
@@ -136,6 +149,12 @@ pub fn resolve_registry_path_in(
             home,
             rel,
             ".kimi-code",
+        ),
+        "codebuddy" => resolve_prefixed(
+            codebuddy_root_in(home, codebuddy_home),
+            home,
+            rel,
+            ".codebuddy",
         ),
         "grok" => resolve_prefixed(grok_root_in(home, grok_home), home, rel, ".grok"),
         "hermes" => resolve_prefixed(hermes_root_in(home, hermes_home), home, rel, ".hermes"),
@@ -154,6 +173,7 @@ pub fn resolve_registry_path(home: &Path, quirk_id: &str, rel: &str) -> PathBuf 
         std::env::var_os(ENV_KIMI_CODE_HOME),
         std::env::var_os(ENV_GROK_HOME),
         std::env::var_os(ENV_HERMES_HOME),
+        std::env::var_os(ENV_CODEBUDDY_CONFIG_DIR),
     )
 }
 
@@ -168,6 +188,7 @@ pub fn registry_path_candidates_in(
     kimi_code_home: Option<OsString>,
     grok_home: Option<OsString>,
     hermes_home: Option<OsString>,
+    codebuddy_home: Option<OsString>,
 ) -> Vec<PathBuf> {
     let active = resolve_registry_path_in(
         home,
@@ -178,6 +199,7 @@ pub fn registry_path_candidates_in(
         kimi_code_home,
         grok_home,
         hermes_home,
+        codebuddy_home,
     );
     let default = home.join(rel);
     if default == active {
@@ -198,6 +220,7 @@ pub fn registry_path_candidates(home: &Path, quirk_id: &str, rel: &str) -> Vec<P
         std::env::var_os(ENV_KIMI_CODE_HOME),
         std::env::var_os(ENV_GROK_HOME),
         std::env::var_os(ENV_HERMES_HOME),
+        std::env::var_os(ENV_CODEBUDDY_CONFIG_DIR),
     )
 }
 
@@ -331,6 +354,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert_eq!(resolved, PathBuf::from("/stores/codex/hooks.json"));
     }
@@ -342,6 +366,7 @@ mod tests {
             home,
             "codex",
             ".codex/AGENTS.md",
+            None,
             None,
             None,
             None,
@@ -364,6 +389,7 @@ mod tests {
                 env.clone(),
                 None,
                 None,
+                None,
                 None
             ),
             PathBuf::from("/stores/claude/settings.json")
@@ -377,6 +403,7 @@ mod tests {
                 env.clone(),
                 None,
                 None,
+                None,
                 None
             ),
             PathBuf::from("/stores/claude/CLAUDE.md")
@@ -388,6 +415,7 @@ mod tests {
                 ".claude.json",
                 None,
                 env,
+                None,
                 None,
                 None,
                 None
@@ -419,6 +447,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert_eq!(
             paths,
@@ -441,6 +470,7 @@ mod tests {
             None,
             None,
             Some(OsString::from("/stores/hermes")),
+            None,
         );
         assert_eq!(resolved, PathBuf::from("/stores/hermes/config.yaml"));
         // Default keeps ~/.hermes; candidates sweep both when relocated.
@@ -453,6 +483,7 @@ mod tests {
             None,
             None,
             Some(OsString::from("/stores/hermes")),
+            None,
         );
         assert_eq!(
             candidates,
@@ -464,6 +495,27 @@ mod tests {
         assert_eq!(
             hermes_root_in(home, None),
             PathBuf::from("/home/alice/.hermes")
+        );
+    }
+
+    #[test]
+    fn codebuddy_config_dir_rewrites_native_paths() {
+        let home = Path::new("/home/alice");
+        let resolved = resolve_registry_path_in(
+            home,
+            "codebuddy",
+            ".codebuddy/settings.json",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(OsString::from("/stores/codebuddy")),
+        );
+        assert_eq!(resolved, PathBuf::from("/stores/codebuddy/settings.json"));
+        assert_eq!(
+            codebuddy_root_in(home, None),
+            PathBuf::from("/home/alice/.codebuddy")
         );
     }
 

@@ -361,6 +361,81 @@
       }
     },
     {
+      "id": "codebuddy",
+      "display": "CodeBuddy",
+      "aliases": [
+        "codebuddy",
+        "codebuddy-code",
+        "cbc"
+      ],
+      "framing": "CodeBuddy harness: preserve native session evidence, injected context, and verification results.",
+      "tier": "A",
+      "detect": [
+        ".codebuddy"
+      ],
+      "detect_cmds": [
+        "codebuddy",
+        "codebuddy-code",
+        "cbc"
+      ],
+      "skill_source_roots": {
+        "global": [
+          ".codebuddy/skills",
+          ".agents/skills"
+        ],
+        "project": [
+          ".codebuddy/skills",
+          ".agents/skills"
+        ]
+      },
+      "builtin_policy": "reference_only",
+      "builtin_roots": [],
+      "projection_roots": {
+        "global": [
+          ".agents/skills",
+          ".codebuddy/skills"
+        ],
+        "project": [
+          ".agents/skills",
+          ".codebuddy/skills"
+        ]
+      },
+      "delegation": {
+        "mode": "cli",
+        "command": "codebuddy",
+        "pty": false,
+        "print_mode": true,
+        "handoff_only": false,
+        "argv": [
+          "--print",
+          "--permission-mode",
+          "bypassPermissions",
+          "{prompt}"
+        ]
+      },
+      "reload": "session",
+      "capabilities": [
+        "skills",
+        "hooks",
+        "mcp",
+        "delegation"
+      ],
+      "mcp_config": {
+        "global": [
+          {
+            "path": ".codebuddy/.mcp.json",
+            "shape": "mcpServers"
+          }
+        ],
+        "project": [
+          {
+            "path": ".mcp.json",
+            "shape": "mcpServers"
+          }
+        ]
+      }
+    },
+    {
       "id": "opencode",
       "display": "OpenCode",
       "aliases": [

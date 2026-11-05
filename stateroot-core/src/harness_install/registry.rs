@@ -103,7 +103,7 @@ impl DigestDeliveryPolicy {
     /// Policy for a canonical adapter id. Unknown ids are degraded.
     pub fn for_id(id: &str) -> Self {
         match id {
-            "claude-code" | "codex" | "kimi" | "devin" => Self {
+            "claude-code" | "codex" | "kimi" | "codebuddy" | "devin" => Self {
                 primary_event: "session_start",
                 session_start_prints: true,
                 session_start_marks: true,
@@ -392,6 +392,23 @@ const KIMI_CODE_EVENTS: &[(&str, &str)] = &[
     ("SessionEnd", "session_end"),
 ];
 
+/// CodeBuddy CLI hooks v1.16+ (beta): Claude-Code-shaped event vocabulary and
+/// payload (`session_id`, `cwd`, `hook_event_name`, `transcript_path`), with
+/// an observational post-compaction event on top.
+const CODEBUDDY_EVENTS: &[(&str, &str)] = &[
+    ("SessionStart", "session_start"),
+    ("SessionEnd", "session_end"),
+    ("UserPromptSubmit", "user_prompt_submit"),
+    ("PreToolUse", "pre_tool_use"),
+    ("PostToolUse", "post_tool_use"),
+    ("PostToolUseFailure", "tool_failure"),
+    ("PreCompact", "pre_compact"),
+    ("PostCompact", "post_compaction"),
+    ("Stop", "stop"),
+    ("SubagentStart", "subagent_start"),
+    ("SubagentStop", "subagent_stop"),
+];
+
 const DEVIN_EVENTS: &[(&str, &str)] = &[
     ("SessionStart", "session_start"),
     ("UserPromptSubmit", "user_prompt_submit"),
@@ -633,6 +650,27 @@ pub const ADAPTERS: &[HarnessQuirk] = &[
         events: es::ALL,
         legacy_id: Some("kimi"),
         event_map: KIMI_CODE_EVENTS,
+    },
+    HarnessQuirk {
+        id: "codebuddy",
+        display: "CodeBuddy",
+        tier: Tier::A,
+        detect: &[".codebuddy"],
+        detect_cmds: &["codebuddy", "codebuddy-code", "cbc"],
+        instruction_file: Some(".codebuddy/CODEBUDDY.md"),
+        mcp: Some(McpTarget {
+            path: ".codebuddy/.mcp.json",
+            shape: McpShape::McpServersJson,
+        }),
+        hooks: Some(HookTarget {
+            path: ".codebuddy/settings.json",
+            format: HookFormat::NestedJson,
+        }),
+        injection: Injection::StdoutJson,
+        compact_injection: true,
+        events: es::ALL,
+        legacy_id: None,
+        event_map: CODEBUDDY_EVENTS,
     },
     HarnessQuirk {
         id: "devin",
@@ -894,6 +932,7 @@ pub fn transcript_reader_id(id: &str) -> Option<&'static str> {
         "kimi" => Some("kimi"),
         "github_copilot" => Some("copilot"),
         "codex" => Some("codex"),
+        "codebuddy" => Some("codebuddy"),
         "cursor" => Some("cursor"),
         "openclaw" => Some("openclaw"),
         "hermes" => Some("hermes"),
@@ -1014,8 +1053,8 @@ mod tests {
     }
 
     #[test]
-    fn registry_has_18_unique_rows() {
-        assert_eq!(ADAPTERS.len(), 18);
+    fn registry_has_19_unique_rows() {
+        assert_eq!(ADAPTERS.len(), 19);
         let mut ids: Vec<&str> = ADAPTERS.iter().map(|q| q.id).collect();
         ids.sort_unstable();
         ids.dedup();
@@ -1090,6 +1129,51 @@ mod tests {
             policy.note.contains("pre_llm_call"),
             "hermes note must name the verified injection event"
         );
+    }
+
+    #[test]
+    fn codebuddy_row_shape_and_event_mapping() {
+        let cb = quirk("codebuddy").expect("codebuddy row");
+        assert_eq!(cb.tier, Tier::A);
+        assert_eq!(cb.detect, &[".codebuddy"]);
+        assert_eq!(cb.detect_cmds, &["codebuddy", "codebuddy-code", "cbc"]);
+        assert_eq!(cb.instruction_file, Some(".codebuddy/CODEBUDDY.md"));
+        let mcp = cb.mcp.expect("codebuddy mcp target");
+        assert_eq!(mcp.path, ".codebuddy/.mcp.json");
+        assert_eq!(mcp.shape, McpShape::McpServersJson);
+        let hooks = cb.hooks.expect("codebuddy hooks target");
+        assert_eq!(hooks.path, ".codebuddy/settings.json");
+        assert!(matches!(hooks.format, HookFormat::NestedJson));
+        assert_eq!(cb.injection, Injection::StdoutJson);
+        assert!(cb.compact_injection);
+        assert_eq!(cb.events, super::es::ALL);
+        assert!(cb.legacy_id.is_none());
+        for (harness_event, canonical) in [
+            ("SessionStart", "session_start"),
+            ("SessionEnd", "session_end"),
+            ("UserPromptSubmit", "user_prompt_submit"),
+            ("PreToolUse", "pre_tool_use"),
+            ("PostToolUse", "post_tool_use"),
+            ("PostToolUseFailure", "tool_failure"),
+            ("PreCompact", "pre_compact"),
+            ("PostCompact", "post_compaction"),
+            ("Stop", "stop"),
+            ("SubagentStart", "subagent_start"),
+            ("SubagentStop", "subagent_stop"),
+        ] {
+            assert_eq!(
+                normalize_event(cb, harness_event),
+                Some(canonical),
+                "CodeBuddy event {harness_event} must normalize to {canonical}"
+            );
+        }
+        assert_eq!(normalize_event(cb, "NotARealEvent"), None);
+        let policy = cb.delivery();
+        assert_eq!(policy.tier, DeliveryTier::Automatic);
+        assert_eq!(policy.primary_event, "session_start");
+        assert!(policy.session_start_prints);
+        assert!(policy.session_start_marks);
+        assert!(policy.prompt_submit_injects);
     }
 
     #[test]
@@ -1274,7 +1358,7 @@ mod tests {
                         "copilot note must name the verified injection channel"
                     );
                 }
-                "claude-code" | "codex" | "kimi" | "devin" => {
+                "claude-code" | "codex" | "kimi" | "codebuddy" | "devin" => {
                     assert!(policy.session_start_marks);
                     assert!(policy.prompt_submit_injects);
                     assert_eq!(policy.tier, DeliveryTier::Automatic);

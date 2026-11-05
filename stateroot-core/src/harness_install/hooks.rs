@@ -2006,4 +2006,46 @@ mod tests {
         let actions = remove_hooks(home.path(), q).expect("second remove");
         assert!(actions.is_empty(), "{actions:?}");
     }
+
+    #[test]
+    fn codebuddy_settings_json_install_is_nested_shaped_and_idempotent() {
+        let home = tempfile::tempdir().expect("home");
+        let q = quirk("codebuddy").expect("codebuddy");
+        install_hooks(home.path(), q).expect("install");
+        let path = home.path().join(".codebuddy/settings.json");
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+        let hooks = doc["hooks"].as_object().expect("hooks object");
+        for event in [
+            "SessionStart",
+            "SessionEnd",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+            "PostToolUseFailure",
+            "PreCompact",
+            "PostCompact",
+            "Stop",
+            "SubagentStart",
+            "SubagentStop",
+        ] {
+            let entries = hooks[event]
+                .as_array()
+                .unwrap_or_else(|| panic!("CodeBuddy event {event} missing from settings.json"));
+            assert_eq!(entries.len(), 1, "{event}: exactly one stateroot handler");
+            let command = entries[0]["hooks"][0]["command"]
+                .as_str()
+                .expect("command string");
+            assert!(
+                command.contains("hook ") && command.contains("--harness codebuddy"),
+                "{event}: command must route to the codebuddy adapter: {command}"
+            );
+        }
+        // Reinstall is byte-identical (idempotent), and no foreign keys appear.
+        install_hooks(home.path(), q).expect("second install");
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+        assert_eq!(doc, after, "second install is byte-identical");
+        assert!(after.get("allowUntrustedFrontmatterHooks").is_none());
+    }
 }

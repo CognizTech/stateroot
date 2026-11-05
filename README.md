@@ -1,10 +1,12 @@
 # StateRoot
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 **Persistent, federated meta-harness for AI agents.**
 
 **The harness is disposable. The work is not.**
 
-StateRoot federates Claude Code, Codex, Cursor, Kimi, OpenClaw, Hermes, Pi, DeepSeek Harness and other agent harnesses through shared working intelligence and versioned project state. Continue work in another harness. Hand a plan to a different agent. Delegate bounded tasks across tools. Run agents in parallel on independent StateRoot forks. Merge the results when the work converges.
+StateRoot federates Claude Code, Codex, Cursor, Kimi, CodeBuddy, OpenClaw, Hermes, Pi, DeepSeek Harness and other agent harnesses through shared working intelligence and versioned project state. Continue work in another harness. Hand a plan to a different agent. Delegate bounded tasks across tools. Run agents in parallel on independent StateRoot forks. Merge the results when the work converges.
 
 Memory, personality, rules, skills, tools, plans and hard-won learnings persist across the harnesses using them. Each harness keeps its own runtime, model and strengths.
 
@@ -25,6 +27,8 @@ Memory, personality, rules, skills, tools, plans and hard-won learnings persist 
   <a href="https://stateroot.dev/docs/intro"><img src="https://img.shields.io/badge/Docs-7ee0c8?style=for-the-badge&labelColor=0c1016" alt="Docs"></a>
   <a href="https://stateroot.dev/docs/getting-started/quickstart"><img src="https://img.shields.io/badge/Quickstart-7ee0c8?style=for-the-badge&labelColor=0c1016" alt="Quickstart"></a>
   <a href="https://stateroot.dev/docs/reference/cli"><img src="https://img.shields.io/badge/CLI-7ee0c8?style=for-the-badge&labelColor=0c1016" alt="CLI reference"></a>
+  <a href="https://discord.gg/wrjgpnuky"><img src="https://img.shields.io/badge/Discord-Join%20community-5865F2?style=for-the-badge&logo=discord&logoColor=white&labelColor=0c1016" alt="Join the StateRoot Discord community"></a>
+  <a href="https://qm.qq.com/q/ZFoqWSP9yo"><img src="https://img.shields.io/badge/QQ-Join%20group-12B7F5?style=for-the-badge&logo=qq&logoColor=white&labelColor=0c1016" alt="Join the StateRoot QQ group"></a>
 </p>
 
 ## Why StateRoot
@@ -84,9 +88,9 @@ Plans close with an explicit `stateroot plan done <id> --evidence "…"` receipt
 
 ## Native harnesses stay native
 
-StateRoot does not replace Claude Code, Codex, Cursor, Kimi or any other tool with a proprietary runtime. Each harness keeps its own model, interface, capabilities and strengths; StateRoot is the persistent layer through which they share intelligence and work state. Choose the agent for the job: Codex authors the plan, Kimi implements one task, Cursor implements another on its own fork, Codex reviews and integrates. The agents remain distinct; the project does not reset when the worker changes.
+StateRoot does not replace Claude Code, Codex, Cursor, Kimi, CodeBuddy or any other tool with a proprietary runtime. Each harness keeps its own model, interface, capabilities and strengths; StateRoot is the persistent layer through which they share intelligence and work state. Choose the agent for the job: Codex authors the plan, Kimi implements one task, Cursor implements another on its own fork, Codex reviews and integrates. The agents remain distinct; the project does not reset when the worker changes.
 
-OpenClaw, Hermes and other general agent harnesses can join the same persistent layer alongside Claude Code, Codex, Cursor, Kimi and Pi.
+OpenClaw, Hermes and other general agent harnesses can join the same persistent layer alongside Claude Code, Codex, Cursor, Kimi, CodeBuddy and Pi.
 
 ### What crosses the boundary
 
@@ -208,9 +212,29 @@ If a digest did not appear, run `stateroot resume --harness <id>` with the harne
 
 Walkthrough: [Quickstart](https://stateroot.dev/docs/getting-started/quickstart).
 
+### Add or refresh coding-agent integrations
+
+When StateRoot adds support for another coding agent, or you install a supported agent later, install that agent's CLI first, update StateRoot, then rerun the harness section of setup:
+
+```bash
+stateroot self-update
+stateroot setup --only harnesses
+stateroot doctor
+```
+
+If setup says the harnesses are already configured, choose **Yes** to reconfigure. Keep the agents you use selected, select the newly detected agent, and confirm. This refreshes the selected integrations without rerunning identity setup or reinitializing your projects. Restart the coding agent to load its updated configuration.
+
+For an integration marked **nightly only** below, use this update command instead of the first command above, then run the same setup and doctor commands:
+
+```bash
+stateroot self-update --tag nightly
+```
+
+Nightly builds are available from the [rolling preview release](https://github.com/CognizTech/stateroot/releases/tag/nightly); a nightly-only integration is not yet included in the latest stable release. To refresh detected integrations without the setup wizard, run `stateroot install`.
+
 ## Supported harnesses
 
-**Hooks + transcripts:** Claude Code · Codex · Cursor · Kimi Code · OpenClaw · Hermes · Pi
+**Hooks + transcripts:** Claude Code · Codex · Cursor · Kimi Code · CodeBuddy (**nightly only**) · OpenClaw · Hermes · Pi
 
 **Transcripts / delegation:** DeepSeek Harness · OpenCode · others detected at install
 

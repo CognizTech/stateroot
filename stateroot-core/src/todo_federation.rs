@@ -534,7 +534,7 @@ fn cursor_merge_flag(input: &Value) -> bool {
 pub fn harness_has_sources(harness: &str) -> bool {
     matches!(
         harness,
-        "cursor" | "claude" | "claude-code" | "kimi" | "kimi-code" | "codex"
+        "cursor" | "claude" | "claude-code" | "codebuddy" | "kimi" | "kimi-code" | "codex"
     )
 }
 
@@ -544,6 +544,7 @@ pub fn sync_from(home: &Path, project_dir: &Path, harness: &str) -> TodoSyncRepo
     match harness {
         "cursor" => sync_cursor_standalone(home, project_dir),
         "claude" | "claude-code" => sync_claude(home, project_dir),
+        "codebuddy" => sync_codebuddy(home, project_dir),
         "kimi" | "kimi-code" => sync_kimi(home, project_dir),
         "codex" => sync_codex(home, project_dir),
         _ => TodoSyncReport::default(),
@@ -848,6 +849,67 @@ fn kimi_items(value: &Value) -> Option<Vec<TodoItem>> {
     } else {
         Some(items)
     }
+}
+
+fn sync_codebuddy(home: &Path, project_dir: &Path) -> TodoSyncReport {
+    let mut report = TodoSyncReport::default();
+    let tasks_root = crate::harness_install::paths::codebuddy_root(home).join("tasks");
+    for transcript in crate::transcripts::codebuddy::session_files(home) {
+        let Some((session_id, _)) =
+            crate::transcripts::codebuddy::session_identity(&transcript, project_dir)
+        else {
+            continue;
+        };
+        let task_dir = tasks_root.join(&session_id);
+        if !task_dir.is_dir() {
+            continue;
+        }
+        let mut items = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&task_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let Ok(task) = serde_json::from_str::<Value>(&text) else {
+                    continue;
+                };
+                let Some(id) = task.get("id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let subject = task.get("subject").and_then(Value::as_str).unwrap_or("");
+                let status = task.get("status").and_then(Value::as_str).unwrap_or("");
+                if status == "deleted" {
+                    continue;
+                }
+                items.push(TodoItem {
+                    key: id.to_string(),
+                    content: subject.to_string(),
+                    status: normalize_status(status),
+                });
+            }
+        }
+        items.sort_by(|left, right| left.key.cmp(&right.key));
+        match replace_list(
+            project_dir,
+            "codebuddy",
+            &session_id,
+            items,
+            &transcript.to_string_lossy(),
+            None,
+        ) {
+            Ok(record) => report.written.push(format!(
+                "codebuddy/{} ({} items)",
+                record.session_id,
+                record.items.len()
+            )),
+            Err(err) => report.notes.push(err),
+        }
+    }
+    report
 }
 
 fn sync_codex(home: &Path, project_dir: &Path) -> TodoSyncReport {
@@ -1360,6 +1422,61 @@ isProject: false
         .expect("closure obligation");
         assert_eq!(closure.plan_id.as_deref(), Some(meta.id.as_str()));
         assert!(!closure.state().is_terminal());
+    }
+
+    #[test]
+    fn codebuddy_tasks_follow_native_session_and_storage() {
+        let home = tempfile::tempdir().expect("home");
+        let project = project();
+        let transcript_dir = home.path().join(".codebuddy/projects/native");
+        std::fs::create_dir_all(&transcript_dir).expect("transcript dir");
+        let transcript = transcript_dir.join("cb-tasks.jsonl");
+        let event = serde_json::json!({
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "plan work"}],
+            "sessionId": "cb-tasks",
+            "cwd": project.path().to_string_lossy(),
+            "timestamp": 1i64,
+        });
+        std::fs::write(&transcript, serde_json::to_string(&event).unwrap()).expect("transcript");
+        let task_dir = home.path().join(".codebuddy/tasks/cb-tasks");
+        std::fs::create_dir_all(&task_dir).expect("task dir");
+        std::fs::write(
+            task_dir.join("1.json"),
+            serde_json::to_string(&serde_json::json!({
+                "id": "1",
+                "subject": "Verify native tasks",
+                "description": "Read the task store",
+                "status": "in_progress"
+            }))
+            .unwrap(),
+        )
+        .expect("task");
+
+        let report = sync_from(home.path(), project.path(), "codebuddy");
+        assert_eq!(report.written.len(), 1, "{report:?}");
+        let lists = current_lists(project.path(), Some("codebuddy"));
+        assert_eq!(lists.len(), 1);
+        assert_eq!(lists[0].items.len(), 1);
+        assert_eq!(lists[0].items[0].key, "1");
+        assert_eq!(lists[0].items[0].status, "in_progress");
+        assert!(lists[0].plan_id.is_none());
+
+        std::fs::write(
+            task_dir.join("1.json"),
+            serde_json::to_string(&serde_json::json!({
+                "id": "1",
+                "subject": "Verify native tasks",
+                "status": "completed"
+            }))
+            .unwrap(),
+        )
+        .expect("completed task");
+        let report = sync_from(home.path(), project.path(), "codebuddy");
+        assert_eq!(report.written.len(), 1, "{report:?}");
+        let lists = current_lists(project.path(), Some("codebuddy"));
+        assert_eq!(lists[0].items[0].status, "completed");
     }
 
     #[test]

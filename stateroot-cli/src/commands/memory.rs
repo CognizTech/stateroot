@@ -202,7 +202,7 @@ pub fn recall(ctx: &Ctx, query: &str, limit: usize) -> Result<()> {
     Ok(())
 }
 
-/// `stateroot memory sync [--harness claude|codex|openclaw] [--dry-run] [--push]`
+/// `stateroot memory sync [--harness claude|codex|codebuddy|openclaw] [--dry-run] [--push]`
 pub fn sync(ctx: &Ctx, harness: Option<&str>, dry_run: bool, push: bool) -> Result<()> {
     ctx.require_project()?;
     let home = home()?;
@@ -210,8 +210,11 @@ pub fn sync(ctx: &Ctx, harness: Option<&str>, dry_run: bool, push: bool) -> Resu
         return sync_push(ctx, &home, dry_run);
     }
     if let Some(h) = harness {
-        if !["claude", "codex", "openclaw"].contains(&h) {
-            anyhow::bail!("unknown harness {h:?} — expected claude | codex | openclaw");
+        if !memory_federation::HARNESSES.contains(&h) {
+            anyhow::bail!(
+                "unknown harness {h:?} — expected {}",
+                memory_federation::HARNESSES.join(" | ")
+            );
         }
     }
     let report = memory_federation::sync_pull(&ctx.cwd, &home, harness, dry_run)

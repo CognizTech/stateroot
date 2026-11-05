@@ -1,6 +1,6 @@
 //! Plan federation — harness-native plans (Cursor plan mode's
 //! `~/.cursor/plans/*.plan.md`, Claude's `~/.claude/plans/`, Kimi's session
-//! plans, …) land in the
+//! plans, and CodeBuddy's session-linked `~/.codebuddy/plans/`) land in the
 //! central plan store as drafts. Without this, a plan authored in a harness's
 //! native plan mode never reaches the shared store, and the next harness
 //! cannot see it (the cursor-plan continuity gap).
@@ -14,6 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::Digest as _;
 
 /// Per-project sync cursor (local lane — never in snapshots or git).
@@ -34,6 +35,11 @@ fn plan_dirs(home: &Path, harness: &str) -> Vec<PlanSource> {
             harness: "cursor",
             dir: home.join(".cursor/plans"),
             suffix: ".plan.md",
+        }],
+        "codebuddy" => vec![PlanSource {
+            harness: "codebuddy",
+            dir: crate::harness_install::paths::codebuddy_root(home).join("plans"),
+            suffix: ".md",
         }],
         "claude" | "claude-code" => vec![PlanSource {
             harness: "claude-code",
@@ -94,6 +100,56 @@ fn kimi_plan_paths(home: &Path, project_dir: &Path) -> Vec<PathBuf> {
             .ok()
     });
     paths.into_iter().rev().take(1).collect()
+}
+
+fn codebuddy_plan_path(value: &Value) -> Option<PathBuf> {
+    value
+        .get("planFilePath")
+        .or_else(|| value.pointer("/meta/planFilePath"))
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Native plans are eligible only when a session belonging to this project
+/// explicitly names the file in its `planFilePath`. The global plan directory
+/// alone is never sufficient attribution.
+fn codebuddy_plan_paths(home: &Path, project_dir: &Path) -> std::collections::BTreeSet<PathBuf> {
+    let plans_root = crate::harness_install::paths::codebuddy_root(home).join("plans");
+    let canonical_root = std::fs::canonicalize(&plans_root).unwrap_or(plans_root);
+    let mut plans = std::collections::BTreeSet::new();
+    for transcript in crate::transcripts::codebuddy::session_files(home) {
+        if crate::transcripts::codebuddy::session_identity(&transcript, project_dir).is_none() {
+            continue;
+        }
+        let mut candidates = Vec::new();
+        if let Ok(text) = std::fs::read_to_string(transcript.with_extension("meta.json")) {
+            if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                if let Some(path) = codebuddy_plan_path(&value) {
+                    candidates.push(path);
+                }
+            }
+        }
+        if let Some(events) = crate::transcripts::codebuddy::parse_session_file(&transcript) {
+            candidates.extend(events.iter().filter_map(codebuddy_plan_path));
+        }
+        for candidate in candidates {
+            let candidate = if candidate.is_relative() {
+                canonical_root.join(candidate)
+            } else {
+                candidate
+            };
+            if !candidate.is_file() {
+                continue;
+            }
+            if let Ok(canonical) = std::fs::canonicalize(candidate) {
+                if canonical.starts_with(&canonical_root) {
+                    plans.insert(canonical);
+                }
+            }
+        }
+    }
+    plans
 }
 
 /// How far back a cursor session may have touched a plan for it to count as
@@ -287,11 +343,25 @@ pub fn sync_from(home: &Path, project_dir: &Path, harness: &str) -> PlanSyncRepo
         } else {
             Vec::new()
         };
+        let codebuddy_plans = if source.harness == "codebuddy" {
+            codebuddy_plan_paths(home, project_dir)
+        } else {
+            std::collections::BTreeSet::new()
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
             if !name.ends_with(source.suffix) {
                 continue;
+            }
+            if source.harness == "codebuddy" {
+                let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                if !codebuddy_plans.contains(&canonical) {
+                    report.notes.push(format!(
+                        "{name}: skipped — no native session planFilePath for this project"
+                    ));
+                    continue;
+                }
             }
             if source.harness == "cursor" {
                 // Attribute by session activity: a plan is this project's
@@ -555,6 +625,48 @@ mod tests {
 
     const PLAN_A: &str =
         "---\nname: Conductor UI\noverview: test\n---\n\n# Conductor UI\n\nBody A.\n";
+
+    #[test]
+    fn codebuddy_plan_requires_native_session_attribution() {
+        let home = tempfile::tempdir().expect("home");
+        let project = project();
+        let plans = home.path().join(".codebuddy/plans");
+        std::fs::create_dir_all(&plans).expect("plan dir");
+        let native_plan = plans.join("native-plan.md");
+        std::fs::write(&native_plan, PLAN_A).expect("native plan");
+        std::fs::write(plans.join("foreign.md"), PLAN_A).expect("foreign plan");
+        let transcripts = home.path().join(".codebuddy/projects/native");
+        std::fs::create_dir_all(&transcripts).expect("transcript dir");
+        let event = serde_json::json!({
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "plan this"}],
+            "sessionId": "s1",
+            "cwd": project.path().to_string_lossy(),
+            "timestamp": 1i64,
+        });
+        std::fs::write(
+            transcripts.join("s1.jsonl"),
+            serde_json::to_string(&event).unwrap(),
+        )
+        .expect("transcript");
+        std::fs::write(
+            transcripts.join("s1.meta.json"),
+            serde_json::to_string(&serde_json::json!({"planFilePath": native_plan})).unwrap(),
+        )
+        .expect("session metadata");
+
+        let report = sync_from(home.path(), project.path(), "codebuddy");
+        assert_eq!(report.ingested.len(), 1, "{report:?}");
+        assert!(
+            report.notes.iter().any(|note| note.contains("foreign.md")),
+            "{report:?}"
+        );
+        let (meta, _) = crate::plans::current(project.path()).expect("plan");
+        assert_eq!(meta.created_by_harness, "codebuddy");
+        let second = sync_from(home.path(), project.path(), "codebuddy");
+        assert!(second.ingested.is_empty(), "{second:?}");
+    }
 
     #[test]
     fn native_plan_lands_as_draft_with_provenance() {

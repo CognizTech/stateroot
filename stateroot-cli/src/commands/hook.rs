@@ -1130,6 +1130,12 @@ fn antigravity_envelope(digest: &str) -> Value {
     })
 }
 
+fn compact_event_injects(quirk: &registry::HarnessQuirk, canonical: &str) -> bool {
+    quirk.compact_injection
+        && matches!(canonical, "pre_compact" | "post_compaction")
+        && !(quirk.id == "codebuddy" && canonical == "post_compaction")
+}
+
 fn print_hook_injection(quirk: &registry::HarnessQuirk, canonical: &str, digest: &str) {
     match quirk.injection {
         Injection::StdoutJson => {
@@ -1702,12 +1708,11 @@ async fn checkpoint_from_spool(
         note!("hook checkpoint queued to outbox (offline)");
     }
 
-    // B2: where the harness injects hook stdout into the post-compaction
-    // context (registry `compact_injection`), pre/post-compaction ALSO print
-    // the bounded hook digest — state re-injected at the moment of
-    // compaction. Unsupported harnesses: checkpoint only.
+    // Compact-capable harnesses re-inject the bounded digest at supported
+    // boundaries. CodeBuddy accepts PreCompact context but documents
+    // PostCompact as observational only, so that event stays silent.
     // Pre-compact: extract into wiki/memory BEFORE re-injecting the digest.
-    if quirk.compact_injection && matches!(canonical, "pre_compact" | "post_compaction") {
+    if compact_event_injects(quirk, canonical) {
         if canonical == "pre_compact" {
             let _ = super::compiler::try_ingest(&hook_ctx, false).await;
             reconcile_boundary(&hook_ctx, project_dir);
@@ -2023,6 +2028,15 @@ mod tests {
         assert!(digest.contains("You are Yinyue."), "{digest}");
         assert!(!digest.contains("Objective:"), "{digest}");
         assert!(!digest.contains("learnings are empty"), "{digest}");
+    }
+
+    #[test]
+    fn codebuddy_only_injects_before_compaction() {
+        let codebuddy = registry::quirk("codebuddy").expect("codebuddy");
+        assert!(compact_event_injects(codebuddy, "pre_compact"));
+        assert!(!compact_event_injects(codebuddy, "post_compaction"));
+        let claude = registry::quirk("claude-code").expect("claude");
+        assert!(compact_event_injects(claude, "post_compaction"));
     }
 
     #[test]

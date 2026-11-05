@@ -10,6 +10,7 @@
 
 pub mod bundle;
 pub mod claude;
+pub mod codebuddy;
 pub mod codex;
 pub mod copilot;
 pub mod cursor;
@@ -142,6 +143,7 @@ pub trait TranscriptReader {
 pub fn readers() -> Vec<Box<dyn TranscriptReader>> {
     vec![
         Box::new(codex::CodexReader),
+        Box::new(codebuddy::CodeBuddyReader),
         Box::new(claude::ClaudeReader),
         Box::new(copilot::CopilotReader),
         Box::new(cursor::CursorReader),

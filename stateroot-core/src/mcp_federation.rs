@@ -330,7 +330,11 @@ fn collect_targets_with(
     let mut out = Vec::new();
     for entry in &reg.harnesses {
         for target in &entry.mcp_config.global {
-            let path = expand_home_relative(&target.path, home);
+            let path = if entry.id == "codebuddy" {
+                crate::harness_install::paths::resolve_registry_path(home, &entry.id, &target.path)
+            } else {
+                expand_home_relative(&target.path, home)
+            };
             // Detection-gating (R2.1): targets for harnesses absent from the
             // machine are never materialized. An existing config file counts
             // as detected; the product harnesses are always writable.

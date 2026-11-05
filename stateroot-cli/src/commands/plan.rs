@@ -406,7 +406,7 @@ pub fn sync(ctx: &Ctx) -> anyhow::Result<()> {
     ctx.require_project()?;
     let home = stateroot_core::harness_install::home_dir().map_err(|e| anyhow::anyhow!(e))?;
     let mut any = false;
-    for harness in ["cursor", "claude-code", "kimi-code"] {
+    for harness in ["cursor", "claude-code", "kimi-code", "codebuddy"] {
         let report = stateroot_core::plan_federation::sync_from(&home, &ctx.cwd, harness);
         for line in &report.ingested {
             any = true;

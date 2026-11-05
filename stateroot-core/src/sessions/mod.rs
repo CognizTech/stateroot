@@ -24,7 +24,9 @@ use serde_json::{json, Value};
 use crate::harness_install::paths;
 use crate::local_store::{self, now_rfc3339};
 use crate::tombstones::{self, TombstoneError, TombstonePolicy};
-use crate::transcripts::{self, claude, codex, copilot, cursor, dsh, hermes, kimi, openclaw, pi};
+use crate::transcripts::{
+    self, claude, codebuddy, codex, copilot, cursor, dsh, hermes, kimi, openclaw, pi,
+};
 
 /// Schema tag on the header line.
 pub const SCHEMA_SESSION_V1: &str = "stateroot.session.v1";
@@ -584,6 +586,17 @@ pub fn import_from_readers_filtered(
         }
     }
 
+    if harness.is_none_or(|h| h == "codebuddy") {
+        for file in codebuddy::session_files(home) {
+            let Some(events) = codebuddy::parse_session_file(&file) else {
+                continue;
+            };
+            if let Some(session) = extract::canonical_from_codebuddy(&events, &file, project_dir) {
+                import_one(session, &mut report);
+            }
+        }
+    }
+
     if harness.is_none_or(|h| h == "kimi") {
         let index = kimi::read_session_index(home);
         for file in kimi::session_files(home) {
@@ -916,6 +929,9 @@ pub fn summarize_stored(session: &StoredSession) -> (String, String, &'static st
         .find_map(|e| e.ts.clone())
         .unwrap_or_default();
     let outcome = match session.entries.last() {
+        Some(e) if matches!(e.native_type.as_deref(), Some("incomplete" | "interrupted")) => {
+            "interrupted"
+        }
         Some(e) if e.kind == "message" && e.role.as_deref() == Some("assistant") => "completed",
         Some(e) if e.kind == "tool_call" => "interrupted",
         Some(_) => "unknown",
