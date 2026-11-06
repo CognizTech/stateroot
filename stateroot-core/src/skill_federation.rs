@@ -450,11 +450,12 @@ fn is_projection_loop(skill_dir: &Path, skill_md: &str) -> bool {
     if skill_dir.join(PROJECTION_META).is_file() {
         return true;
     }
-    let head = if skill_md.len() > 400 {
-        &skill_md[..400]
-    } else {
-        skill_md
-    };
+    // Keep the byte budget without splitting a UTF-8 character.
+    let mut end = skill_md.len().min(400);
+    while !skill_md.is_char_boundary(end) {
+        end -= 1;
+    }
+    let head = &skill_md[..end];
     head.contains(PROJECTION_MARKER) || head.contains(MANAGED_MARKER)
 }
 
@@ -2617,6 +2618,26 @@ mod tests {
             .iter()
             .any(|s| s.slug == "demo" && s.harness == "cursor"));
         assert!(!found.iter().any(|s| s.slug == "loop"));
+    }
+
+    #[test]
+    fn projection_scan_handles_utf8_at_byte_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        for marker in ["", PROJECTION_MARKER, MANAGED_MARKER] {
+            for ch in ['a', 'é', '给', '🧞'] {
+                for start in 397..=400 {
+                    let body = format!("{marker}{}{ch}tail", "x".repeat(start - marker.len()));
+                    assert_eq!(
+                        is_projection_loop(dir.path(), &body),
+                        !marker.is_empty(),
+                        "marker={marker:?}, character={ch:?}, byte offset={start}"
+                    );
+                }
+            }
+        }
+        assert!(!is_projection_loop(dir.path(), "给🧞"));
+        let outside = format!("{}{PROJECTION_MARKER}", "x".repeat(400));
+        assert!(!is_projection_loop(dir.path(), &outside));
     }
 
     pub(super) fn write_skill(root: &Path, name: &str, description: &str) {

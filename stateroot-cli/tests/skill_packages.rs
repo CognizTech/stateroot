@@ -27,6 +27,47 @@ fn stateroot(
 }
 
 #[test]
+fn chinese_skill_crossing_scan_boundary_keeps_resume_and_status_usable() {
+    let (config, home) = homes();
+    let project = tempfile::tempdir().unwrap();
+    let cli = || {
+        let mut command = stateroot(config.path(), home.path(), project.path());
+        command.env_remove("CODEBUDDY_CONFIG_DIR");
+        command
+    };
+    cli().arg("init").assert().success();
+    let header = "---\nname: unicode-boundary\ndescription: \"";
+    let description = format!("{}给🧞完整技能说明", "a".repeat(398 - header.len()));
+    let body = format!("{header}{description}\"\n---\n# Unicode boundary\n");
+    let skill_dir = home.path().join(".codebuddy/skills/unicode-boundary");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    let path = skill_dir.join("SKILL.md");
+    std::fs::write(&path, &body).unwrap();
+
+    let scan = cli()
+        .args(["skill", "scan", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let scan: Value = serde_json::from_slice(&scan).unwrap();
+    let skill = scan
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|skill| skill["slug"] == "unicode-boundary" && skill["harness"] == "codebuddy")
+        .expect("native CodeBuddy skill remains discoverable");
+    assert_eq!(skill["description"], description);
+    cli()
+        .args(["resume", "--harness", "codebuddy"])
+        .assert()
+        .success();
+    cli().arg("status").assert().success();
+    assert_eq!(std::fs::read_to_string(path).unwrap(), body);
+}
+
+#[test]
 fn authored_resources_and_provenance_roundtrip_through_real_cli() {
     let (config, home) = homes();
     let project = tempfile::tempdir().unwrap();
