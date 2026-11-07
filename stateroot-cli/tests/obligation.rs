@@ -322,6 +322,15 @@ fn obligation_concurrent_adds_lose_nothing() {
     let project = tempfile::tempdir().expect("project");
     init_project(config_home.path(), user_home.path(), project.path());
 
+    // Exercise a legitimate owner lasting longer than the generic short-lock
+    // budget, as durable writes can do on a contended Windows filesystem.
+    let held = stateroot_core::safe_io::ResourceLock::acquire(
+        project
+            .path()
+            .join(".stateroot")
+            .join(stateroot_core::obligations::LOCK_REL),
+    )
+    .expect("hold obligation writer");
     let mut handles = Vec::new();
     for n in 0..6 {
         let config = config_home.path().to_path_buf();
@@ -339,6 +348,8 @@ fn obligation_concurrent_adds_lose_nothing() {
                 .success();
         }));
     }
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    drop(held);
     for handle in handles {
         handle.join().expect("thread");
     }

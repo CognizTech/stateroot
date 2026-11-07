@@ -139,6 +139,14 @@ fn lock_path(project_dir: &Path) -> PathBuf {
     local_store::root(project_dir).join(LOCK_REL)
 }
 
+// Obligation mutations persist a definition and its event under one lock.
+// Concurrent native writers need time to queue behind durable filesystem I/O;
+// the generic 600ms short-lock budget is insufficient on Windows runners.
+fn write_guard(project_dir: &Path) -> Result<ResourceLock, String> {
+    ResourceLock::acquire_with_budget(lock_path(project_dir), 400, 25)
+        .map_err(|error| error.to_string())
+}
+
 fn report_path(project_dir: &Path, abs: &Path) {
     if let Ok(rel) = abs.strip_prefix(local_store::root(project_dir)) {
         local_store::report_written(project_dir, &rel.to_string_lossy());
@@ -341,7 +349,7 @@ pub fn add(project_dir: &Path, new: NewObligation) -> Result<(Obligation, bool),
     if new.task.trim().is_empty() {
         return Err("obligation task is empty".into());
     }
-    let _guard = ResourceLock::acquire(lock_path(project_dir)).map_err(|e| e.to_string())?;
+    let _guard = write_guard(project_dir)?;
     if let Some(existing) = find_by_operation(project_dir, &new.operation_id) {
         return Ok((existing, false));
     }
@@ -392,7 +400,7 @@ fn mutate(
     apply: impl Fn(&mut Obligation) -> Result<(), String>,
     event_fields: impl Fn(&Obligation) -> (Option<String>, Option<String>, Option<String>),
 ) -> Result<Obligation, String> {
-    let _guard = ResourceLock::acquire(lock_path(project_dir)).map_err(|e| e.to_string())?;
+    let _guard = write_guard(project_dir)?;
     // Idempotent retry of the same mutation operation returns current state.
     let (events, _) = read_events(project_dir);
     if events.iter().any(|e| e.operation_id == operation_id) {

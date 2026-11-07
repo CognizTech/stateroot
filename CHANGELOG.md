@@ -5,6 +5,8 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- Concurrent obligation updates wait through filesystem contention while
+  preserving exclusive ownership and every submitted entry.
 - Fork worktrees created by `delegate --plan` and bare `fork --worktree`
   now live under `.stateroot/local/worktrees/<fork-id>/`, keeping the
   project's parent directory clear. Explicit external locations remain
