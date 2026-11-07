@@ -838,6 +838,15 @@ fn plan_delegation_provisions_one_claimed_fork_worktree() {
     assert_eq!(envelope["fork_id"], fork_id);
     assert_eq!(envelope["plan_id"], plan_id);
     let worktree = record["worktree"].as_str().expect("worktree");
+    assert_eq!(
+        std::path::Path::new(worktree),
+        project
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join(".stateroot/local/worktrees")
+            .join(fork_id)
+    );
     assert!(
         std::path::Path::new(worktree).is_dir(),
         "worktree provisioned"

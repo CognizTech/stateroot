@@ -2212,17 +2212,14 @@ pub fn fork_materialize(
             worktree_path.display()
         )));
     }
-    let project_canon = project_dir
-        .canonicalize()
-        .unwrap_or_else(|_| project_dir.to_path_buf());
-    let dest_canon = worktree_path
-        .parent()
-        .and_then(|p| p.canonicalize().ok())
-        .map(|p| p.join(worktree_path.file_name().unwrap_or_default()))
-        .unwrap_or_else(|| worktree_path.to_path_buf());
-    if dest_canon.starts_with(&project_canon) {
+    let project_canon = project_dir.canonicalize()?;
+    let dest_canon = resolved_worktree_path(worktree_path)?;
+    let managed = managed_worktree_path(project_dir, name)?;
+    if (dest_canon.starts_with(&project_canon) && dest_canon != managed)
+        || (std::path::absolute(worktree_path)? == managed && dest_canon != managed)
+    {
         return Err(RootsError::Merge(format!(
-            "worktree destination {} is inside the project tree — use a sibling directory",
+            "worktree destination {} is inside the project tree or redirects the managed area — use --worktree without a path or an external directory",
             worktree_path.display()
         )));
     }
@@ -2287,6 +2284,9 @@ pub fn fork_materialize(
             let reference = repo.find_reference(&tmp_branch)?;
             let mut opts = git2::WorktreeAddOptions::new();
             opts.reference(Some(&reference));
+            if dest_canon == managed {
+                std::fs::create_dir_all(managed.parent().expect("managed worktree parent"))?;
+            }
             repo.worktree(name, worktree_path, Some(&opts))?;
             worktree_created = true;
         }
@@ -4813,13 +4813,17 @@ fn merge_cleanup_budget() -> Duration {
     MERGE_CLEANUP_BUDGET
 }
 
-/// Creation and deletion share one destination owner, including across
-/// Windows/WSL aliases. Independent worktree paths never share this lock.
-fn fork_worktree_path_guard(
-    repo: &Repository,
-    path: &Path,
-) -> Result<crate::safe_io::ResourceLock, RootsError> {
-    use sha2::Digest;
+/// Default local-only location for an isolated agent checkout. Explicit external
+/// paths remain supported; ordinary project directories are never worktrees.
+pub fn managed_worktree_path(project_dir: &Path, name: &str) -> Result<PathBuf, RootsError> {
+    validate_fork_name(name)?;
+    Ok(project_dir
+        .canonicalize()?
+        .join(".stateroot/local/worktrees")
+        .join(name))
+}
+
+fn resolved_worktree_path(path: &Path) -> Result<PathBuf, RootsError> {
     let absolute = std::path::absolute(path)?;
     let mut ancestor = absolute.as_path();
     let mut suffix = Vec::new();
@@ -4844,6 +4848,17 @@ fn fork_worktree_path_guard(
             resolved.push(component);
         }
     }
+    Ok(resolved)
+}
+
+/// Creation and deletion share one destination owner, including across
+/// Windows/WSL aliases. Independent worktree paths never share this lock.
+fn fork_worktree_path_guard(
+    repo: &Repository,
+    path: &Path,
+) -> Result<crate::safe_io::ResourceLock, RootsError> {
+    use sha2::Digest;
+    let resolved = resolved_worktree_path(path)?;
     let mut key = crate::path_identity::normalize_host_path(&resolved.to_string_lossy());
     if key.as_bytes().get(1) == Some(&b':') {
         key.make_ascii_lowercase();
@@ -7915,6 +7930,57 @@ mod tests {
     }
 
     #[test]
+    fn managed_fork_worktrees_keep_lineage_local_and_preserve_the_trunk() {
+        let (_tmp, dir) = project();
+        write(&dir, "src/main.rs", "base\n");
+        let (base, _) = create_root(&dir, "cli", "base", None).unwrap();
+        let (name, _) = fork_root(&dir, &base.id, Some("managed"), "cli").unwrap();
+        let path = managed_worktree_path(&dir, &name).unwrap();
+        fork_materialize(&dir, &name, &path, None).unwrap();
+        let repo = Repository::open(&path).unwrap();
+        assert!(repo.head_detached().unwrap());
+        assert_eq!(registered_worktree_path(&dir, &name).unwrap(), path);
+        write(&path, "src/main.rs", "fork\n");
+        let (child, _) = create_root(&path, "cli", "fork change", None).unwrap();
+        assert_eq!(
+            latest_root(&dir).unwrap().as_deref(),
+            Some(base.id.as_str())
+        );
+        assert_eq!(std::fs::read(dir.join("src/main.rs")).unwrap(), b"base\n");
+        let (trunk, _) = create_root(&dir, "cli", "local worktree excluded", None).unwrap();
+        let owner = Repository::open(&dir).unwrap();
+        let commit = owner.find_commit(trunk.id.parse().unwrap()).unwrap();
+        assert!(commit
+            .tree()
+            .unwrap()
+            .get_path(Path::new(".stateroot/local"))
+            .is_err());
+        assert_eq!(
+            owner
+                .refname_to_id(&format!("{FORKS_REF_PREFIX}{name}"))
+                .unwrap()
+                .to_string(),
+            child.id
+        );
+        assert!(fork_materialize(&dir, &name, &path, None).is_err());
+        assert!(managed_worktree_path(&dir, "../escape").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_worktree_destination_cannot_redirect_through_a_symlink() {
+        let (_tmp, dir) = project();
+        let outside = tempfile::tempdir().unwrap();
+        let (base, _) = create_root(&dir, "cli", "base", None).unwrap();
+        let (name, _) = fork_root(&dir, &base.id, Some("redirect"), "cli").unwrap();
+        std::fs::create_dir_all(dir.join(".stateroot/local")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.join(".stateroot/local/worktrees")).unwrap();
+        let path = managed_worktree_path(&dir, &name).unwrap();
+        assert!(fork_materialize(&dir, &name, &path, None).is_err());
+        assert!(!outside.path().join(name).exists());
+    }
+
+    #[test]
     fn fork_materialize_preserves_collisions_and_unwinds_only_acquired_resources() {
         for phase in 0..=3 {
             let (_tmp, dir) = project();
@@ -8245,6 +8311,11 @@ mod tests {
         write(&dir, "src/main.rs", "fn main() {}\n");
         create_root(&dir, "cli", "first", None).expect("snap");
         write(&dir, ".stateroot/worktrees/nested-checkout.txt", "bloat\n");
+        write(
+            &dir,
+            ".stateroot/local/worktrees/fork/nested-checkout.txt",
+            "bloat\n",
+        );
         write(&dir, "src/main.rs", "fn main() { println!(\"hi\"); }\n");
         let outcome = snap_if_changed(&dir, "cli", "auto", None).expect("snap2");
         let SnapOutcome::Created(m, _) = outcome else {
@@ -8260,6 +8331,7 @@ mod tests {
             tree.get_path(Path::new(".stateroot/worktrees")).is_err(),
             "nested worktree content entered the tree"
         );
+        assert!(tree.get_path(Path::new(".stateroot/local")).is_err());
     }
 
     // -- WS5 batch B: merge -------------------------------------------------
@@ -10384,9 +10456,11 @@ mod tests {
         let (_tmp, dir) = project();
         write(&dir, "src/main.rs", "fn main() {}\n");
         let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
-        let (_wt, _tip) =
-            fork_with_change(&dir, &first.id, "fork-a", "src/lib_a.rs", "pub fn a() {}\n");
-        let wt_path = registered_worktree_path(&dir, "fork-a").expect("registered");
+        fork_root(&dir, &first.id, Some("fork-a"), "cli").expect("fork");
+        let wt_path = managed_worktree_path(&dir, "fork-a").unwrap();
+        fork_materialize(&dir, "fork-a", &wt_path, None).expect("managed checkout");
+        write(&wt_path, "src/lib_a.rs", "pub fn a() {}\n");
+        create_root(&wt_path, "cli", "fork change", None).expect("fork snap");
         merge_forks(&dir, &["fork-a".to_string()], "kimi").expect("merge");
         assert!(
             wt_path.exists(),

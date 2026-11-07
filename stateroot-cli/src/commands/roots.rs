@@ -394,15 +394,22 @@ pub fn fork(
         engine::fork_root(&ctx.cwd, hash, branch, LOCAL_HARNESS).map_err(|e| anyhow::anyhow!(e))?;
     println!("fork {name} → {refname}");
     if let Some(path) = worktree {
-        engine::fork_materialize(&ctx.cwd, &name, Path::new(path), plan)
-            .map_err(|e| anyhow::anyhow!(e))?;
-        println!("worktree: {path} (fork context stamped; snaps there chain on {refname})");
+        let path = if path.is_empty() {
+            engine::managed_worktree_path(&ctx.cwd, &name)?
+        } else {
+            Path::new(path).to_path_buf()
+        };
+        engine::fork_materialize(&ctx.cwd, &name, &path, plan).map_err(|e| anyhow::anyhow!(e))?;
+        println!(
+            "worktree: {} (fork context stamped; snaps there chain on {refname})",
+            path.display()
+        );
         println!("HEAD: detached at the fork root (user branches untouched)");
         if let Some(plan) = plan {
             println!("plan claimed: {plan}");
         }
     } else {
-        println!("materialize with: stateroot fork {hash} --worktree <path>");
+        println!("materialize with: stateroot fork {hash} --worktree");
     }
     println!(
         "fidelity: stateroot show {hash} --fidelity (environment compatibility is not guaranteed)"

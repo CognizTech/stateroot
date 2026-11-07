@@ -40,6 +40,20 @@ Handoff carries **session continuity**. **Root lineage** records verified projec
 4. Run `stateroot fork <root>` when work should diverge from an earlier root.
 5. Use `stateroot log`, `stateroot show`, `stateroot diff`, and `stateroot compare` to inspect lineage — do not invent history the CLI has not verified.
 
+For isolated agent work, use `stateroot fork <root> --plan <id> --worktree`.
+Bare `--worktree` and `delegate --plan` use the same managed location,
+`.stateroot/local/worktrees/<fork-id>/`, excluded from roots and federation.
+Do not create per-task sibling directories by default. Explicit external
+`--worktree <path>` remains available; other locations inside the project
+are rejected. A plain `fork <root>` still creates only the lineage ref.
+
+Keep active worktrees in place. After verified integration, retire completed
+copies with `stateroot merge --cleanup <fork>…`; preserve unfinished files
+and local evidence first. Historical external worktrees keep their current
+bindings: never raw-move them or rewrite old handoffs. Project removal
+refuses while the managed area contains worktrees, including unregistered
+copies, so unfinished work cannot be erased with the surrounding store.
+
 Fork refs remain canonical under `refs/stateroot/forks/*`; default names use
 an opaque full UUID. Use `--name` for an explicit name (`--branch` is a
 compatibility alias, not a human Git branch). For historical temporary refs

@@ -3,6 +3,15 @@
 All notable changes to StateRoot. Format loosely follows Keep a Changelog;
 StateRoot is pre-1.0 and milestones land as minor versions.
 
+## Unreleased
+
+- Fork worktrees created by `delegate --plan` and bare `fork --worktree`
+  now live under `.stateroot/local/worktrees/<fork-id>/`, keeping the
+  project's parent directory clear. Explicit external locations remain
+  supported. Project removal preserves retained managed worktrees.
+- Built-in skill and CLI documentation explain managed placement and
+  cleanup of completed worktrees.
+
 ## v0.2.13 — 2026-11-04
 
 - **MCP tool failures are honest.** Tool results preserve the JSON payload

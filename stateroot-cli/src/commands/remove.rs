@@ -486,6 +486,13 @@ pub async fn run(ctx: &Ctx, yes: bool, dry_run: bool, full: bool) -> anyhow::Res
 
     if plan.stateroot_dir {
         let root = local_store::root(&plan.project_dir);
+        let worktrees = root.join("local/worktrees");
+        if worktrees.is_dir() && std::fs::read_dir(&worktrees)?.next().transpose()?.is_some() {
+            anyhow::bail!(
+                "managed fork worktrees remain in {}; retain unfinished work and use `stateroot merge --cleanup <fork>` for merged forks before removing the project",
+                worktrees.display()
+            );
+        }
         std::fs::remove_dir_all(&root)?;
         println!("  deleted {}", root.display());
     }

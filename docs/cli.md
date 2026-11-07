@@ -313,7 +313,7 @@ For an interactive harness session use `stateroot harness run` instead;
 ## `stateroot fork` / `stateroot merge` — parallel plan execution
 
 ```bash
-stateroot fork <root> --worktree <path> [--name NAME] [--plan ID]
+stateroot fork <root> [--name NAME] [--plan ID] --worktree [<path>]
 stateroot fork --cleanup [--json]
 stateroot fork --cleanup --apply [--json]
 stateroot merge <fork> [<fork>…]
@@ -325,14 +325,21 @@ stateroot merge --abort <attempt>
 ```
 
 `fork --worktree` materializes an isolated checkout of the fork root's
-tree at `<path>` — validated (destination free and outside the project,
+tree in `.stateroot/local/worktrees/<fork-id>/` when no path is supplied.
+`delegate --plan` uses the same managed area. An explicit `<path>` selects
+an external location instead. Placement is validated (destination free,
+internal placement restricted to the managed fork directory,
 plan exists and unclaimed) and rolled back on partial failure. The
 snapshot's `.stateroot/` state (plans, handoffs, memory) travels with it;
 HEAD is detached at the root commit (user branches are never created or
 moved). A machine-local `fork-context.json` stamp makes snaps inside the
 worktree chain on the fork ref, never on the trunk's `latest`.
-`.stateroot/worktrees/` is hardcoded-ignored; keep checkouts outside the
-project tree.
+The managed area is local-only and never enters roots or federation.
+Existing external worktrees retain their paths and bindings; do not move
+them by hand. After integration and retention of any local evidence, use
+`stateroot merge --cleanup <fork>…` to retire completed copies. `remove`
+refuses while managed worktrees remain, including unregistered copies.
+The legacy `.stateroot/worktrees/` exclusion remains for compatibility.
 
 Fork lineage stays under `refs/stateroot/forks/*`; generated default names
 use an opaque full UUID. `--name` selects a name explicitly; `--branch`

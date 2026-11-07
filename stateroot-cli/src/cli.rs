@@ -1012,9 +1012,9 @@ pub struct ForkArgs {
     /// Opaque StateRoot fork name (preferred over the compatibility --branch alias).
     #[arg(long, conflicts_with = "branch")]
     pub name: Option<String>,
-    /// Materialize the fork as an isolated worktree at this path
-    /// (sibling directory recommended, never inside the project tree).
-    #[arg(long)]
+    /// Materialize an isolated worktree in .stateroot/local/worktrees/<fork-id>.
+    /// Supply a path to use an explicit external directory instead.
+    #[arg(long, num_args = 0..=1, default_missing_value = "")]
     pub worktree: Option<String>,
     /// Claim this plan for the fork (recorded in the fork record and the
     /// worktree's fork context).

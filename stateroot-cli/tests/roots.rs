@@ -417,7 +417,12 @@ fn diff_content_revert_and_fork() {
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
     assert!(stdout.contains("fork claude-line"), "fork: {stdout}");
-    assert!(stdout.contains("--worktree <path>"), "fork: {stdout}");
+    assert!(
+        stdout.contains(&format!(
+            "materialize with: stateroot fork {first} --worktree"
+        )),
+        "fork: {stdout}"
+    );
 
     // append-only revert: new root with the v1 tree; v2 still listed.
     let out = stateroot(config_home.path(), user_home.path(), project.path())
@@ -773,4 +778,44 @@ fn merge_conflicted_attempt_reconciles_through_worktree() {
         .args(["merge", "--status", &id])
         .assert()
         .failure();
+}
+
+#[test]
+fn managed_fork_cli_keeps_local_work_when_project_removal_is_requested() {
+    let config = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    init_project(config.path(), home.path(), project.path());
+    write(project.path(), "work.txt", "base\n");
+    let out = stateroot(config.path(), home.path(), project.path())
+        .args(["snap", "--reason", "base"])
+        .assert()
+        .success();
+    let root = root_hash(&String::from_utf8_lossy(&out.get_output().stdout));
+    stateroot(config.path(), home.path(), project.path())
+        .args(["fork", &root, "--name", "managed", "--worktree"])
+        .assert()
+        .success();
+    let worktree = project.path().join(".stateroot/local/worktrees/managed");
+    assert_eq!(std::fs::read(worktree.join("work.txt")).unwrap(), b"base\n");
+    write(&worktree, "uncommitted.txt", "retain me\n");
+    let owner = git2::Repository::open(project.path()).unwrap();
+    let before = owner.refname_to_id("refs/stateroot/latest").unwrap();
+    stateroot(config.path(), home.path(), project.path())
+        .args(["remove", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("managed fork worktrees remain"));
+    assert_eq!(
+        std::fs::read(worktree.join("uncommitted.txt")).unwrap(),
+        b"retain me\n"
+    );
+    assert_eq!(
+        owner.refname_to_id("refs/stateroot/latest").unwrap(),
+        before
+    );
+    assert!(git2::Repository::open(&worktree)
+        .unwrap()
+        .head_detached()
+        .unwrap());
 }

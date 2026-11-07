@@ -170,11 +170,7 @@ fn spawn_plan(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
         anyhow::anyhow!("no trunk root yet — run `stateroot snap` before parallel work")
     })?;
     let (fork_id, _) = stateroot_core::roots::fork_root(&ctx.cwd, &base, None, "cli")?;
-    let worktree = ctx
-        .cwd
-        .parent()
-        .unwrap_or(&ctx.cwd)
-        .join(format!(".stateroot-work-{fork_id}"));
+    let worktree = stateroot_core::roots::managed_worktree_path(&ctx.cwd, &fork_id)?;
     stateroot_core::roots::fork_materialize(&ctx.cwd, &fork_id, &worktree, Some(&plan.id))?;
     stateroot_core::plans::transition(
         &worktree,
