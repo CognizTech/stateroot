@@ -873,4 +873,5 @@ fn plan_delegation_provisions_one_claimed_fork_worktree() {
     .expect("plan json");
     assert_eq!(active["status"], "active");
     std::fs::write(std::path::Path::new(worktree).join(".go"), b"go").expect("release");
+    assert_eq!(wait_for_outcome(project.path(), 60)["outcome"], "completed");
 }
