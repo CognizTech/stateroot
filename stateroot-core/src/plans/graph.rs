@@ -475,11 +475,14 @@ fn published_contains(project: &Path, root: &str) -> bool {
     tip == root || repo.graph_descendant_of(tip, root).unwrap_or(false)
 }
 
+type SourceComparisons = BTreeMap<(PathBuf, String, String), Result<bool, String>>;
+
 fn dependency_state(
     project: &Path,
     target: Option<&Path>,
     edge: &PlanDependency,
     all: &BTreeMap<String, PlanMeta>,
+    comparisons: &mut SourceComparisons,
 ) -> (String, String) {
     let Some(upstream) = all.get(&edge.plan_id) else {
         return if meta_path(project, &edge.plan_id).exists() {
@@ -568,14 +571,34 @@ fn dependency_state(
             && !accepted.accepted_by.trim().is_empty()
             && !accepted.evidence.trim().is_empty()
             && published_contains(target, &accepted.target_root)
-            && crate::roots::product_tree_matches(target, &accepted.target_product_tree)
-                .unwrap_or(false)
         {
-            return (
-                "satisfied".into(),
-                "native coordinator accepted compatibility on unchanged published target source"
-                    .into(),
-            );
+            // Reuse the same source observation within this graph only;
+            // admission obtains a fresh graph before launching a worker.
+            let compared = comparisons
+                .entry((
+                    target.to_path_buf(),
+                    target_root.clone(),
+                    accepted.target_product_tree.clone(),
+                ))
+                .or_insert_with(|| {
+                    crate::roots::product_tree_matches(target, &accepted.target_product_tree)
+                });
+            match compared {
+                Ok(true) => {
+                    return (
+                        "satisfied".into(),
+                        "native coordinator accepted compatibility on unchanged published target source"
+                            .into(),
+                    );
+                }
+                Ok(false) => {}
+                Err(detail) => {
+                    return (
+                        "source_unavailable".into(),
+                        format!("target source comparison unavailable: {detail}"),
+                    );
+                }
+            }
         }
         return (
             "acceptance_stale".into(),
@@ -726,6 +749,7 @@ pub fn graph(project: &Path) -> PlanGraph {
         .map(|p| (p.id.clone(), p))
         .collect();
     let mut nodes = Vec::new();
+    let mut comparisons = SourceComparisons::new();
     for plan in all.values() {
         let declaration = plan.execution.as_ref().map(|e| &e.declaration);
         let assignment = declaration.and_then(|d| d.assignment.clone());
@@ -785,7 +809,13 @@ pub fn graph(project: &Path) -> PlanGraph {
                         "dependency reference is malformed".into(),
                     )
                 } else {
-                    dependency_state(authority_project, target.as_deref(), edge, authority_plans)
+                    dependency_state(
+                        authority_project,
+                        target.as_deref(),
+                        edge,
+                        authority_plans,
+                        &mut comparisons,
+                    )
                 };
                 if state != "satisfied" {
                     blockers.push(reason(&state, &detail, Some(edge.plan_id.clone())));

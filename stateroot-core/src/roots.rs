@@ -1207,7 +1207,7 @@ pub fn product_tree_matches(project: &Path, id: &str) -> Result<bool, String> {
     while let Some(dir) = stack.pop() {
         for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
             entries += 1;
-            if entries > 4096 || start.elapsed() > Duration::from_secs(2) {
+            if entries > 4096 || start.elapsed() > Duration::from_secs(10) {
                 return Err("source comparison budget exceeded".into());
             }
             let path = entry.map_err(|e| e.to_string())?.path();
@@ -1232,19 +1232,20 @@ pub fn product_tree_matches(project: &Path, id: &str) -> Result<bool, String> {
                     return Ok(false);
                 };
                 let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
-                bytes += size;
-                if size > 8 * 1024 * 1024 || bytes > 64 * 1024 * 1024 {
+                let remaining = 64 * 1024 * 1024 - bytes;
+                if size > remaining {
                     return Err("source comparison byte budget exceeded".into());
                 }
                 let mut content = Vec::new();
                 std::fs::File::open(path)
                     .map_err(|e| e.to_string())?
-                    .take(8 * 1024 * 1024 + 1)
+                    .take(remaining + 1)
                     .read_to_end(&mut content)
                     .map_err(|e| e.to_string())?;
-                if content.len() > 8 * 1024 * 1024 {
+                if content.len() as u64 > remaining {
                     return Err("source comparison byte budget exceeded".into());
                 }
+                bytes += content.len() as u64;
                 if content != repo.find_blob(oid).map_err(|e| e.to_string())?.content() {
                     return Ok(false);
                 }
@@ -6493,12 +6494,14 @@ mod tests {
     fn verification_fingerprint_reads_bytes_even_when_stat_cache_matches() {
         let (_tmp, dir) = project();
         write(&dir, "code.txt", "before");
+        std::fs::write(dir.join("demo.bin"), vec![b'x'; 9 * 1024 * 1024]).unwrap();
         let path = dir.join("code.txt");
         let file = std::fs::File::options().write(true).open(&path).unwrap();
         let old_time = std::time::UNIX_EPOCH + Duration::from_secs(1_000_000);
         file.set_times(std::fs::FileTimes::new().set_modified(old_time))
             .unwrap();
         let first = current_product_tree(&dir).unwrap();
+        assert!(product_tree_matches(&dir, &first).unwrap());
         write(&dir, "code.txt", "after!");
         file.set_times(std::fs::FileTimes::new().set_modified(old_time))
             .unwrap();
