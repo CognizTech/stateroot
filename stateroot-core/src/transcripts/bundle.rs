@@ -250,7 +250,13 @@ pub(crate) fn source_files(
             match harness {
                 "codex" => name.starts_with("rollout-") && name.ends_with(".jsonl"),
                 "kimi" => name == "wire.jsonl",
-                "openclaw" => name.ends_with(".jsonl") && !name.contains(".deleted."),
+                // Trajectory companions use a separate trace schema; their
+                // canonical session siblings remain the native recall source.
+                "openclaw" => {
+                    name.ends_with(".jsonl")
+                        && !name.contains(".deleted.")
+                        && !name.ends_with(".trajectory.jsonl")
+                }
                 _ => name.ends_with(".jsonl"),
             }
         };
@@ -1174,6 +1180,47 @@ mod tests {
         format!(
             r#"{{"timestamp":"2026-07-01T09:59:00Z","type":"session_meta","payload":{{"id":"{id}","timestamp":"2026-07-01T10:00:00Z","cwd":"{cwd}","originator":"codex_cli"}}}}"#
         )
+    }
+
+    #[test]
+    fn native_discovery_distinguishes_openclaw_trajectory_companions() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".openclaw/agents/main/sessions");
+        let header =
+            json!({"type":"session","id":"native-canary","cwd":project.path()}).to_string();
+        let message = json!({"type":"message","message":{"role":"user","content":"trajectorycanary retained native request"}}).to_string();
+        let session = write_rollout(&dir, "native-canary.jsonl", &[&header, &message]);
+        let trace = json!({"type":"session.started","traceSchema":"trajectory","workspaceDir":project.path()}).to_string();
+        let companion = write_rollout(&dir, "native-canary.trajectory.jsonl", &[&trace]);
+        let mut visited = 0;
+        let sources = source_files(
+            home.path(),
+            &mut visited,
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(sources, vec![("openclaw".into(), session.clone())]);
+        let bundles = source_bundles(home.path(), project.path(), "openclaw", &session).unwrap();
+        assert_eq!(bundles.len(), 1);
+        assert!(bundles[0].to_string().contains("trajectorycanary"));
+        assert!(
+            companion.is_file(),
+            "the companion is retained, not deleted"
+        );
+
+        // An unknown broken session is still selected and reported as an error;
+        // this is a known-format distinction, not a skip-all-failures policy.
+        let broken = write_rollout(&dir, "broken.jsonl", &["{malformed native session"]);
+        let mut visited = 0;
+        let sources = source_files(
+            home.path(),
+            &mut visited,
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(sources.iter().any(|(_, path)| path == &broken));
+        assert!(source_bundles(home.path(), project.path(), "openclaw", &broken).is_err());
     }
 
     #[test]

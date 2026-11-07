@@ -1003,8 +1003,9 @@ pub struct RevertArgs {
 #[derive(Debug, Args)]
 pub struct ForkArgs {
     /// Root hash to branch from.
-    pub root: String,
-    /// Fork name (default: an opaque f-<id8>). Never a user branch:
+    #[arg(required_unless_present = "cleanup", conflicts_with = "cleanup")]
+    pub root: Option<String>,
+    /// Fork name (default: an opaque generated ID). Never a user branch:
     /// refs/heads entries are never created or moved by fork.
     #[arg(long)]
     pub branch: Option<String>,
@@ -1019,6 +1020,15 @@ pub struct ForkArgs {
     /// worktree's fork context).
     #[arg(long)]
     pub plan: Option<String>,
+    /// Inspect leaked temporary fork refs without changing worktrees.
+    #[arg(long, conflicts_with_all = ["branch", "name", "worktree", "plan"])]
+    pub cleanup: bool,
+    /// Remove only temporary refs whose unchanged StateRoot ownership is proven.
+    #[arg(long, requires = "cleanup")]
+    pub apply: bool,
+    /// Print the temporary-ref inspection or repair as JSON.
+    #[arg(long, requires = "cleanup")]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]

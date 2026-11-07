@@ -313,7 +313,9 @@ For an interactive harness session use `stateroot harness run` instead;
 ## `stateroot fork` / `stateroot merge` — parallel plan execution
 
 ```bash
-stateroot fork <root> --worktree <path> [--plan ID]
+stateroot fork <root> --worktree <path> [--name NAME] [--plan ID]
+stateroot fork --cleanup [--json]
+stateroot fork --cleanup --apply [--json]
 stateroot merge <fork> [<fork>…]
 stateroot merge --cleanup <fork> [<fork>…]
 stateroot merge --prepare <fork> [<fork>…] --json
@@ -331,6 +333,21 @@ moved). A machine-local `fork-context.json` stamp makes snaps inside the
 worktree chain on the fork ref, never on the trunk's `latest`.
 `.stateroot/worktrees/` is hardcoded-ignored; keep checkouts outside the
 project tree.
+
+Fork lineage stays under `refs/stateroot/forks/*`; generated default names
+use an opaque full UUID. `--name` selects a name explicitly; `--branch`
+remains a compatibility alias and does not create a human Git branch.
+
+`stateroot fork --cleanup` inspects historical
+`refs/heads/stateroot-forktmp-*` leaks without changing refs or worktrees.
+It reports each ref as `eligible` or `retained`, with its target and reason.
+`--apply` removes only proven unchanged, owned, unused temporary refs:
+the fork record, creation reflog, retained original root and worktree state
+must agree, and deletion revalidates ownership and use. Ambiguous, changed
+or active refs remain explicitly `retained`. `--json` exposes the same
+per-ref result (`removed` after successful repair). This command does not
+delete worktrees or canonical `refs/stateroot/*` history; merged-worktree
+removal remains `stateroot merge --cleanup <fork>…` below.
 
 `stateroot merge` folds fork tips back into the trunk: each fork is
 3-way-merged into the accumulated union, then committed as ONE root with N
@@ -471,13 +488,16 @@ archived duplicates).
 
 - **The `local/` boundary** — canonical sessions live under
   `.stateroot/local/`, never pinned into roots (same rule as
-  `local/memory.sqlite`): full session logs stay out of snapshots to
-  protect root size. Promotion into synced state is a later,
+  `local/memory-index/<host-namespace>/memory.sqlite`): full session logs
+  stay out of snapshots to protect root size. Promotion into synced state is a later,
   retention-tiered decision.
 - **Honest skips** — DSH `.jsonl.zstd` artifacts are counted and skipped
   (no zstd in the dependency tree); torn tails and seq gaps are recorded,
   not hidden; `assistant/chunk` stream deltas are skipped (assembled text
   lives in `assistant/message`) with the omission counted.
+- **OpenClaw trajectory companions** — native trajectory companion files
+  are excluded from canonical session enumeration; they remain on disk.
+  This is a format-specific enumeration rule, not general evidence suppression.
 - `stateroot session list [--harness H]` — id, harness, span, entries,
   outcome. `stateroot session show <id>` — header, first user message, last
   entries (capped for display).
@@ -818,6 +838,28 @@ downgrade is not historical state restoration. No-root, partial scans, unknown
 metadata and missing verification are not reported as verified acceptance.
 
 ## Capture exclusions and original-evidence recall
+
+The derived memory cache lives at
+`.stateroot/local/memory-index/<host-namespace>/memory.sqlite`. The namespace
+is stable within a runtime (boot and PID namespace on Linux), so a new
+runtime builds its own cache. Schema initialization and refresh use SQLite
+transactions and crash recovery; recall does not delete another runtime's
+locks or databases. Canonical intelligence sources remain separate from
+these disposable derived caches.
+
+If the current runtime has no readable committed generation, recall can
+read the legacy `.stateroot/local/memory.sqlite` without modifying it,
+then try preserved prior-runtime caches. Discovery checks at most 128
+directory entries within a 250 ms metadata-scan budget and opens at most
+eight candidate databases. Old directories are retained; the bounded scan
+does not establish that every preserved generation was examined. Fallback
+hits are always `Stale` and remain subject to current source visibility,
+removal and tombstone checks. A preserved fallback never becomes `Current`.
+
+Run `stateroot memory recall state` to refresh this runtime's cache.
+`stateroot doctor` and `stateroot status` show the selected cache path,
+generation and health. Read index freshness separately from raw evidence
+coverage: `Current` does not mean every raw observation was searched.
 
 Root `.gitignore` and `.staterootignore` exclude matching project files from
 snapshots. Tool results are a separate observation stream: by default their

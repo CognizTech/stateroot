@@ -207,6 +207,9 @@ pub fn run(ctx: &Ctx, json_out: bool) -> anyhow::Result<()> {
             "boundary journal: {jobs_active} active · {jobs_manual} parked for manual attention"
         );
         match &index_health {
+            Some(h) if matches!(h.generation, "legacy_read_only" | "prior_runtime_read_only") => println!(
+                "memory index: preserved read-only generation — `stateroot memory recall` builds this runtime's cache; other runtime locks and databases stay untouched"
+            ),
             Some(h) if h.error.is_some() && h.fingerprint.is_none() => {
                 println!("memory index: not built yet — first `stateroot memory recall` builds it")
             }

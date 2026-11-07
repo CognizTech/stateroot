@@ -355,6 +355,30 @@ pub fn revert(ctx: &Ctx, hash: &str, yes: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Inspect or remove only proven historical temporary refs; worktrees stay put.
+pub fn cleanup_fork_refs(ctx: &Ctx, apply: bool, json_output: bool) -> anyhow::Result<()> {
+    ctx.require_project()?;
+    let results = engine::cleanup_temporary_fork_refs(&ctx.cwd, apply)?;
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": "stateroot.fork-ref-cleanup.v1", "apply": apply, "refs": results,
+            }))?
+        );
+    } else if results.is_empty() {
+        println!("no temporary fork refs found");
+    } else {
+        for result in results {
+            println!("{} {}: {}", result.state, result.reference, result.detail);
+        }
+        if !apply {
+            println!("apply eligible removals with `stateroot fork --cleanup --apply`");
+        }
+    }
+    Ok(())
+}
+
 /// `stateroot fork <hash> [--branch NAME] [--worktree PATH] [--plan ID]`
 /// — branch ref from the root; with --worktree, an isolated checkout whose
 /// snaps chain on the fork ref (WS5 parallel execution).

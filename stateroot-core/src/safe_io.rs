@@ -211,8 +211,8 @@ fn same_namespace(namespace: &str) -> bool {
 /// Lock acquisition failure (fail-closed by contract).
 #[derive(Debug, thiserror::Error)]
 pub enum LockError {
-    /// The budget expired while another live owner holds the lock.
-    #[error("resource lock {path} held by live owner ({owner}) after {budget_ms}ms")]
+    /// The budget expired; owner liveness may be unknown in another runtime.
+    #[error("resource lock {path} held or ownership unverifiable ({owner}) after {budget_ms}ms")]
     Timeout {
         /// Lock file path.
         path: PathBuf,
@@ -474,7 +474,7 @@ impl ResourceLock {
                     format!("same host namespace; acquired at {acquired}")
                 } else {
                     format!(
-                        "foreign host namespace — a live owner in another runtime cannot be probed or reclaimed from here; acquired at {acquired}"
+                        "foreign host namespace — owner liveness is unknown in this runtime, never probed or reclaimed from here; acquired at {acquired}"
                     )
                 };
                 (
@@ -850,6 +850,7 @@ mod tests {
         .expect("plant foreign");
         let err = ResourceLock::acquire_with_budget(&path, 2, 5)
             .expect_err("foreign lock is held, never reclaimed");
+        assert!(!err.to_string().contains("held by live owner"));
         match err {
             LockError::Timeout { owner, .. } => {
                 assert!(owner.contains("foreign host namespace"), "{owner}");

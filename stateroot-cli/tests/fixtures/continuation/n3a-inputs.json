@@ -1,0 +1,25 @@
+{
+  "id": "n3a-continuation-activation-2026-11-07",
+  "source": "dacaf8b3677013d9af8f6d17b32c01715be119d5",
+  "fork_root": "cd86e42e7bb3f44cc9b443b0609ce0315b9c8c87",
+  "cli": "0.2.13-dev.280",
+  "pair": ["cursor", "codex"],
+  "sampling": "one exploratory trial per condition; no model calls",
+  "unstored_canary": "ORIGINAL-CONVERSATION-CANARY-do-not-store",
+  "journey2": {
+    "checkpoint_old": "Current requirement: bind the service on port 8080.",
+    "checkpoint_new": "Requirement changed: bind the service on port 9090. Port 8080 is superseded.",
+    "objective": "Continue the service bind after the requirement change.",
+    "task": "Bind the service on port 9090.",
+    "next": "Bind the service on port 9090.",
+    "decision": "Port 8080 is superseded by port 9090.",
+    "failed_approach": "binding 8080 in the shared dev loop → failed: the legacy probe already owns 8080",
+    "exception": "Exception: port 8080 stays reserved for the legacy probe and must not be reused."
+  },
+  "journey3": {
+    "path": "spec.txt",
+    "historical": "batch size is 32 (token HISTORICAL-RESULT-42)\n",
+    "current": "batch size is 64 (token CURRENT-RESULT-64)\n",
+    "memory": "Historical measurement HISTORICAL-RESULT-42: batch size was 32 when spec.txt said so."
+  }
+}

@@ -155,13 +155,8 @@ fn recall_process_reads_committed_rollback_generation_during_uncommitted_rebuild
         project.path().join(".stateroot/local/memory-index.lock"),
     )
     .unwrap();
-    let conn = rusqlite::Connection::open(
-        project
-            .path()
-            .join(".stateroot")
-            .join(stateroot_core::memory_index::INDEX_DB_REL),
-    )
-    .unwrap();
+    let conn = rusqlite::Connection::open(stateroot_core::memory_index::index_path(project.path()))
+        .unwrap();
     assert_eq!(
         conn.query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
             .unwrap(),
@@ -178,7 +173,9 @@ fn recall_process_reads_committed_rollback_generation_during_uncommitted_rebuild
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("committedcanary"));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("stale"));
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .to_ascii_lowercase()
+        .contains("stale"));
     conn.execute_batch("ROLLBACK").unwrap();
 }
 
@@ -987,7 +984,7 @@ fn fresh_capture_is_discoverable_via_recall_raw_labeled() {
     let shown_text = String::from_utf8(shown.stdout).unwrap();
     assert!(shown_text.contains("ZebraQuasar end-to-end evidence"));
     assert!(shown_text.contains("s-fresh-e2e"));
-    let db = project.path().join(".stateroot/local/memory.sqlite");
+    let db = stateroot_core::memory_index::index_path(project.path());
     std::fs::remove_file(&db).unwrap();
     std::fs::create_dir(&db).unwrap();
     let outage = stateroot(config.path(), home.path(), project.path())

@@ -532,6 +532,43 @@ fn merge_cleanup_json_and_human_contracts() {
         ])
         .assert()
         .success();
+    // Historical repair is ref-only: inspecting and removing a proven legacy
+    // leak must retain the active detached checkout and its lineage.
+    let repo = stateroot_core::roots::ensure_repo(project.path()).unwrap();
+    let temporary = "refs/heads/stateroot-forktmp-fork-a";
+    // Reconstruct the old writer's single creation event, rather than a new
+    // branch inheriting the fixed writer's prior operation history.
+    repo.reflog_delete(temporary).unwrap();
+    repo.reference(
+        temporary,
+        git2::Oid::from_str(&root).unwrap(),
+        false,
+        "fork tmp branch",
+    )
+    .unwrap();
+    let inspect = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["fork", "--cleanup", "--json"])
+        .assert()
+        .success();
+    let inspection: serde_json::Value =
+        serde_json::from_slice(&inspect.get_output().stdout).unwrap();
+    assert_eq!(inspection["refs"][0]["state"], "eligible", "{inspection}");
+    assert!(repo.find_reference(temporary).is_ok());
+    let apply = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["fork", "--cleanup", "--apply", "--json"])
+        .assert()
+        .success();
+    let applied: serde_json::Value = serde_json::from_slice(&apply.get_output().stdout).unwrap();
+    assert_eq!(applied["schema_version"], "stateroot.fork-ref-cleanup.v1");
+    assert_eq!(applied["refs"][0]["state"], "removed");
+    assert!(repo.find_reference(temporary).is_err());
+    assert!(worktree.exists());
+    assert_eq!(
+        stateroot_core::roots::latest_root(project.path())
+            .unwrap()
+            .as_deref(),
+        Some(root.as_str())
+    );
     write(&worktree, "src/lib.rs", "pub fn merged() {}\n");
     stateroot(config_home.path(), user_home.path(), &worktree)
         .args(["snap", "--reason", "fork work"])

@@ -164,6 +164,7 @@ fn snapshot_reuses_git_lineage_without_moving_user_head_and_skill_matches_source
         .path()
         .join(".stateroot/local/memory.sqlite")
         .exists());
+    assert!(!stateroot_core::memory_index::index_path(project.path()).exists());
     let root_id = stateroot_core::roots::latest_root(project.path())
         .unwrap()
         .unwrap();

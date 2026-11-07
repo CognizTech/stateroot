@@ -40,6 +40,16 @@ Handoff carries **session continuity**. **Root lineage** records verified projec
 4. Run `stateroot fork <root>` when work should diverge from an earlier root.
 5. Use `stateroot log`, `stateroot show`, `stateroot diff`, and `stateroot compare` to inspect lineage — do not invent history the CLI has not verified.
 
+Fork refs remain canonical under `refs/stateroot/forks/*`; default names use
+an opaque full UUID. Use `--name` for an explicit name (`--branch` is a
+compatibility alias, not a human Git branch). For historical temporary refs
+visible in `git branch`, run `stateroot fork --cleanup [--json]` to inspect.
+Only `--apply` removes refs: the fork record, creation reflog, retained
+original root and unused-ref proof must agree and are revalidated at
+deletion. Ambiguous, changed or active refs stay `retained` with a reason.
+This never removes worktrees or canonical lineage; `stateroot merge
+--cleanup <fork>…` is the separate merged-worktree cleanup command.
+
 ## Scoped audit and evidence reuse
 
 Use this procedure for non-trivial changes, before proposing additions. Scale effort to task risk, the actual contract and uncertainty; reuse valid intelligence first and widen only as evidence warrants. Routine small edits need no new command ritual or full inventory.
@@ -129,6 +139,22 @@ remain valid; explicit authoring activates immediately.
 
 ## Raw evidence in recall
 
+The derived cache is
+`.stateroot/local/memory-index/<host-namespace>/memory.sqlite`, isolated by
+a stable runtime namespace (boot and PID namespace on Linux). SQLite
+transactions cover initialization and refresh with crash recovery; another
+runtime's locks and databases are never deleted to force progress.
+`stateroot memory recall state` refreshes the current runtime's cache;
+`doctor` and `status` report its selected path, generation and health.
+
+When no current committed generation is readable, the legacy
+`.stateroot/local/memory.sqlite` is a read-only fallback, followed by bounded
+read-only discovery of prior-runtime caches: at most 128 directory entries,
+a 250 ms metadata-scan budget and eight database opens. Old directories stay
+on disk and discovery is not exhaustive. Preserved fallback hits always
+remain `Stale`, subject to current source visibility, removals and tombstones;
+they never establish a `Current` index.
+
 `memory recall` searches bounded raw observations even when the derived index
 is unavailable. Raw events are labeled `(raw observation)`, with stable
 `cap_…`/`obs_N` references for `observations show <id>`. Equal text does not
@@ -139,6 +165,8 @@ legacy physical line locators. An unresolved ID with incomplete archive
 coverage is unavailable, not confirmed absent; inspect `observations health`.
 
 Read index degradation and raw coverage separately, including on no-match.
+A `Current` index can still have partial raw coverage; freshness does not
+prove every raw observation was searched.
 Discovery, file/byte windows, unreadable/corrupt records, and result limits can
 make coverage partial. `observations search` and `observations health` inspect
 retained evidence beyond the recall window; recall never deletes that evidence.
@@ -148,6 +176,10 @@ these facts. MCP retains its `hits` and `gates` fields alongside `index_state`,
 `isError` and preserve the JSON payload. Usable fallback hits report degradation
 without becoming a tool failure; no hits plus an index error sets `isError`.
 Check the installed CLI version when qualifying a transport.
+
+Native OpenClaw trajectory companions are excluded only from canonical
+session enumeration and retained on disk. Do not generalize that format rule
+into suppression of other evidence.
 
 ## Verification and publication
 

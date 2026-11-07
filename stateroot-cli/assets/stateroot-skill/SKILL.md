@@ -206,6 +206,7 @@ without refreshing it. See the protocol reference for tool names and evidence li
 | `stateroot diff` / `stateroot compare A B` | inspect tree deltas | verified git diff between roots |
 | `stateroot revert <root>` | verified restoration | append-only — creates a new root |
 | `stateroot fork <root>` | divergent work | branch lineage from an earlier root |
+| `stateroot fork --cleanup [--json] [--apply]` | inspect historical temporary refs visible in `git branch` | read-only without `--apply`; removes only proven unchanged owned unused refs, retains ambiguity, never deletes worktrees — see [lineage](references/protocol.md#work-state-lineage-snap--revert--fork) |
 | `stateroot merge <fork>…` / `--prepare` / `--continue` / `--status` / `--abort` / `--cleanup` | fold fork lineages into the trunk | one N+1-parent root; conflicts get a reconciliation worktree — see Integrating parallel forks |
 | `stateroot rules list` / `list --json` / `show` / `sync` | shared rules pool | product-intent always on; harness rules imported; JSON exposes canonical origin and digest |
 | *(no stateroot pack command)* | — | resume already injects the observed context pack. Do not invent a truncated pack |
@@ -231,6 +232,7 @@ without refreshing it. See the protocol reference for tool names and evidence li
 | write reported as queued | offline | normal — the outbox syncs later; continue working |
 | conflict / stale revision on write | another harness wrote concurrently | re-run `stateroot resume`, then retry the operation once |
 | thin or missing handoff on resume | previous harness wrote an incomplete handoff | note the gap in your next checkpoint; do not fabricate history |
+| stale/unavailable memory index or preserved read-only generation | runtime cache needs refresh; raw coverage remains independent | run `stateroot memory recall state`; inspect path/generation/health in `doctor` or `status`. Never delete foreign locks or caches; see [recall](references/protocol.md#raw-evidence-in-recall) |
 
 ## Output Discipline
 

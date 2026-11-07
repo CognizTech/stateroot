@@ -922,6 +922,24 @@ fn human_size(bytes: u64) -> String {
 fn continuity_chain_checks(home: &Path, project_dir: &Path) -> Vec<Check> {
     let mut checks = Vec::new();
 
+    let index = stateroot_core::memory_index::health(project_dir, home);
+    checks.push(Check {
+        label: "memory index".into(),
+        ok: index.fresh,
+        detail: format!(
+            "{} · {}{}",
+            index.generation,
+            index.path.display(),
+            index
+                .error
+                .as_deref()
+                .map(|error| format!(" · {error}"))
+                .unwrap_or_default()
+        ),
+        hard: false,
+        repair: index.repair.map(str::to_owned),
+    });
+
     // Store footprint: growth you can see never becomes a surprise (sizes
     // only, never content). The episodic journal is append-only by design;
     // this line is how an operator watches it.

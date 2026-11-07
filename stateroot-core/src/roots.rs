@@ -64,9 +64,15 @@ thread_local! {
     static TEST_BEFORE_ROOT_PUBLICATION: std::cell::RefCell<Option<PublicationObserver>> = const { std::cell::RefCell::new(None) };
     static TEST_FAIL_PUBLICATION_PHASE:std::cell::Cell<u8> = const {std::cell::Cell::new(0)};
     static TEST_BEFORE_STORE_OVERWRITE:std::cell::RefCell<Option<PublicationObserver>> = const {std::cell::RefCell::new(None)};
+    static TEST_FORK_FAILURE_PHASE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    static TEST_BEFORE_FORK_TEMP_CLEANUP: std::cell::RefCell<Option<PublicationObserver>> = const { std::cell::RefCell::new(None) };
+    static TEST_AFTER_FORK_CLAIM: std::cell::RefCell<Option<PublicationObserver>> = const { std::cell::RefCell::new(None) };
+    static TEST_BEFORE_FORK_ROLLBACK: std::cell::RefCell<Option<PublicationObserver>> = const { std::cell::RefCell::new(None) };
 }
 #[cfg(test)]
 type PublicationObserver = Box<dyn FnOnce(&Path)>;
+#[cfg(test)]
+type CleanupObserver = Box<dyn FnOnce(&Path) + Send>;
 
 fn publication_observer(_project_dir: &Path) {
     #[cfg(test)]
@@ -2126,10 +2132,15 @@ pub fn fork_root(
     require_supported_root_metadata(project_dir, &commit.id().to_string())?;
     let name = branch
         .map(str::to_string)
-        .unwrap_or_else(|| format!("f-{}", &uuid::Uuid::now_v7().to_string()[..8]));
+        // UUIDv7's opening bytes are only time. Keep the complete UUID so
+        // independent workers created in the same instant get distinct IDs.
+        .unwrap_or_else(|| format!("f-{}", uuid::Uuid::now_v7().simple()));
     validate_fork_name(&name)?;
     let refname = format!("{FORKS_REF_PREFIX}{name}");
-    repo.reference(&refname, commit.id(), true, "fork root")?;
+    if fork_record_path(project_dir, &name).exists() {
+        return Err(RootsError::Merge(format!("fork {name} already exists")));
+    }
+    repo.reference(&refname, commit.id(), false, "fork root")?;
     let record = json!({
         "schema_version": "stateroot.fork.local.v1",
         "name": name,
@@ -2181,12 +2192,19 @@ pub fn fork_materialize(
     validate_fork_name(name)?;
     let repo = ensure_repo(project_dir)?;
     let refname = format!("{FORKS_REF_PREFIX}{name}");
+    let _path_guard = fork_worktree_path_guard(&repo, worktree_path)?;
 
     // -- Validation (before ANY mutation) ----------------------------------
     let tip = repo
         .refname_to_id(&refname)
         .map_err(|_| RootsError::NotFound(format!("no fork named {name}")))?;
     require_supported_root_metadata(project_dir, &tip.to_string())?;
+    if repo.find_worktree(name).is_ok() || read_registry(project_dir)["entries"].get(name).is_some()
+    {
+        return Err(RootsError::Merge(format!(
+            "fork {name} already has a worktree registration"
+        )));
+    }
     if worktree_path.exists() {
         return Err(RootsError::Merge(format!(
             "worktree destination {} already exists",
@@ -2216,6 +2234,14 @@ pub fn fork_materialize(
                 "plan {plan_id} is already claimed by fork {holder}"
             )));
         }
+        let meta: Value = serde_json::from_slice(&std::fs::read(
+            crate::plans::plans_dir(project_dir).join(format!("{plan_id}.json")),
+        )?)?;
+        if !meta["claimed_by"].is_null() {
+            return Err(RootsError::Merge(format!(
+                "plan {plan_id} already has a claim"
+            )));
+        }
     }
 
     // -- Execute with rollback ----------------------------------------------
@@ -2223,13 +2249,45 @@ pub fn fork_materialize(
     // libgit2's worktree-add accepts only branch refs — check out via a
     // throwaway branch, then detach HEAD and delete it so no refs/heads
     // entry survives.
-    repo.reference(&tmp_branch, tip, true, "fork tmp branch")?;
+    let operation = uuid::Uuid::now_v7().to_string();
+    let log_message = format!("stateroot fork temporary {operation}");
+    let mut temporary_acquired = false;
+    let mut worktree_created = false;
+    let mut registered = None;
+    let mut claimed = false;
+    let mut owned_files = Vec::new();
     let result = (|| -> Result<(), RootsError> {
+        if let Some(plan_id) = plan {
+            claim_plan(project_dir, plan_id, name, &operation)?;
+            claimed = true;
+        }
+        #[cfg(test)]
+        if let Some(observer) = TEST_AFTER_FORK_CLAIM.with(|slot| slot.borrow_mut().take()) {
+            observer(project_dir);
+        }
+        let mut transaction = repo.transaction()?;
+        transaction.lock_ref(&tmp_branch)?;
+        match repo.find_reference(&tmp_branch) {
+            Ok(_) => {
+                return Err(RootsError::Merge(
+                    "temporary fork ref already exists; retained".into(),
+                ))
+            }
+            Err(error) if error.code() == git2::ErrorCode::NotFound => (),
+            Err(error) => return Err(error.into()),
+        }
+        // Ownership must remain checkable even when ordinary branch reflogs
+        // are disabled in this repository.
+        repo.reference_ensure_log(&tmp_branch)?;
+        transaction.set_target(&tmp_branch, tip, Some(&signature()?), &log_message)?;
+        transaction.commit()?;
+        temporary_acquired = true;
         {
             let reference = repo.find_reference(&tmp_branch)?;
             let mut opts = git2::WorktreeAddOptions::new();
             opts.reference(Some(&reference));
             repo.worktree(name, worktree_path, Some(&opts))?;
+            worktree_created = true;
         }
         let wt_repo = git2::Repository::open(worktree_path)?;
         wt_repo.set_head_detached(tip)?;
@@ -2238,51 +2296,347 @@ pub fn fork_materialize(
         // differ from its root blob at the next snap. Rewrite the tip tree
         // byte-exact, same contract as trunk merge checkouts.
         rewrite_workdir_byte_exact(&wt_repo, tip, worktree_path)?;
-        if let Ok(mut branch) = repo.find_branch(&tmp_branch, git2::BranchType::Local) {
-            branch.delete()?;
-        }
+        delete_temporary_fork_ref(project_dir, &repo, &tmp_branch, tip, &log_message)?;
         if let Some(plan_id) = plan {
-            copy_plan_to_worktree(project_dir, worktree_path, plan_id)?;
+            owned_files.extend(copy_plan_to_worktree(project_dir, worktree_path, plan_id)?);
         }
-        local_store::write_fork_context(
+        let context = local_store::ForkContext {
+            schema: "stateroot.fork-context.v1".into(),
+            fork: name.to_string(),
+            parent_root: tip.to_string(),
+            plan: plan.map(str::to_string),
+        };
+        let context_bytes = format!("{}\n", serde_json::to_string_pretty(&context)?).into_bytes();
+        local_store::write_fork_context(worktree_path, &context)?;
+        owned_files.push((
+            PathBuf::from(".stateroot/local/fork-context.json"),
+            context_bytes,
+        ));
+        fork_materialization_fault(1)?;
+        registered = Some(register_worktree(
+            project_dir,
+            name,
             worktree_path,
-            &local_store::ForkContext {
-                schema: "stateroot.fork-context.v1".into(),
-                fork: name.to_string(),
-                parent_root: tip.to_string(),
-                plan: plan.map(str::to_string),
-            },
-        )?;
-        register_worktree(project_dir, name, worktree_path)?;
+            &operation,
+        )?);
+        fork_materialization_fault(2)?;
         if let Some(plan_id) = plan {
-            claim_plan(project_dir, plan_id, name)?;
+            fork_materialization_fault(3)?;
+            let _guard = crate::plans::write_guard(project_dir).map_err(RootsError::Merge)?;
+            let meta: Value = serde_json::from_slice(&std::fs::read(
+                crate::plans::plans_dir(project_dir).join(format!("{plan_id}.json")),
+            )?)?;
+            if meta["claimed_by"]["fork"] != name || meta["claimed_by"]["operation"] != operation {
+                return Err(RootsError::Merge(
+                    "plan claim changed during checkout; retained".into(),
+                ));
+            }
             let record_path = local_store::root(project_dir)
                 .join(FORKS_DIR)
                 .join(format!("{name}.json"));
-            if let Ok(text) = std::fs::read_to_string(&record_path) {
-                if let Ok(mut record) = serde_json::from_str::<Value>(&text) {
-                    record["plan"] = json!(plan_id);
-                    write_json(&record_path, &record)?;
-                }
-            }
+            let mut record: Value = serde_json::from_slice(&std::fs::read(&record_path)?)?;
+            record["plan"] = json!(plan_id);
+            write_json(&record_path, &record)?;
         }
         Ok(())
     })();
-    if result.is_err() {
-        // Rollback in reverse: registry entry, plan claim, worktree, branch.
-        let _ = unregister_worktree(project_dir, name);
-        if let Some(plan_id) = plan {
-            let _ = release_plan_claim(project_dir, plan_id, name);
+    let Err(original) = result else {
+        return Ok(());
+    };
+    let mut cleanup_errors = Vec::new();
+    let mut retain_error = |result: Result<(), RootsError>| {
+        if let Err(error) = result {
+            cleanup_errors.push(error.to_string());
         }
-        let _ = std::fs::remove_dir_all(worktree_path);
-        if let Ok(mut branch) = repo.find_branch(&tmp_branch, git2::BranchType::Local) {
-            let _ = branch.delete();
+    };
+    let mut removed = !worktree_created;
+    if worktree_created {
+        #[cfg(test)]
+        if let Some(observer) = TEST_BEFORE_FORK_ROLLBACK.with(|slot| slot.borrow_mut().take()) {
+            observer(worktree_path);
         }
-        if let Ok(wt) = repo.find_worktree(name) {
-            let _ = wt.prune(None);
+        let cleanup = (|| {
+            let worktree = repo.find_worktree(name)?;
+            let checkout = Repository::open_from_worktree(&worktree)?;
+            let head = checkout.find_reference("HEAD")?;
+            let unchanged_head = (checkout.head_detached()? && head.target() == Some(tip))
+                || head.symbolic_target() == Some(tmp_branch.as_str());
+            if worktree.path().canonicalize()? != worktree_path.canonicalize()? || !unchanged_head {
+                return Err(RootsError::Merge(
+                    "worktree registration or HEAD changed during rollback; retained".into(),
+                ));
+            }
+            let mut options = git2::StatusOptions::new();
+            options
+                .include_untracked(true)
+                .recurse_untracked_dirs(true)
+                .include_ignored(true)
+                .recurse_ignored_dirs(true);
+            for status in checkout.statuses(Some(&mut options))?.iter() {
+                let path = status.path().map(Path::new);
+                let changed_index = status.status().intersects(
+                    git2::Status::INDEX_NEW
+                        | git2::Status::INDEX_MODIFIED
+                        | git2::Status::INDEX_DELETED
+                        | git2::Status::INDEX_RENAMED
+                        | git2::Status::INDEX_TYPECHANGE,
+                );
+                let own_bytes = owned_files
+                    .iter()
+                    .find(|(owned, _)| path == Some(owned.as_path()));
+                if changed_index
+                    || !own_bytes.is_some_and(|(path, bytes)| {
+                        std::fs::read(worktree_path.join(path)).ok().as_ref() == Some(bytes)
+                    })
+                {
+                    return Err(RootsError::Merge(
+                        "worktree has unowned changes; checkout and claims retained".into(),
+                    ));
+                }
+            }
+            std::fs::remove_dir_all(worktree_path)?;
+            worktree.prune(None)?;
+            Ok(())
+        })();
+        removed = cleanup.is_ok();
+        retain_error(cleanup);
+    } else if worktree_path.exists() {
+        retain_error(Err(RootsError::Merge(
+            "unacquired or incomplete worktree destination retained".into(),
+        )));
+    }
+    if removed {
+        if let Some(entry) = registered.as_ref() {
+            retain_error(unregister_worktree(project_dir, name, Some(entry)));
+        }
+        if claimed {
+            retain_error(release_plan_claim(
+                project_dir,
+                plan.unwrap(),
+                name,
+                &operation,
+            ));
         }
     }
-    result
+    if temporary_acquired {
+        retain_error(delete_temporary_fork_ref(
+            project_dir,
+            &repo,
+            &tmp_branch,
+            tip,
+            &log_message,
+        ));
+    }
+    if cleanup_errors.is_empty() {
+        Err(original)
+    } else {
+        Err(RootsError::Merge(format!(
+            "{original}; rollback incomplete: {}",
+            cleanup_errors.join("; ")
+        )))
+    }
+}
+
+fn fork_materialization_fault(_phase: u8) -> Result<(), RootsError> {
+    #[cfg(test)]
+    if TEST_FORK_FAILURE_PHASE.with(|value| value.get() == _phase) {
+        TEST_FORK_FAILURE_PHASE.with(|value| value.set(0));
+        return Err(RootsError::Merge(
+            "injected fork materialization failure".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn temporary_fork_ref_unused(repo: &Repository, refname: &str) -> Result<(), RootsError> {
+    let owner = Repository::open(repo.commondir())?;
+    let check = |path: &Path| -> Result<(), RootsError> {
+        // Git's administrative HEAD remains authoritative when a detached
+        // worktree directory has disappeared. Opening its checkout would
+        // incorrectly make an unrelated stale worktree block every fork.
+        let head = std::fs::read_to_string(path)?;
+        if let Some(target) = head.trim().strip_prefix("ref: ") {
+            let resolved = owner
+                .find_reference(target)
+                .and_then(|reference| reference.resolve());
+            if target == refname
+                || resolved
+                    .as_ref()
+                    .ok()
+                    .and_then(|reference| reference.name())
+                    == Some(refname)
+            {
+                return Err(RootsError::Merge(
+                    "temporary ref is checked out; retained".into(),
+                ));
+            }
+            if let Err(error) = resolved {
+                if error.code() != git2::ErrorCode::NotFound {
+                    return Err(error.into());
+                }
+            }
+        } else if git2::Oid::from_str(head.trim()).is_err() {
+            return Err(RootsError::Merge(
+                "worktree HEAD is unverifiable; temporary ref retained".into(),
+            ));
+        }
+        Ok(())
+    };
+    check(&owner.path().join("HEAD"))?;
+    for name in owner.worktrees()?.iter().flatten() {
+        check(&owner.commondir().join("worktrees").join(name).join("HEAD"))?;
+    }
+    Ok(())
+}
+
+fn delete_temporary_fork_ref(
+    project: &Path,
+    repo: &Repository,
+    refname: &str,
+    expected: git2::Oid,
+    message: &str,
+) -> Result<(), RootsError> {
+    #[cfg(test)]
+    if let Some(observer) = TEST_BEFORE_FORK_TEMP_CLEANUP.with(|slot| slot.borrow_mut().take()) {
+        observer(project);
+    }
+    #[cfg(not(test))]
+    let _ = project;
+    let mut transaction = repo.transaction()?;
+    transaction.lock_ref(refname)?;
+    let reference = match repo.find_reference(refname) {
+        Ok(reference) => reference,
+        Err(error) if error.code() == git2::ErrorCode::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if reference.target() != Some(expected) {
+        return Err(RootsError::Merge(
+            "temporary ref target changed; retained".into(),
+        ));
+    }
+    let log = repo.reflog(refname)?;
+    if (message == "fork tmp branch" && log.len() != 1)
+        || !log.get(0).is_some_and(|entry| {
+            entry.id_old().is_zero()
+                && entry.id_new() == expected
+                && entry.message() == Some(message)
+        })
+    {
+        return Err(RootsError::Merge(
+            "temporary ref ownership changed or is unavailable; retained".into(),
+        ));
+    }
+    temporary_fork_ref_unused(repo, refname)?;
+    transaction.remove(refname)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Inspection and conservative repair of historical temporary branch leaks.
+/// This never deletes a worktree or changes a StateRoot lineage ref.
+#[derive(Debug, Serialize)]
+pub struct TemporaryForkRefCleanup {
+    pub reference: String,
+    pub target: Option<String>,
+    pub state: String,
+    pub detail: String,
+}
+
+pub fn cleanup_temporary_fork_refs(
+    project: &Path,
+    apply: bool,
+) -> Result<Vec<TemporaryForkRefCleanup>, RootsError> {
+    lineage_refname_checked(project)?;
+    let repo = Repository::open(project)?;
+    let mut results = Vec::new();
+    for reference in repo.references_glob("refs/heads/stateroot-forktmp-*")? {
+        let reference = reference?;
+        let refname = reference
+            .name()
+            .ok_or_else(|| RootsError::Merge("non-UTF-8 temporary ref retained".into()))?;
+        let name = refname
+            .strip_prefix("refs/heads/stateroot-forktmp-")
+            .unwrap();
+        let eligibility = (|| -> Result<(git2::Oid, String), RootsError> {
+            validate_fork_name(name)?;
+            let target = reference
+                .target()
+                .ok_or_else(|| RootsError::Merge("symbolic ref retained".into()))?;
+            repo.find_commit(target)?;
+            let record: Value =
+                serde_json::from_slice(&std::fs::read(fork_record_path(project, name))?)?;
+            if record["schema_version"] != "stateroot.fork.local.v1"
+                || record["name"] != name
+                || record["root"] != target.to_string()
+                || record["ref"] != format!("{FORKS_REF_PREFIX}{name}")
+                || repo
+                    .find_reference(&format!("{FORKS_REF_PREFIX}{name}"))
+                    .is_err()
+                || repo
+                    .refname_to_id(&format!("{ROOTS_REF_PREFIX}{target}"))
+                    .ok()
+                    != Some(target)
+            {
+                return Err(RootsError::Merge(
+                    "fork ownership or retained original root is unverified; retained".into(),
+                ));
+            }
+            if let Some(path) = registered_worktree_path(project, name) {
+                let worktree = repo.find_worktree(name)?;
+                if worktree.path().canonicalize()? != path.canonicalize()? {
+                    return Err(RootsError::Merge(
+                        "fork registry and Git worktree disagree; retained".into(),
+                    ));
+                }
+            } else if repo.find_worktree(name).is_ok() {
+                return Err(RootsError::Merge(
+                    "Git worktree has no matching local registration; retained".into(),
+                ));
+            }
+            let log = repo.reflog(refname)?;
+            let entry = log
+                .get(0)
+                .ok_or_else(|| RootsError::Merge("creation reflog unavailable; retained".into()))?;
+            let message = entry.message().unwrap_or_default();
+            let owned_message = message == "fork tmp branch"
+                || message
+                    .strip_prefix("stateroot fork temporary ")
+                    .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok());
+            if (message == "fork tmp branch" && log.len() != 1)
+                || !entry.id_old().is_zero()
+                || entry.id_new() != target
+                || !owned_message
+            {
+                return Err(RootsError::Merge(
+                    "creation reflog does not establish unchanged StateRoot ownership; retained"
+                        .into(),
+                ));
+            }
+            temporary_fork_ref_unused(&repo, refname)?;
+            Ok((target, message.to_string()))
+        })();
+        let (state, detail) = match eligibility {
+            Ok((target, message)) if apply => {
+                match delete_temporary_fork_ref(project, &repo, refname, target, &message) {
+                    Ok(()) => ("removed", "removed unchanged owned temporary ref".into()),
+                    Err(error) => ("retained", error.to_string()),
+                }
+            }
+            Ok(_) => (
+                "eligible",
+                "fork record, creation reflog, retained root and unused ref agree".into(),
+            ),
+            Err(error) => ("retained", error.to_string()),
+        };
+        results.push(TemporaryForkRefCleanup {
+            reference: refname.into(),
+            target: reference.target().map(|id| id.to_string()),
+            state: state.into(),
+            detail,
+        });
+    }
+    results.sort_by(|a, b| a.reference.cmp(&b.reference));
+    Ok(results)
 }
 
 /// Copy the authoritative plan body and sidecar into a newly materialized
@@ -2293,19 +2647,34 @@ fn copy_plan_to_worktree(
     project_dir: &Path,
     worktree_path: &Path,
     plan_id: &str,
-) -> Result<(), RootsError> {
+) -> Result<Vec<(PathBuf, Vec<u8>)>, RootsError> {
     let (_meta, body_path) = crate::plans::load(project_dir, plan_id)
         .ok_or_else(|| RootsError::NotFound(format!("no plan named {plan_id}")))?;
     let body = std::fs::read(&body_path)?;
-    let meta = std::fs::read(
+    let mut meta: Value = serde_json::from_slice(&std::fs::read(
         local_store::root(project_dir)
             .join("plans")
             .join(format!("{plan_id}.json")),
-    )?;
+    )?)?;
+    // The reservation belongs to the originating project. The child carries
+    // its fork context; it must not inherit a parent-local execution claim.
+    meta.as_object_mut()
+        .ok_or_else(|| RootsError::Merge("plan metadata is not an object".into()))?
+        .remove("claimed_by");
+    let meta = serde_json::to_vec_pretty(&meta)?;
     let destination = local_store::root(worktree_path).join("plans");
     crate::safe_io::atomic_replace(&destination.join(format!("{plan_id}.md")), &body)?;
     crate::safe_io::atomic_replace(&destination.join(format!("{plan_id}.json")), &meta)?;
-    Ok(())
+    Ok(vec![
+        (
+            PathBuf::from(format!(".stateroot/plans/{plan_id}.md")),
+            body,
+        ),
+        (
+            PathBuf::from(format!(".stateroot/plans/{plan_id}.json")),
+            meta,
+        ),
+    ])
 }
 
 fn fork_holding_plan(project_dir: &Path, plan_id: &str) -> Option<String> {
@@ -2351,37 +2720,84 @@ pub fn registered_worktree_path(project_dir: &Path, name: &str) -> Option<PathBu
         .map(PathBuf::from)
 }
 
-fn register_worktree(project_dir: &Path, name: &str, path: &Path) -> Result<(), RootsError> {
+fn register_worktree(
+    project_dir: &Path,
+    name: &str,
+    path: &Path,
+    operation: &str,
+) -> Result<Value, RootsError> {
+    let _guard = crate::safe_io::ResourceLock::acquire(
+        local_store::root(project_dir).join("local/locks/fork-worktrees.lock"),
+    )
+    .map_err(crate::safe_io::RefCasError::from)?;
     let mut registry = read_registry(project_dir);
-    registry["entries"][name] = json!({
+    if registry["entries"].get(name).is_some() {
+        return Err(RootsError::Merge(
+            "fork worktree registration already exists; retained".into(),
+        ));
+    }
+    let entry = json!({
         "path": path.to_string_lossy(),
         "created_at": now_rfc3339(),
+        "operation": operation,
     });
-    write_registry(project_dir, &registry)
+    registry["entries"][name] = entry.clone();
+    write_registry(project_dir, &registry)?;
+    Ok(entry)
 }
 
-fn unregister_worktree(project_dir: &Path, name: &str) -> Result<(), RootsError> {
+fn unregister_worktree(
+    project_dir: &Path,
+    name: &str,
+    expected: Option<&Value>,
+) -> Result<(), RootsError> {
+    let _guard = crate::safe_io::ResourceLock::acquire(
+        local_store::root(project_dir).join("local/locks/fork-worktrees.lock"),
+    )
+    .map_err(crate::safe_io::RefCasError::from)?;
     let mut registry = read_registry(project_dir);
+    if expected.is_some_and(|expected| registry["entries"].get(name) != Some(expected)) {
+        return Err(RootsError::Merge(
+            "fork worktree registration changed; retained".into(),
+        ));
+    }
     if let Some(entries) = registry.get_mut("entries").and_then(|e| e.as_object_mut()) {
         entries.remove(name);
     }
     write_registry(project_dir, &registry)
 }
 
-fn claim_plan(project_dir: &Path, plan_id: &str, fork: &str) -> Result<(), RootsError> {
+fn claim_plan(
+    project_dir: &Path,
+    plan_id: &str,
+    fork: &str,
+    operation: &str,
+) -> Result<(), RootsError> {
+    let _guard = crate::plans::write_guard(project_dir).map_err(RootsError::Merge)?;
     let path = local_store::root(project_dir)
         .join("plans")
         .join(format!("{plan_id}.json"));
     let text = std::fs::read_to_string(&path)
         .map_err(|_| RootsError::NotFound(format!("no plan named {plan_id}")))?;
     let mut meta: Value = serde_json::from_str(&text)?;
-    meta["claimed_by"] = json!({"fork": fork, "at": now_rfc3339()});
+    if !meta["claimed_by"].is_null() {
+        return Err(RootsError::Merge(format!(
+            "plan {plan_id} already has a claim"
+        )));
+    }
+    meta["claimed_by"] = json!({"fork": fork, "at": now_rfc3339(), "operation": operation});
     crate::safe_io::atomic_replace_json(&path, &meta)?;
     local_store::report_written(project_dir, &format!("plans/{plan_id}.json"));
     Ok(())
 }
 
-fn release_plan_claim(project_dir: &Path, plan_id: &str, fork: &str) -> Result<(), RootsError> {
+fn release_plan_claim(
+    project_dir: &Path,
+    plan_id: &str,
+    fork: &str,
+    operation: &str,
+) -> Result<(), RootsError> {
+    let _guard = crate::plans::write_guard(project_dir).map_err(RootsError::Merge)?;
     let path = local_store::root(project_dir)
         .join("plans")
         .join(format!("{plan_id}.json"));
@@ -2393,13 +2809,16 @@ fn release_plan_claim(project_dir: &Path, plan_id: &str, fork: &str) -> Result<(
         .get("claimed_by")
         .and_then(|c| c.get("fork"))
         .and_then(|f| f.as_str())
-        == Some(fork);
+        == Some(fork)
+        && meta["claimed_by"]["operation"] == operation;
     if ours {
         if let Some(obj) = meta.as_object_mut() {
             obj.remove("claimed_by");
         }
         crate::safe_io::atomic_replace_json(&path, &meta)?;
         local_store::report_written(project_dir, &format!("plans/{plan_id}.json"));
+    } else if !meta["claimed_by"].is_null() {
+        return Err(RootsError::Merge("plan claim changed; retained".into()));
     }
     Ok(())
 }
@@ -4393,12 +4812,60 @@ fn merge_cleanup_budget() -> Duration {
     MERGE_CLEANUP_BUDGET
 }
 
+/// Creation and deletion share one destination owner, including across
+/// Windows/WSL aliases. Independent worktree paths never share this lock.
+fn fork_worktree_path_guard(
+    repo: &Repository,
+    path: &Path,
+) -> Result<crate::safe_io::ResourceLock, RootsError> {
+    use sha2::Digest;
+    let absolute = std::path::absolute(path)?;
+    let mut ancestor = absolute.as_path();
+    let mut suffix = Vec::new();
+    while !ancestor.exists() {
+        suffix.push(
+            ancestor
+                .components()
+                .next_back()
+                .ok_or_else(|| RootsError::Merge("worktree path has no existing ancestor".into()))?
+                .as_os_str()
+                .to_os_string(),
+        );
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| RootsError::Merge("worktree path has no existing ancestor".into()))?;
+    }
+    let mut resolved = ancestor.canonicalize()?;
+    for component in suffix.into_iter().rev() {
+        if component == ".." {
+            resolved.pop();
+        } else {
+            resolved.push(component);
+        }
+    }
+    let mut key = crate::path_identity::normalize_host_path(&resolved.to_string_lossy());
+    if key.as_bytes().get(1) == Some(&b':') {
+        key.make_ascii_lowercase();
+    }
+    let owner = Repository::open(repo.commondir())?;
+    let project = owner
+        .workdir()
+        .ok_or_else(|| RootsError::Merge("worktree owner has no checkout".into()))?;
+    let lock = local_store::root(project).join("local/locks").join(format!(
+        "fork-path-{:x}.lock",
+        sha2::Sha256::digest(key.as_bytes())
+    ));
+    crate::safe_io::ResourceLock::acquire(lock)
+        .map_err(|error| crate::safe_io::RefCasError::from(error).into())
+}
+
 fn cleanup_merged_fork_worktree(
     repo: &Repository,
     project_dir: &Path,
     name: &str,
 ) -> Result<ForkCleanup, RootsError> {
-    let Some(path) = registered_worktree_path(project_dir, name) else {
+    let entry = read_registry(project_dir)["entries"][name].clone();
+    let Some(path) = entry["path"].as_str().map(PathBuf::from) else {
         let _ = clear_cleanup_pending(project_dir, name);
         return Ok(ForkCleanup {
             name: name.to_string(),
@@ -4406,15 +4873,42 @@ fn cleanup_merged_fork_worktree(
             pending: None,
         });
     };
-    if let Err(err) = remove_worktree_bounded(&path) {
-        let message = format!("{err}");
-        let _ = record_cleanup_pending(project_dir, name, &message);
-        return Ok(ForkCleanup {
-            name: name.to_string(),
-            cleaned: false,
-            pending: Some(message),
-        });
+    #[cfg(test)]
+    if let Some(observer) = TEST_BEFORE_CLEANUP_PATH_LOCK.with(|slot| slot.borrow_mut().take()) {
+        observer(project_dir);
     }
+    let ownership = (|| {
+        let guard = fork_worktree_path_guard(repo, &path)?;
+        if read_registry(project_dir)["entries"].get(name) != Some(&entry) {
+            return Err(RootsError::Merge(
+                "fork worktree registration changed before cleanup; retained".into(),
+            ));
+        }
+        if path.exists() {
+            let checkout = Repository::open(&path)?;
+            let current = git2::Worktree::open_from_repository(&checkout)?;
+            if current.name() != Some(name)
+                || checkout.commondir().canonicalize()? != repo.commondir().canonicalize()?
+            {
+                return Err(RootsError::Merge(
+                    "destination now belongs to another worktree; retained".into(),
+                ));
+            }
+        }
+        remove_worktree_bounded(&path, guard)
+    })();
+    let _path_guard = match ownership {
+        Ok(guard) => guard,
+        Err(err) => {
+            let message = format!("{err}");
+            let _ = record_cleanup_pending(project_dir, name, &message);
+            return Ok(ForkCleanup {
+                name: name.to_string(),
+                cleaned: false,
+                pending: Some(message),
+            });
+        }
+    };
     if let Ok(wt) = repo.find_worktree(name) {
         if let Err(err) = wt.prune(None) {
             let message = format!("{err}");
@@ -4426,7 +4920,7 @@ fn cleanup_merged_fork_worktree(
             });
         }
     }
-    if let Err(err) = unregister_worktree(project_dir, name) {
+    if let Err(err) = unregister_worktree(project_dir, name, Some(&entry)) {
         let message = format!("{err}");
         let _ = record_cleanup_pending(project_dir, name, &message);
         return Ok(ForkCleanup {
@@ -4443,7 +4937,10 @@ fn cleanup_merged_fork_worktree(
     })
 }
 
-fn remove_worktree_bounded(path: &Path) -> Result<(), RootsError> {
+fn remove_worktree_bounded(
+    path: &Path,
+    guard: crate::safe_io::ResourceLock,
+) -> Result<crate::safe_io::ResourceLock, RootsError> {
     #[cfg(test)]
     if TEST_CLEANUP_FORCE_ERR.with(std::cell::Cell::get) {
         return Err(RootsError::Merge("injected cleanup failure".into()));
@@ -4454,11 +4951,17 @@ fn remove_worktree_bounded(path: &Path) -> Result<(), RootsError> {
     let extra_sleep_ms = 0u64;
 
     if extra_sleep_ms == 0 && !path.exists() {
-        return Ok(());
+        return Ok(guard);
     }
     let path = path.to_path_buf();
+    #[cfg(test)]
+    let observer = TEST_CLEANUP_WORKER_PAUSE.with(|slot| slot.borrow_mut().take());
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
+        #[cfg(test)]
+        if let Some(observer) = observer {
+            observer(&path);
+        }
         if extra_sleep_ms > 0 {
             std::thread::sleep(Duration::from_millis(extra_sleep_ms));
         }
@@ -4467,11 +4970,14 @@ fn remove_worktree_bounded(path: &Path) -> Result<(), RootsError> {
         } else {
             Ok(())
         };
-        let _ = tx.send(result);
+        // A timeout drops the receiver, not ownership of a still-running
+        // remover. On success the caller retains the guard through pruning
+        // and conditional unregister; on timeout the worker releases it last.
+        let _ = tx.send((result, guard));
     });
     match rx.recv_timeout(merge_cleanup_budget()) {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(err)) => Err(err.into()),
+        Ok((Ok(()), guard)) => Ok(guard),
+        Ok((Err(err), _guard)) => Err(err.into()),
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(RootsError::Merge(format!(
             "cleanup timed out after {}ms",
             merge_cleanup_budget().as_millis()
@@ -4484,6 +4990,8 @@ fn remove_worktree_bounded(path: &Path) -> Result<(), RootsError> {
 
 #[cfg(test)]
 thread_local! {
+    static TEST_BEFORE_CLEANUP_PATH_LOCK: std::cell::RefCell<Option<PublicationObserver>> = const { std::cell::RefCell::new(None) };
+    static TEST_CLEANUP_WORKER_PAUSE: std::cell::RefCell<Option<CleanupObserver>> = const { std::cell::RefCell::new(None) };
     static TEST_CLEANUP_BUDGET_MS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static TEST_CLEANUP_SLEEP_MS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static TEST_CLEANUP_FORCE_ERR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -6734,6 +7242,33 @@ mod tests {
         let oid = repo.refname_to_id(&refname).expect("fork ref");
         assert_eq!(oid.to_string(), a.id);
         assert!(dir.join(".stateroot/forks/claude-line.json").is_file());
+
+        write(&dir, "a.txt", "v2");
+        let (b, _) = create_root(&dir, "cli", "v2", None).expect("b");
+        let mut names = BTreeSet::new();
+        let mut automatic = Vec::new();
+        // No delay: default parallel forks must not collide within a shared
+        // UUIDv7 timestamp prefix, and later allocations must retain earlier
+        // forks and their original selected roots.
+        for root in [&a.id, &b.id, &a.id, &b.id] {
+            let (name, reference) = fork_root(&dir, root, None, "cli").expect("automatic fork");
+            assert!(
+                names.insert(name.clone()),
+                "default fork names must be unique"
+            );
+            automatic.push((name, reference, root));
+        }
+        for (name, reference, root) in automatic {
+            assert_eq!(repo.refname_to_id(&reference).unwrap().to_string(), *root);
+            let record: Value =
+                serde_json::from_slice(&std::fs::read(fork_record_path(&dir, &name)).unwrap())
+                    .unwrap();
+            assert_eq!(record["name"], name);
+            assert_eq!(record["ref"], reference);
+            assert_eq!(record["root"], *root);
+        }
+        assert_eq!(repo.refname_to_id(&refname).unwrap().to_string(), a.id);
+        assert_eq!(latest_root(&dir).unwrap(), Some(b.id));
     }
 
     #[test]
@@ -7256,7 +7791,30 @@ mod tests {
     #[test]
     fn fork_materialize_detaches_head_and_carries_the_plan() {
         let (_tmp, dir) = project();
+        let repo = ensure_repo(&dir).expect("repo");
+        let branches = |repo: &Repository| {
+            repo.references_glob("refs/heads/*")
+                .unwrap()
+                .map(|reference| {
+                    let reference = reference.unwrap();
+                    (reference.name().unwrap().to_string(), reference.target())
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let before = branches(&repo);
+        let head_before = std::fs::read(repo.path().join("HEAD")).unwrap();
+        let index_before = std::fs::read(repo.path().join("index")).ok();
         let (_wt_tmp, wt, name, first, plan_id) = forked_worktree(&dir);
+        assert_eq!(
+            branches(&repo),
+            before,
+            "fork leaves ordinary branches unchanged"
+        );
+        assert_eq!(
+            std::fs::read(repo.path().join("HEAD")).unwrap(),
+            head_before
+        );
+        assert_eq!(std::fs::read(repo.path().join("index")).ok(), index_before);
         // The worktree physically carries the snapshot's .stateroot state.
         let carried = std::fs::read_dir(wt.join(".stateroot/plans"))
             .expect("plans dir")
@@ -7351,6 +7909,302 @@ mod tests {
         )
         .expect_err("ghost plan must refuse");
         assert!(err.to_string().contains("no plan named"), "{err}");
+    }
+
+    #[test]
+    fn fork_materialize_preserves_collisions_and_unwinds_only_acquired_resources() {
+        for phase in 0..=3 {
+            let (_tmp, dir) = project();
+            write(&dir, "work.txt", "base");
+            let (base, _) = create_root(&dir, "cli", "base", None).unwrap();
+            let plan = crate::plans::record(&dir, "work", "cli", None, "# Work\n").unwrap();
+            let (name, _) = fork_root(&dir, &base.id, Some("rollback"), "cli").unwrap();
+            let repo = Repository::open(&dir).unwrap();
+            let branch = format!("refs/heads/stateroot-forktmp-{name}");
+            let wt_tmp = tempfile::tempdir().unwrap();
+            let wt = wt_tmp.path().join("checkout");
+            let before_plan: Value = serde_json::from_slice(
+                &std::fs::read(crate::plans::plans_dir(&dir).join(format!("{}.json", plan.id)))
+                    .unwrap(),
+            )
+            .unwrap();
+            if phase == 0 {
+                repo.reference(
+                    &branch,
+                    git2::Oid::from_str(&base.id).unwrap(),
+                    false,
+                    "human branch",
+                )
+                .unwrap();
+            } else {
+                TEST_FORK_FAILURE_PHASE.with(|value| value.set(phase));
+            }
+            let err = fork_materialize(&dir, &name, &wt, Some(&plan.id)).unwrap_err();
+            assert!(
+                !wt.exists(),
+                "failed creation leaves no owned checkout: {err}"
+            );
+            assert!(repo.find_worktree(&name).is_err());
+            assert!(registered_worktree_path(&dir, &name).is_none());
+            let after_plan: Value = serde_json::from_slice(
+                &std::fs::read(crate::plans::plans_dir(&dir).join(format!("{}.json", plan.id)))
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(after_plan, before_plan, "pre-existing plan remains intact");
+            if phase == 0 {
+                assert_eq!(repo.refname_to_id(&branch).unwrap().to_string(), base.id);
+                assert_eq!(
+                    repo.reflog(&branch).unwrap().get(0).unwrap().message(),
+                    Some("human branch")
+                );
+            } else {
+                assert!(err
+                    .to_string()
+                    .contains("injected fork materialization failure"));
+                assert!(repo.find_reference(&branch).is_err());
+                fork_materialize(&dir, &name, &wt, Some(&plan.id))
+                    .expect("retry after owned rollback");
+            }
+        }
+    }
+
+    #[test]
+    fn fork_materialize_keeps_a_changed_temp_ref_and_preexisting_registration() {
+        let (_tmp, dir) = project();
+        write(&dir, "work.txt", "A");
+        let (a, _) = create_root(&dir, "cli", "A", None).unwrap();
+        write(&dir, "work.txt", "B");
+        let (b, _) = create_root(&dir, "cli", "B", None).unwrap();
+        let (name, _) = fork_root(&dir, &a.id, Some("changed"), "cli").unwrap();
+        let branch = format!("refs/heads/stateroot-forktmp-{name}");
+        let moved_branch = branch.clone();
+        let moved_target = git2::Oid::from_str(&b.id).unwrap();
+        TEST_BEFORE_FORK_TEMP_CLEANUP.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move |project| {
+                Repository::open(project)
+                    .unwrap()
+                    .find_reference(&moved_branch)
+                    .unwrap()
+                    .set_target(moved_target, "human moved branch")
+                    .unwrap();
+            }))
+        });
+        let wt_tmp = tempfile::tempdir().unwrap();
+        let wt = wt_tmp.path().join("checkout");
+        let error = fork_materialize(&dir, &name, &wt, None).unwrap_err();
+        assert!(error.to_string().contains("target changed"));
+        assert!(error.to_string().contains("rollback incomplete"));
+        assert!(!wt.exists());
+        let repo = Repository::open(&dir).unwrap();
+        assert_eq!(repo.refname_to_id(&branch).unwrap(), moved_target);
+        assert!(fork_root(&dir, &b.id, Some(&name), "cli").is_err());
+        assert_eq!(
+            repo.refname_to_id(&format!("{FORKS_REF_PREFIX}{name}"))
+                .unwrap()
+                .to_string(),
+            a.id
+        );
+
+        let (registered, _) = fork_root(&dir, &a.id, Some("registered"), "cli").unwrap();
+        register_worktree(&dir, &registered, wt_tmp.path(), "fixture").unwrap();
+        write(wt_tmp.path(), "human.txt", "keep");
+        assert!(fork_materialize(&dir, &registered, &wt, None).is_err());
+        assert_eq!(
+            registered_worktree_path(&dir, &registered).unwrap(),
+            wt_tmp.path()
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt_tmp.path().join("human.txt")).unwrap(),
+            "keep"
+        );
+
+        for (suffix, path, contents) in [
+            ("tracked", "work.txt", "concurrent edit"),
+            ("untracked", "new.txt", "unique work"),
+            ("ignored", "local.log", "ignored work"),
+        ] {
+            let name = format!("keep-{suffix}");
+            fork_root(&dir, &a.id, Some(&name), "cli").unwrap();
+            let plan = crate::plans::record(&dir, &name, "cli", None, "# Keep work\n").unwrap();
+            let checkout = wt_tmp.path().join(&name);
+            TEST_FORK_FAILURE_PHASE.with(|value| value.set(2));
+            TEST_BEFORE_FORK_ROLLBACK.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move |checkout| {
+                    if path == "local.log" {
+                        write(
+                            Repository::open(checkout).unwrap().commondir(),
+                            "info/exclude",
+                            "*.log\n",
+                        );
+                    }
+                    write(checkout, path, contents);
+                }))
+            });
+            let error = fork_materialize(&dir, &name, &checkout, Some(&plan.id)).unwrap_err();
+            assert!(error.to_string().contains("unowned changes"), "{error}");
+            assert_eq!(
+                std::fs::read_to_string(checkout.join(path)).unwrap(),
+                contents
+            );
+            assert_eq!(
+                registered_worktree_path(&dir, &name).as_deref(),
+                Some(checkout.as_path())
+            );
+            let meta: Value = serde_json::from_slice(
+                &std::fs::read(crate::plans::plans_dir(&dir).join(format!("{}.json", plan.id)))
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(meta["claimed_by"]["fork"], name);
+        }
+    }
+
+    #[test]
+    fn fork_slow_checkout_does_not_hold_plan_or_registry_locks() {
+        let (_tmp, dir) = project();
+        write(&dir, "work.txt", "base");
+        let (base, _) = create_root(&dir, "cli", "base", None).unwrap();
+        let a = crate::plans::record(&dir, "slow", "cli", None, "# Slow\n").unwrap();
+        let b = crate::plans::record(&dir, "parallel", "cli", None, "# Parallel\n").unwrap();
+        let c = crate::plans::record(&dir, "ordinary", "cli", None, "# Ordinary\n").unwrap();
+        for name in ["slow", "parallel", "duplicate"] {
+            fork_root(&dir, &base.id, Some(name), "cli").unwrap();
+        }
+        let checkouts = tempfile::tempdir().unwrap();
+        let slow_path = checkouts.path().join("slow");
+        let parallel_path = checkouts.path().join("parallel");
+        let duplicate_path = checkouts.path().join("duplicate");
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let source = dir.clone();
+        let plan_id = a.id.clone();
+        let first_path = slow_path.clone();
+        let slow = std::thread::spawn(move || {
+            TEST_AFTER_FORK_CLAIM.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move |_| {
+                    entered_tx.send(()).unwrap();
+                    resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                }))
+            });
+            fork_materialize(&source, "slow", &first_path, Some(&plan_id))
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let parallel = fork_materialize(&dir, "parallel", &parallel_path, Some(&b.id));
+        let duplicate = fork_materialize(&dir, "duplicate", &duplicate_path, Some(&a.id));
+        let ordinary = crate::plans::transition(&dir, &c.id, crate::plans::PlanStatus::Approved);
+        resume_tx.send(()).unwrap();
+        slow.join()
+            .unwrap()
+            .expect("slow fork completes after release");
+        parallel.expect("different plan provisions while first checkout waits");
+        assert!(duplicate.unwrap_err().to_string().contains("claim"));
+        ordinary.expect("ordinary plan mutation is not held by checkout");
+        assert!(!duplicate_path.exists());
+        assert_eq!(fork_holding_plan(&dir, &a.id).as_deref(), Some("slow"));
+        assert_eq!(
+            registered_worktree_path(&dir, "slow").as_deref(),
+            Some(slow_path.as_path())
+        );
+        assert_eq!(
+            registered_worktree_path(&dir, "parallel").as_deref(),
+            Some(parallel_path.as_path())
+        );
+    }
+
+    #[test]
+    fn temporary_fork_cleanup_proves_ownership_preserves_active_refs_and_revalidates() {
+        let (_tmp, dir) = project();
+        write(&dir, "work.txt", "A");
+        let (a, _) = create_root(&dir, "cli", "A", None).unwrap();
+        let repo = Repository::open(&dir).unwrap();
+        let target = git2::Oid::from_str(&a.id).unwrap();
+        for name in [
+            "owned",
+            "removable",
+            "ambiguous",
+            "modified",
+            "checked-out",
+            "orphan",
+        ] {
+            if name != "orphan" {
+                fork_root(&dir, &a.id, Some(name), "cli").unwrap();
+            }
+            let reference = format!("refs/heads/stateroot-forktmp-{name}");
+            repo.reference(
+                &reference,
+                target,
+                false,
+                if name == "ambiguous" {
+                    "human branch"
+                } else {
+                    "fork tmp branch"
+                },
+            )
+            .unwrap();
+            if name == "modified" {
+                let mut log = repo.reflog(&reference).unwrap();
+                log.append(target, &signature().unwrap(), Some("human touched branch"))
+                    .unwrap();
+                log.write().unwrap();
+            }
+        }
+        let active_tmp = tempfile::tempdir().unwrap();
+        let active = active_tmp.path().join("active");
+        let reference = repo
+            .find_reference("refs/heads/stateroot-forktmp-checked-out")
+            .unwrap();
+        let mut options = git2::WorktreeAddOptions::new();
+        options.reference(Some(&reference));
+        repo.worktree("checked-out", &active, Some(&options))
+            .unwrap();
+        register_worktree(&dir, "checked-out", &active, "fixture").unwrap();
+        let inspection = cleanup_temporary_fork_refs(&dir, false).unwrap();
+        assert_eq!(
+            inspection.iter().filter(|r| r.state == "eligible").count(),
+            2
+        );
+        assert!(inspection
+            .iter()
+            .any(|r| r.reference.ends_with("checked-out")
+                && r.state == "retained"
+                && r.detail.contains("checked out")));
+        write(&dir, "work.txt", "B");
+        let (b, _) = create_root(&dir, "cli", "B", None).unwrap();
+        let moved = git2::Oid::from_str(&b.id).unwrap();
+        TEST_BEFORE_FORK_TEMP_CLEANUP.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move |project| {
+                Repository::open(project)
+                    .unwrap()
+                    .find_reference("refs/heads/stateroot-forktmp-owned")
+                    .unwrap()
+                    .set_target(moved, "concurrent human update")
+                    .unwrap();
+            }))
+        });
+        let applied = cleanup_temporary_fork_refs(&dir, true).unwrap();
+        assert_eq!(applied.iter().filter(|r| r.state == "removed").count(), 1);
+        assert!(applied.iter().any(|r| r.reference.ends_with("owned")
+            && r.state == "retained"
+            && r.detail.contains("target changed")));
+        assert!(active.exists());
+        assert_eq!(
+            repo.refname_to_id("refs/heads/stateroot-forktmp-owned")
+                .unwrap(),
+            moved
+        );
+        for name in ["ambiguous", "modified", "checked-out", "orphan"] {
+            assert_eq!(
+                repo.refname_to_id(&format!("refs/heads/stateroot-forktmp-{name}"))
+                    .unwrap(),
+                target
+            );
+        }
+        assert!(cleanup_temporary_fork_refs(&dir, true)
+            .unwrap()
+            .iter()
+            .all(|r| r.state == "retained"));
+        assert_eq!(latest_root(&dir).unwrap(), Some(b.id));
     }
 
     #[test]
@@ -7449,6 +8303,12 @@ mod tests {
             TEST_CLEANUP_BUDGET_MS.with(|c| c.set(0));
             TEST_CLEANUP_SLEEP_MS.with(|c| c.set(0));
             TEST_CLEANUP_FORCE_ERR.with(|c| c.set(false));
+            TEST_BEFORE_CLEANUP_PATH_LOCK.with(|slot| {
+                slot.borrow_mut().take();
+            });
+            TEST_CLEANUP_WORKER_PAUSE.with(|slot| {
+                slot.borrow_mut().take();
+            });
             TEST_AUTO_SNAPSHOT_ENTRY_LIMIT.with(|c| c.set(0));
             TEST_CHECKOUT_ABORT_AFTER_UPDATES.with(|c| c.set(0));
             TEST_BEFORE_ROOT_PUBLICATION.with(|slot| {
@@ -9625,11 +10485,99 @@ mod tests {
         TEST_CLEANUP_SLEEP_MS.with(|c| c.set(0));
         TEST_CLEANUP_BUDGET_MS.with(|c| c.set(0));
         let second = cleanup_merged_forks(&dir, &["fork-a".to_string()]).expect("retry");
-        assert!(second[0].cleaned);
+        if !second[0].cleaned {
+            // The original remover may still own the path after its caller
+            // timed out. A retry must not start a second remover against it.
+            assert!(second[0].pending.is_some());
+            let after_worker = cleanup_merged_forks(&dir, &["fork-a".to_string()]).unwrap();
+            assert!(after_worker[0].cleaned);
+        }
         assert!(!wt_path.exists());
         let third = cleanup_merged_forks(&dir, &["fork-a".to_string()]).expect("idempotent");
         assert!(third[0].cleaned, "missing path counts as already removed");
         assert!(fork_cleanup_pending(&dir, "fork-a").is_none());
+    }
+
+    #[test]
+    fn merge_cleanup_cannot_delete_a_reused_path_or_release_a_running_remover() {
+        let _hooks = TestCleanupHooks;
+        let (_tmp, dir) = project();
+        write(&dir, "work.txt", "base");
+        let (base, _) = create_root(&dir, "cli", "base", None).unwrap();
+        let worktrees = tempfile::tempdir().unwrap();
+        let reused = worktrees.path().join("reused");
+        fork_root(&dir, &base.id, Some("old-a"), "cli").unwrap();
+        fork_materialize(&dir, "old-a", &reused, None).unwrap();
+        let (captured_tx, captured_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let source = dir.clone();
+        let delayed = std::thread::spawn(move || {
+            TEST_BEFORE_CLEANUP_PATH_LOCK.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move |_| {
+                    captured_tx.send(()).unwrap();
+                    resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                }))
+            });
+            cleanup_merged_forks(&source, &["old-a".into()]).unwrap()
+        });
+        captured_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(cleanup_merged_forks(&dir, &["old-a".into()]).unwrap()[0].cleaned);
+        fork_root(&dir, &base.id, Some("new-b"), "cli").unwrap();
+        fork_materialize(&dir, "new-b", &reused, None).unwrap();
+        write(&reused, "new-work.txt", "B owns this path");
+        resume_tx.send(()).unwrap();
+        assert!(!delayed.join().unwrap()[0].cleaned);
+        assert_eq!(
+            std::fs::read_to_string(reused.join("new-work.txt")).unwrap(),
+            "B owns this path"
+        );
+        assert_eq!(local_store::fork_context(&reused).unwrap().fork, "new-b");
+
+        let timed = worktrees.path().join("timed");
+        fork_root(&dir, &base.id, Some("timed-c"), "cli").unwrap();
+        fork_materialize(&dir, "timed-c", &timed, None).unwrap();
+        let (running_tx, running_rx) = std::sync::mpsc::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        TEST_CLEANUP_BUDGET_MS.with(|value| value.set(20));
+        TEST_CLEANUP_WORKER_PAUSE.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move |_| {
+                running_tx.send(()).unwrap();
+                finish_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            }))
+        });
+        let timed_out = cleanup_merged_forks(&dir, &["timed-c".into()]).unwrap();
+        assert!(timed_out[0]
+            .pending
+            .as_deref()
+            .unwrap()
+            .contains("timed out"));
+        running_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Simulate external disappearance while the delayed remover is still
+        // running. The normal materializer must not reuse its destination.
+        std::fs::remove_dir_all(&timed).unwrap();
+        fork_root(&dir, &base.id, Some("later-d"), "cli").unwrap();
+        let blocked = fork_materialize(&dir, "later-d", &timed, None);
+        assert!(blocked.is_err());
+        assert!(!timed.exists());
+        finish_tx.send(()).unwrap();
+        // Wait for worker ownership to end without clearing C's registry,
+        // then exercise that stale entry against a genuinely new D.
+        drop(fork_worktree_path_guard(&Repository::open(&dir).unwrap(), &timed).unwrap());
+        fork_materialize(&dir, "later-d", &timed, None).unwrap();
+        write(&timed, "later-work.txt", "D owns this path");
+        let stale = cleanup_merged_forks(&dir, &["timed-c".into()]).unwrap();
+        assert!(!stale[0].cleaned);
+        assert!(stale[0]
+            .pending
+            .as_deref()
+            .unwrap()
+            .contains("another worktree"));
+        assert_eq!(
+            std::fs::read_to_string(timed.join("later-work.txt")).unwrap(),
+            "D owns this path"
+        );
+        assert_eq!(local_store::fork_context(&timed).unwrap().fork, "later-d");
+        assert!(reused.join("new-work.txt").is_file());
     }
 
     #[test]

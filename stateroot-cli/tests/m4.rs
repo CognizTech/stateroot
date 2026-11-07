@@ -399,7 +399,7 @@ fn degraded_memory_recall_preserves_visible_limit_over_stdio() {
         stateroot_core::hot_apex::join_entries(&entries),
     )
     .unwrap();
-    let db = project.path().join(".stateroot/local/memory.sqlite");
+    let db = stateroot_core::memory_index::index_path(project.path());
     if db.is_file() {
         std::fs::remove_file(&db).unwrap();
     }

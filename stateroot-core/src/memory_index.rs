@@ -1,6 +1,7 @@
 //! Local FTS5 index over curated memory, wiki pages, episodic, and transcripts.
 //!
-//! Lives at `.stateroot/local/memory.sqlite` (unsynced via `.stateroot/local/`).
+//! Runtime-isolated, unsynced SQLite generations live under `.stateroot/local/`.
+//! The older shared database remains a read-only fallback, never a write target.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,7 +12,7 @@ use crate::hot_apex;
 use crate::local_store;
 use crate::wiki;
 
-/// Relative path of the index DB under `.stateroot/`.
+/// Legacy shared index, retained for read-only fallback.
 pub const INDEX_DB_REL: &str = "local/memory.sqlite";
 
 /// One recall hit.
@@ -51,11 +52,28 @@ pub enum MemoryIndexError {
     Io(#[from] std::io::Error),
 }
 
+/// Current runtime's derived cache. A reboot/runtime change selects a new cache;
+/// other runtimes' databases and sentinel locks are never modified or removed.
+pub fn index_path(project_dir: &Path) -> PathBuf {
+    let runtime = crate::safe_io::host_namespace()
+        .unwrap_or("unavailable")
+        .trim_start_matches("sha256:");
+    local_store::root(project_dir)
+        .join("local/memory-index")
+        .join(runtime)
+        .join("memory.sqlite")
+}
+
 fn db_path(project_dir: &Path) -> PathBuf {
-    local_store::root(project_dir).join(INDEX_DB_REL)
+    index_path(project_dir)
 }
 
 fn open(project_dir: &Path) -> Result<Connection, MemoryIndexError> {
+    if crate::safe_io::host_namespace().is_none() {
+        return Err(MemoryIndexError::Source(
+            "runtime identity unavailable; committed index retained".into(),
+        ));
+    }
     let path = db_path(project_dir);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -66,8 +84,12 @@ fn open(project_dir: &Path) -> Result<Connection, MemoryIndexError> {
     conn.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA cache_spill=OFF;")?;
     // Regular table is the source of truth for listing/LIKE; FTS5 mirrors `text`
     // for MATCH queries. FTS5 alone is awkward for full-table scans.
+    // Serialize schema initialization as well as refresh: two first-time readers
+    // must not race the legacy-column migration. SQLite releases this lock on
+    // process exit/crash; no persistent owner sentinel can wedge a later boot.
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        "BEGIN IMMEDIATE;
+         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS docs (
            id INTEGER PRIMARY KEY,
            kind TEXT NOT NULL,
@@ -93,16 +115,94 @@ fn open(project_dir: &Path) -> Result<Connection, MemoryIndexError> {
             ))?;
         }
     }
+    conn.execute_batch("COMMIT;")?;
     Ok(conn)
 }
 
-fn open_read(project_dir: &Path) -> Result<Connection, MemoryIndexError> {
-    let conn = Connection::open_with_flags(
-        db_path(project_dir),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )?;
+fn open_read_at(path: &Path) -> Result<Connection, MemoryIndexError> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     conn.busy_timeout(std::time::Duration::from_millis(100))?;
     Ok(conn)
+}
+
+fn fingerprint(conn: &Connection) -> Result<String, rusqlite::Error> {
+    conn.query_row(
+        "SELECT value FROM meta WHERE key='fingerprint'",
+        [],
+        |row| row.get(0),
+    )
+}
+
+fn committed_read(path: &Path) -> Result<Connection, MemoryIndexError> {
+    let conn = open_read_at(path)?;
+    fingerprint(&conn)?;
+    conn.prepare("SELECT kind,path,text,private,source,session_id,harness FROM docs LIMIT 0")?;
+    conn.prepare("SELECT rowid FROM docs_fts LIMIT 0")?;
+    Ok(conn)
+}
+
+// Only read preserved caches. Modification time ranks candidates; it never
+// establishes owner death, permits takeover, or makes a fallback current.
+const PRIOR_RUNTIME_SCAN_LIMIT: usize = 128;
+const PRIOR_RUNTIME_OPEN_LIMIT: usize = 8;
+
+// The final flag identifies any preserved read-only fallback, never Current.
+fn readable_generation(
+    project_dir: &Path,
+) -> Result<(Connection, PathBuf, bool), MemoryIndexError> {
+    let path = db_path(project_dir);
+    let current = committed_read(&path);
+    match current {
+        Ok(conn) => Ok((conn, path, false)),
+        Err(error) => {
+            let legacy = local_store::root(project_dir).join(INDEX_DB_REL);
+            if let Ok(conn) = committed_read(&legacy) {
+                return Ok((conn, legacy, true));
+            }
+            let mut candidates = Vec::new();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+            if let Some(root) = path.parent().and_then(Path::parent) {
+                if let Ok(entries) = fs::read_dir(root) {
+                    for entry in entries.take(PRIOR_RUNTIME_SCAN_LIMIT).flatten() {
+                        if std::time::Instant::now() >= deadline {
+                            break;
+                        }
+                        let name = entry.file_name();
+                        let Some(name) = name.to_str() else {
+                            continue;
+                        };
+                        if name.len() != 64
+                            || !name.bytes().all(|byte| byte.is_ascii_hexdigit())
+                            || !entry.file_type().is_ok_and(|kind| kind.is_dir())
+                        {
+                            continue;
+                        }
+                        let candidate = entry.path().join("memory.sqlite");
+                        if candidate == path {
+                            continue;
+                        }
+                        if let Ok(meta) = fs::symlink_metadata(&candidate) {
+                            if meta.is_file() {
+                                candidates.push((meta.modified().ok(), candidate));
+                            }
+                        }
+                    }
+                }
+            }
+            candidates.sort_by(|a, b| b.cmp(a));
+            for (_, candidate) in candidates.into_iter().take(PRIOR_RUNTIME_OPEN_LIMIT) {
+                if let Ok(conn) = committed_read(&candidate) {
+                    return Ok((conn, candidate, true));
+                }
+            }
+            Err(error)
+        }
+    }
+}
+
+#[cfg(test)]
+fn open_read(project_dir: &Path) -> Result<Connection, MemoryIndexError> {
+    readable_generation(project_dir).map(|(conn, _, _)| conn)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -251,39 +351,31 @@ fn content_fingerprint(project_dir: &Path, home: &Path) -> Result<String, Memory
 pub fn rebuild_if_needed(project_dir: &Path, home: &Path) -> Result<bool, MemoryIndexError> {
     let sources = source_inventory(project_dir, home)?;
     let fp = metadata_fingerprint(&sources);
-    if let Ok(conn) = open_read(project_dir) {
-        let stored = conn
-            .query_row(
-                "SELECT value FROM meta WHERE key='fingerprint'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .ok();
+    if let Ok(conn) = open_read_at(&db_path(project_dir)) {
+        let stored = fingerprint(&conn).ok();
         if stored.as_deref() == Some(fp.as_str()) {
             return Ok(false);
         }
     }
-    refresh(project_dir, home, false)?;
-    Ok(true)
+    refresh(project_dir, home, false)
 }
 
 /// Force a full rebuild.
 pub fn rebuild(project_dir: &Path, home: &Path) -> Result<(), MemoryIndexError> {
-    refresh(project_dir, home, true)
+    refresh(project_dir, home, true).map(|_| ())
 }
 
-fn refresh(project_dir: &Path, home: &Path, force: bool) -> Result<(), MemoryIndexError> {
-    let _writer = crate::safe_io::ResourceLock::acquire_with_budget(
-        local_store::root(project_dir).join("local/memory-index.lock"),
-        4,
-        25,
-    )?;
+fn refresh(project_dir: &Path, home: &Path, force: bool) -> Result<bool, MemoryIndexError> {
+    let mut conn = open(project_dir)?;
+    let transaction = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let sources = source_inventory(project_dir, home)?;
     let fp = metadata_fingerprint(&sources);
-    let conn = open(project_dir)?;
-    let previous = stored_sources(&conn);
+    // Another current-runtime writer may have completed while we waited.
+    if !force && fingerprint(&transaction).ok().as_deref() == Some(fp.as_str()) {
+        return Ok(false);
+    }
+    let previous = stored_sources(&transaction);
     let full = force || previous.is_empty();
-    let transaction = conn.unchecked_transaction()?;
     if full {
         transaction.execute("DELETE FROM docs", [])?;
         transaction.execute("INSERT INTO docs_fts(docs_fts) VALUES('delete-all')", [])?;
@@ -345,7 +437,13 @@ fn refresh(project_dir: &Path, home: &Path, force: bool) -> Result<(), MemoryInd
                 project_dir,
                 &source.kind,
                 &source.path,
-            )?
+            )
+            .map_err(|error| {
+                MemoryIndexError::Source(format!(
+                    "native source {} unavailable: {error}",
+                    source.path.display()
+                ))
+            })?
         };
         for bundle in bundles {
             let sid = bundle["session_id"].as_str().unwrap_or("");
@@ -403,7 +501,7 @@ fn refresh(project_dir: &Path, home: &Path, force: bool) -> Result<(), MemoryInd
         transaction.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![key,value])?;
     }
     transaction.commit()?;
-    Ok(())
+    Ok(true)
 }
 
 fn delete_source(conn: &Connection, source: &str) -> Result<(), MemoryIndexError> {
@@ -694,7 +792,16 @@ pub fn search_report(
         report.index_detail = Some(error.to_string());
     }
     report.hits = match search_indexed(project_dir, home, q, limit, owner, stale) {
-        Ok(hits) => hits,
+        Ok((hits, read_only)) => {
+            if read_only {
+                report.index_state = RecallIndexState::Stale;
+                report.index_detail.get_or_insert_with(|| {
+                    "runtime index unavailable; preserved read-only generation searched (prior-runtime discovery is bounded)"
+                        .into()
+                });
+            }
+            hits
+        }
         Err(error) => {
             report.index_state = RecallIndexState::Unavailable;
             report.index_detail = Some(match report.index_detail {
@@ -738,8 +845,9 @@ fn search_indexed(
     limit: usize,
     owner: bool,
     stale: bool,
-) -> Result<Vec<RecallHit>, MemoryIndexError> {
-    let conn = open_read(project_dir)?;
+) -> Result<(Vec<RecallHit>, bool), MemoryIndexError> {
+    let (conn, _, read_only) = readable_generation(project_dir)?;
+    let stale = stale || read_only;
     let transaction = conn.unchecked_transaction()?;
     let stones =
         crate::tombstones::load(project_dir, crate::tombstones::TombstonePolicy::FailClosed)
@@ -852,7 +960,7 @@ fn search_indexed(
     for hit in &mut merged {
         hit.text = excerpt_around(&hit.text, q);
     }
-    Ok(merged)
+    Ok((merged, read_only))
 }
 
 /// Owner-view source fallback for degraded indexes; never pretends index freshness.
@@ -927,41 +1035,53 @@ pub struct IndexHealth {
     pub fingerprint: Option<String>,
     /// Read/schema error; absence never implies a successful empty index.
     pub error: Option<String>,
+    /// Runtime cache, preserved legacy fallback, or no readable generation.
+    pub generation: &'static str,
+    /// Actual selected database, separate from canonical intelligence sources.
+    pub path: PathBuf,
+    /// Existing on-demand refresh route; no lock-file deletion is required.
+    pub repair: Option<&'static str>,
 }
 
 /// Inspect index health without rebuilding or replacing its last generation.
 pub fn health(project_dir: &Path, home: &Path) -> IndexHealth {
-    let result = Connection::open_with_flags(
-        db_path(project_dir),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .and_then(|conn| {
-        conn.busy_timeout(std::time::Duration::from_millis(100))?;
-        conn.query_row(
-            "SELECT value FROM meta WHERE key='fingerprint'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-    });
-    match result {
-        Ok(fingerprint) => match content_fingerprint(project_dir, home) {
-            Ok(current) => IndexHealth {
-                fresh: fingerprint == current,
-                fingerprint: Some(fingerprint),
-                error: None,
-            },
-            Err(error) => IndexHealth {
-                fresh: false,
-                fingerprint: Some(fingerprint),
-                error: Some(error.to_string()),
-            },
-        },
-        Err(error) => IndexHealth {
-            fresh: false,
-            fingerprint: None,
-            error: Some(error.to_string()),
-        },
+    let mut health = IndexHealth {
+        fresh: false,
+        fingerprint: None,
+        error: None,
+        generation: "unavailable",
+        path: db_path(project_dir),
+        repair: Some("stateroot memory recall state"),
+    };
+    match readable_generation(project_dir) {
+        Ok((conn, path, read_only)) => {
+            health.generation = if read_only {
+                if path == local_store::root(project_dir).join(INDEX_DB_REL) {
+                    "legacy_read_only"
+                } else {
+                    "prior_runtime_read_only"
+                }
+            } else {
+                "runtime"
+            };
+            health.path = path;
+            health.fingerprint = fingerprint(&conn).ok();
+            match content_fingerprint(project_dir, home) {
+                Ok(current) => {
+                    health.fresh = !read_only && health.fingerprint.as_deref() == Some(&current);
+                    if read_only {
+                        health.error = Some("using preserved read-only generation; next recall builds this runtime's cache without changing another runtime's lock or database; prior-runtime discovery checks up to 128 entries and 8 caches".into());
+                    }
+                }
+                Err(error) => health.error = Some(error.to_string()),
+            }
+        }
+        Err(error) => health.error = Some(error.to_string()),
     }
+    if health.fresh {
+        health.repair = None;
+    }
+    health
 }
 
 /// The excerpt budget for one recall hit (chars, not tokens).
@@ -1194,6 +1314,204 @@ fn cjk_substring_hits(
 mod tests {
     use super::*;
 
+    fn preserve_legacy_generation(project: &Path) -> PathBuf {
+        let legacy = local_store::root(project).join(INDEX_DB_REL);
+        fs::copy(db_path(project), &legacy).unwrap();
+        fs::remove_file(db_path(project)).unwrap();
+        legacy
+    }
+
+    #[test]
+    fn runtime_cache_recovers_without_changing_old_owner_or_database() {
+        for owner in [
+            serde_json::json!({"pid": std::process::id(), "namespace": "windows", "token": "foreign-live"}).to_string(),
+            serde_json::json!({"pid": 547167, "namespace": "sha256:058e48beb13c48146246a091730a5f97f0ceb100245357d81e812eda4bfdc1d8", "acquired_at": "2026-10-08T00:00:00Z", "token": "prior-runtime"}).to_string(),
+            serde_json::json!({"pid": std::process::id(), "namespace": crate::safe_io::host_namespace().unwrap_or("unavailable"), "token": "live-legacy-writer"}).to_string(),
+            serde_json::json!({"pid": 4_000_000}).to_string(),
+            "{malformed owner".into(),
+        ] {
+            let project = tempfile::tempdir().unwrap();
+            let home = tempfile::tempdir().unwrap();
+            local_store::init_skeleton(project.path(), "p", "P", "default").unwrap();
+            native_file(home.path(), project.path(), "stable", "runtimecanary retained evidence");
+            rebuild(project.path(), home.path()).unwrap();
+            let legacy = preserve_legacy_generation(project.path());
+            let before = fs::read(&legacy).unwrap();
+            let lock = local_store::root(project.path()).join("local/memory-index.lock");
+            fs::write(&lock, &owner).unwrap();
+            let foreign_writer = Connection::open(&legacy).unwrap();
+            foreign_writer.execute_batch("BEGIN IMMEDIATE; DELETE FROM docs;").unwrap();
+            hot_apex::add(project.path(), home.path(), "memory", "freshcanary latest fact", false).unwrap();
+            let cold = std::time::Instant::now();
+            let report = search_report(project.path(), home.path(), "freshcanary", 4, true);
+            let cold_ms = cold.elapsed().as_millis();
+            assert_eq!(report.index_state, RecallIndexState::Current, "{report:?}");
+            assert!(report.hits.iter().any(|hit| !hit.stale && hit.text.contains("freshcanary")));
+            assert_eq!(health(project.path(), home.path()).generation, "runtime");
+            assert_eq!(fs::read(&lock).unwrap(), owner.as_bytes());
+            assert_eq!(fs::read(&legacy).unwrap(), before);
+            let parses = crate::transcripts::bundle::source_parse_count();
+            let warm = std::time::Instant::now();
+            for _ in 0..10 {
+                assert!(!rebuild_if_needed(project.path(), home.path()).unwrap());
+            }
+            assert_eq!(crate::transcripts::bundle::source_parse_count(), parses);
+            eprintln!("runtime recovery: cold_ms={cold_ms} unchanged_10_ms={}", warm.elapsed().as_millis());
+            foreign_writer.execute_batch("ROLLBACK;").unwrap();
+        }
+    }
+
+    #[test]
+    fn failed_runtime_rebuild_preserves_fallback_and_current_removals() {
+        for prior_runtime in [false, true] {
+            let project = tempfile::tempdir().unwrap();
+            let home = tempfile::tempdir().unwrap();
+            local_store::init_skeleton(project.path(), "p", "P", "default").unwrap();
+            native_file(
+                home.path(),
+                project.path(),
+                "kept",
+                "legacycanary retained evidence",
+            );
+            native_file(
+                home.path(),
+                project.path(),
+                "purged",
+                "purgedcanary removed evidence",
+            );
+            let broken = native_file(home.path(), project.path(), "broken", "beforecorruption");
+            hot_apex::add(
+                project.path(),
+                home.path(),
+                "memory",
+                "obsoletecanary removed fact",
+                false,
+            )
+            .unwrap();
+            rebuild(project.path(), home.path()).unwrap();
+            let preserved = if prior_runtime {
+                let current = db_path(project.path());
+                let root = current.parent().unwrap().parent().unwrap();
+                let prior = root.join("0".repeat(64)).join("memory.sqlite");
+                assert_ne!(prior, current);
+                fs::create_dir_all(prior.parent().unwrap()).unwrap();
+                fs::copy(&current, &prior).unwrap();
+                fs::remove_file(&current).unwrap();
+                // A newer invalid cache must not hide an older usable commit.
+                let invalid = root.join("f".repeat(64)).join("memory.sqlite");
+                fs::create_dir_all(invalid.parent().unwrap()).unwrap();
+                fs::write(invalid, "not a sqlite database").unwrap();
+                prior
+            } else {
+                preserve_legacy_generation(project.path())
+            };
+            let before = fs::read(&preserved).unwrap();
+            let (hits, fallback) =
+                search_indexed(project.path(), home.path(), "legacycanary", 4, true, false)
+                    .unwrap();
+            assert!(fallback);
+            assert!(hits
+                .iter()
+                .any(|hit| hit.stale && hit.text.contains("legacycanary")));
+            fs::write(broken, "{malformed source").unwrap();
+            hot_apex::remove(
+                project.path(),
+                home.path(),
+                "memory",
+                "obsoletecanary removed fact",
+            )
+            .unwrap();
+            crate::tombstones::record(project.path(), "purged", "codex").unwrap();
+            let report = search_report(project.path(), home.path(), "legacycanary", 4, true);
+            assert_eq!(report.index_state, RecallIndexState::Stale, "{report:?}");
+            assert!(report
+                .hits
+                .iter()
+                .any(|hit| hit.stale && hit.text.contains("legacycanary")));
+            for removed in ["purgedcanary", "obsoletecanary"] {
+                assert!(search_report(project.path(), home.path(), removed, 4, true)
+                    .hits
+                    .is_empty());
+            }
+            let health = health(project.path(), home.path());
+            assert_eq!(
+                health.generation,
+                if prior_runtime {
+                    "prior_runtime_read_only"
+                } else {
+                    "legacy_read_only"
+                }
+            );
+            assert!(!health.fresh);
+            assert!(health.repair.is_some());
+            assert_eq!(fs::read(preserved).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn concurrent_runtime_refresh_reuses_the_committed_generation() {
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(project.path(), "p", "P", "default").unwrap();
+        native_file(
+            home.path(),
+            project.path(),
+            "parallel",
+            "parallelcanary native evidence",
+        );
+        let barrier = std::sync::Barrier::new(2);
+        let results = std::thread::scope(|scope| {
+            let run = || {
+                barrier.wait();
+                rebuild_if_needed(project.path(), home.path())
+            };
+            let first = scope.spawn(run);
+            let second = scope.spawn(run);
+            [
+                first.join().unwrap().unwrap(),
+                second.join().unwrap().unwrap(),
+            ]
+        });
+        assert_eq!(results.iter().filter(|changed| **changed).count(), 1);
+        assert!(health(project.path(), home.path()).fresh);
+        assert_eq!(
+            search_report(project.path(), home.path(), "parallelcanary", 4, true).index_state,
+            RecallIndexState::Current
+        );
+    }
+
+    #[test]
+    fn crashed_runtime_writer_rolls_back_and_refreshes_without_sentinel_repair() {
+        const CRASH_PATH: &str = "STATEROOT_TEST_INDEX_CRASH_PATH";
+        if let Some(path) = std::env::var_os(CRASH_PATH) {
+            let conn = Connection::open(PathBuf::from(path)).unwrap();
+            conn.execute_batch("BEGIN IMMEDIATE; DELETE FROM docs; INSERT INTO docs_fts(docs_fts) VALUES('delete-all');").unwrap();
+            std::process::exit(17);
+        }
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(project.path(), "p", "P", "default").unwrap();
+        native_file(
+            home.path(),
+            project.path(),
+            "crash",
+            "crashcanary committed evidence",
+        );
+        rebuild(project.path(), home.path()).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "memory_index::tests::crashed_runtime_writer_rolls_back_and_refreshes_without_sentinel_repair"])
+            .env(CRASH_PATH, db_path(project.path()))
+            .status().unwrap();
+        assert_eq!(status.code(), Some(17));
+        let report = search_report(project.path(), home.path(), "crashcanary", 4, true);
+        assert_eq!(report.index_state, RecallIndexState::Current, "{report:?}");
+        assert!(report
+            .hits
+            .iter()
+            .any(|hit| !hit.stale && hit.text.contains("crashcanary")));
+        assert!(health(project.path(), home.path()).fresh);
+    }
+
     #[test]
     fn malformed_changed_source_keeps_committed_generation_and_reports_unavailable() {
         let project = tempfile::tempdir().unwrap();
@@ -1215,7 +1533,8 @@ mod tests {
             )
             .unwrap();
         fs::write(&file, b"{malformed native source").unwrap();
-        assert!(rebuild_if_needed(project.path(), home.path()).is_err());
+        let error = rebuild_if_needed(project.path(), home.path()).unwrap_err();
+        assert!(error.to_string().contains("native source"));
         let conn = open_read(project.path()).unwrap();
         assert_eq!(
             conn.query_row(
@@ -1387,10 +1706,8 @@ mod tests {
             .any(|hit| hit.text.contains("tailcanaryalpha") && Path::new(&hit.source) == file));
         let cold_ms = cold.elapsed().as_millis();
         let parses = crate::transcripts::bundle::source_parse_count();
-        let _lock = crate::safe_io::ResourceLock::acquire(
-            local_store::root(project.path()).join("local/memory-index.lock"),
-        )
-        .unwrap();
+        let writer = open(project.path()).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE;").unwrap();
         let warm = std::time::Instant::now();
         for _ in 0..20 {
             assert!(
@@ -1406,7 +1723,7 @@ mod tests {
             "current reads must not parse native evidence or take writer lock"
         );
         let warm_ms = warm.elapsed().as_millis();
-        drop(_lock);
+        writer.execute_batch("ROLLBACK;").unwrap();
         let mut out = fs::OpenOptions::new().append(true).open(&file).unwrap();
         out.write_all(message("tailcanarybeta next actual request").as_bytes())
             .unwrap();
@@ -1445,10 +1762,8 @@ mod tests {
         );
         rebuild(project.path(), home.path()).unwrap();
         crate::tombstones::record(project.path(), "purged", "codex").unwrap();
-        let _lock = crate::safe_io::ResourceLock::acquire(
-            local_store::root(project.path()).join("local/memory-index.lock"),
-        )
-        .unwrap();
+        let writer = open(project.path()).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE;").unwrap();
         let kept = search(project.path(), home.path(), "keepguard", 8, true).unwrap();
         assert!(kept
             .iter()

@@ -301,13 +301,21 @@ async fn main() -> anyhow::Result<()> {
         Command::Diff(args) => commands::roots::diff(&ctx, &args.from, &args.to, args.content)?,
         Command::Compare(args) => commands::roots::compare(&ctx, &args.a, &args.b)?,
         Command::Revert(args) => commands::roots::revert(&ctx, &args.root, args.yes)?,
-        Command::Fork(args) => commands::roots::fork(
-            &ctx,
-            &args.root,
-            args.name.as_deref().or(args.branch.as_deref()),
-            args.worktree.as_deref(),
-            args.plan.as_deref(),
-        )?,
+        Command::Fork(args) => {
+            if args.cleanup {
+                commands::roots::cleanup_fork_refs(&ctx, args.apply, args.json)?;
+            } else {
+                commands::roots::fork(
+                    &ctx,
+                    args.root
+                        .as_deref()
+                        .expect("clap requires root unless cleanup"),
+                    args.name.as_deref().or(args.branch.as_deref()),
+                    args.worktree.as_deref(),
+                    args.plan.as_deref(),
+                )?;
+            }
+        }
         Command::Merge(args) => commands::roots::merge(
             &ctx,
             &args.forks,
