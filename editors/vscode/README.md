@@ -44,6 +44,10 @@ own runtime:
   session start, never trimmed. The same persona, USER.md and working
   identity project into every harness; the agents stay distinct, and the
   working relationship does not reset when the harness changes.
+- **Portable project state** — the CLI exports and validates local bundles of
+  retained roots, shared intelligence and referenced evidence. Import retains
+  state without moving the current head; materialization applies a compatible
+  checkout. Use these commands in the terminal alongside the workbench.
 - **Memory in three layers** — a curated hot-apex every session sees, a
   compiled wiki distilled from evidence, and an episodic log with full-text
   recall (`stateroot memory recall`). Every fact carries provenance:

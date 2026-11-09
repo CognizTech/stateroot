@@ -417,6 +417,202 @@ pub fn fork(
     Ok(())
 }
 
+/// Reuse the normal boundary drainer/ingest/frontier acknowledgements before
+/// sealing. This never declares task completion or reactivates a plan.
+pub async fn prepare_retirements(ctx: &Ctx, names: &[String]) -> anyhow::Result<()> {
+    use stateroot_core::{local_store, observations};
+    for name in names {
+        let Some(path) = engine::retirement_checkout(&ctx.cwd, name)? else {
+            continue;
+        };
+        let fork = Ctx {
+            cwd: path.clone(),
+            ..ctx.clone()
+        };
+        super::drain_finalize::run_drain(&fork).await?;
+        let pending: std::collections::BTreeSet<_> = observations::list_segments(&path)
+            .into_iter()
+            .filter(|segment| !segment.sealed)
+            .map(|segment| segment.file)
+            .collect();
+        let sessions: std::collections::BTreeSet<_> = observations::load_spool(&path)
+            .into_iter()
+            .filter_map(|observation| {
+                observation
+                    .session_id
+                    .map(|session| (observation.harness, session))
+            })
+            .collect();
+        let mut frontiers = Vec::new();
+        for (harness, session) in sessions {
+            let watermark = match observations::session_watermark(&path, &harness, &session) {
+                observations::SessionWatermark::Present(watermark) => Some(watermark),
+                observations::SessionWatermark::Absent => None,
+                observations::SessionWatermark::Unreadable(_) => {
+                    observations::recover_session_frontier(&path, &harness, &session)?
+                }
+            };
+            if let Some(watermark) = watermark.filter(|watermark| {
+                watermark
+                    .segment
+                    .as_ref()
+                    .is_some_and(|segment| pending.contains(segment))
+            }) {
+                frontiers.push((harness, session, watermark));
+            }
+        }
+        if !frontiers.is_empty() {
+            super::compiler::try_ingest(&fork, false).await?;
+            for (harness, session, watermark) in frontiers {
+                observations::acknowledge_frontier(
+                    &path,
+                    &harness,
+                    &session,
+                    &format!("fork-close-{}", uuid::Uuid::now_v7()),
+                    &watermark,
+                )?;
+            }
+            local_store::append_episodic(
+                &path,
+                &serde_json::json!({"ts":local_store::now_rfc3339(),"kind":"fork_capture_seal","fork":name,"harness":"cli"}),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Existing service owns recovery and bounded retirement; preparation reuses
+/// the same boundary drain/frontier sealing as explicit parking.
+pub async fn reconcile_retirements(ctx: &Ctx) -> anyhow::Result<()> {
+    for (name, _) in engine::retirement_candidates(&ctx.cwd)?.into_iter().take(2) {
+        if let Err(error) = prepare_retirements(ctx, std::slice::from_ref(&name)).await {
+            // The lifecycle itself records the authoritative retained reason.
+            tracing::debug!("fork boundary preparation {name}: {error}");
+        }
+        let _ = engine::retire_eligible_fork(&ctx.cwd, &name)?;
+    }
+    Ok(())
+}
+
+/// Legacy migration is an explicit operator judgment on the inspected fork
+/// and output inventory; the existing storage owner validates and performs it.
+pub fn migrate_output(
+    ctx: &Ctx,
+    name: &str,
+    relative: Option<&Path>,
+    input: Option<&str>,
+    json_output: bool,
+) -> anyhow::Result<()> {
+    use stateroot_core::build_storage;
+    use std::io::Read;
+    ctx.require_project()?;
+    let owner = engine::retained_storage_owner(&ctx.cwd)?;
+    let result = if let Some(input) = input {
+        engine::lineage_refname_checked(&ctx.cwd)?;
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Migration {
+            #[serde(default)]
+            fork: Option<String>,
+            #[serde(default)]
+            relative: Option<std::path::PathBuf>,
+            expected_tip: String,
+            expected_inventory: String,
+            reason: String,
+        }
+        let reader: Box<dyn Read> = if input == "-" {
+            Box::new(std::io::stdin())
+        } else {
+            Box::new(std::fs::File::open(input)?)
+        };
+        let mut bytes = Vec::new();
+        reader.take(65537).read_to_end(&mut bytes)?;
+        anyhow::ensure!(bytes.len() <= 65536, "migration input exceeds 64 KiB");
+        let request: Migration = serde_json::from_slice(&bytes)?;
+        anyhow::ensure!(
+            request.fork.as_deref().is_none_or(|fork| fork == name),
+            "migration input names another fork"
+        );
+        serde_json::to_value(
+            build_storage::adopt_legacy_cargo_output_at(
+                &owner,
+                name,
+                request
+                    .relative
+                    .as_deref()
+                    .unwrap_or_else(|| Path::new("target")),
+                &request.expected_tip,
+                &request.expected_inventory,
+                &request.reason,
+            )
+            .map_err(anyhow::Error::msg)?,
+        )?
+    } else {
+        serde_json::to_value(
+            build_storage::inspect_legacy_cargo_output_at(
+                &owner,
+                name,
+                relative.unwrap_or_else(|| Path::new("target")),
+            )
+            .map_err(anyhow::Error::msg)?,
+        )?
+    };
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!("fork {name}: {}", serde_json::to_string_pretty(&result)?);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn fork_lifecycle(
+    ctx: &Ctx,
+    park: Option<&str>,
+    reopen: Option<&str>,
+    inspect: Option<&str>,
+    worktree: Option<&str>,
+    plan: Option<&str>,
+    json_output: bool,
+) -> anyhow::Result<()> {
+    ctx.require_project()?;
+    let result = if let Some(name) = park {
+        prepare_retirements(ctx, &[name.to_string()]).await?;
+        engine::park_fork(&ctx.cwd, name)?
+    } else if let Some(name) = reopen {
+        let destination = worktree
+            .map(|path| {
+                if path.is_empty() {
+                    engine::managed_worktree_path(&ctx.cwd, name)
+                } else {
+                    Ok(Path::new(path).to_path_buf())
+                }
+            })
+            .transpose()?;
+        engine::reopen_fork(&ctx.cwd, name, destination.as_deref(), plan)?
+    } else {
+        engine::fork_lifecycle(&ctx.cwd, inspect.expect("lifecycle operation selected"))?
+    };
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!(
+            "fork {}: {} (root {})",
+            result["fork"].as_str().unwrap_or_default(),
+            result["state"].as_str().unwrap_or_default(),
+            result["root"].as_str().unwrap_or_default()
+        );
+        if let Some(path) = result["worktree"].as_str() {
+            println!("worktree: {path}");
+        }
+        if let Some(path) = result["retention"]["directory"].as_str() {
+            println!("retained local closure: {path}");
+        }
+        println!("Plan state and historical provenance are preserved; reopened bytes require fresh verification for new execution.");
+    }
+    Ok(())
+}
+
 /// `stateroot merge <fork>…` — fold fork lineages into the trunk (3-way
 /// merge → one N-parent root; conflicts report paths, never half-apply).
 #[allow(clippy::too_many_arguments)]

@@ -68,6 +68,8 @@ thread_local! {
     static TEST_BEFORE_FORK_TEMP_CLEANUP: std::cell::RefCell<Option<PublicationObserver>> = const { std::cell::RefCell::new(None) };
     static TEST_AFTER_FORK_CLAIM: std::cell::RefCell<Option<PublicationObserver>> = const { std::cell::RefCell::new(None) };
     static TEST_BEFORE_FORK_ROLLBACK: std::cell::RefCell<Option<PublicationObserver>> = const { std::cell::RefCell::new(None) };
+    static TEST_BEFORE_FORK_RETIREMENT: std::cell::RefCell<Option<PublicationObserver>> = const { std::cell::RefCell::new(None) };
+    static TEST_BEFORE_FORK_CLOSE_GUARDS: std::cell::RefCell<Option<PublicationObserver>> = const { std::cell::RefCell::new(None) };
 }
 #[cfg(test)]
 type PublicationObserver = Box<dyn FnOnce(&Path)>;
@@ -98,7 +100,7 @@ fn publication_fault(_phase: u8) -> Result<(), RootsError> {
 /// order follows existing writers (memory -> wiki -> episodic; segment ->
 /// projection). Unchanged and append-only identity-addressed paths are not
 /// overwritten by checkout.
-fn materialization_guards(
+pub(crate) fn materialization_guards(
     repo: &Repository,
     project: &Path,
     before: git2::Oid,
@@ -162,12 +164,7 @@ fn materialization_guards_retaining_main(
             // must leave it untouched, rather than inventing a writer lock.
             continue;
         }
-        if retain_controls
-            && matches!(
-                relative,
-                "project/state.json" | "handoffs/current.json" | "spool/current.json"
-            )
-        {
+        if receiver_owned_path(&path, retain_controls) {
             continue;
         }
         if relative.starts_with("learnings/") {
@@ -337,12 +334,24 @@ pub enum RootsError {
     RefCas(#[from] crate::safe_io::RefCasError),
 }
 
+/// Checkout-local root metadata provenance; Git remains the content authority.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RootMetadataAvailability {
+    CheckoutSidecar,
+    CheckoutSidecarAbsentGitRetained,
+    CheckoutSidecarUnavailable,
+}
+
 /// Persisted root manifest (`.stateroot/roots/<hash>.json`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RootManifest {
     /// Sidecar availability/integrity; content authority always comes from Git.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub metadata_status: String,
+    /// Checkout-local metadata provenance; retained Git authority is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_availability: Option<RootMetadataAvailability>,
     /// Schema id.
     #[serde(default)]
     pub schema_version: String,
@@ -418,6 +427,12 @@ pub fn ensure_repo(dir: &Path) -> Result<Repository, RootsError> {
 }
 
 use git2::Repository;
+
+mod lifecycle;
+pub use lifecycle::{
+    fork_lifecycle, park_fork, reconcile_retirements, reopen_fork, retire_eligible_fork,
+    retirement_candidates, retirement_checkout, storage_lifecycle_report,
+};
 
 fn signature() -> Result<git2::Signature<'static>, git2::Error> {
     git2::Signature::now("StateRoot", "local@stateroot")
@@ -975,6 +990,7 @@ fn persist_root(
     };
     let manifest = RootManifest {
         metadata_status: "recorded".into(),
+        metadata_availability: Some(RootMetadataAvailability::CheckoutSidecar),
         schema_version: ROOT_SCHEMA.into(),
         id: hash,
         parents: parent_hashes,
@@ -1496,7 +1512,7 @@ pub fn get_root(project_dir: &Path, hash_prefix: &str) -> Result<RootManifest, R
     let commit = repo.find_commit(git2::Oid::from_str(&id)?)?;
     validate_root_project(&repo, project_dir, &commit)?;
     let parents: Vec<String> = commit.parent_ids().map(|p| p.to_string()).collect();
-    let metadata_status = match std::fs::read_to_string(&path) {
+    let (metadata_status, metadata_availability) = match std::fs::read_to_string(&path) {
         Ok(text) => match serde_json::from_str::<RootManifest>(&text) {
             Ok(mut manifest) if manifest.id == id && manifest.parents == parents => {
                 if manifest.schema_version != ROOT_SCHEMA {
@@ -1510,23 +1526,32 @@ pub fn get_root(project_dir: &Path, hash_prefix: &str) -> Result<RootManifest, R
                             "unsupported"
                         }
                         .into(),
+                        metadata_availability: Some(RootMetadataAvailability::CheckoutSidecar),
                         coverage: "unknown".into(),
                         ..Default::default()
                     });
                 }
                 manifest.metadata_status = "recorded".into();
+                manifest.metadata_availability = Some(RootMetadataAvailability::CheckoutSidecar);
                 return Ok(manifest);
             }
-            Ok(_) => "mismatched",
-            Err(_) => "corrupt",
+            Ok(_) => ("mismatched", RootMetadataAvailability::CheckoutSidecar),
+            Err(_) => ("corrupt", RootMetadataAvailability::CheckoutSidecar),
         },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "legacy_unknown",
-        Err(_) => "unavailable",
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
+            "legacy_unknown",
+            RootMetadataAvailability::CheckoutSidecarAbsentGitRetained,
+        ),
+        Err(_) => (
+            "unavailable",
+            RootMetadataAvailability::CheckoutSidecarUnavailable,
+        ),
     };
     Ok(RootManifest {
         id,
         parents,
         metadata_status: metadata_status.into(),
+        metadata_availability: Some(metadata_availability),
         coverage: "unknown".into(),
         ..Default::default()
     })
@@ -1713,6 +1738,8 @@ pub fn lineage_projection(project_dir: &Path) -> Result<Value, RootsError> {
                 "created_at": manifest.created_at,
                 "created_by_harness": manifest.created_by_harness,
                 "created_reason": manifest.created_reason,
+                "metadata_status": manifest.metadata_status,
+                "metadata_availability": manifest.metadata_availability,
                 "coverage": manifest.coverage,
                 "files_pinned": manifest.files_pinned,
                 "mainline": entry.mainline,
@@ -1792,6 +1819,7 @@ pub fn lineage_projection(project_dir: &Path) -> Result<Value, RootsError> {
                 "contained": contained,
                 "worktree": worktree.unwrap_or(Value::Null),
                 "cleanup": {"state": cleanup_state, "pending": cleanup_pending},
+                "lifecycle": record.get("lifecycle").cloned().unwrap_or(Value::Null),
             })
         })
         .collect::<Vec<_>>();
@@ -2190,6 +2218,38 @@ pub fn fork_materialize(
     plan: Option<&str>,
 ) -> Result<(), RootsError> {
     lineage_refname_checked(project_dir)?;
+    let _operation = lifecycle::operation_guard(&ensure_repo(project_dir)?, name)?;
+    materialize_fork(project_dir, name, worktree_path, plan, false)
+}
+
+/// Serialize fork admission/lifecycle publication, not execution authority.
+/// Existing authorization remains required; release after publishing the
+/// worker/command and output scopes, before long-running work.
+pub fn fork_operation_guard(
+    owner_project: &Path,
+    fork: &str,
+) -> Result<crate::safe_io::ResourceLock, RootsError> {
+    lineage_refname_checked(owner_project)?;
+    lifecycle::operation_guard(&ensure_repo(owner_project)?, fork)
+}
+
+/// Revalidate this exact live locator after acquiring its fork admission guard.
+pub fn validate_fork_execution(
+    owner_project: &Path,
+    fork: &str,
+    checkout: &Path,
+) -> Result<(), RootsError> {
+    lifecycle::validate_admission(owner_project, fork, checkout)
+}
+
+fn materialize_fork(
+    project_dir: &Path,
+    name: &str,
+    worktree_path: &Path,
+    plan: Option<&str>,
+    reopening: bool,
+) -> Result<(), RootsError> {
+    lineage_refname_checked(project_dir)?;
     validate_fork_name(name)?;
     let repo = ensure_repo(project_dir)?;
     let refname = format!("{FORKS_REF_PREFIX}{name}");
@@ -2215,8 +2275,8 @@ pub fn fork_materialize(
     let project_canon = project_dir.canonicalize()?;
     let dest_canon = resolved_worktree_path(worktree_path)?;
     let managed = managed_worktree_path(project_dir, name)?;
-    if (dest_canon.starts_with(&project_canon) && dest_canon != managed)
-        || (std::path::absolute(worktree_path)? == managed && dest_canon != managed)
+    if (dest_canon.starts_with(&project_canon) || std::path::absolute(worktree_path)? == managed)
+        && dest_canon != managed
     {
         return Err(RootsError::Merge(format!(
             "worktree destination {} is inside the project tree or redirects the managed area — use --worktree without a path or an external directory",
@@ -2228,14 +2288,16 @@ pub fn fork_materialize(
             .ok_or_else(|| RootsError::NotFound(format!("no plan named {plan_id}")))?;
         // Duplicate-claim rejection: another fork already holds this plan.
         if let Some(holder) = fork_holding_plan(project_dir, plan_id) {
-            return Err(RootsError::Merge(format!(
-                "plan {plan_id} is already claimed by fork {holder}"
-            )));
+            if !reopening || holder != name {
+                return Err(RootsError::Merge(format!(
+                    "plan {plan_id} is already claimed by fork {holder}"
+                )));
+            }
         }
         let meta: Value = serde_json::from_slice(&std::fs::read(
             crate::plans::plans_dir(project_dir).join(format!("{plan_id}.json")),
         )?)?;
-        if !meta["claimed_by"].is_null() {
+        if !(meta["claimed_by"].is_null() || reopening && meta["claimed_by"]["fork"] == name) {
             return Err(RootsError::Merge(format!(
                 "plan {plan_id} already has a claim"
             )));
@@ -2253,11 +2315,13 @@ pub fn fork_materialize(
     let mut worktree_created = false;
     let mut registered = None;
     let mut claimed = false;
+    let mut expected_claim = Value::Null;
     let mut owned_files = Vec::new();
     let result = (|| -> Result<(), RootsError> {
         if let Some(plan_id) = plan {
-            claim_plan(project_dir, plan_id, name, &operation)?;
-            claimed = true;
+            let reservation = claim_plan(project_dir, plan_id, name, &operation, reopening)?;
+            expected_claim = reservation.0;
+            claimed = reservation.1;
         }
         #[cfg(test)]
         if let Some(observer) = TEST_AFTER_FORK_CLAIM.with(|slot| slot.borrow_mut().take()) {
@@ -2297,6 +2361,9 @@ pub fn fork_materialize(
         // differ from its root blob at the next snap. Rewrite the tip tree
         // byte-exact, same contract as trunk merge checkouts.
         rewrite_workdir_byte_exact(&wt_repo, tip, worktree_path)?;
+        if reopening {
+            lifecycle::apply_current_exclusions(project_dir, worktree_path, &repo, tip)?;
+        }
         delete_temporary_fork_ref(project_dir, &repo, &tmp_branch, tip, &log_message)?;
         if let Some(plan_id) = plan {
             owned_files.extend(copy_plan_to_worktree(project_dir, worktree_path, plan_id)?);
@@ -2327,7 +2394,7 @@ pub fn fork_materialize(
             let meta: Value = serde_json::from_slice(&std::fs::read(
                 crate::plans::plans_dir(project_dir).join(format!("{plan_id}.json")),
             )?)?;
-            if meta["claimed_by"]["fork"] != name || meta["claimed_by"]["operation"] != operation {
+            if meta["claimed_by"] != expected_claim {
                 return Err(RootsError::Merge(
                     "plan claim changed during checkout; retained".into(),
                 ));
@@ -2773,7 +2840,8 @@ fn claim_plan(
     plan_id: &str,
     fork: &str,
     operation: &str,
-) -> Result<(), RootsError> {
+    reuse: bool,
+) -> Result<(Value, bool), RootsError> {
     let _guard = crate::plans::write_guard(project_dir).map_err(RootsError::Merge)?;
     let path = local_store::root(project_dir)
         .join("plans")
@@ -2781,6 +2849,9 @@ fn claim_plan(
     let text = std::fs::read_to_string(&path)
         .map_err(|_| RootsError::NotFound(format!("no plan named {plan_id}")))?;
     let mut meta: Value = serde_json::from_str(&text)?;
+    if reuse && meta["claimed_by"]["fork"] == fork {
+        return Ok((meta["claimed_by"].clone(), false));
+    }
     if !meta["claimed_by"].is_null() {
         return Err(RootsError::Merge(format!(
             "plan {plan_id} already has a claim"
@@ -2789,7 +2860,7 @@ fn claim_plan(
     meta["claimed_by"] = json!({"fork": fork, "at": now_rfc3339(), "operation": operation});
     crate::safe_io::atomic_replace_json(&path, &meta)?;
     local_store::report_written(project_dir, &format!("plans/{plan_id}.json"));
-    Ok(())
+    Ok((meta["claimed_by"].clone(), true))
 }
 
 fn release_plan_claim(
@@ -2911,6 +2982,15 @@ fn retained_main_path_allowed(path: &str) -> bool {
     let parts: Vec<_> = path.split('/').collect();
     match parts.as_slice() {
         [".stateroot", "ingest-gov.json"] => true,
+        [".stateroot", "plans", file] => file
+            .strip_suffix(".json")
+            .and_then(|id| id.strip_prefix("plan_"))
+            .is_some_and(|id| {
+                !id.is_empty()
+                    && id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            }),
         [".stateroot", "plan-bindings", harness, file]
             if !harness.is_empty()
                 && harness
@@ -3094,6 +3174,70 @@ pub(crate) fn repository_owner(project: &Path) -> Result<PathBuf, RootsError> {
     Ok(reconciliation_owner(project)?
         .map(|(owner, _)| owner)
         .unwrap_or_else(|| project.to_path_buf()))
+}
+
+/// Storage ownership only. Execution, intelligence writers and lineage keep
+/// using their existing checkout/candidate authority.
+pub fn retained_storage_owner(project: &Path) -> Result<PathBuf, RootsError> {
+    if let Some((owner, _)) = reconciliation_owner(project)? {
+        return Ok(owner);
+    }
+    let project = project.canonicalize()?;
+    let repo = Repository::open(&project)?;
+    let common = Repository::open(repo.commondir())?;
+    let owner = common
+        .workdir()
+        .ok_or_else(|| RootsError::Merge("retained storage owner has no checkout".into()))?
+        .canonicalize()?;
+    if crate::path_identity::same_directory(&owner, &project)? {
+        return Ok(owner);
+    }
+    let identity = |path: &Path| -> Result<Option<String>, RootsError> {
+        let Some(manifest) = local_store::read_manifest(path)? else {
+            return Ok(None);
+        };
+        if manifest["schema_version"] != local_store::SCHEMA_MANIFEST_V1 {
+            return Err(RootsError::Merge(
+                "unsupported retained-storage project identity".into(),
+            ));
+        }
+        Ok(manifest["project_id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned))
+    };
+    let Some(context) = local_store::fork_context(&project) else {
+        if identity(&owner)?.is_some() && identity(&owner)? == identity(&project)? {
+            return Err(RootsError::Merge(
+                "shared project worktree has no verified fork context".into(),
+            ));
+        }
+        return Ok(project);
+    };
+    validate_fork_name(&context.fork)?;
+    let registered = registered_worktree_path(&owner, &context.fork)
+        .and_then(|path| crate::path_identity::resolve_existing_dir(&path))
+        .ok_or_else(|| {
+            RootsError::Merge("retained-storage fork registration unavailable".into())
+        })?;
+    let actual = git2::Worktree::open_from_repository(&repo)?;
+    let record: Value =
+        serde_json::from_slice(&std::fs::read(fork_record_path(&owner, &context.fork))?)?;
+    let reference = format!("{FORKS_REF_PREFIX}{}", context.fork);
+    if context.schema != "stateroot.fork-context.v1"
+        || actual.name() != Some(context.fork.as_str())
+        || !crate::path_identity::same_directory(&registered, &project)?
+        || identity(&owner)?.is_none()
+        || identity(&owner)? != identity(&project)?
+        || record["name"] != context.fork
+        || record["ref"] != reference
+        || repo.refname_to_id(&reference).is_err()
+    {
+        return Err(RootsError::Merge(
+            "retained-storage fork/project/Git identity mismatch".into(),
+        ));
+    }
+    Ok(owner)
 }
 
 /// Prepare a merge for an agent chosen by the user.
@@ -4876,81 +5020,11 @@ fn fork_worktree_path_guard(
 }
 
 fn cleanup_merged_fork_worktree(
-    repo: &Repository,
+    _repo: &Repository,
     project_dir: &Path,
     name: &str,
 ) -> Result<ForkCleanup, RootsError> {
-    let entry = read_registry(project_dir)["entries"][name].clone();
-    let Some(path) = entry["path"].as_str().map(PathBuf::from) else {
-        let _ = clear_cleanup_pending(project_dir, name);
-        return Ok(ForkCleanup {
-            name: name.to_string(),
-            cleaned: true,
-            pending: None,
-        });
-    };
-    #[cfg(test)]
-    if let Some(observer) = TEST_BEFORE_CLEANUP_PATH_LOCK.with(|slot| slot.borrow_mut().take()) {
-        observer(project_dir);
-    }
-    let ownership = (|| {
-        let guard = fork_worktree_path_guard(repo, &path)?;
-        if read_registry(project_dir)["entries"].get(name) != Some(&entry) {
-            return Err(RootsError::Merge(
-                "fork worktree registration changed before cleanup; retained".into(),
-            ));
-        }
-        if path.exists() {
-            let checkout = Repository::open(&path)?;
-            let current = git2::Worktree::open_from_repository(&checkout)?;
-            if current.name() != Some(name)
-                || checkout.commondir().canonicalize()? != repo.commondir().canonicalize()?
-            {
-                return Err(RootsError::Merge(
-                    "destination now belongs to another worktree; retained".into(),
-                ));
-            }
-        }
-        remove_worktree_bounded(&path, guard)
-    })();
-    let _path_guard = match ownership {
-        Ok(guard) => guard,
-        Err(err) => {
-            let message = format!("{err}");
-            let _ = record_cleanup_pending(project_dir, name, &message);
-            return Ok(ForkCleanup {
-                name: name.to_string(),
-                cleaned: false,
-                pending: Some(message),
-            });
-        }
-    };
-    if let Ok(wt) = repo.find_worktree(name) {
-        if let Err(err) = wt.prune(None) {
-            let message = format!("{err}");
-            let _ = record_cleanup_pending(project_dir, name, &message);
-            return Ok(ForkCleanup {
-                name: name.to_string(),
-                cleaned: false,
-                pending: Some(message),
-            });
-        }
-    }
-    if let Err(err) = unregister_worktree(project_dir, name, Some(&entry)) {
-        let message = format!("{err}");
-        let _ = record_cleanup_pending(project_dir, name, &message);
-        return Ok(ForkCleanup {
-            name: name.to_string(),
-            cleaned: false,
-            pending: Some(message),
-        });
-    }
-    let _ = clear_cleanup_pending(project_dir, name);
-    Ok(ForkCleanup {
-        name: name.to_string(),
-        cleaned: true,
-        pending: None,
-    })
+    lifecycle::cleanup(project_dir, name)
 }
 
 fn remove_worktree_bounded(
@@ -5064,7 +5138,7 @@ fn checkout_root_tree(
     checkout_root_tree_retaining_main(repo, project_dir, tree, expected_before, &[])
 }
 
-fn checkout_root_tree_retaining_main(
+pub(crate) fn checkout_root_tree_retaining_main(
     repo: &Repository,
     project_dir: &Path,
     tree: git2::Oid,
@@ -5427,7 +5501,7 @@ const SPOOL_CURRENT_PATH: &str = ".stateroot/spool/current.json";
 /// `.stateroot/ingest-gov.json` — wiki ingest compiler skip cache.
 const INGEST_GOV_PATH: &str = ".stateroot/ingest-gov.json";
 
-fn receiver_owned_path(path: &str, controls: bool) -> bool {
+pub(crate) fn receiver_owned_path(path: &str, controls: bool) -> bool {
     crate::todo_federation::current_binding_path(path)
         || matches!(path, INGEST_GOV_PATH | SPOOL_CURRENT_PATH)
         || (controls
@@ -6291,6 +6365,35 @@ pub fn compose_digest_section(project_dir: &Path) -> String {
             .and_then(|v| v.as_u64())
         {
             out.push_str(&format!("Verified tree delta at snap: {count} file(s)\n"));
+        }
+        if !transition.from_root.is_empty() {
+            if let Ok(delta) = diff_roots(
+                project_dir,
+                &transition.from_root,
+                &transition.to_root,
+                false,
+                0,
+                0,
+            ) {
+                let files = delta["files"].as_array().cloned().unwrap_or_default();
+                if !files.is_empty() {
+                    out.push_str("Verified project-file changes since the prior root (review the source; older records stay historical, not false):\n");
+                    const MAX_PATHS: usize = 12;
+                    for item in files.iter().take(MAX_PATHS) {
+                        let status = item.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+                        let path = item.get("path").and_then(|v| v.as_str()).unwrap_or("?");
+                        out.push_str(&format!("  {status} {path}\n"));
+                    }
+                    if files.len() > MAX_PATHS {
+                        out.push_str(&format!("  … {} more\n", files.len() - MAX_PATHS));
+                    }
+                    out.push_str(&format!(
+                        "Exact bytes: `stateroot diff {} {} --content`\n",
+                        short(&transition.from_root),
+                        short(&transition.to_root)
+                    ));
+                }
+            }
         }
     }
 
@@ -8306,6 +8409,408 @@ mod tests {
     }
 
     #[test]
+    fn fork_lifecycle_parks_and_reopens_same_identity_with_evidence_and_current_exclusions() {
+        let (_tmp, dir) = project();
+        write_json(&dir.join(".stateroot/manifest.json"),&json!({"schema_version":local_store::SCHEMA_MANIFEST_V1,"project_id":"lifecycle-fixture"})).unwrap();
+        write(&dir, "work.txt", "base");
+        write(&dir, "secret.txt", "historical bytes");
+        let (base, _) = create_root(&dir, "cli", "base", None).unwrap();
+        let plan =
+            crate::plans::record(&dir, "retained work", "cli", None, "# Retained work\n").unwrap();
+        crate::plans::transition(&dir, &plan.id, crate::plans::PlanStatus::Approved).unwrap();
+        let (name, _) = fork_root(&dir, &base.id, Some("recoverable"), "cli").unwrap();
+        let path = managed_worktree_path(&dir, &name).unwrap();
+        fork_materialize(&dir, &name, &path, Some(&plan.id)).unwrap();
+        let owner = Repository::open(&dir).unwrap();
+        let index = std::fs::read(owner.path().join("index")).ok();
+        let branches = owner.references_glob("refs/heads/*").unwrap().count();
+        write(&path, "work.txt", "late unsnapped work");
+        write(&path, ".stateroot/memories/MEMORY.md", "retained decision");
+        write(
+            &path,
+            ".stateroot/skills/example/SKILL.md",
+            "---\nname: example\ndescription: Retained procedure\n---\nUse checked results.\n",
+        );
+        write(
+            &path,
+            ".stateroot/local/sessions/fixture.jsonl",
+            "native evidence with original cwd\n",
+        );
+        write(
+            &path,
+            ".stateroot/local/private-note.txt",
+            "local bytes survive retirement",
+        );
+        assert_eq!(
+            retained_storage_owner(&path).unwrap(),
+            dir.canonicalize().unwrap()
+        );
+        assert_eq!(
+            repository_owner(&path).unwrap(),
+            path,
+            "storage must not redirect execution authority"
+        );
+        let observation =
+            crate::verification::start(&path, &plan.id, "cli", &["fixture".into()]).unwrap();
+        let output = crate::verification::output_directory(&path).unwrap();
+        let expected_output = dir.join(".stateroot/local/verification");
+        std::fs::create_dir_all(&expected_output).unwrap();
+        assert_eq!(
+            output.canonicalize().unwrap(),
+            expected_output.canonicalize().unwrap()
+        );
+        let stdout = output.join(format!("{}.stdout", observation.id));
+        let stderr = output.join(format!("{}.stderr", observation.id));
+        let legacy = path.join(".stateroot/local/verification");
+        std::fs::create_dir_all(&legacy).unwrap();
+        let legacy_stdout = legacy.join(format!("{}.stdout", observation.id));
+        let legacy_stderr = legacy.join(format!("{}.stderr", observation.id));
+        std::fs::write(&legacy_stdout, "actual fixture output").unwrap();
+        std::fs::write(&legacy_stderr, "").unwrap();
+        let digests = [&legacy_stdout, &legacy_stderr]
+            .map(|path| crate::verification::output_digest(path).unwrap())
+            .to_vec();
+        let observation =
+            crate::verification::finish(&path, observation, Some(0), None, digests).unwrap();
+        let parked = park_fork(&dir, &name).unwrap();
+        assert_eq!(parked["state"], "parked");
+        assert!(!path.exists());
+        assert_eq!(
+            std::fs::read_to_string(&stdout).unwrap(),
+            "actual fixture output"
+        );
+        assert!(std::fs::read(&stderr).unwrap().is_empty());
+        let retained = PathBuf::from(parked["retention"]["directory"].as_str().unwrap());
+        assert_eq!(
+            get_root(&dir, parked["root"].as_str().unwrap())
+                .unwrap()
+                .metadata_status,
+            "recorded"
+        );
+        assert!(get_transition(
+            &dir,
+            parked["retention"]["manifest"]["transition"]
+                .as_str()
+                .unwrap()
+        )
+        .is_ok());
+        assert_eq!(
+            std::fs::read_to_string(retained.join("local/private-note.txt")).unwrap(),
+            "local bytes survive retirement"
+        );
+        // Crash cut: directory/registration removal committed, but the final
+        // lifecycle annotation did not. Retry must finish the same closure.
+        update_fork_record(&dir, &name, |value| {
+            value["lifecycle"]["state"] = json!("closing")
+        })
+        .unwrap();
+        assert_eq!(
+            park_fork(&dir, &name).unwrap()["root"],
+            parked["root"],
+            "park retry is idempotent"
+        );
+        merge_forks(&dir, std::slice::from_ref(&name), "cli").unwrap();
+        assert!(cleanup_merged_forks(&dir, std::slice::from_ref(&name)).unwrap()[0].cleaned);
+        assert_eq!(
+            fork_lifecycle(&dir, &name).unwrap()["state"],
+            "retired",
+            "a parked fork can integrate and retire without reopening"
+        );
+        let meta_path = crate::plans::plans_dir(&dir).join(format!("{}.json", plan.id));
+        let original_meta: Value =
+            serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
+        let mut conflicting = original_meta.clone();
+        conflicting["claimed_by"]["fork"] = json!("another-owner");
+        write_json(&meta_path, &conflicting).unwrap();
+        assert!(reopen_fork(&dir, &name, None, Some(&plan.id)).is_err());
+        assert!(!path.exists());
+        write_json(&meta_path, &original_meta).unwrap();
+        let reopened = reopen_fork(&dir, &name, None, Some(&plan.id)).unwrap();
+        assert_eq!(reopened["fork"], name);
+        assert_eq!(reopened["state"], "active");
+        assert_eq!(
+            local_store::fork_context(&path).unwrap().plan.as_deref(),
+            Some(plan.id.as_str())
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join("work.txt")).unwrap(),
+            "late unsnapped work"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join(".stateroot/memories/MEMORY.md")).unwrap(),
+            "retained decision"
+        );
+        assert!(path.join(".stateroot/skills/example/SKILL.md").is_file());
+        assert_eq!(
+            std::fs::read_to_string(path.join(".stateroot/local/sessions/fixture.jsonl")).unwrap(),
+            "native evidence with original cwd\n"
+        );
+        crate::verification::load(&path, &observation.id).unwrap();
+        assert!(reopen_fork(&dir, &name, None, Some("other-plan")).is_err());
+        crate::plans::complete(
+            &dir,
+            &plan.id,
+            "fixture history complete",
+            "cli",
+            parked["root"].as_str().map(str::to_owned),
+        )
+        .unwrap();
+        park_fork(&dir, &name).unwrap();
+        write(&dir, ".gitignore", "secret.txt\n");
+        let historical = reopen_fork(&dir, &name, None, None).unwrap();
+        assert_eq!(historical["fork"], name);
+        assert!(!path.join("secret.txt").exists());
+        assert_eq!(
+            crate::plans::load(&path, &plan.id).unwrap().0.status(),
+            crate::plans::PlanStatus::Done
+        );
+        assert!(get_root(&dir, &base.id).is_ok());
+        assert!(
+            crate::verification::validate(&path, &plan.id, &observation.id).is_err(),
+            "historical observation must not authorize reopened changed inputs"
+        );
+        assert_eq!(
+            owner.references_glob("refs/heads/*").unwrap().count(),
+            branches
+        );
+        assert_eq!(std::fs::read(owner.path().join("index")).ok(), index);
+    }
+
+    #[test]
+    fn fork_lifecycle_preserves_unmerged_ignored_active_and_interrupted_work() {
+        if std::env::var("STATEROOT_TEST_VERIFY_LEASE_CHILD").as_deref() == Ok("wait") {
+            use std::io::Read;
+            let mut input = Vec::new();
+            std::io::stdin().read_to_end(&mut input).unwrap();
+            return;
+        }
+        let _hooks = TestCleanupHooks;
+        let (_tmp, dir) = project();
+        write_json(&dir.join(".stateroot/manifest.json"),&json!({"schema_version":local_store::SCHEMA_MANIFEST_V1,"project_id":"retirement-failures"})).unwrap();
+        write(&dir, "work.txt", "base");
+        let (base, _) = create_root(&dir, "cli", "base", None).unwrap();
+        let (name, _) = fork_root(&dir, &base.id, Some("preserved"), "cli").unwrap();
+        let path = managed_worktree_path(&dir, &name).unwrap();
+        fork_materialize(&dir, &name, &path, None).unwrap();
+        write(&path, "work.txt", "unmerged");
+        create_root(&path, "cli", "fork work", None).unwrap();
+        let unmerged = cleanup_merged_forks(&dir, std::slice::from_ref(&name)).unwrap();
+        assert!(!unmerged[0].cleaned);
+        assert!(unmerged[0]
+            .pending
+            .as_deref()
+            .unwrap()
+            .contains("not merged"));
+        merge_forks(&dir, std::slice::from_ref(&name), "cli").unwrap();
+        write(&path, "work.txt", "late source after integration");
+        let edited = cleanup_merged_forks(&dir, std::slice::from_ref(&name)).unwrap();
+        assert!(!edited[0].cleaned);
+        assert_eq!(
+            std::fs::read_to_string(path.join("work.txt")).unwrap(),
+            "late source after integration"
+        );
+        let live_bytes = std::fs::read(path.join("work.txt")).unwrap();
+        TEST_BEFORE_FORK_CLOSE_GUARDS.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move |checkout| {
+                write(checkout, "work.txt", "staged-only value");
+                let repo = Repository::open(checkout).unwrap();
+                let mut index = repo.index().unwrap();
+                index.add_path(Path::new("work.txt")).unwrap();
+                index.write().unwrap();
+                std::fs::write(checkout.join("work.txt"), live_bytes).unwrap();
+            }))
+        });
+        assert!(park_fork(&dir, &name)
+            .unwrap_err()
+            .to_string()
+            .contains("staged"));
+        let repo = Repository::open(&path).unwrap();
+        let mut staged = repo.index().unwrap();
+        assert_eq!(
+            repo.find_blob(staged.get_path(Path::new("work.txt"), 0).unwrap().id)
+                .unwrap()
+                .content(),
+            b"staged-only value"
+        );
+        staged
+            .read_tree(&repo.head().unwrap().peel_to_tree().unwrap())
+            .unwrap();
+        staged.write().unwrap();
+        drop(staged);
+        drop(repo);
+        for relative in [
+            ".stateroot/spool/segments/orphan.lock",
+            ".stateroot/spool/current.lock.guard",
+        ] {
+            write(&path, relative, "unowned lock-shaped valuable bytes");
+            assert!(park_fork(&dir, &name).is_err());
+            assert_eq!(
+                std::fs::read_to_string(path.join(relative)).unwrap(),
+                "unowned lock-shaped valuable bytes"
+            );
+            std::fs::remove_file(path.join(relative)).unwrap();
+        }
+        write(&path, ".gitignore", "valuable.local\n");
+        write(&path, "valuable.local", "private valuable work");
+        assert!(park_fork(&dir, &name)
+            .unwrap_err()
+            .to_string()
+            .contains("ignored"));
+        assert_eq!(
+            std::fs::read_to_string(path.join("valuable.local")).unwrap(),
+            "private valuable work"
+        );
+        std::fs::remove_file(path.join("valuable.local")).unwrap();
+        let worker = dir.join(".stateroot/delegations/worker.json");
+        std::fs::create_dir_all(worker.parent().unwrap()).unwrap();
+        for namespace in [
+            "foreign-unknown".to_string(),
+            crate::delegation_status::process_namespace().unwrap(),
+        ] {
+            let mut activity = json!({"schema_version":crate::delegation_status::SCHEMA_V2,"id":"worker","fork_id":name,"status":"running","pid":std::process::id(),"process_namespace":namespace});
+            if namespace == "foreign-unknown" {
+                activity.as_object_mut().unwrap().remove("fork_id");
+                let key = crate::path_identity::normalize_host_path(&path.to_string_lossy());
+                activity["worktree"] = json!(if key.as_bytes().get(1) == Some(&b':') {
+                    key.to_ascii_uppercase()
+                } else {
+                    format!("\\\\wsl$\\Fixture{}", key.replace('/', "\\"))
+                });
+            }
+            write_json(&worker, &activity).unwrap();
+            assert!(park_fork(&dir, &name)
+                .unwrap_err()
+                .to_string()
+                .contains("worker"));
+            assert!(path.exists());
+        }
+        std::fs::remove_file(worker).unwrap();
+        // Real unmanaged commands remain protected even while preparing an
+        // observation, before started JSON exists; independent IDs coexist.
+        let command_plan = crate::plans::record(
+            &path,
+            "unmanaged verification",
+            "cli",
+            None,
+            "# Command lease\n",
+        )
+        .unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let argv = vec![
+            executable.to_string_lossy().into_owned(),
+            "--exact".into(),
+            "roots::tests::fork_lifecycle_preserves_unmerged_ignored_active_and_interrupted_work"
+                .into(),
+        ];
+        let mut commands = Vec::new();
+        for _ in 0..2 {
+            let admission = fork_operation_guard(&dir, &name).unwrap();
+            validate_fork_execution(&dir, &name, &path).unwrap();
+            let (id, lease) =
+                crate::verification::reserve_command(&path, &command_plan.id, &argv).unwrap();
+            let output = crate::build_storage::prepare_execution(&dir, &path, &id);
+            assert!(
+                output.environment().is_empty(),
+                "fixture has no Cargo manifest; cache is unmanaged"
+            );
+            drop(admission);
+            let child = std::process::Command::new(&executable)
+                .args(&argv[1..])
+                .env("STATEROOT_TEST_VERIFY_LEASE_CHILD", "wait")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            commands.push((id, lease, output, child));
+        }
+        while let Some((id, lease, output, mut child)) = commands.pop() {
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "real non-Cargo command is still running"
+            );
+            assert!(park_fork(&dir, &name)
+                .unwrap_err()
+                .to_string()
+                .contains("verification command"));
+            assert_eq!(
+                std::fs::read_to_string(path.join("work.txt")).unwrap(),
+                "late source after integration"
+            );
+            let observed =
+                crate::verification::start_reserved(&path, &command_plan.id, "cli", &argv, &id)
+                    .unwrap();
+            drop(child.stdin.take());
+            let status = child.wait().unwrap();
+            assert!(status.success());
+            crate::verification::finish(&path, observed, status.code(), None, Vec::new()).unwrap();
+            output.finish();
+            drop(lease);
+        }
+        let unknown = format!("v_{}", uuid::Uuid::now_v7());
+        let unknown_lease = path
+            .join(".stateroot/local/locks")
+            .join(format!("verification-command-{unknown}.lock"));
+        write_json(&unknown_lease,&json!({"pid":std::process::id(),"token":"foreign-command","acquired_at":local_store::now_rfc3339(),"namespace":"foreign-unknown"})).unwrap();
+        let held = std::fs::read(&unknown_lease).unwrap();
+        assert!(park_fork(&dir, &name).is_err());
+        assert_eq!(std::fs::read(&unknown_lease).unwrap(), held);
+        std::fs::remove_file(unknown_lease).unwrap();
+        TEST_BEFORE_FORK_RETIREMENT.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(|checkout| {
+                write(checkout, "work.txt", "write at deletion boundary")
+            }))
+        });
+        assert!(park_fork(&dir, &name)
+            .unwrap_err()
+            .to_string()
+            .contains("late write"));
+        assert_eq!(
+            std::fs::read_to_string(path.join("work.txt")).unwrap(),
+            "write at deletion boundary"
+        );
+        write(
+            &path,
+            ".stateroot/local/sessions/evidence.jsonl",
+            "raw evidence",
+        );
+        TEST_CLEANUP_FORCE_ERR.with(|value| value.set(true));
+        assert!(park_fork(&dir, &name).is_err());
+        let interrupted = fork_lifecycle(&dir, &name).unwrap();
+        assert_eq!(interrupted["state"], "closing");
+        let retained = PathBuf::from(interrupted["retention"]["directory"].as_str().unwrap());
+        assert_eq!(
+            std::fs::read_to_string(retained.join("local/sessions/evidence.jsonl")).unwrap(),
+            "raw evidence"
+        );
+        TEST_CLEANUP_FORCE_ERR.with(|value| value.set(false));
+        reopen_fork(&dir, &name, None, None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(path.join("work.txt")).unwrap(),
+            "write at deletion boundary"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join(".stateroot/local/sessions/evidence.jsonl")).unwrap(),
+            "raw evidence"
+        );
+        let checkout = Repository::open(&path).unwrap();
+        checkout
+            .set_head_detached(base.id.parse().unwrap())
+            .unwrap();
+        drop(checkout);
+        std::fs::remove_dir_all(&path).unwrap();
+        assert!(park_fork(&dir, &name)
+            .unwrap_err()
+            .to_string()
+            .contains("Git HEAD"));
+        assert!(
+            Repository::open(&dir).unwrap().find_worktree(&name).is_ok(),
+            "missing-cwd cleanup must retain independently moved Git history"
+        );
+        assert!(get_root(&dir, &base.id).is_ok());
+    }
+
+    #[test]
     fn stateroot_worktrees_dir_never_enters_a_tree() {
         let (_tmp, dir) = project();
         write(&dir, "src/main.rs", "fn main() {}\n");
@@ -8628,6 +9133,7 @@ mod tests {
             ".stateroot/plan-bindings/kimi-code/session_6e0c7220-6465-4205-8fb4-2fe028a4427a.json",
             ".stateroot/spool/acknowledgements/01a11f59-3060-7cf1-9afd-adc8c5f00502.json",
             ".stateroot/spool/acknowledgements/01a11f59-3cbd-7fa3-80b2-0c44fa71d71c.json",
+            ".stateroot/plans/plan_2026-11-08T03-51-24Z_n6a-recoverable-fork-lifecycle.json",
         ];
         write(&dir, "src/main.rs", "base\n");
         for path in paths {
@@ -8648,7 +9154,7 @@ mod tests {
                 .all(|entry| paths[4..].contains(&entry.path.as_str())),
             "only altered immutable identities require a decision"
         );
-        let selections: Vec<_> = paths[4..].iter().map(|path| path.to_string()).collect();
+        let selections: Vec<_> = paths[4..6].iter().map(|path| path.to_string()).collect();
         let staged = stage_merge_attempt(&dir, &attempt.id, &selections).unwrap();
         let candidate = PathBuf::from(staged.worktree.as_ref().unwrap());
         // Normal ownership needs no keep-main choices. This legacy escape
@@ -8666,6 +9172,14 @@ mod tests {
             ".stateroot/spool/acknowledgements/*.json",
             ".stateroot/plan-bindings/kimi-code/session_not-a-uuid.json",
             ".stateroot/spool/acknowledgements/00000000-0000-0000-0000-000000000000.json",
+            ".stateroot/plans/MEMORY.json",
+            ".stateroot/plans/plan_.json",
+            ".stateroot/plans/plan_*.json",
+            ".stateroot/plans/plan_unsafe.json.json",
+            ".stateroot/plans/plan_unsafe.md",
+            ".stateroot/plans/plan_unsafe/other.json",
+            ".stateroot/plans/plan_../other.json",
+            ".stateroot/plans/verification/v_31160a87-5565-42b3-9133-1c00c498e94b.started.json",
         ] {
             assert!(
                 stage_merge_attempt_retaining_main(&dir, &attempt.id, &[], &[invalid.into()])
@@ -10454,6 +10968,7 @@ mod tests {
     #[test]
     fn a_merged_fork_worktree_is_cleaned_up_but_history_stays() {
         let (_tmp, dir) = project();
+        write_json(&dir.join(".stateroot/manifest.json"), &json!({"schema_version":local_store::SCHEMA_MANIFEST_V1,"project_id":"cleanup-fixture"})).unwrap();
         write(&dir, "src/main.rs", "fn main() {}\n");
         let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
         fork_root(&dir, &first.id, Some("fork-a"), "cli").expect("fork");
@@ -10476,7 +10991,10 @@ mod tests {
         );
         let results = cleanup_merged_forks(&dir, &["fork-a".to_string()]).expect("cleanup");
         assert_eq!(results.len(), 1);
-        assert!(results[0].cleaned, "explicit cleanup should succeed");
+        assert!(
+            results[0].cleaned,
+            "explicit cleanup should succeed: {results:?}"
+        );
         assert!(
             !wt_path.exists(),
             "merged fork worktree must be removed: {}",
@@ -10534,30 +11052,34 @@ mod tests {
         TEST_CLEANUP_BUDGET_MS.with(|c| c.set(80));
         TEST_CLEANUP_SLEEP_MS.with(|c| c.set(800));
         let (_tmp, dir) = project();
+        write_json(&dir.join(".stateroot/manifest.json"), &json!({"schema_version":local_store::SCHEMA_MANIFEST_V1,"project_id":"cleanup-fixture"})).unwrap();
         write(&dir, "src/main.rs", "fn main() {}\n");
         let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
         let (_wt, _tip) =
             fork_with_change(&dir, &first.id, "fork-a", "src/lib_a.rs", "pub fn a() {}\n");
         merge_forks(&dir, &["fork-a".to_string()], "kimi").expect("merge");
         let wt_path = registered_worktree_path(&dir, "fork-a").expect("registered");
-        let start = std::time::Instant::now();
+        // Snapshot/evidence retention is separate from the configured deletion
+        // wait. Assert that budget and the retained in-flight state directly.
         let first_try =
             cleanup_merged_forks(&dir, &["fork-a".to_string()]).expect("timeout result");
-        assert!(
-            start.elapsed() < std::time::Duration::from_millis(400),
-            "cleanup retry must return within the budget"
-        );
         assert!(!first_try[0].cleaned);
         assert!(
             first_try[0]
                 .pending
                 .as_deref()
                 .unwrap_or("")
-                .contains("timed out"),
+                .contains("timed out after 80ms"),
             "timeout is recorded as pending: {:?}",
             first_try[0].pending
         );
-        assert!(wt_path.exists(), "timeout must leave the worktree in place");
+        let pending = fork_lifecycle(&dir, "fork-a").unwrap();
+        let retained = PathBuf::from(pending["retention"]["directory"].as_str().unwrap());
+        assert!(
+            retained.join("checkout").exists(),
+            "timeout preserves the sealed checkout at its retained locator"
+        );
+        assert!(get_root(&dir, pending["root"].as_str().unwrap()).is_ok());
 
         TEST_CLEANUP_SLEEP_MS.with(|c| c.set(0));
         TEST_CLEANUP_BUDGET_MS.with(|c| c.set(0));
@@ -10579,6 +11101,7 @@ mod tests {
     fn merge_cleanup_cannot_delete_a_reused_path_or_release_a_running_remover() {
         let _hooks = TestCleanupHooks;
         let (_tmp, dir) = project();
+        write_json(&dir.join(".stateroot/manifest.json"), &json!({"schema_version":local_store::SCHEMA_MANIFEST_V1,"project_id":"cleanup-fixture"})).unwrap();
         write(&dir, "work.txt", "base");
         let (base, _) = create_root(&dir, "cli", "base", None).unwrap();
         let worktrees = tempfile::tempdir().unwrap();
@@ -10598,12 +11121,16 @@ mod tests {
             cleanup_merged_forks(&source, &["old-a".into()]).unwrap()
         });
         captured_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert!(cleanup_merged_forks(&dir, &["old-a".into()]).unwrap()[0].cleaned);
+        assert!(
+            !cleanup_merged_forks(&dir, &["old-a".into()]).unwrap()[0].cleaned,
+            "same-fork transitions share operation ownership"
+        );
+        resume_tx.send(()).unwrap();
+        assert!(delayed.join().unwrap()[0].cleaned);
         fork_root(&dir, &base.id, Some("new-b"), "cli").unwrap();
         fork_materialize(&dir, "new-b", &reused, None).unwrap();
         write(&reused, "new-work.txt", "B owns this path");
-        resume_tx.send(()).unwrap();
-        assert!(!delayed.join().unwrap()[0].cleaned);
+        assert!(cleanup_merged_forks(&dir, &["old-a".into()]).unwrap()[0].cleaned);
         assert_eq!(
             std::fs::read_to_string(reused.join("new-work.txt")).unwrap(),
             "B owns this path"
@@ -10631,7 +11158,10 @@ mod tests {
         running_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         // Simulate external disappearance while the delayed remover is still
         // running. The normal materializer must not reuse its destination.
-        std::fs::remove_dir_all(&timed).unwrap();
+        assert!(
+            !timed.exists(),
+            "retirement already moved the sealed checkout"
+        );
         fork_root(&dir, &base.id, Some("later-d"), "cli").unwrap();
         let blocked = fork_materialize(&dir, "later-d", &timed, None);
         assert!(blocked.is_err());
@@ -10643,12 +11173,10 @@ mod tests {
         fork_materialize(&dir, "later-d", &timed, None).unwrap();
         write(&timed, "later-work.txt", "D owns this path");
         let stale = cleanup_merged_forks(&dir, &["timed-c".into()]).unwrap();
-        assert!(!stale[0].cleaned);
-        assert!(stale[0]
-            .pending
-            .as_deref()
-            .unwrap()
-            .contains("another worktree"));
+        assert!(
+            stale[0].cleaned,
+            "retained C closure can finish without touching D"
+        );
         assert_eq!(
             std::fs::read_to_string(timed.join("later-work.txt")).unwrap(),
             "D owns this path"
@@ -10662,6 +11190,7 @@ mod tests {
         let _hooks = TestCleanupHooks;
         TEST_CLEANUP_FORCE_ERR.with(|c| c.set(true));
         let (_tmp, dir) = project();
+        write_json(&dir.join(".stateroot/manifest.json"), &json!({"schema_version":local_store::SCHEMA_MANIFEST_V1,"project_id":"cleanup-fixture"})).unwrap();
         write(&dir, "src/main.rs", "fn main() {}\n");
         let (first, _) = create_root(&dir, "cli", "first", None).expect("snap");
         let (_wt, _tip) =

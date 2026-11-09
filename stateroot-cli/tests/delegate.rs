@@ -617,7 +617,10 @@ fn cancel_is_two_phase_and_records_cancelled_with_root() {
     assert_eq!(records.len(), 1);
     let record = &records[0];
     assert_eq!(record["outcome"], "cancelled_with_root");
-    assert_eq!(record["cancel_confirmed"], true);
+    assert_eq!(
+        record["cancel_confirmed"], true,
+        "cancellation record: {record}"
+    );
     assert!(
         record
             .get("outcome_root")
@@ -732,6 +735,16 @@ fn worktree_runs_there_and_the_record_stays_with_the_caller() {
 
 #[cfg(unix)]
 fn pid_alive_unix(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        if matches!(
+            stat.rsplit_once(") ")
+                .and_then(|(_, fields)| fields.chars().next()),
+            Some('Z' | 'X')
+        ) {
+            return false;
+        }
+    }
     std::process::Command::new("kill")
         .args(["-0", &pid.to_string()])
         .stdin(std::process::Stdio::null())
@@ -874,4 +887,236 @@ fn plan_delegation_provisions_one_claimed_fork_worktree() {
     assert_eq!(active["status"], "active");
     std::fs::write(std::path::Path::new(worktree).join(".go"), b"go").expect("release");
     assert_eq!(wait_for_outcome(project.path(), 60)["outcome"], "completed");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn managed_build_lanes_propagate_exclusively_and_cancelled_consumers_stay_owned() {
+    let (config, home) = homes();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(
+        project.path().join("Cargo.toml"),
+        "[package]\nname='cache_bridge'\nversion='0.0.0'\nedition='2021'\n",
+    )
+    .unwrap();
+    std::fs::create_dir(project.path().join("src")).unwrap();
+    std::fs::write(project.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+    init_project(config.path(), home.path(), project.path());
+    let (base, _) =
+        stateroot_core::roots::create_root(project.path(), "test", "cache bridge", None).unwrap();
+    let forks = tempfile::tempdir().unwrap();
+    let mut worktrees = Vec::new();
+    for name in ["cache-first", "cache-second"] {
+        stateroot_core::roots::fork_root(project.path(), &base.id, Some(name), "test").unwrap();
+        let path = forks.path().join(name);
+        stateroot_core::roots::fork_materialize(project.path(), name, &path, None).unwrap();
+        worktrees.push(path);
+    }
+    let cache = tempfile::tempdir().unwrap();
+    let (_bin,path)=fake_claude("#!/bin/sh\nif [ \"$1\" = --version ]; then echo fake; exit 0; fi\nmkdir -p \"$CARGO_TARGET_DIR\"\nprintf owned > \"$CARGO_TARGET_DIR/consumer\"\nwhile [ ! -f .stateroot-cache-test-go ]; do sleep 0.1; done\necho finished\n");
+    for (n, worktree) in worktrees.iter().enumerate() {
+        stateroot(config.path(), home.path(), project.path())
+            .env("PATH", &path)
+            .env_remove("CARGO_TARGET_DIR")
+            .env_remove("STATEROOT_BUILD_LEASE")
+            .env("STATEROOT_BUILD_CACHE_ROOT", cache.path())
+            .env("STATEROOT_BUILD_CACHE_MAX_BYTES", "0")
+            .env("STATEROOT_BUILD_CACHE_WARM_SLOTS", "0")
+            .args([
+                "delegate",
+                "--to",
+                "claude",
+                "--key",
+                if n == 0 {
+                    "cache-first"
+                } else {
+                    "cache-second"
+                },
+                "--task",
+                "exercise owned outputs",
+                "--worktree",
+            ])
+            .arg(worktree)
+            .assert()
+            .success();
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let observations = loop {
+        let records = read_records(project.path());
+        if records.len() == 2
+            && records
+                .iter()
+                .all(|record| record["build_storage"]["cache_id"].is_string())
+        {
+            break records;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "managed lanes unavailable: {records:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let first = observations
+        .iter()
+        .find(|record| record["id"] == "cache-first")
+        .unwrap()["build_storage"]["cache_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let second = observations
+        .iter()
+        .find(|record| record["id"] == "cache-second")
+        .unwrap()["build_storage"]["cache_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(first, second);
+    let current = stateroot_core::build_storage::inspect(project.path()).unwrap();
+    let first_path = current
+        .locations
+        .iter()
+        .find(|item| item.cache_id.as_deref() == Some(&first))
+        .unwrap()
+        .path
+        .clone()
+        .unwrap();
+    let second_path = current
+        .locations
+        .iter()
+        .find(|item| item.cache_id.as_deref() == Some(&second))
+        .unwrap()
+        .path
+        .clone()
+        .unwrap();
+    assert_ne!(first_path, second_path);
+    stateroot(config.path(), home.path(), project.path())
+        .args(["delegate", "cancel", "cache-first"])
+        .assert()
+        .success();
+    assert!(first_path.join("consumer").is_file());
+    std::fs::write(worktrees[1].join(".stateroot-cache-test-go"), "go").unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let records = read_records(project.path());
+        if records
+            .iter()
+            .any(|record| record["id"] == "cache-second" && record["outcome"] == "completed")
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "second worker did not finish: {records:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        first_path.join("consumer").is_file(),
+        "unconfirmed cancelled ownership was not evicted under zero budget"
+    );
+    assert!(
+        stateroot_core::build_storage::checkout_disposition(project.path(), &worktrees[0])
+            .unwrap()
+            .blocked
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_cargo_output_override_remains_unmanaged_and_unchanged() {
+    let (config, home) = homes();
+    let project = tempfile::tempdir().unwrap();
+    let outputs = tempfile::tempdir().unwrap();
+    std::fs::write(
+        project.path().join("Cargo.toml"),
+        "[package]\nname='override_fixture'\nversion='0.0.0'\n",
+    )
+    .unwrap();
+    init_project(config.path(), home.path(), project.path());
+    std::fs::write(outputs.path().join("human-owned"), "preserve").unwrap();
+    let (_bin, path) = fake_claude("#!/bin/sh\nprintf '%s' \"$CARGO_TARGET_DIR\"\n");
+    stateroot(config.path(), home.path(), project.path())
+        .env("PATH", path)
+        .env("CARGO_TARGET_DIR", outputs.path())
+        .env_remove("STATEROOT_BUILD_LEASE")
+        .args([
+            "delegate",
+            "--to",
+            "claude",
+            "--task",
+            "preserve native output override",
+        ])
+        .assert()
+        .success();
+    let record = wait_for_outcome(project.path(), 30);
+    assert_eq!(record["build_storage"]["state"], "unmanaged");
+    assert!(record["build_storage"]["cache_id"].is_null());
+    assert_eq!(
+        std::fs::read(outputs.path().join("human-owned")).unwrap(),
+        b"preserve"
+    );
+    let log =
+        std::fs::read_to_string(project.path().join(record["log"].as_str().unwrap())).unwrap();
+    let stdout = log
+        .split("--- stdout ---\n")
+        .nth(1)
+        .unwrap()
+        .split("\n\n--- stderr ---")
+        .next()
+        .unwrap();
+    assert_eq!(Path::new(stdout.trim()), outputs.path());
+}
+
+#[test]
+#[cfg(unix)]
+fn direct_native_launch_keeps_unmanaged_command_ownership_until_exit() {
+    let (config, user) = homes();
+    let project = tempfile::tempdir().unwrap();
+    init_project(config.path(), user.path(), project.path());
+    std::fs::write(project.path().join("source.txt"), "base").unwrap();
+    let (base, _) =
+        stateroot_core::roots::create_root(project.path(), "test", "base", None).unwrap();
+    stateroot_core::roots::fork_root(project.path(), &base.id, Some("native-launch"), "test")
+        .unwrap();
+    let checkout = project
+        .path()
+        .parent()
+        .unwrap()
+        .join(format!("native-launch-{}", uuid::Uuid::now_v7()));
+    stateroot_core::roots::fork_materialize(project.path(), "native-launch", &checkout, None)
+        .unwrap();
+    let release = project.path().join("release");
+    let started = project.path().join("started");
+    let (_bin,path)=fake_claude("#!/bin/sh\nprintf ready > \"$N6C_STARTED\"\nwhile [ ! -f \"$N6C_RELEASE\" ]; do sleep 0.05; done\n");
+    let mut launch = std::process::Command::new(assert_cmd::cargo::cargo_bin("stateroot"))
+        .args(["harness", "run", "claude", "--objective", "fixture"])
+        .current_dir(&checkout)
+        .env("STATEROOT_HOME", config.path())
+        .env("STATEROOT_TEST_HOME", user.path())
+        .env("STATEROOT_TEST_CMD_PROBES", "")
+        .env("PATH", path)
+        .env("N6C_STARTED", &started)
+        .env("N6C_RELEASE", &release)
+        .spawn()
+        .unwrap();
+    for _ in 0..100 {
+        if started.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(started.exists());
+    let held = stateroot_core::roots::park_fork(project.path(), "native-launch");
+    assert!(
+        held.is_err(),
+        "direct native process must keep its checkout while no Cargo manifest exists"
+    );
+    assert!(checkout.exists());
+    std::fs::write(&release, "release").unwrap();
+    assert!(launch.wait().unwrap().success());
+    assert_eq!(
+        stateroot_core::roots::park_fork(project.path(), "native-launch").unwrap()["state"],
+        "parked"
+    );
+    assert!(!checkout.exists());
 }

@@ -302,9 +302,32 @@ async fn main() -> anyhow::Result<()> {
         Command::Compare(args) => commands::roots::compare(&ctx, &args.a, &args.b)?,
         Command::Revert(args) => commands::roots::revert(&ctx, &args.root, args.yes)?,
         Command::Fork(args) => {
-            if args.cleanup {
+            if let Some(name) = &args.migrate_output {
+                commands::roots::migrate_output(
+                    &ctx,
+                    name,
+                    args.migration_relative.as_deref(),
+                    args.migration_input.as_deref(),
+                    args.json,
+                )?;
+            } else if args.park.is_some() || args.reopen.is_some() || args.inspect.is_some() {
+                commands::roots::fork_lifecycle(
+                    &ctx,
+                    args.park.as_deref(),
+                    args.reopen.as_deref(),
+                    args.inspect.as_deref(),
+                    args.worktree.as_deref(),
+                    args.plan.as_deref(),
+                    args.json,
+                )
+                .await?;
+            } else if args.cleanup {
                 commands::roots::cleanup_fork_refs(&ctx, args.apply, args.json)?;
             } else {
+                anyhow::ensure!(
+                    !args.json,
+                    "fork --json requires --cleanup, --park, --reopen or --inspect"
+                );
                 commands::roots::fork(
                     &ctx,
                     args.root
@@ -316,20 +339,26 @@ async fn main() -> anyhow::Result<()> {
                 )?;
             }
         }
-        Command::Merge(args) => commands::roots::merge(
-            &ctx,
-            &args.forks,
-            args.json,
-            &args.resolve_ours,
-            &args.keep_main,
-            args.cleanup,
-            args.prepare,
-            args.continue_attempt.as_deref(),
-            args.stage.as_deref(),
-            args.status.as_deref(),
-            args.abort.as_deref(),
-            &args.evidence,
-        )?,
+        Command::Exchange(args) => commands::state_exchange::run(&ctx, args).await?,
+        Command::Merge(args) => {
+            if args.cleanup {
+                commands::roots::prepare_retirements(&ctx, &args.forks).await?;
+            }
+            commands::roots::merge(
+                &ctx,
+                &args.forks,
+                args.json,
+                &args.resolve_ours,
+                &args.keep_main,
+                args.cleanup,
+                args.prepare,
+                args.continue_attempt.as_deref(),
+                args.stage.as_deref(),
+                args.status.as_deref(),
+                args.abort.as_deref(),
+                &args.evidence,
+            )?;
+        }
         Command::Receipt { id, json } => commands::roots::receipt(&ctx, &id, json)?,
         Command::Status { json } => commands::status::run(&ctx, json)?,
         Command::Obligation(args) => match args.action {

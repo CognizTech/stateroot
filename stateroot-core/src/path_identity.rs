@@ -17,6 +17,23 @@ pub fn equivalent_project_key(dir: &Path) -> String {
     normalize_host_path(&canonical.to_string_lossy())
 }
 
+/// Physical equality at ownership boundaries. DrvFs can preserve differently
+/// cased locator strings even when both resolve to the same directory inode.
+/// Text folding alone could conflate distinct case-sensitive directories.
+pub(crate) fn same_directory(a: &Path, b: &Path) -> std::io::Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let a = std::fs::metadata(a)?;
+        let b = std::fs::metadata(b)?;
+        Ok(a.is_dir() && b.is_dir() && a.dev() == b.dev() && a.ino() == b.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(std::fs::canonicalize(a)? == std::fs::canonicalize(b)?)
+    }
+}
+
 /// Fold a path string into the Windows↔WSL identity form.
 pub fn normalize_host_path(raw: &str) -> String {
     let mut s = raw.trim().replace('\\', "/");
@@ -123,6 +140,29 @@ fn native_candidates(norm: &str) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn physical_directory_equality_preserves_distinct_trees_and_locator_aliases() {
+        let temp = tempfile::tempdir().unwrap();
+        let original = temp.path().join("CaseOwner");
+        let other = temp.path().join("other");
+        std::fs::create_dir(&original).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        assert!(same_directory(&original, &original.join("..").join("CaseOwner")).unwrap());
+        assert!(!same_directory(&original, &other).unwrap());
+        #[cfg(unix)]
+        {
+            let alias = temp.path().join("alias");
+            std::os::unix::fs::symlink(&original, &alias).unwrap();
+            assert!(same_directory(&original, &alias).unwrap());
+        }
+        // Case-insensitive native volumes (DrvFs and default Windows) expose
+        // the actual failure without assuming Linux filesystems fold case.
+        let case_alias = temp.path().join("caseowner");
+        if case_alias.is_dir() {
+            assert!(same_directory(&original, &case_alias).unwrap());
+        }
+    }
 
     #[test]
     fn windows_drive_and_wsl_mnt_are_the_same_key() {

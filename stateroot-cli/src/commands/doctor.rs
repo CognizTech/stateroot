@@ -527,6 +527,10 @@ fn authoritative_state(project: &Path) -> Value {
         "project_manifest":manifest_status,
         "lineage_check":"current commit and direct parents only; no exhaustive history audit",
         "plan_compatibility":compatibility,"verification":verification,
+        "storage_lifecycle": match roots::storage_lifecycle_report(project) {
+            Ok(report) => report,
+            Err(error) => serde_json::json!({"state":"unknown","reason":error.to_string()}),
+        },
         "capture":{"last_by_harness":trail.last_by_harness,"problems":trail.diagnosed},
         "restoration":"unavailable: no retained root",
         "limits":"current privacy exclusions apply; credentials, dependency installation and executable environment reproduction are not established"

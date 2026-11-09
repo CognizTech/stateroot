@@ -345,6 +345,68 @@ fn init_auto_inits_git_and_snap_log_show_flow() {
 }
 
 #[test]
+fn resume_names_source_drift_without_falsifying_the_historical_fact() {
+    let config_home = tempfile::tempdir().expect("config home");
+    let user_home = tempfile::tempdir().expect("user home");
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+
+    write(
+        project.path(),
+        "spec.txt",
+        "batch size is 32 (token HISTORICAL-RESULT-42)\n",
+    );
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args([
+            "memory",
+            "add",
+            "Historical measurement HISTORICAL-RESULT-42: batch size was 32 when spec.txt said so.",
+        ])
+        .assert()
+        .success();
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["snap", "--reason", "historical spec"])
+        .assert()
+        .success();
+
+    write(
+        project.path(),
+        "spec.txt",
+        "batch size is 64 (token CURRENT-RESULT-64)\n",
+    );
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["snap", "--reason", "current spec"])
+        .assert()
+        .success();
+
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["resume", "--force"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains("HISTORICAL-RESULT-42"),
+        "historical fact must remain: {stdout}"
+    );
+    assert!(
+        !stdout.contains("HISTORICAL-RESULT-42 is false"),
+        "a changed source must not falsify the fact: {stdout}"
+    );
+    assert!(
+        stdout.contains("older records stay historical, not false"),
+        "drift label missing: {stdout}"
+    );
+    assert!(
+        stdout.contains("M spec.txt"),
+        "changed path missing: {stdout}"
+    );
+    assert!(
+        stdout.contains("stateroot diff") && stdout.contains("--content"),
+        "exact-byte reader missing: {stdout}"
+    );
+}
+
+#[test]
 fn diff_content_revert_and_fork() {
     let config_home = tempfile::tempdir().expect("config home");
     let user_home = tempfile::tempdir().expect("user home");
@@ -575,6 +637,37 @@ fn merge_cleanup_json_and_human_contracts() {
         Some(root.as_str())
     );
     write(&worktree, "src/lib.rs", "pub fn merged() {}\n");
+    let capture = serde_json::json!({"cwd":worktree,"session_id":"retirement-session","tool_name":"Bash","tool_use_id":"retirement-tool-1","tool_input":{"command":"fixture observation"},"tool_response":"retained fixture output"});
+    stateroot(config_home.path(), user_home.path(), &worktree)
+        .args(["hook", "post_tool_use", "--harness", "claude"])
+        .write_stdin(capture.to_string())
+        .assert()
+        .success();
+    let park = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["fork", "--park", "fork-a", "--json"])
+        .assert()
+        .success();
+    let parked: serde_json::Value = serde_json::from_slice(&park.get_output().stdout).unwrap();
+    assert_eq!(parked["state"], "parked");
+    assert!(!worktree.exists());
+    let reopen = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["fork", "--reopen", "fork-a", "--json"])
+        .assert()
+        .success();
+    let reopened: serde_json::Value = serde_json::from_slice(&reopen.get_output().stdout).unwrap();
+    assert_eq!(reopened["fork"], "fork-a");
+    assert_eq!(reopened["state"], "active");
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("src/lib.rs")).unwrap(),
+        "pub fn merged() {}\n"
+    );
+    let inspected = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["fork", "--inspect", "fork-a", "--json"])
+        .assert()
+        .success();
+    let inspected: serde_json::Value =
+        serde_json::from_slice(&inspected.get_output().stdout).unwrap();
+    assert_eq!(inspected["retention"]["manifest"]["phase"], "retained");
     stateroot(config_home.path(), user_home.path(), &worktree)
         .args(["snap", "--reason", "fork work"])
         .assert()
@@ -818,4 +911,423 @@ fn managed_fork_cli_keeps_local_work_when_project_removal_is_requested() {
         .unwrap()
         .head_detached()
         .unwrap());
+}
+
+#[test]
+fn exact_revision_offer_review_publish_and_cleanup_preserve_source_identity() {
+    let config_home = tempfile::tempdir().expect("config home");
+    let user_home = tempfile::tempdir().expect("user home");
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    let run = |cwd: &Path, args: &[&str]| {
+        let output = stateroot(config_home.path(), user_home.path(), cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stateroot {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let snapshot = |cwd: &Path, reason: &str| root_hash(&run(cwd, &["snap", "--reason", reason]));
+    let prepare = |attempt: &str| {
+        let output = run(project.path(), &["merge", "--prepare", attempt, "--json"]);
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        (value["id"].as_str().unwrap().to_string(), value)
+    };
+    let stage = |attempt: &str| {
+        let output = run(project.path(), &["merge", "--stage", attempt, "--json"]);
+        serde_json::from_str::<serde_json::Value>(&output).unwrap()
+    };
+    let verify = |candidate: &Path, plan: &str| {
+        let output = stateroot(config_home.path(), user_home.path(), candidate)
+            .args(["plan", "verify", plan, "--"])
+            .arg(assert_cmd::cargo::cargo_bin("stateroot"))
+            .arg("--version")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "candidate verification failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("verification ")
+                    .and_then(|line| line.split(':').next())
+            })
+            .unwrap()
+            .to_string()
+    };
+
+    let recorded = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["plan", "record", "--stdin", "--title", "Review B"])
+        .write_stdin("# Review exact B\n")
+        .output()
+        .unwrap();
+    assert!(recorded.status.success());
+    let recorded = String::from_utf8(recorded.stdout).unwrap();
+    let plan = recorded
+        .strip_prefix("recorded plan ")
+        .and_then(|line| line.split(' ').next())
+        .unwrap()
+        .to_string();
+    run(project.path(), &["plan", "approve", &plan]);
+    write(project.path(), "README.md", "target T\n");
+    let target = snapshot(project.path(), "target T");
+    let checkouts = tempfile::tempdir().expect("checkouts");
+    let contributor = checkouts.path().join("contributor");
+    run(
+        project.path(),
+        &[
+            "fork",
+            &target,
+            "--name",
+            "contributor",
+            "--worktree",
+            &contributor.to_string_lossy(),
+        ],
+    );
+    write(&contributor, "contribution.txt", "offered revision B\n");
+    let offered = snapshot(&contributor, "offered B");
+    run(
+        &contributor,
+        &[
+            "handoff",
+            "write",
+            "--from",
+            "codex",
+            "--to",
+            "kimi",
+            "--no-plan",
+            "--objective",
+            "Review exactly B",
+            "--task",
+            &format!("Review root B={offered} against target T={target}; do not substitute later D"),
+            "--context-summary",
+            "Offer immutable root B and its exact packet identity; local review is not Cloud approval.",
+            "--next",
+            "Pin B in a separate submission fork and review it against the explicit target",
+        ],
+    );
+    let handoffs = run(&contributor, &["handoff", "list"]);
+    let offer = handoffs
+        .lines()
+        .find(|line| line.contains("codex") && line.contains("kimi"))
+        .expect("offer handoff");
+    let offer_seq = offer.split_whitespace().next().unwrap().to_string();
+    let offer_packet = offer
+        .split_whitespace()
+        .nth(4)
+        .expect("offer packet id")
+        .to_string();
+
+    let submission = checkouts.path().join("submission-b");
+    run(
+        project.path(),
+        &[
+            "fork",
+            &offered,
+            "--name",
+            "submission-b",
+            "--worktree",
+            &submission.to_string_lossy(),
+        ],
+    );
+    write(&contributor, "contribution.txt", "later revision D\n");
+    write(&contributor, "later-d.txt", "not reviewed\n");
+    let later = snapshot(&contributor, "later D");
+    assert_ne!(offered, later);
+    let repo = git2::Repository::open(project.path()).unwrap();
+    assert_eq!(
+        repo.refname_to_id("refs/stateroot/forks/submission-b")
+            .unwrap()
+            .to_string(),
+        offered
+    );
+    assert_eq!(
+        repo.refname_to_id("refs/stateroot/forks/contributor")
+            .unwrap()
+            .to_string(),
+        later
+    );
+
+    let (stale_attempt, prepared) = prepare("submission-b");
+    assert_eq!(prepared["trunk_tip"], target);
+    assert_eq!(prepared["forks"][0]["tip"], offered);
+    stage(&stale_attempt);
+    write(project.path(), "target-t2.txt", "target T2\n");
+    let target_two = snapshot(project.path(), "target T2");
+    let stale = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["merge", "--continue", &stale_attempt, "--json"])
+        .output()
+        .unwrap();
+    assert!(!stale.status.success());
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("stale: trunk moved"));
+    assert_eq!(
+        repo.refname_to_id("refs/stateroot/forks/submission-b")
+            .unwrap()
+            .to_string(),
+        offered
+    );
+    run(project.path(), &["merge", "--abort", &stale_attempt]);
+
+    let (attempt, prepared) = prepare("submission-b");
+    assert_eq!(prepared["trunk_tip"], target_two);
+    assert_eq!(prepared["forks"][0]["tip"], offered);
+    let staged = stage(&attempt);
+    let candidate = staged["worktree"].as_str().unwrap().to_string();
+    let candidate = Path::new(&candidate);
+    assert_eq!(
+        std::fs::read_to_string(candidate.join("contribution.txt")).unwrap(),
+        "offered revision B\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(candidate.join("target-t2.txt")).unwrap(),
+        "target T2\n"
+    );
+    assert!(!candidate.join("later-d.txt").exists());
+
+    verify(candidate, &plan);
+    write(candidate, "contribution.txt", "post-check edit\n");
+    let edited = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["merge", "--continue", &attempt, "--json"])
+        .output()
+        .unwrap();
+    assert!(!edited.status.success());
+    assert!(String::from_utf8_lossy(&edited.stderr)
+        .contains("candidate differs from sealed staged tree"));
+    let doctor = run(candidate, &["doctor", "--json"]);
+    let doctor: serde_json::Value = serde_json::from_str(&doctor).unwrap();
+    assert_eq!(doctor["authoritative_state"]["verification"]["stale"], 1);
+
+    write(candidate, "contribution.txt", "offered revision B\n");
+    stage(&attempt);
+    let verification = verify(candidate, &plan);
+    stage(&attempt);
+    let offer_evidence = format!("offer handoff #{offer_seq} packet {offer_packet} at {offered}");
+    let verification_evidence =
+        format!("verification {verification} checked the restored B+T2 candidate");
+    let published = run(
+        project.path(),
+        &[
+            "merge",
+            "--continue",
+            &attempt,
+            "--evidence",
+            &offer_evidence,
+            "--evidence",
+            &verification_evidence,
+            "--json",
+        ],
+    );
+    let published: serde_json::Value = serde_json::from_str(&published).unwrap();
+    let merged = published["trunk_root"].as_str().unwrap().to_string();
+    let merge_root = stateroot_core::roots::get_root(project.path(), &merged).unwrap();
+    assert_eq!(
+        merge_root.parents,
+        vec![target_two.clone(), offered.clone()]
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.path().join("contribution.txt")).unwrap(),
+        "offered revision B\n"
+    );
+    assert!(!project.path().join("later-d.txt").exists());
+    assert!(!candidate.exists());
+
+    let cleanup = run(
+        project.path(),
+        &["merge", "--cleanup", "submission-b", "--json"],
+    );
+    let cleanup: serde_json::Value = serde_json::from_str(&cleanup).unwrap();
+    assert_eq!(cleanup["forks"][0]["cleaned"], true);
+    assert!(!submission.exists());
+    let sealed_tip = repo
+        .refname_to_id("refs/stateroot/forks/submission-b")
+        .unwrap()
+        .to_string();
+    let sealed = stateroot_core::roots::get_root(project.path(), &sealed_tip).unwrap();
+    assert_eq!(sealed.metadata_status, "recorded");
+    assert_eq!(
+        sealed.metadata_availability,
+        Some(stateroot_core::roots::RootMetadataAvailability::CheckoutSidecar)
+    );
+    for root in [&offered, &later] {
+        let manifest = stateroot_core::roots::get_root(project.path(), root).unwrap();
+        assert_eq!(manifest.metadata_status, "legacy_unknown");
+        assert_eq!(
+            manifest.metadata_availability,
+            Some(stateroot_core::roots::RootMetadataAvailability::CheckoutSidecarAbsentGitRetained)
+        );
+    }
+    let lineage = stateroot_core::roots::lineage_projection(project.path()).unwrap();
+    let offered_projection = lineage["roots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|root| root["id"] == offered)
+        .unwrap();
+    assert_eq!(offered_projection["metadata_status"], "legacy_unknown");
+    assert_eq!(
+        offered_projection["metadata_availability"],
+        "checkout_sidecar_absent_git_retained"
+    );
+    let historical = run(&contributor, &["diff", &offered, &later, "--content"]);
+    assert!(historical.contains("later revision D"));
+
+    let shown = run(&contributor, &["handoff", "show", &offer_seq]);
+    let offered_short: String = offered.chars().take(12).collect();
+    let later_short: String = later.chars().take(12).collect();
+    assert!(
+        shown.contains(&format!("Handoff root: `{offered_short}`")),
+        "{shown}"
+    );
+    assert!(
+        shown.contains(&format!("Current checkout root: `{later_short}`")),
+        "{shown}"
+    );
+    let done = run(
+        project.path(),
+        &[
+            "plan",
+            "done",
+            &plan,
+            "--verification",
+            &verification,
+            "--evidence",
+            "reviewed exact B against T2; D excluded; merge and verification receipts inspected",
+        ],
+    );
+    assert!(done.contains(&merged[..12]), "{done}");
+    run(
+        project.path(),
+        &[
+            "handoff",
+            "write",
+            "--from",
+            "kimi",
+            "--no-plan",
+            "--objective",
+            "Exact B integrated",
+            "--task",
+            &format!("Inspect merge {merged} and offer packet {offer_packet}; D={later} excluded"),
+            "--context-summary",
+            &format!("offer={offer_packet}; B={offered}; T={target}; T2={target_two}; merge={merged}; verification={verification}; submission cleanup retained source and receipts"),
+        ],
+    );
+    let result = run(project.path(), &["handoff", "show"]);
+    assert!(result.contains(&offer_packet));
+    assert!(result.contains(&merged));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn inspected_legacy_migration_uses_the_installed_fork_command() {
+    let config = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    init_project(config.path(), home.path(), project.path());
+    write(project.path(), ".gitignore", "target/\n.stateroot/\n");
+    write(
+        project.path(),
+        "Cargo.toml",
+        "[package]\nname='migration_cli_fixture'\nversion='0.1.0'\nedition='2021'\n",
+    );
+    write(project.path(), "src/lib.rs", "pub fn value()->u32{7}\n");
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let build = |cwd: &Path, args: &[&str]| {
+        let result = std::process::Command::new(&cargo)
+            .args(args)
+            .current_dir(cwd)
+            .env_remove("CARGO_TARGET_DIR")
+            .env_remove("CARGO_BUILD_TARGET_DIR")
+            .env_remove("CARGO_BUILD_BUILD_DIR")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    };
+    build(project.path(), &["generate-lockfile", "--offline"]);
+    let snapped = stateroot(config.path(), home.path(), project.path())
+        .args(["snap"])
+        .assert()
+        .success();
+    let root = root_hash(&String::from_utf8_lossy(&snapped.get_output().stdout));
+    stateroot(config.path(), home.path(), project.path())
+        .args(["fork", &root, "--name", "legacy", "--worktree"])
+        .assert()
+        .success();
+    let checkout = project.path().join(".stateroot/local/worktrees/legacy");
+    build(&checkout, &["build", "--locked", "--offline"]);
+    write(&checkout, "uncommitted.txt", "keep this source\n");
+    let observed = stateroot(config.path(), home.path(), project.path())
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("CARGO_BUILD_TARGET_DIR")
+        .env_remove("CARGO_BUILD_BUILD_DIR")
+        .args(["fork", "--migrate-output", "legacy", "--json"])
+        .assert()
+        .success();
+    let inspection: serde_json::Value =
+        serde_json::from_slice(&observed.get_output().stdout).unwrap();
+    let mut payload = serde_json::json!({"fork":"legacy","expected_tip":"1111111111111111111111111111111111111111",
+        "expected_inventory":inspection["inventory"],"reason":"inspected disposable Cargo build fixture"});
+    stateroot(config.path(), home.path(), project.path())
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("CARGO_BUILD_TARGET_DIR")
+        .env_remove("CARGO_BUILD_BUILD_DIR")
+        .args([
+            "fork",
+            "--migrate-output",
+            "legacy",
+            "--input",
+            "-",
+            "--json",
+        ])
+        .write_stdin(payload.to_string())
+        .assert()
+        .failure();
+    assert!(checkout.join("target/CACHEDIR.TAG").exists());
+    payload["expected_tip"] = inspection["tip"].clone();
+    stateroot(config.path(), home.path(), project.path())
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("CARGO_BUILD_TARGET_DIR")
+        .env_remove("CARGO_BUILD_BUILD_DIR")
+        .env(
+            "STATEROOT_BUILD_CACHE_ROOT",
+            project.path().join(".stateroot/local/migration-cache"),
+        )
+        .args([
+            "fork",
+            "--migrate-output",
+            "legacy",
+            "--input",
+            "-",
+            "--json",
+        ])
+        .write_stdin(payload.to_string())
+        .assert()
+        .success();
+    assert!(!checkout.join("target").exists());
+    assert_eq!(
+        std::fs::read(checkout.join("uncommitted.txt")).unwrap(),
+        b"keep this source\n"
+    );
+    assert_eq!(
+        std::fs::read(checkout.join("src/lib.rs")).unwrap(),
+        b"pub fn value()->u32{7}\n"
+    );
+    let repo = git2::Repository::open(project.path()).unwrap();
+    assert_eq!(
+        repo.refname_to_id("refs/stateroot/forks/legacy")
+            .unwrap()
+            .to_string(),
+        inspection["tip"]
+    );
 }

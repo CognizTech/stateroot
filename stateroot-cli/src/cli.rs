@@ -89,6 +89,8 @@ pub enum Command {
     Revert(RevertArgs),
     /// Branch-materialize a root under refs/stateroot/forks/<name>.
     Fork(ForkArgs),
+    /// Export, inspect, import and materialize portable project-state bundles.
+    Exchange(ExchangeArgs),
     /// Fold fork lineages back into the trunk (3-way merge, N-parent root).
     Merge(MergeArgs),
     /// Render a transition receipt (verified tier = git delta).
@@ -1003,7 +1005,7 @@ pub struct RevertArgs {
 #[derive(Debug, Args)]
 pub struct ForkArgs {
     /// Root hash to branch from.
-    #[arg(required_unless_present = "cleanup", conflicts_with = "cleanup")]
+    #[arg(required_unless_present_any = ["cleanup","park","reopen","inspect","migrate_output"], conflicts_with_all = ["cleanup","park","reopen","inspect","migrate_output"])]
     pub root: Option<String>,
     /// Fork name (default: an opaque generated ID). Never a user branch:
     /// refs/heads entries are never created or moved by fork.
@@ -1021,14 +1023,87 @@ pub struct ForkArgs {
     #[arg(long)]
     pub plan: Option<String>,
     /// Inspect leaked temporary fork refs without changing worktrees.
-    #[arg(long, conflicts_with_all = ["branch", "name", "worktree", "plan"])]
+    #[arg(long, conflicts_with_all = ["branch", "name", "worktree", "plan","park","reopen","inspect"])]
     pub cleanup: bool,
     /// Remove only temporary refs whose unchanged StateRoot ownership is proven.
     #[arg(long, requires = "cleanup")]
     pub apply: bool,
-    /// Print the temporary-ref inspection or repair as JSON.
-    #[arg(long, requires = "cleanup")]
+    /// Print fork inspection, repair or lifecycle results as JSON.
+    #[arg(long)]
     pub json: bool,
+    /// Seal and park an unfinished fork, retaining its source and local evidence.
+    #[arg(long,value_name="FORK",conflicts_with_all=["branch","name","worktree","plan","reopen","inspect","cleanup","apply"])]
+    pub park: Option<String>,
+    /// Materialize the current retained tip of the same fork and plan binding.
+    #[arg(long,value_name="FORK",conflicts_with_all=["branch","name","park","inspect","cleanup","apply"])]
+    pub reopen: Option<String>,
+    /// Inspect retained fork lifecycle, closure and local-evidence coverage.
+    #[arg(long,value_name="FORK",conflicts_with_all=["branch","name","worktree","plan","park","reopen","cleanup","apply"])]
+    pub inspect: Option<String>,
+    /// Inspect legacy Cargo output, or apply an exact inspected migration from --input.
+    #[arg(long, value_name="FORK", conflicts_with_all=["branch","name","worktree","plan","park","reopen","inspect","cleanup","apply"])]
+    pub migrate_output: Option<String>,
+    /// Relative Cargo output inside target/ to inspect (default: target).
+    #[arg(
+        long = "output-path",
+        requires = "migrate_output",
+        conflicts_with = "migration_input"
+    )]
+    pub migration_relative: Option<std::path::PathBuf>,
+    /// Exact migration JSON; '-' reads stdin. No input means read-only inspection.
+    #[arg(long = "input", requires = "migrate_output")]
+    pub migration_input: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ExchangeArgs {
+    #[command(subcommand)]
+    pub action: ExchangeAction,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ExchangeAction {
+    /// Export a selected root with complete selected and auxiliary Git closure.
+    Export {
+        /// Root hash or unique prefix.
+        #[arg(long)]
+        root: String,
+        /// New bundle path; existing files are never overwritten.
+        #[arg(long, value_name = "PATH")]
+        output: std::path::PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Validate and inspect a bundle without importing objects or executing content.
+    Inspect {
+        /// Bundle path.
+        bundle: std::path::PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Import objects, metadata and retained refs without moving any lineage head.
+    Import {
+        /// Bundle path.
+        bundle: std::path::PathBuf,
+        /// Destination project directory (default: current project).
+        #[arg(long, value_name = "DIR")]
+        dest: Option<std::path::PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Materialize a bundle into a fresh or fast-forward destination.
+    Materialize {
+        /// Bundle path.
+        bundle: std::path::PathBuf,
+        /// Destination project directory (default: current project).
+        #[arg(long, value_name = "DIR")]
+        dest: Option<std::path::PathBuf>,
+        /// Confirm destination file and lineage changes.
+        #[arg(short = 'y', long)]
+        yes: bool,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Args)]

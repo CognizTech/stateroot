@@ -310,10 +310,28 @@ stateroot delegate status <id>             # the record + a bounded log tail
 For an interactive harness session use `stateroot harness run` instead;
 `delegate` is the detached, recorded, non-interactive route.
 
+For qualified Rust execution, the managed output pool reuses idle compatible
+lanes while preserving separate active producers/consumers. Explicit
+`CARGO_TARGET_DIR` and unsupported native configuration remain unmanaged.
+The optional `STATEROOT_BUILD_CACHE_ROOT`,
+`STATEROOT_BUILD_CACHE_MAX_BYTES` and `STATEROOT_BUILD_CACHE_WARM_SLOTS`
+variables select cache location, soft byte budget and idle warm reserve.
+The defaults are native OS cache storage, a 32 GiB soft budget and two idle
+warm lanes. Active/unknown/retained outputs are not removed to meet a quota.
+Reusing a lane invalidates local workspace outputs with Cargo's native
+cleanup while retaining qualified registry dependencies; it never changes
+source timestamps to manufacture freshness. General Windows harness
+delegation preserves native breakaway behavior and remains unmanaged;
+short-lived command-helper qualification is a separate supported envelope.
+Only observed managed entry points carry these ownership guarantees.
+
 ## `stateroot fork` / `stateroot merge` — parallel plan execution
 
 ```bash
 stateroot fork <root> [--name NAME] [--plan ID] --worktree [<path>]
+stateroot fork --park NAME [--json]
+stateroot fork --reopen NAME [--worktree [PATH]] [--plan ORIGINAL] [--json]
+stateroot fork --inspect NAME [--json]
 stateroot fork --cleanup [--json]
 stateroot fork --cleanup --apply [--json]
 stateroot merge <fork> [<fork>…]
@@ -323,6 +341,12 @@ stateroot merge --status <attempt> --json
 stateroot merge --continue <attempt>
 stateroot merge --abort <attempt>
 ```
+
+Session-start and explicit resume render the same capped failed-approach and
+context-only sections. Digests name verified project-file changes since the
+prior root and point to `stateroot diff FROM TO --content` for exact bytes.
+Changed source is a review signal; retained historical facts are not
+silently declared false.
 
 `fork --worktree` materializes an isolated checkout of the fork root's
 tree in `.stateroot/local/worktrees/<fork-id>/` when no path is supplied.
@@ -340,6 +364,20 @@ them by hand. After integration and retention of any local evidence, use
 `stateroot merge --cleanup <fork>…` to retire completed copies. `remove`
 refuses while managed worktrees remain, including unregistered copies.
 The legacy `.stateroot/worktrees/` exclusion remains for compatibility.
+
+Run lifecycle commands from the owning project. `--park` seals current
+eligible files and shared intelligence, retains required private evidence,
+and releases the checkout. `--reopen` preserves the fork/ref and original
+plan binding, applies current owner exclusions, and leaves completed plans
+completed. A new assignment uses a new fork. `--inspect` reports retained
+coverage without claiming that every archived byte was revalidated.
+
+Merged cleanup now checks containment, current source, local evidence and
+known command/worker ownership. Unretained ignored data or unknown/live
+owners preserve the checkout with a reason. Missing legacy locators are
+explicitly source-only; cross-volume atomic parking refuses while retaining
+the original locator. These commands do not imply automatic retirement or
+migration of existing worktrees.
 
 Fork lineage stays under `refs/stateroot/forks/*`; generated default names
 use an opaque full UUID. `--name` selects a name explicitly; `--branch`
@@ -404,6 +442,35 @@ fork creation and merge mutations refuse; the owner publishes the result.
 Restage newly recorded verification metadata before publication. Metadata-only
 changes preserve the observed source identity; changed source requires new checks.
 
+### Reviewing an exact offered revision
+
+1. Snapshot offered root B and write a handoff naming B, target T and the
+   evidence. Retain the exact packet ID from `handoff list`.
+2. Run `stateroot fork <B> --name submission-b --worktree` from the
+   coordinator. The contributor can continue to D; the offer stays at B.
+3. Inspect the packet in its contributor checkout and compare T with B.
+   Prepare `stateroot merge --prepare submission-b --json`, stage the
+   attempt and run applicable checks in the candidate with `plan verify`.
+4. If T moves, abort the stale attempt and prepare again. If candidate bytes
+   change, reconcile, restage and rerun applicable verification. Restage
+   verification metadata before publishing.
+5. Publish the checked attempt with `merge --continue <attempt> --evidence
+   "<offer, target, candidate and verification>"`. Confirm parents T and B,
+   with D absent, then write a result handoff linking the offer and receipt.
+   Eligible merged checkout cleanup preserves retained B/D and their evidence.
+
+`staged_tree` identifies the entire staged candidate, including eligible
+StateRoot metadata; verification `product_tree` identifies product bytes and
+can remain valid across metadata-only restaging. A `source_root` pointer
+alone cannot prove the current source was checked.
+
+Root readers preserve existing `metadata_status` values and publication checks.
+Their additive `metadata_availability` reports `checkout_sidecar`,
+`checkout_sidecar_absent_git_retained` or `checkout_sidecar_unavailable`.
+Absent local sidecars do not erase Git-backed root bytes or parents, nor
+justify inventing metadata. Sealed lifecycle closure retains its new root
+and transition sidecars; older uncleaned roots can remain `legacy_unknown`.
+
 A legacy candidate with its own `.git` directory is rejected with recovery
 guidance. Preserve that attempt and its evidence, prepare a new attempt from
 the owning project, and rerun verification in the new candidate.
@@ -432,6 +499,81 @@ fails closed with the exact recovery command. When writing a handoff from
 ALREADY INSIDE the receiving fork, omit `--worktree` — a plain
 `handoff write` updates the fork's own packet (the fork is not a registered
 fork of itself, so the flag would only fail validation).
+
+### Automatic retirement and legacy build output
+
+The existing background continuity service retries eligible merged work and
+exact-tip terminal delegations. It retains late edits, live/unknown consumers,
+unsealed evidence and valuable local bytes with a specific reason. Inspection
+and foreground merge/mutation callbacks do not perform physical retirement.
+Explicit park and cleanup still perform the operation requested by the caller.
+
+`status --json` exposes `storage_lifecycle`; `doctor --json` includes it under
+`authoritative_state.storage_lifecycle`. Read retained history and evidence
+separately from resident checkouts and rebuildable outputs. The shared report
+includes forks, output ownership, pool limits and unresolved reasons. Qualified
+`harness run`, delegation and verification launches share the existing command
+and output lifetime helpers; explicit native configuration remains authoritative.
+General Windows launch descendants/output ownership remain unmanaged.
+
+For inspected Linux/WSL legacy Cargo caches, use the existing fork command:
+
+```bash
+stateroot fork --migrate-output <fork> --json
+stateroot fork --migrate-output <fork> --output-path target/kimi-example --json
+stateroot fork --migrate-output <fork> --input - --json
+```
+
+Without input this is read-only inspection. Apply accepts a JSON object on
+stdin: `fork` (optional, must match), `relative` (default `target`),
+`expected_tip`, `expected_inventory`, and `reason`. The operator declares only
+the inspected output rebuildable; native Cargo provenance, exact inventory,
+source identity, exclusions, indexed files, retention markers and live consumers
+are revalidated before adoption. Inventory seals cover names/types/size/mtime,
+not artifact content. Surrounding unrecognized files remain intact. Repeat the
+same input to advance a reported `evicting` operation; retained/unknown cases
+remain explicit. No second executable is required.
+
+Use a per-command `STATEROOT_BUILD_CACHE_ROOT` on the same filesystem as the
+legacy target for atomic rename without copying. Defaults remain 32 GiB soft
+budget and two released reusable warm lanes; active/unknown/pinned output is
+not evicted to meet them. `STATEROOT_BUILD_CACHE_MAX_BYTES` and
+`STATEROOT_BUILD_CACHE_WARM_SLOTS` override those limits for that invocation.
+Migration does not assert that old artifacts are compatible for reuse. Native
+Windows legacy migration remains unqualified and retained with a reason.
+
+## `stateroot exchange` — portable project state
+
+```bash
+stateroot exchange export --root <root> --output <new-file.srfs> [--json]
+stateroot exchange inspect <bundle.srfs> [--json]
+stateroot exchange import <bundle.srfs> [--dest <directory>] [--json]
+stateroot exchange materialize <bundle.srfs> [--dest <directory>] --yes [--json]
+```
+
+Export a retained root with its complete Git ancestry, shared intelligence,
+root/transition sidecars and referenced verification source trees. The local
+v2 format uses `SRFSBND2` / `stateroot.srfs.bundle.v2`; typed auxiliary
+references, exact object closure and artifact digests are validated before
+destination refs or files change. Missing referenced evidence is represented
+by explicit omissions and prevents a full-evidence claim. That claim covers
+shared bundle evidence; it does not include machine-local verification stdout/stderr, native
+session archives, an authenticated reviewer identity or a reproduced runtime.
+
+`inspect` validates without modifying a destination. `import` retains validated
+objects, root sidecars and evidence refs without moving the current lineage
+or materializing project files. `materialize` applies a fresh project or a
+same-project fast-forward; it refuses divergent lineage, conflicting work,
+and changes to the recipient's current exclusions or exclusion declarations.
+Use `import` when you want to retain an otherwise conflicting historical root.
+Existing operational routing, human branches and the Git index stay intact.
+Valid immutable objects/evidence may remain retained if a later materialization
+step fails; this does not mean the checkout or lineage was published.
+
+No system Git executable, server, database or provider is required. Native
+sessions and `.stateroot/local/` are not exchanged, and imported scripts are
+not executed. The Cloud v1 contract is unchanged: local v2 bundles do not
+establish Cloud v2 compatibility. V1 bundles are explicitly rejected here.
 
 ## Extension subcommands — git-style `stateroot-<name>` on PATH
 
@@ -817,7 +959,7 @@ complete a plan or certify semantic acceptance. Bindings cover project
 identity, exact plan body and eligible before/after project bytes using current
 ignore declarations. Raw stdout/stderr remains under excluded
 `.stateroot/local/verification/`; shared records contain digests and outcomes.
-For a reconciliation candidate, that directory belongs to the owning project,
+For an ordinary registered fork or reconciliation candidate, that directory belongs to the verified owning project,
 and the command prints its actual location. Candidate publication and cleanup
 therefore preserve the local output. Verification source trees are retained in
 the owning repository so ordinary Git garbage collection preserves their objects.
@@ -983,6 +1125,14 @@ refuses to guess and lists exact `handoff show --id <SHA256>` selectors with
 their provenance. The selector reuses the acceptance body hash below, works
 for legacy packets, and stays unchanged by acceptance/checkpoint bookkeeping.
 Omitting both selectors still shows the current packet.
+
+When a packet's recorded root differs from the checkout's live root, the digest
+shows `Handoff root` and `Current checkout root` separately. It preserves the
+packet's original `latest_root`. Inspect another fork's offer with
+`stateroot --project <contributor-checkout> handoff show --id <packet-sha256>`.
+MCP `handoff_list` and `handoff_inspect` expose additive `handoff_root` and
+`checkout_root` fields; a packet with no recorded root returns null. Those
+fields identify state, not semantic acceptance or Cloud-authenticated approval.
 
 `handoff write` owns the packet envelope (schema, sequence, provenance,
 timestamps); the author owns the content. Beyond the core fields, two

@@ -306,8 +306,12 @@ fn structured_receipts_report_ambiguity_and_stale_verification() {
         std::slice::from_ref(&record.id),
     )
     .unwrap();
+    let (offered, _) =
+        stateroot_core::roots::create_root(project.path(), "cli", "offered", None).unwrap();
+    let offered_root = offered.id;
     let first = json!({"seq":77,"created_at":"2026-01-01T00:00:00Z","created_by_harness":"cli","task":"first"});
-    let second = json!({"seq":77,"created_at":"2026-01-01T00:00:01Z","created_by_harness":"codex","task":"second"});
+    let mut second = json!({"seq":77,"created_at":"2026-01-01T00:00:01Z","created_by_harness":"codex","task":"second"});
+    second["latest_root"] = json!(offered_root.clone());
     stateroot_core::local_store::write_handoff_local(project.path(), &first).unwrap();
     stateroot_core::local_store::write_handoff_local(project.path(), &second).unwrap();
     let mut client = mcp_client(config.path(), home.path(), project.path());
@@ -339,6 +343,9 @@ fn structured_receipts_report_ambiguity_and_stale_verification() {
         json!({"id":record.id}),
     ));
     assert_eq!(stale["inputs_match"], false);
+    let (checkout, _) =
+        stateroot_core::roots::create_root(project.path(), "cli", "later checkout", None).unwrap();
+    let checkout_root = checkout.id;
     let ambiguous = call(&mut client, "handoff_inspect", json!({"seq":77}));
     assert_eq!(ambiguous["result"]["isError"], true);
     assert!(McpClient::tool_text(&ambiguous)["error"]
@@ -348,25 +355,35 @@ fn structured_receipts_report_ambiguity_and_stale_verification() {
     let page = McpClient::tool_text(&call(&mut client, "handoff_list", json!({"limit":1})));
     assert_eq!(page["total"], 2);
     assert_eq!(page["next_offset"], 1);
+    assert_eq!(page["entries"][0]["handoff_root"], offered_root);
+    assert_eq!(page["entries"][0]["checkout_root"], checkout_root);
     let id = page["entries"][0]["id"].as_str().unwrap();
     let exact = McpClient::tool_text(&call(&mut client, "handoff_inspect", json!({"id":id})));
     assert_eq!(exact["packet"]["task"], "second");
+    assert_eq!(exact["handoff_root"], offered_root);
+    assert_eq!(exact["checkout_root"], checkout_root);
     let next = McpClient::tool_text(&call(
         &mut client,
         "handoff_list",
         json!({"limit":1,"offset":1}),
     ));
     assert!(next["next_offset"].is_null());
+    assert!(next["entries"][0]["handoff_root"].is_null());
+    assert_eq!(next["entries"][0]["checkout_root"], checkout_root);
     let exact = McpClient::tool_text(&call(
         &mut client,
         "handoff_inspect",
         json!({"id":next["entries"][0]["id"]}),
     ));
     assert_eq!(exact["packet"]["task"], "first");
+    assert!(exact["handoff_root"].is_null());
+    assert_eq!(exact["checkout_root"], checkout_root);
     let bad_page = call(&mut client, "handoff_list", json!({"limit":0}));
     assert_eq!(bad_page["result"]["isError"], true);
     let current = McpClient::tool_text(&call(&mut client, "handoff_inspect", json!({})));
     assert_eq!(current["packet"]["task"], "second");
+    assert_eq!(current["handoff_root"], offered_root);
+    assert_eq!(current["checkout_root"], checkout_root);
     stateroot_core::local_store::write_handoff_local(project.path(), &first).unwrap();
     let restored = McpClient::tool_text(&call(&mut client, "handoff_list", json!({"limit":1})));
     assert_eq!(restored["entries"][0]["is_current"], true);

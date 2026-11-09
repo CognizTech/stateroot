@@ -104,6 +104,10 @@ pub fn run(ctx: &Ctx, json_out: bool) -> anyhow::Result<()> {
         stateroot_core::continuity::read_projection(&ctx.cwd)
     };
 
+    let storage_lifecycle = match stateroot_core::roots::storage_lifecycle_report(&ctx.cwd) {
+        Ok(report) => report,
+        Err(error) => json!({"state":"unknown","reason":error.to_string()}),
+    };
     let brief = gather(ctx);
 
     // Counts and boundary-journal health.
@@ -142,6 +146,7 @@ pub fn run(ctx: &Ctx, json_out: bool) -> anyhow::Result<()> {
             "generated_at": now_rfc3339(),
             "project": { "name": project.name, "project_id": project.project_id },
             "root": latest_root,
+            "storage_lifecycle": storage_lifecycle,
             "handoff": { "summary": brief.handoff_line, "stale": brief.handoff_stale },
             "plan": { "summary": brief.plan_line, "directive": brief.plan_directive },
             "continuity": assessment,
@@ -221,6 +226,16 @@ pub fn run(ctx: &Ctx, json_out: bool) -> anyhow::Result<()> {
                 println!("memory index: stale — search re-indexes on next recall")
             }
             _ => {}
+        }
+        if let Some(forks) = storage_lifecycle["forks"].as_array() {
+            println!("fork storage: {} resident · {} retained histories · {} pending (inspect: stateroot fork --inspect <fork>; continue: stateroot fork --reopen <fork>)",
+                forks.iter().filter(|fork| fork["resident"] == true).count(), forks.len(),
+                forks.iter().filter(|fork| fork["retained_reason"].is_string()).count());
+        }
+        if let Some(locations) = storage_lifecycle["rebuildable_outputs"]["locations"].as_array() {
+            println!("build storage: {} managed lanes · {} active/unknown · {} last closed bytes (detailed ownership and limits: stateroot status --json)", locations.len(),
+                locations.iter().filter(|lane| matches!(lane["state"].as_str(),Some("active"|"unknown"))).count(),
+                storage_lifecycle["rebuildable_outputs"]["last_closed_bytes"]);
         }
         println!("checkpoints: {episodic}");
         if !capture_diagnosed.is_empty() {

@@ -58,7 +58,7 @@ Claude Code ──→ State A ──→ State B
 
 **Delegate.** `stateroot delegate --to codex --task "…"` runs a bounded task inside another harness CLI with full project context — depth-capped, lineage recorded. The parent gets the conclusion, not the transcript.
 
-**Fork.** `stateroot fork` branch-materializes any project state into its own worktree under `refs/stateroot/forks/`. Agents work in parallel on independent states of the same project — shared intelligence, independent execution. Your Git branches are never touched.
+**Fork.** `stateroot fork` creates an internal lineage ref under `refs/stateroot/forks/`; add `--worktree` to materialize an isolated checkout in the managed local area. Agents work in parallel on independent states of the same project — shared intelligence, independent execution. Park retained work and reopen the same fork when needed. Your Git branches are never touched.
 
 **Merge.** `stateroot merge` folds fork lineages back into the trunk: each fork is 3-way-merged into the accumulated union and committed as one root with the trunk and every fork tip as parents. Conflicts are reported per path; contained forks report nothing-to-merge. The work converges with its lineage intact.
 
@@ -116,6 +116,7 @@ One project, every harness — no new runtime, no required cloud, no lock-in:
 | **Skills and tools** | SKILL.md packages and MCP servers sync across agent configs. Conflicts are left alone. |
 | **Sessions** | Full-fidelity canonical session store across harnesses; transfer into Pi / DeepSeek Harness. |
 | **Subagents** | Delegate bounded tasks into other harness CLIs — depth-capped, bounded result, lineage recorded. |
+| **Portable state** | Export a retained root and its shared intelligence/evidence, inspect a bundle, import without moving the head, or materialize a compatible checkout. Local v2 exchange works offline. |
 | **Extensions** | Any `stateroot-<name>` executable on PATH becomes a subcommand — agents can extend the CLI itself. |
 
 ### One personality across every agent

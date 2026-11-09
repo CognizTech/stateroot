@@ -350,10 +350,27 @@ pub fn done_with_verification(
 }
 
 pub fn verify(ctx: &Ctx, id: &str, command: &[String], from: Option<&str>) -> anyhow::Result<i32> {
-    use stateroot_core::verification;
+    use stateroot_core::{build_storage, local_store, roots, verification};
     ctx.require_project()?;
-    let record = verification::start(&ctx.cwd, id, &harness(ctx, from), command)
-        .map_err(anyhow::Error::msg)?;
+    let owner = roots::retained_storage_owner(&ctx.cwd)?;
+    let admission = if let Some(fork) = local_store::fork_context(&ctx.cwd) {
+        let guard = roots::fork_operation_guard(&owner, &fork.fork)?;
+        roots::validate_fork_execution(&owner, &fork.fork, &ctx.cwd)?;
+        Some(guard)
+    } else {
+        None
+    };
+    let (observation_id, _command_lease) =
+        verification::reserve_command(&ctx.cwd, id, command).map_err(anyhow::Error::msg)?;
+    // Verification is a general entrypoint: preserve Windows breakaway
+    // behavior just like delegation. The command lease is independent of
+    // whether output storage can be qualified as managed on this runtime.
+    let execution = build_storage::prepare_delegate_execution(&owner, &ctx.cwd, &observation_id);
+    let environment = execution.environment();
+    drop(admission);
+    let record =
+        verification::start_reserved(&ctx.cwd, id, &harness(ctx, from), command, &observation_id)
+            .map_err(anyhow::Error::msg)?;
     let logs = verification::output_directory(&ctx.cwd).map_err(anyhow::Error::msg)?;
     std::fs::create_dir_all(&logs)?;
     let stdout = logs.join(format!("{}.stdout", record.id));
@@ -366,6 +383,7 @@ pub fn verify(ctx: &Ctx, id: &str, command: &[String], from: Option<&str>) -> an
     };
     let result = std::process::Command::new(&command[0])
         .args(&command[1..])
+        .envs(environment)
         .current_dir(&ctx.cwd)
         .stdin(std::process::Stdio::inherit())
         .stdout(open(&stdout)?)
@@ -382,6 +400,7 @@ pub fn verify(ctx: &Ctx, id: &str, command: &[String], from: Option<&str>) -> an
         .map_err(anyhow::Error::msg)?;
     let record =
         verification::finish(&ctx.cwd, record, code, error, digests).map_err(anyhow::Error::msg)?;
+    let _storage_disposition = execution.finish();
     println!("verification {}: {}", record.id, record.status);
     println!("local command output: {}", logs.display());
     println!("Eligible project bytes and plan body only; environment reproduction and semantic acceptance are not established.");

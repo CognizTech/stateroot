@@ -54,6 +54,7 @@ pub mod session;
 pub mod setup;
 pub mod skill;
 pub mod soul;
+pub mod state_exchange;
 pub mod status;
 pub mod synthesize;
 pub mod telemetry_drain;

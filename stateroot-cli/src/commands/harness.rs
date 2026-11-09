@@ -92,11 +92,39 @@ pub fn run(
         return Ok(());
     }
 
-    let status = Command::new(command)
+    // Direct native launches share delegation's qualified lifetime/overrides.
+    // Dry-run above is read-only; external native configuration stays native.
+    let (storage, _execution_lease) = if stateroot_core::local_store::is_stateroot_dir(&ctx.cwd) {
+        let owner = stateroot_core::roots::retained_storage_owner(&ctx.cwd)?;
+        let admission = if let Some(fork) = stateroot_core::local_store::fork_context(&ctx.cwd) {
+            let guard = stateroot_core::roots::fork_operation_guard(&owner, &fork.fork)?;
+            stateroot_core::roots::validate_fork_execution(&owner, &fork.fork, &ctx.cwd)?;
+            Some(guard)
+        } else {
+            None
+        };
+        let (operation, command_lease) = stateroot_core::verification::reserve_execution(&ctx.cwd)
+            .map_err(anyhow::Error::msg)?;
+        let storage =
+            stateroot_core::build_storage::prepare_delegate_execution(&owner, &ctx.cwd, &operation);
+        drop(admission);
+        (Some(storage), Some(command_lease))
+    } else {
+        (None, None)
+    };
+    let environment = storage
+        .as_ref()
+        .map(|storage| storage.environment())
+        .unwrap_or_default();
+    let result = Command::new(command)
         .args(args)
+        .envs(environment)
         .current_dir(&ctx.cwd)
-        .status()
-        .with_context(|| format!("launching {id} via `{command}`"))?;
+        .status();
+    if let Some(storage) = storage {
+        let _ = storage.finish();
+    }
+    let status = result.with_context(|| format!("launching {id} via `{command}`"))?;
     if !status.success() {
         anyhow::bail!("{id} exited with {status}");
     }

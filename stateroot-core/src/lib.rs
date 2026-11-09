@@ -7,6 +7,7 @@
 //! No server anywhere: every module here works against the local filesystem
 //! and the harnesses on the machine.
 
+pub mod build_storage;
 pub mod canonical;
 pub mod config;
 pub mod context_pack;
@@ -47,6 +48,7 @@ pub mod skill_federation;
 pub mod snap_context;
 pub mod soul;
 pub mod soul_sync;
+pub mod state_exchange;
 pub mod sync_engine;
 pub mod telemetry;
 pub mod todo_federation;

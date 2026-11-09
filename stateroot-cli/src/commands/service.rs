@@ -1021,6 +1021,12 @@ async fn scan_all_projects(ctx: &Ctx) -> usize {
                         );
                     }
                 }
+                if let Err(error) = super::roots::reconcile_retirements(&project_ctx).await {
+                    log_line(
+                        &log_path(&ctx.config_dir),
+                        &format!("fork retention: {error}"),
+                    );
+                }
                 // Optional advisory synthesis: hash-gated, advisory-only,
                 // never a blocker for the deterministic projection.
                 if ctx.config.continuity.synthesis {

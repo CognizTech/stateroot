@@ -311,6 +311,79 @@ struct AutomaticLaunch<'a> {
     observed: &'a stateroot_core::plans::PlanReadiness,
 }
 
+/// Captured intent, not a reusable locator lookup. Recheck the same logical
+/// fork/context after acquiring its existing lifecycle operation guard.
+struct ForkAdmission {
+    owner: PathBuf,
+    context: local_store::ForkContext,
+}
+
+impl ForkAdmission {
+    fn capture(checkout: &Path, required: bool) -> Result<Option<Self>> {
+        let context = local_store::fork_context(checkout);
+        match context {
+            Some(context) => Ok(Some(Self {
+                owner: stateroot_core::roots::retained_storage_owner(checkout)?,
+                context,
+            })),
+            None if required => anyhow::bail!(
+                "worktree has no fork context; materialize a registered fork before delegation"
+            ),
+            None => Ok(None),
+        }
+    }
+
+    fn from_record(record_root: &Path, record: &Value) -> Result<Option<Self>> {
+        match record.get("fork_binding") {
+            Some(binding) => Ok(Some(Self {
+                owner: stateroot_core::roots::retained_storage_owner(record_root)?,
+                context: serde_json::from_value(binding.clone())?,
+            })),
+            None if record["fork_id"].is_string() || record["worktree"].is_string() => {
+                anyhow::bail!("fork execution binding is unavailable; reconcile and dispatch a fresh qualified attempt")
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn acquire(&self, checkout: &Path) -> Result<stateroot_core::safe_io::ResourceLock> {
+        let guard = stateroot_core::roots::fork_operation_guard(&self.owner, &self.context.fork)?;
+        self.validate(checkout)?;
+        Ok(guard)
+    }
+
+    fn validate(&self, checkout: &Path) -> Result<()> {
+        let current = local_store::fork_context(checkout).ok_or_else(|| {
+            anyhow::anyhow!("fork context disappeared before execution admission")
+        })?;
+        if current.schema != self.context.schema
+            || current.fork != self.context.fork
+            || current.parent_root != self.context.parent_root
+            || current.plan != self.context.plan
+        {
+            anyhow::bail!("fork execution binding changed before admission; locator is not execution identity");
+        }
+        let owner = stateroot_core::roots::retained_storage_owner(checkout)?;
+        if stateroot_core::path_identity::equivalent_project_key(&owner)
+            != stateroot_core::path_identity::equivalent_project_key(&self.owner)
+        {
+            anyhow::bail!("fork storage ownership changed before admission");
+        }
+        stateroot_core::roots::validate_fork_execution(&self.owner, &self.context.fork, checkout)?;
+        Ok(())
+    }
+}
+
+fn validate_request_fork_binding(record: &Value, expected: Option<&ForkAdmission>) -> Result<()> {
+    let binding = expected
+        .map(|fork| serde_json::to_value(&fork.context))
+        .transpose()?;
+    if record.get("fork_binding") != binding.as_ref() {
+        anyhow::bail!("delegation key belongs to a different or unqualified fork binding; reconcile the original attempt before dispatching a fresh key");
+    }
+    Ok(())
+}
+
 fn spawn_observed(
     ctx: &Ctx,
     args: &DelegateArgs,
@@ -333,6 +406,21 @@ fn spawn_observed(
         anyhow::bail!(
             "delegation depth cap reached ({DEPTH_ENV}={depth}) — a subagent may not spawn further subagents"
         );
+    }
+
+    let work_dir = args
+        .worktree
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| ctx.cwd.clone());
+    let expected_fork = ForkAdmission::capture(&work_dir, args.worktree.is_some())?;
+    if let Some(fork) = &expected_fork {
+        let caller = stateroot_core::roots::retained_storage_owner(&ctx.cwd)?;
+        if stateroot_core::path_identity::equivalent_project_key(&caller)
+            != stateroot_core::path_identity::equivalent_project_key(&fork.owner)
+        {
+            anyhow::bail!("requested fork does not belong to the calling project");
+        }
     }
 
     let ts = now_rfc3339();
@@ -381,6 +469,7 @@ fn spawn_observed(
                 "delegation key `{record_id}` exists with a different request — pick a new key"
             );
         }
+        validate_request_fork_binding(&existing, expected_fork.as_ref())?;
         if automatic.is_some() {
             // Includes failed/lost, starting and unknown: a periodic observation
             // never authorizes another attempt, even after service restart.
@@ -430,6 +519,13 @@ fn spawn_observed(
         }
     }
 
+    // Lock order is delegation key -> logical fork, also used by the worker.
+    // A retiring/reused locator cannot change the captured execution intent.
+    let _fork_admission = expected_fork
+        .as_ref()
+        .map(|fork| fork.acquire(&work_dir))
+        .transpose()?;
+
     // Recheck the exact graph/source/assignment observation while owning the
     // existing delegation key, immediately before reserving a new attempt.
     // This path never provisions another fork or infers an authorization.
@@ -468,36 +564,6 @@ fn spawn_observed(
         }
     }
 
-    // The work directory: a fork worktree isolates the subagent (WS5);
-    // records and lineage stay with the CALLING project. Validated as a
-    // fork of THIS project (repair Phase 6B): an arbitrary directory with
-    // `.stateroot` is not enough.
-    let work_dir: PathBuf = match &args.worktree {
-        Some(w) => {
-            let p = PathBuf::from(w);
-            if !p.is_dir() {
-                anyhow::bail!("worktree {w} is not a directory");
-            }
-            let context = stateroot_core::local_store::fork_context(&p).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "worktree {w} has no fork context — materialize with `stateroot fork <root> --worktree`"
-                )
-            })?;
-            let fork_record = ctx
-                .cwd
-                .join(".stateroot/forks")
-                .join(format!("{}.json", context.fork));
-            if !fork_record.is_file() {
-                anyhow::bail!(
-                    "worktree {w} is a fork checkout, but fork `{}` is not registered in this project",
-                    context.fork
-                );
-            }
-            p
-        }
-        None => ctx.cwd.clone(),
-    };
-
     let log_name = format!("{stamp}-{id}-d{depth}.log");
     let log_path = dir.join(&log_name);
     let log_rel = format!(".stateroot/delegations/{log_name}");
@@ -526,6 +592,10 @@ fn spawn_observed(
         record["plan_revision"] = json!(observed.revision);
         record["readiness_observation"] = serde_json::to_value(observed)?;
         record["fork_id"] = json!(observed.target_fork);
+    }
+    if let Some(fork) = &expected_fork {
+        record["fork_id"] = json!(fork.context.fork);
+        record["fork_binding"] = serde_json::to_value(&fork.context)?;
     }
     if !retries.is_empty() {
         record["retries"] = Value::Array(retries);
@@ -658,7 +728,27 @@ fn worker(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
         .map(|id| {
             format!("Execute recorded plan {id}. Read .stateroot/plans/{id}.md first.\n\n{task}")
         });
-    let result = worker_run(ctx, args, to, bound_task.as_deref().unwrap_or(task));
+    let result = worker_run(
+        ctx,
+        args,
+        to,
+        bound_task.as_deref().unwrap_or(task),
+        my_attempt,
+    );
+    // Terminal outcome is only one part of completion: retain the same fork
+    // ownership through late root/intelligence capture and finalization writes.
+    // Match parent/worker admission lock order and never hold this over the run.
+    let captured = reservation
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("worker reservation unavailable before finalization"))?;
+    let final_admission = ForkAdmission::from_record(&record_root, captured)?;
+    let final_key = key_lock(&delegations_dir(&record_root), record_id)?;
+    validate_worker_reservation(&record_root, record_id, args, my_attempt, captured)?;
+    let _final_fork = final_admission
+        .as_ref()
+        .map(|fork| fork.acquire(&ctx.cwd))
+        .transpose()?;
+    validate_worker_checkout(&record_root, &ctx.cwd, final_admission.as_ref())?;
     match result {
         Ok((id, output)) => {
             let outcome = if output.status.success() {
@@ -666,7 +756,7 @@ fn worker(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
             } else {
                 "failed"
             };
-            finalize(
+            finalize_locked(
                 &record_root,
                 record_id,
                 my_attempt,
@@ -684,7 +774,14 @@ fn worker(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
             // Outcome → immutable root (repair Phase 6B): a delegated task
             // is not terminal until its worktree is captured into the fork
             // lineage. Failed outcomes capture too (salvage semantics).
-            capture_outcome_root(&ctx.cwd, &record_root, record_id, &id, my_attempt);
+            capture_outcome_root_with_guard(
+                &ctx.cwd,
+                &record_root,
+                record_id,
+                &id,
+                my_attempt,
+                Some(&final_key),
+            );
             episodic_lineage(
                 &record_root,
                 &id,
@@ -695,7 +792,7 @@ fn worker(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
             Ok(output.status.code().unwrap_or(1))
         }
         Err(err) => {
-            let _ = finalize(
+            let _ = finalize_locked(
                 &record_root,
                 record_id,
                 my_attempt,
@@ -713,6 +810,7 @@ fn worker(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
 /// root — completion/cancellation is not terminal until this lands
 /// (best-effort: the error is recorded in the record's events, never
 /// silently dropped on the floor).
+#[cfg(test)]
 fn capture_outcome_root(
     work_dir: &Path,
     record_root: &Path,
@@ -814,6 +912,7 @@ fn worker_run(
     args: &DelegateArgs,
     to: &str,
     task: &str,
+    attempt: u64,
 ) -> Result<(String, harness_cli::HarnessOutput)> {
     let (id, _command, spec) = resolve(to)?;
     let depth = delegation_depth();
@@ -829,7 +928,34 @@ fn worker_run(
         std::process::id()
     );
 
-    let prompt = format!("{SUBAGENT_CONTRACT}\n\n{task}");
+    let record_id = args.record_id.as_deref().unwrap_or("unrecorded");
+    let record_root = args.record_in.as_deref().map(Path::new).unwrap_or(&ctx.cwd);
+    let captured = load_record(record_root, record_id)
+        .ok_or_else(|| anyhow::anyhow!("worker reservation unavailable before output admission"))?
+        .1;
+    let admission = ForkAdmission::from_record(record_root, &captured)?;
+    let storage = {
+        let _key = key_lock(&delegations_dir(record_root), record_id)?;
+        validate_worker_reservation(record_root, record_id, args, attempt, &captured)?;
+        let _fork = admission
+            .as_ref()
+            .map(|fork| fork.acquire(&ctx.cwd))
+            .transpose()?;
+        let owner = validate_worker_checkout(record_root, &ctx.cwd, admission.as_ref())?;
+        let storage = stateroot_core::build_storage::prepare_delegate_execution(
+            &owner,
+            &ctx.cwd,
+            &format!("delegate:{record_id}:{attempt}"),
+        );
+        attach_build_storage_locked(record_root, record_id, attempt, storage.disposition())?;
+        storage
+    };
+    let build_contract = if storage.disposition().state == "active" {
+        "\nThe supplied CARGO_TARGET_DIR is an exclusively leased, rebuildable output lane. Keep source and required deliverables outside it, or retain the lane with a .stateroot-retain marker beside its target directory. Background consumers keep its ownership unresolved until closure is proven."
+    } else {
+        ""
+    };
+    let prompt = format!("{SUBAGENT_CONTRACT}{build_contract}\n\n{task}");
     let home = stateroot_core::harness_install::home_dir().map_err(|e| anyhow::anyhow!(e))?;
     let skill_paths = args
         .skills
@@ -839,18 +965,94 @@ fn worker_run(
         .iter()
         .map(|path| path.display().to_string())
         .collect::<Vec<_>>();
+    let mut environment = vec![(DEPTH_ENV.to_string(), (depth + 1).to_string())];
+    environment.extend(storage.environment());
     let policy = harness_cli::LaunchPolicy {
         skill_paths,
         ambient_skills: args.ambient_skills,
-        env: vec![(DEPTH_ENV.to_string(), (depth + 1).to_string())],
+        env: environment,
     };
     // NO cap: the harness runs to its natural end. Its own internal limits
     // belong to the harness, not to us.
-    let output = harness_cli::run_capture_streaming(&ctx.cwd, &id, &spec, &prompt, &policy, None)?;
+    let result = harness_cli::run_capture_streaming(&ctx.cwd, &id, &spec, &prompt, &policy, None);
+    let disposition = storage.finish();
+    let attached = (|| -> Result<()> {
+        let _key = key_lock(&delegations_dir(record_root), record_id)?;
+        validate_worker_reservation(record_root, record_id, args, attempt, &captured)?;
+        let _fork = admission
+            .as_ref()
+            .map(|fork| fork.acquire(&ctx.cwd))
+            .transpose()?;
+        validate_worker_checkout(record_root, &ctx.cwd, admission.as_ref())?;
+        attach_build_storage_locked(record_root, record_id, attempt, &disposition)
+    })();
+    if let Err(error) = attached {
+        tracing::warn!("delegation build-storage completion observation unavailable: {error}");
+    }
+    let output = result?;
     Ok((id, output))
 }
 
+fn validate_worker_reservation(
+    root: &Path,
+    id: &str,
+    args: &DelegateArgs,
+    attempt: u64,
+    captured: &Value,
+) -> Result<()> {
+    let current = load_record(root, id)
+        .ok_or_else(|| anyhow::anyhow!("worker reservation disappeared"))?
+        .1;
+    if current["attempt"].as_u64() != Some(attempt)
+        || current["harness"].as_str() != args.to.as_deref().map(normalize_harness).as_deref()
+        || current["task"].as_str() != args.task.as_deref()
+        || current["fork_binding"] != captured["fork_binding"]
+        || current["pid"]
+            .as_u64()
+            .is_some_and(|pid| pid != u64::from(std::process::id()))
+    {
+        anyhow::bail!("worker reservation changed before execution/output admission");
+    }
+    Ok(())
+}
+
+fn validate_worker_checkout(
+    record_root: &Path,
+    checkout: &Path,
+    admission: Option<&ForkAdmission>,
+) -> Result<PathBuf> {
+    if admission.is_none() && local_store::fork_context(checkout).is_some() {
+        anyhow::bail!("unbound worker cannot execute in a fork checkout");
+    }
+    let owner = stateroot_core::roots::retained_storage_owner(checkout)?;
+    let caller = stateroot_core::roots::retained_storage_owner(record_root)?;
+    if stateroot_core::path_identity::equivalent_project_key(&owner)
+        != stateroot_core::path_identity::equivalent_project_key(&caller)
+    {
+        anyhow::bail!("worker checkout no longer belongs to its calling project");
+    }
+    Ok(owner)
+}
+
+// Caller owns the existing delegation key and, for forks, operation guard.
+fn attach_build_storage_locked(
+    root: &Path,
+    id: &str,
+    attempt: u64,
+    disposition: &stateroot_core::build_storage::OutputDisposition,
+) -> Result<()> {
+    let Some((path, mut record)) = load_record(root, id) else {
+        anyhow::bail!("worker record unavailable during output publication");
+    };
+    if record["attempt"].as_u64() != Some(attempt) {
+        anyhow::bail!("worker attempt changed during output publication");
+    }
+    record["build_storage"] = disposition.shared_observation();
+    save_record(&path, &record)
+}
+
 /// Rewrite a record file with final fields (status → outcome).
+#[cfg(test)]
 fn finalize(
     record_root: &Path,
     record_id: &str,
@@ -861,6 +1063,26 @@ fn finalize(
     log_append: &str,
 ) -> Result<()> {
     let _guard = key_lock(&delegations_dir(record_root), record_id)?;
+    finalize_locked(
+        record_root,
+        record_id,
+        attempt,
+        outcome,
+        exit_code,
+        duration_ms,
+        log_append,
+    )
+}
+
+fn finalize_locked(
+    record_root: &Path,
+    record_id: &str,
+    attempt: u64,
+    outcome: &str,
+    exit_code: Option<i32>,
+    duration_ms: u128,
+    log_append: &str,
+) -> Result<()> {
     let Some((path, mut record)) = load_record(record_root, record_id) else {
         anyhow::bail!("worker record `{record_id}` is gone — cannot finalize");
     };
@@ -1143,9 +1365,20 @@ fn cancel(ctx: &Ctx, id: &str) -> Result<()> {
         } else {
             "cancel-unconfirmed"
         },
-        "process tree verified",
+        if confirmed {
+            "process tree verified stopped"
+        } else {
+            "process tree remains active or unverified"
+        },
     );
     save_record(&path, &record)?;
+
+    if !confirmed {
+        record["cancel_confirmed"] = json!(false);
+        save_record(&path, &record)?;
+        println!("delegation {record_id} cancellation pending — process tree remains active or unverified");
+        return Ok(());
+    }
 
     // Phase 2: partial capture BEFORE the terminal record — cancellation
     // is not terminal until the partial work is a root in the fork lineage.
@@ -1160,6 +1393,12 @@ fn cancel(ctx: &Ctx, id: &str) -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| ctx.cwd.clone());
     let cancel_attempt = record.get("attempt").and_then(Value::as_u64).unwrap_or(1);
+    let admission = ForkAdmission::from_record(&ctx.cwd, &record)?;
+    let _fork = admission
+        .as_ref()
+        .map(|fork| fork.acquire(&work_dir))
+        .transpose()?;
+    validate_worker_checkout(&ctx.cwd, &work_dir, admission.as_ref())?;
     capture_outcome_root_with_guard(
         &work_dir,
         &ctx.cwd,
@@ -1171,6 +1410,9 @@ fn cancel(ctx: &Ctx, id: &str) -> Result<()> {
     let Some((path, mut record)) = load_record(&ctx.cwd, &record_id) else {
         anyhow::bail!("delegation record `{record_id}` vanished mid-cancel");
     };
+    anyhow::ensure!(record.get("outcome_root").and_then(Value::as_str).is_some()
+            && record["events"].as_array().and_then(|events| events.last()).and_then(|event| event["event"].as_str()) == Some("capture"),
+        "delegation {record_id} stopped but partial capture is unavailable; cancellation remains pending");
     {
         let obj = record.as_object_mut().unwrap();
         obj.insert("outcome".into(), json!("cancelled_with_root"));
@@ -1227,10 +1469,48 @@ fn signal_group(pid: u32, signal: Signal) {
         .status();
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
+fn group_alive(pgid: u32) -> bool {
+    if unsafe { libc::kill(-(pgid as i32), 0) } != 0 {
+        return std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+    }
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return true;
+    };
+    let mut observed = false;
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        if unsafe { libc::getpgid(pid) } != pgid as i32 {
+            continue;
+        }
+        observed = true;
+        match std::fs::read_to_string(entry.path().join("stat")) {
+            Ok(stat) => match stat
+                .rsplit_once(") ")
+                .and_then(|(_, fields)| fields.chars().next())
+            {
+                Some('Z' | 'X') => {}
+                _ => return true,
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return true,
+        }
+    }
+    // Unobservable membership is uncertainty, not confirmed termination.
+    !observed
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
 fn group_alive(pgid: u32) -> bool {
     // kill(2) with a negative pid and signal 0 probes the process group.
     unsafe { libc::kill(-(pgid as i32), 0) == 0 }
+    || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
 #[cfg(windows)]
@@ -1280,6 +1560,80 @@ pub(crate) fn recent_delegations(
 mod tests {
     use super::*;
     use stateroot_core::skill_federation::build_launch_argv_from_spec;
+
+    #[test]
+    fn fork_admission_rejects_a_reused_locator_and_terminal_capture_excludes_park() {
+        let caller = tempfile::tempdir().unwrap();
+        local_store::init_skeleton(
+            caller.path(),
+            "admission-fixture",
+            "Admission fixture",
+            "default",
+        )
+        .unwrap();
+        std::fs::write(caller.path().join("work.txt"), "retained source").unwrap();
+        let (base, _) =
+            stateroot_core::roots::create_root(caller.path(), "test", "admission base", None)
+                .unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let checkout = parent.path().join("checkout");
+        stateroot_core::roots::fork_root(caller.path(), &base.id, Some("admission-a"), "test")
+            .unwrap();
+        stateroot_core::roots::fork_materialize(caller.path(), "admission-a", &checkout, None)
+            .unwrap();
+        let intent = ForkAdmission::capture(&checkout, true).unwrap().unwrap();
+        let dir = delegations_dir(caller.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        let record = json!({"schema_version":"stateroot.delegation.v2","id":"terminal-admission","ts":now_rfc3339(),"harness":"codex","task":"fixture","command":"codex","attempt":1,"pid":std::process::id(),"process_namespace":stateroot_core::delegation_status::process_namespace(),"outcome":"completed","fork_id":"admission-a","fork_binding":intent.context,"worktree":checkout,"events":[]});
+        validate_request_fork_binding(&record, Some(&intent)).unwrap();
+        {
+            let key = key_lock(&dir, "terminal-admission").unwrap();
+            let _fork = intent.acquire(&checkout).unwrap();
+            write_record(&dir, &record).unwrap();
+            let owner = caller.path().to_owned();
+            let location = checkout.clone();
+            TEST_AFTER_OUTCOME_SNAPSHOT.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move |_| {
+                    assert!(
+                        stateroot_core::roots::park_fork(&owner, "admission-a").is_err(),
+                        "terminal outcome alone cannot allow park during late capture"
+                    );
+                    assert!(location.is_dir());
+                }))
+            });
+            capture_outcome_root_with_guard(
+                &checkout,
+                caller.path(),
+                "terminal-admission",
+                "codex",
+                1,
+                Some(&key),
+            );
+            assert!(
+                load_record(caller.path(), "terminal-admission").unwrap().1["outcome_root"]
+                    .is_string()
+            );
+        }
+        stateroot_core::roots::park_fork(caller.path(), "admission-a").unwrap();
+        assert!(!checkout.exists());
+        stateroot_core::roots::fork_root(caller.path(), &base.id, Some("admission-b"), "test")
+            .unwrap();
+        stateroot_core::roots::fork_materialize(caller.path(), "admission-b", &checkout, None)
+            .unwrap();
+        assert!(
+            intent.acquire(&checkout).is_err(),
+            "an old task cannot follow a locator into another fork"
+        );
+        let replacement = ForkAdmission::capture(&checkout, true).unwrap().unwrap();
+        assert!(
+            validate_request_fork_binding(&record, Some(&replacement)).is_err(),
+            "a same-key retry cannot reinterpret the old task in a replacement fork"
+        );
+        assert_eq!(
+            local_store::fork_context(&checkout).unwrap().fork,
+            "admission-b"
+        );
+    }
 
     #[test]
     fn outcome_capture_never_overwrites_a_replaced_attempt_or_worker() {

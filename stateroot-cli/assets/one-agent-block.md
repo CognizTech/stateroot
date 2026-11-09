@@ -20,9 +20,10 @@
 ### Capabilities
 
 Project state, memory and skills are available via the `stateroot` CLI
-(`resume`, `search`, `pack`, `skill show <slug>`) and, where an MCP server
-named `stateroot` is registered, via its tools (`state_get/put`,
-`handoff_read/write`, `context_pack_build`, `execute`, `run_skill`).
+(`resume`, `memory recall`, `plan show`, `skill show <slug>`) and, where an MCP
+server named `stateroot` is registered, via its typed tools (`root_inspect`,
+`handoff_inspect`, `plan_inspect`, `memory_recall`, `skill_inspect`). Use the
+CLI for delegation and lineage mutations not exposed by the registered tools.
 
 ### Self-improvement (shared)
 

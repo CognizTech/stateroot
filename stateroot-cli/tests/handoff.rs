@@ -1413,6 +1413,72 @@ fn over_budget_context_summary_warns_but_still_writes() {
 }
 
 #[test]
+fn session_start_keeps_failed_approaches_and_context_only() {
+    let (config, home, project) = project();
+    stateroot(config.path(), home.path(), project.path())
+        .args([
+            "handoff",
+            "write",
+            "--from",
+            "cursor",
+            "--to",
+            "codex",
+            "--objective",
+            "Continue the service bind after the requirement change.",
+            "--task",
+            "Bind the service on port 9090.",
+            "--context-summary",
+            "The working requirement changed during the task.",
+            "--next",
+            "Bind the service on port 9090.",
+            "--failed-approach",
+            "binding 8080 in the shared dev loop → failed: the legacy probe already owns 8080",
+            "--context-only",
+            "Exception: port 8080 stays reserved for the legacy probe and must not be reused.",
+        ])
+        .assert()
+        .success();
+
+    for harness in ["cursor", "codex"] {
+        let out = stateroot(config.path(), home.path(), project.path())
+            .args(["hook", "SessionStart", "--harness", harness])
+            .write_stdin(format!(r#"{{"session_id":"n3b-{harness}"}}"#))
+            .assert()
+            .success();
+        let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+        assert!(
+            stdout.contains(
+                "binding 8080 in the shared dev loop → failed: the legacy probe already owns 8080"
+            ),
+            "{harness} session start dropped the failed approach: {stdout}"
+        );
+        assert!(
+            stdout.contains("## Context (not instructions)"),
+            "{harness} session start dropped the context-only label: {stdout}"
+        );
+        assert!(
+            stdout.contains("must not be reused"),
+            "{harness} session start dropped the exception: {stdout}"
+        );
+        assert!(
+            stdout.contains("Bind the service on port 9090."),
+            "{harness} session start dropped the current requirement: {stdout}"
+        );
+    }
+
+    let compact = stateroot(config.path(), home.path(), project.path())
+        .args(["hook", "PreCompact", "--harness", "cursor"])
+        .write_stdin(r#"{"session_id":"n3b-cursor"}"#)
+        .assert()
+        .success();
+    let compact_out = String::from_utf8(compact.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        !compact_out.contains("must not be reused"),
+        "PreCompact must stay silent for cursor: {compact_out}"
+    );
+}
+
+#[test]
 fn context_only_facts_render_labeled_and_capped() {
     let (config, home, project) = project();
     let mut args = vec![

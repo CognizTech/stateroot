@@ -843,6 +843,8 @@ fn append_handoff_work(work: &mut String, handoff: &Value, project_dir: &Path) {
     if !phase.is_empty() {
         work.push_str(&format!("Phase: {phase}\n"));
     }
+    // Same failed-approach records resume already renders.
+    work.push_str(&super::resume::render_structured_failed_approaches(handoff));
     let mut failures = Vec::new();
     for key in ["failures", "bugs_found"] {
         if let Some(items) = handoff.get(key).and_then(|v| v.as_array()) {
@@ -886,6 +888,8 @@ fn append_handoff_work(work: &mut String, handoff: &Value, project_dir: &Path) {
     if !summary.is_empty() {
         work.push_str(&format!("Summary: {summary}\n"));
     }
+    // Background facts, after the actions, and explicitly not instructions.
+    work.push_str(&super::resume::render_context_only(handoff));
 
     for rel in [local_store::MEMORY_CORE_PATH] {
         if let Ok(home) = stateroot_core::harness_install::home_dir() {
@@ -1017,6 +1021,11 @@ pub fn hook_digest_with_identity(
     }
     if let Some(ref handoff) = handoff {
         append_handoff_work(&mut work, handoff, project_dir);
+    } else {
+        let lineage = stateroot_core::roots::compose_digest_section(project_dir);
+        if !lineage.is_empty() {
+            work.push_str(&lineage);
+        }
     }
     if let Some(section) = super::resume::recent_checkpoints_section(project_dir) {
         work.push_str(&section);

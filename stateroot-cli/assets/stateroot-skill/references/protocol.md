@@ -54,6 +54,38 @@ bindings: never raw-move them or rewrite old handoffs. Project removal
 refuses while the managed area contains worktrees, including unregistered
 copies, so unfinished work cannot be erased with the surrounding store.
 
+From the owning project, `stateroot fork --park NAME [--json]` explicitly
+seals eligible source and intelligence, preserves required evidence and
+releases the checkout. `fork --reopen NAME [--worktree [PATH]]
+[--plan ORIGINAL] [--json]` reconstructs that same fork and original plan
+binding; a completed plan stays completed. Use a new logical fork for a new
+assignment. `fork --inspect NAME [--json]` reports the lifecycle and retained
+coverage; inspection does not imply the entire private payload was rehashed.
+
+Parking and merged cleanup require retained source, stable ownership and
+inactive known producers/consumers. Unknown ignored output is retained with
+a reason. Current owner exclusions govern reopening. Original session cwd
+and provenance remain historical; unknown runtime locks are not blindly
+replayed. A missing old checkout provides only retained-source coverage,
+not proof that unrecorded files or private evidence survived. A cross-volume
+atomic park failure preserves the original locator. The existing background
+service retries eligible merged or exact-tip terminal forks; plan completion
+alone does not authorize retirement. Foreground status and merge callbacks
+report facts without physical cleanup. Late edits and unknown/live ownership
+retain a specific reason.
+
+Qualified Rust execution can receive an exclusively owned rebuildable output
+lane. Preserve an explicit user `CARGO_TARGET_DIR` override. Keep source and
+required deliverables outside the leased target, or pin the lane using its
+reported retention marker. Keep ownership until the command and known
+consumers finish; active/unknown ownership cannot become idle merely because
+the foreground harness exited. Cache budgets are soft around retained/active
+work. General Windows harness delegation keeps its native environment and
+breakaway behavior and remains unmanaged; qualified short-lived native
+command coverage is reported separately. Arbitrary external shell commands
+are not assumed managed. No compiler wrapper or incremental-mode change is
+required by default.
+
 Fork refs remain canonical under `refs/stateroot/forks/*`; default names use
 an opaque full UUID. Use `--name` for an explicit name (`--branch` is a
 compatibility alias, not a human Git branch). For historical temporary refs
@@ -202,6 +234,46 @@ Run `stateroot plan verify <id> -- <project-check-command> [args...]` on the act
 For a reconciliation candidate, verify there using its owning repository, then restage the observation metadata and publish from the owner. Do not snapshot the candidate or create a private repository. Unchanged source may reuse evidence across metadata-only restaging; changed source needs new checks. Raw stdout/stderr stay in the owner's local verification lane after publication and candidate cleanup.
 
 When automating installation, parse the complete stdout of `stateroot install --json` as one document and inspect its `install` outcome. Human scheduling and editor-reconciliation messages belong to stderr. Malformed output is not success and must not be repaired by stripping arbitrary text or recording a Ready receipt.
+
+`status --json` and `doctor --json` expose storage/lifecycle facts; doctor nests
+them under `authoritative_state`. For Linux/WSL legacy Cargo output, inspect
+`fork --migrate-output NAME [--output-path target/child] --json`, then apply only
+a justified exact inventory with `fork --migrate-output NAME --input - --json`.
+JSON carries `expected_tip`, `expected_inventory`, `reason`, optional matching
+`fork` and relative path (default `target`). Repeated input advances `evicting`;
+unknown/retained data is not declared disposable by the framework. Keep a scoped
+same-filesystem cache root for atomic large-output moves. Native Windows legacy
+migration and general Windows descendant ownership remain unqualified. Existing
+native target overrides, history and human worktrees retain their ownership.
+
+## Portable exchange and exact-revision review
+
+Use `exchange export --root <root> --output <new-file>` and `exchange inspect
+<bundle>` to create and validate local v2 bundles. `exchange import <bundle>
+[--dest DIR]` retains state without moving the head. `exchange materialize
+<bundle> [--dest DIR] --yes` applies a fresh/same-project fast-forward, preserving
+current exclusions, human branches and index; conflicting work/policy refuses.
+A failure can retain validated immutable evidence without publishing lineage.
+Local v2 does not imply Cloud v2 compatibility, native-session restoration,
+machine-local verification output transfer, environment reproduction or authenticated approval. Explicit
+omissions prevent full shared-evidence claims. Import never executes scripts.
+
+Review offered B independently of a contributor's later D: from the coordinator
+create `fork <B> --name submission-b --worktree`, inspect the exact offer packet
+with `--project <contributor> handoff show --id <packet>`, prepare/stage the offer,
+verify the candidate and publish only that checked attempt. A moved target
+requires a new attempt; changed candidate bytes require restaging and applicable
+verification. Confirm the merge parents identify the target and B, not D.
+Link the exact offer, roots, attempt, verification and result in the return handoff.
+The full staged tree includes shared metadata; verification's product tree
+identifies product bytes. Metadata-only restaging does not invalidate unchanged
+product evidence. Local attribution and command exit zero are not semantic approval.
+
+MCP handoff readers expose `handoff_root` / `checkout_root` without changing
+packet selectors or ambiguity refusal. Missing packet roots stay null. Digests
+distinguish packet and live roots when they differ. Root metadata availability
+separately reports a local sidecar, absent-sidecar/Git-retained, or unavailable;
+existing `metadata_status` values and publication checks remain unchanged.
 
 ## Dependency execution
 

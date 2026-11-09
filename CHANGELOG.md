@@ -5,6 +5,23 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- Background retirement releases eligible fork checkouts while retaining
+  source/evidence and late-work reasons; existing fork commands inspect and
+  migrate qualified legacy Cargo output with source-bound operator input.
+- Storage/lifecycle diagnostics distinguish retained history, resident
+  checkouts and bounded rebuildable output; DrvFs aliases retain one identity.
+
+- Portable local exchange exports, validates, imports and materializes roots
+  with shared intelligence and referenced evidence; incomplete coverage is explicit.
+- Handoff readers distinguish the offered root from later checkout work, and
+  root readers report local metadata availability alongside retained Git state.
+
+- Fork lifecycle commands park, inspect and reopen retained work with the
+  same identity; merged cleanup preserves unretained data and live ownership.
+- Qualified Rust execution reuses bounded owned build outputs while keeping
+  active consumers and explicit native configuration intact.
+- Session-start context matches resume's failed-approach/context sections,
+  and digests point to verified source changes without falsifying history.
 - Concurrent obligation updates wait through filesystem contention while
   preserving exclusive ownership and every submitted entry.
 - Fork worktrees created by `delegate --plan` and bare `fork --worktree`

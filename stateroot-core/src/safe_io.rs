@@ -308,6 +308,22 @@ impl MutationGuard {
     }
 }
 
+/// A crash-released kernel mutex for a short resource-mutation section.
+///
+/// Locks `<resource>.guard` without unlinking it. Availability does not prove
+/// that a resource owner or its consumers have finished; no owner record is
+/// probed, reclaimed or changed. None means another mutation holds the mutex.
+pub struct ResourceMutationGuard {
+    _guard: MutationGuard,
+}
+
+impl ResourceMutationGuard {
+    pub fn acquire(resource: impl AsRef<Path>) -> std::io::Result<Option<Self>> {
+        MutationGuard::acquire(resource.as_ref(), false)
+            .map(|guard| guard.map(|guard| Self { _guard: guard }))
+    }
+}
+
 #[cfg(windows)]
 #[repr(C)]
 #[derive(Default)]
@@ -812,6 +828,26 @@ mod tests {
         let _held = ResourceLock::acquire(&path).expect("first");
         let err = ResourceLock::acquire_with_budget(&path, 2, 5).expect_err("must fail closed");
         assert!(matches!(err, LockError::Timeout { .. }), "{err}");
+    }
+
+    #[test]
+    fn kernel_mutation_guard_is_exclusive_without_releasing_resource_ownership() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("resource.lock");
+        let owner = ResourceLock::acquire(&path).unwrap();
+        let original = fs::read(&path).unwrap();
+        // Resource ownership outlives its short mutation section: acquiring
+        // this kernel guard is not evidence that the resource is idle.
+        let guard = ResourceMutationGuard::acquire(&path).unwrap().unwrap();
+        assert!(ResourceMutationGuard::acquire(&path).unwrap().is_none());
+        assert!(ResourceLock::acquire_with_budget(&path, 2, 1).is_err());
+        drop(guard);
+        assert_eq!(fs::read(&path).unwrap(), original);
+        let guard = ResourceMutationGuard::acquire(&path).unwrap().unwrap();
+        drop(guard);
+        assert!(ResourceLock::acquire_with_budget(&path, 2, 1).is_err());
+        drop(owner);
+        drop(ResourceLock::acquire(&path).unwrap());
     }
 
     #[test]

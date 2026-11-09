@@ -32,10 +32,10 @@ fn directory(project: &Path) -> PathBuf {
     local_store::root(project).join("plans/verification")
 }
 
-/// Candidate output is already in its owner's local lane, so publishing or
-/// removing the candidate never discards the command's raw evidence.
+/// Candidates and verified ordinary forks retain raw output outside disposable
+/// checkouts. This changes storage ownership, not command/plan authority.
 pub fn output_directory(project: &Path) -> Result<PathBuf, String> {
-    let owner = roots::repository_owner(project).map_err(|error| error.to_string())?;
+    let owner = roots::retained_storage_owner(project).map_err(|error| error.to_string())?;
     Ok(local_store::root(&owner).join("local/verification"))
 }
 
@@ -108,6 +108,16 @@ pub fn start(
     actor: &str,
     command: &[String],
 ) -> Result<CommandObservation, String> {
+    start_reserved(
+        project,
+        plan,
+        actor,
+        command,
+        &format!("v_{}", uuid::Uuid::now_v7()),
+    )
+}
+
+fn validate_request(project: &Path, plan: &str, command: &[String]) -> Result<(), String> {
     if command.is_empty() {
         return Err("verification command is empty".into());
     }
@@ -116,11 +126,56 @@ pub fn start(
             "verification argv metadata exceeds its capture budget; no command executed".into(),
         );
     }
+    project_identity(project)?;
+    plans::load(project, plan).ok_or_else(|| format!("unknown or unsupported plan `{plan}`"))?;
+    Ok(())
+}
+
+/// Publish real command ownership under the caller's short fork admission
+/// guard. The existing per-ID token/PID lock lasts through command + finish,
+/// including unmanaged/non-Cargo work. No separate command ledger is needed.
+pub fn reserve_command(
+    project: &Path,
+    plan: &str,
+    command: &[String],
+) -> Result<(String, crate::safe_io::ResourceLock), String> {
+    validate_request(project, plan, command)?;
+    reserve_execution(project)
+}
+
+/// The same short admission and command lease protects native launches which
+/// have no plan verification observation. No completion or acceptance implied.
+pub fn reserve_execution(project: &Path) -> Result<(String, crate::safe_io::ResourceLock), String> {
+    project_identity(project)?;
+    let id = format!("v_{}", uuid::Uuid::now_v7());
+    let guard = crate::safe_io::ResourceLock::acquire(
+        local_store::root(project)
+            .join("local/locks")
+            .join(format!("verification-command-{id}.lock")),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok((id, guard))
+}
+
+/// Capture the inputs after reservation; its live lease prevents retirement
+/// while source capture runs, without serializing independent commands under
+/// the short admission lock.
+pub fn start_reserved(
+    project: &Path,
+    plan: &str,
+    actor: &str,
+    command: &[String],
+    id: &str,
+) -> Result<CommandObservation, String> {
+    if !valid_id(id) {
+        return Err("unsupported verification reservation identity".into());
+    }
+    validate_request(project, plan, command)?;
     let (meta, body) = plans::load(project, plan)
         .ok_or_else(|| format!("unknown or unsupported plan `{plan}`"))?;
     let record = CommandObservation {
         schema_version: SCHEMA.into(),
-        id: format!("v_{}", uuid::Uuid::now_v7()),
+        id: id.into(),
         project_id: project_identity(project)?,
         plan_id: meta.id,
         plan_body_sha256: plans::body_digest(&body).ok_or("plan body unreadable")?,
@@ -138,6 +193,40 @@ pub fn start(
     retain_product_tree(project, &record)?;
     save(project, &record, "started")?;
     Ok(record)
+}
+
+/// Called under fork admission before any source/local-evidence retirement.
+/// Probe only existing command resources, preserving live/foreign/malformed
+/// owners; known-dead same-runtime tokens use normal ResourceLock recovery.
+pub fn ensure_no_active_commands(project: &Path) -> Result<(), String> {
+    let entries = match std::fs::read_dir(local_store::root(project).join("local/locks")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "verification command ownership unavailable: {error}"
+            ))
+        }
+    };
+    for entry in entries {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(id) = name
+            .strip_prefix("verification-command-")
+            .and_then(|name| name.strip_suffix(".lock"))
+        else {
+            continue;
+        };
+        if !valid_id(id) {
+            return Err("unrecognized verification command lease; checkout retained".into());
+        }
+        let probe=crate::safe_io::ResourceLock::acquire_with_budget(&path,2,0)
+            .map_err(|error|format!("verification command {id} is live or unverifiable ({error}); checkout retained"))?;
+        drop(probe);
+    }
+    Ok(())
 }
 
 /// Staleness is input identity, not a clock-based expiry. Legacy prose is
@@ -254,6 +343,90 @@ pub fn output_digest(path: &Path) -> Result<String, String> {
         hash.update(&buffer[..count]);
     }
     Ok(format!("{:x}", hash.finalize()))
+}
+
+/// Preserve this fork's introduced observations and their exact raw output.
+/// Inherited history is retained by its original source; it is not a live
+/// command in this checkout merely because its record was materialized here.
+pub(crate) fn retain_fork_outputs(
+    project: &Path,
+    baseline: &git2::Tree<'_>,
+) -> Result<Vec<String>, String> {
+    let target = output_directory(project)?;
+    let legacy = local_store::root(project).join("local/verification");
+    let repo = roots::ensure_repo(project).map_err(|e| e.to_string())?;
+    let mut retained = Vec::new();
+    let entries = match std::fs::read_dir(directory(project)) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(retained),
+        Err(error) => return Err(error.to_string()),
+    };
+    for entry in entries {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("verification filename unavailable")?;
+        let Some(id) = name.strip_suffix(".started.json") else {
+            continue;
+        };
+        let bytes = bounded_record_bytes(&path)?;
+        let relative = Path::new(".stateroot/plans/verification").join(name);
+        let inherited = baseline
+            .get_path(&relative)
+            .ok()
+            .is_some_and(|entry| repo.blob(&bytes).ok() == Some(entry.id()));
+        let finished = directory(project).join(format!("{id}.finished.json"));
+        if !finished.exists() {
+            if inherited {
+                continue;
+            }
+            return Err(format!(
+                "verification {id} has not released command ownership; checkout retained"
+            ));
+        }
+        let record = load(project, id)?;
+        if inherited && record.output_digests.is_empty() {
+            continue;
+        }
+        if !record.output_digests.is_empty() && record.output_digests.len() != 2 {
+            return Err(format!(
+                "verification {id} has unsupported raw-output coverage"
+            ));
+        }
+        for (suffix, digest) in ["stdout", "stderr"].into_iter().zip(&record.output_digests) {
+            let destination = target.join(format!("{id}.{suffix}"));
+            if destination.exists() {
+                if output_digest(&destination)? != *digest {
+                    return Err(format!("retained output conflict for {id}.{suffix}"));
+                }
+                continue;
+            }
+            let source = legacy.join(format!("{id}.{suffix}"));
+            if !source.exists() && inherited {
+                continue;
+            }
+            if output_digest(&source)? != *digest {
+                return Err(format!("raw output mismatch for {id}.{suffix}"));
+            }
+            std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+            let mut file = tempfile::NamedTempFile::new_in(&target).map_err(|e| e.to_string())?;
+            std::io::copy(
+                &mut std::fs::File::open(&source).map_err(|e| e.to_string())?,
+                &mut file,
+            )
+            .map_err(|e| e.to_string())?;
+            file.as_file().sync_all().map_err(|e| e.to_string())?;
+            if output_digest(file.path())? != *digest {
+                return Err(format!("raw output changed while retaining {id}.{suffix}"));
+            }
+            file.persist_noclobber(&destination)
+                .map_err(|e| e.to_string())?;
+        }
+        retained.push(id.to_string());
+    }
+    retained.sort();
+    Ok(retained)
 }
 
 /// Read-only bounded observation inventory. Before/after input equality is

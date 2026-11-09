@@ -66,6 +66,70 @@ pub fn render_handoff_digest_with(packet: &Value, deterministic: bool) -> String
     render_handoff_digest_full(packet, deterministic, &[], None, None)
 }
 
+/// Structured `failed_approaches` records, distinct from free-text failures.
+/// Resume and session-start injection share this wording.
+pub(crate) fn render_structured_failed_approaches(packet: &Value) -> String {
+    let Some(items) = packet.get("failed_approaches").and_then(Value::as_array) else {
+        return String::new();
+    };
+    let entries: Vec<String> = items
+        .iter()
+        .filter_map(|item| {
+            let approach = item.get("approach").and_then(Value::as_str)?.trim();
+            if approach.is_empty() {
+                return None;
+            }
+            let outcome = item.get("outcome").and_then(Value::as_str).unwrap_or("");
+            let reason = item.get("reason").and_then(Value::as_str).unwrap_or("");
+            Some(format!("{approach} → {outcome}: {reason}"))
+        })
+        .collect();
+    if entries.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("## Failed approaches\n\n");
+    for entry in entries {
+        out.push_str(&format!("- {entry}\n"));
+    }
+    out.push('\n');
+    out
+}
+
+/// Background facts the receiver may use but must not execute. Hard-capped.
+pub(crate) fn render_context_only(packet: &Value) -> String {
+    let Some(items) = packet.get("context_only").and_then(Value::as_array) else {
+        return String::new();
+    };
+    let facts: Vec<&str> = items
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .collect();
+    if facts.is_empty() {
+        return String::new();
+    }
+    const MAX_ITEMS: usize = 8;
+    const MAX_CHARS: usize = 4000;
+    let mut out = String::from("## Context (not instructions)\n\n");
+    let mut rendered = 0usize;
+    let mut chars = 0usize;
+    for fact in &facts {
+        let len = fact.chars().count();
+        if rendered >= MAX_ITEMS || chars + len > MAX_CHARS {
+            break;
+        }
+        out.push_str(&format!("- {fact}\n"));
+        rendered += 1;
+        chars += len;
+    }
+    if rendered < facts.len() {
+        out.push_str(&format!("- … +{} more\n", facts.len() - rendered));
+    }
+    out.push('\n');
+    out
+}
+
 /// The central-plan digest section (authoritative tier): pointer + directive,
 /// never the plan body. Shared by the handoff digest and the no-handoff arm —
 /// a planner/executor split must surface even before any handoff exists.
@@ -422,16 +486,29 @@ pub fn render_handoff_digest_full(
             out.push_str(&format!("## {heading}\n\n**{title}** ({status}) at `.stateroot/plans/{id}.md`. {instruction}\n\n"));
         }
     }
+    let handoff_root = packet
+        .get("latest_root")
+        .and_then(|v| v.as_str())
+        .filter(|value| !value.is_empty());
+    let checkout_root =
+        project_dir.and_then(|dir| stateroot_core::roots::latest_root(dir).ok().flatten());
     let lineage = project_dir
         .map(stateroot_core::roots::compose_digest_section)
         .unwrap_or_default();
     if !lineage.is_empty() {
-        out.push_str(&lineage);
-    } else if let Some(root) = packet
-        .get("latest_root")
-        .and_then(|v| v.as_str())
-        .filter(|value| !value.is_empty())
-    {
+        if let Some(root) = handoff_root.filter(|root| checkout_root.as_deref() != Some(*root)) {
+            let short: String = root.chars().take(12).collect();
+            out.push_str(&lineage.replacen(
+                "## Work State Lineage\n\nCurrent root:",
+                &format!(
+                    "## Work State Lineage\n\nHandoff root: `{short}`\nCurrent checkout root:"
+                ),
+                1,
+            ));
+        } else {
+            out.push_str(&lineage);
+        }
+    } else if let Some(root) = handoff_root {
         let short: String = root.chars().take(12).collect();
         out.push_str(&format!("Continuing from root `{short}`.\n\n"));
     }
@@ -605,28 +682,8 @@ pub fn render_handoff_digest_full(
     }
     // Structured failed approaches (truthful handoffs): the authored
     // approach → outcome: reason records, kept distinct from the free-text
-    // failures/bugs section below.
-    if let Some(items) = packet.get("failed_approaches").and_then(|v| v.as_array()) {
-        let entries: Vec<String> = items
-            .iter()
-            .filter_map(|item| {
-                let approach = item.get("approach").and_then(Value::as_str)?.trim();
-                if approach.is_empty() {
-                    return None;
-                }
-                let outcome = item.get("outcome").and_then(Value::as_str).unwrap_or("");
-                let reason = item.get("reason").and_then(Value::as_str).unwrap_or("");
-                Some(format!("{approach} → {outcome}: {reason}"))
-            })
-            .collect();
-        if !entries.is_empty() {
-            out.push_str("## Failed approaches\n\n");
-            for entry in entries {
-                out.push_str(&format!("- {entry}\n"));
-            }
-            out.push('\n');
-        }
-    }
+    // failures/bugs section below. Session-start injection uses the same helper.
+    out.push_str(&render_structured_failed_approaches(packet));
     // Failures and bugs are separate authoring channels but one reader-facing
     // section. Preserve first-seen wording and avoid duplicate rendering.
     let mut failures = Vec::new();
@@ -685,34 +742,8 @@ pub fn render_handoff_digest_full(
     }
     // Authority labels: author-asserted background facts, explicitly NOT work
     // directives. Hard-capped so a stuffed packet cannot flood the digest.
-    if let Some(items) = packet.get("context_only").and_then(|v| v.as_array()) {
-        let facts: Vec<&str> = items
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .collect();
-        if !facts.is_empty() {
-            const MAX_ITEMS: usize = 8;
-            const MAX_CHARS: usize = 4000;
-            let mut rendered = 0usize;
-            let mut chars = 0usize;
-            out.push_str("## Context (not instructions)\n\n");
-            for fact in &facts {
-                let len = fact.chars().count();
-                if rendered >= MAX_ITEMS || chars + len > MAX_CHARS {
-                    break;
-                }
-                out.push_str(&format!("- {fact}\n"));
-                rendered += 1;
-                chars += len;
-            }
-            if rendered < facts.len() {
-                out.push_str(&format!("- … +{} more\n", facts.len() - rendered));
-            }
-            out.push('\n');
-        }
-    }
+    // Session-start injection uses the same helper.
+    out.push_str(&render_context_only(packet));
     // Transcript-sourced sections (Progress Narrative / Milestones /
     // Conversation Tail). B3: once the project has captured state, they are
     // HISTORY — grouped under an "Adoption History" banner after the
@@ -1153,6 +1184,11 @@ skipping duplicate. If this session has no digest in context, pass --force to re
         }
         None => {
             out.push_str("(no handoff yet — write one with `stateroot handoff write`)\n");
+            let lineage = stateroot_core::roots::compose_digest_section(&ctx.cwd);
+            if !lineage.is_empty() {
+                out.push('\n');
+                out.push_str(&lineage);
+            }
             // Push before pull, even before the first handoff.
             if let Some(section) = needs_attention_section(&ctx.cwd) {
                 out.push('\n');

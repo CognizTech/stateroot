@@ -385,6 +385,7 @@ fn structured_tool(
                 }
             }
             let total = packets.len();
+            let checkout_root = roots::latest_root(&ctx.cwd).map_err(|e| e.to_string())?;
             let entries: Vec<_> = packets
                 .into_iter()
                 .skip(offset)
@@ -394,7 +395,8 @@ fn structured_tool(
                         "is_current":current_id.as_ref() == Some(&id), "id":id, "seq":packet.get("seq"), "created_at":packet.get("created_at"),
                         "created_by_harness":packet.get("created_by_harness"),
                         "recommended_next_harness":packet.get("recommended_next_harness"),
-                        "fork_id":packet.get("fork_id"), "current_phase":packet.get("current_phase")
+                        "fork_id":packet.get("fork_id"), "current_phase":packet.get("current_phase"),
+                        "handoff_root":packet.get("latest_root"), "checkout_root":&checkout_root
                     })
                 })
                 .collect();
@@ -409,10 +411,14 @@ fn structured_tool(
             if id.is_some() && seq.is_some() {
                 return Err("select either id or seq".into());
             }
+            let checkout_root = roots::latest_root(&ctx.cwd).map_err(|e| e.to_string())?;
             if id.is_none() && seq.is_none() {
                 return local_store::read_handoff_local(&ctx.cwd)
                     .map_err(|e| e.to_string())?
-                    .map(|packet| json!({"id":super::handoff::handoff_body_sha256(&packet),"packet":packet,"source":"current"}))
+                    .map(|packet| {
+                        let handoff_root = packet.get("latest_root").cloned();
+                        json!({"id":super::handoff::handoff_body_sha256(&packet),"packet":packet,"source":"current","handoff_root":handoff_root,"checkout_root":&checkout_root})
+                    })
                     .ok_or("no current handoff".into());
             }
             if let Some(id) = id {
@@ -446,7 +452,10 @@ fn structured_tool(
                 ));
             }
             let (id, packet) = matches.into_iter().next().unwrap();
-            Ok(json!({"id":id,"packet":packet,"source":"history"}))
+            let handoff_root = packet.get("latest_root").cloned();
+            Ok(
+                json!({"id":id,"packet":packet,"source":"history","handoff_root":handoff_root,"checkout_root":&checkout_root}),
+            )
         }
         "verification_inspect" => {
             let record = verification::load(&ctx.cwd, required("id")?)?;
