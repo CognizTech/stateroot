@@ -1214,7 +1214,7 @@ pub fn reopen_fork(
             }
             if let Some(plan) = original {
                 claim_plan(owner, plan, name, &uuid::Uuid::now_v7().to_string(), true)?;
-                copy_plan_to_worktree(owner, &path, plan)?;
+                copy_plan_to_worktree(owner, &path, plan, true)?;
             }
             path
         }

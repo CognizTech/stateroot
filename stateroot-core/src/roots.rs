@@ -2366,7 +2366,12 @@ fn materialize_fork(
         }
         delete_temporary_fork_ref(project_dir, &repo, &tmp_branch, tip, &log_message)?;
         if let Some(plan_id) = plan {
-            owned_files.extend(copy_plan_to_worktree(project_dir, worktree_path, plan_id)?);
+            owned_files.extend(copy_plan_to_worktree(
+                project_dir,
+                worktree_path,
+                plan_id,
+                reopening,
+            )?);
         }
         let context = local_store::ForkContext {
             schema: "stateroot.fork-context.v1".into(),
@@ -2711,13 +2716,26 @@ pub fn cleanup_temporary_fork_refs(
 /// fork. The root being forked may predate the plan, so relying on the Git
 /// snapshot alone leaves the executor with a fork context that names a plan
 /// it cannot read or activate.
+/// Reopening restores the fork's terminal history; an older owner-side
+/// assignment must not replace its completion or abandonment receipt.
 fn copy_plan_to_worktree(
     project_dir: &Path,
     worktree_path: &Path,
     plan_id: &str,
+    reopening: bool,
 ) -> Result<Vec<(PathBuf, Vec<u8>)>, RootsError> {
     let (_meta, body_path) = crate::plans::load(project_dir, plan_id)
         .ok_or_else(|| RootsError::NotFound(format!("no plan named {plan_id}")))?;
+    if reopening
+        && crate::plans::load(worktree_path, plan_id).is_some_and(|(meta, _)| {
+            matches!(
+                meta.status(),
+                crate::plans::PlanStatus::Done | crate::plans::PlanStatus::Abandoned
+            )
+        })
+    {
+        return Ok(Vec::new());
+    }
     let body = std::fs::read(&body_path)?;
     let mut meta: Value = serde_json::from_slice(&std::fs::read(
         local_store::root(project_dir)
@@ -8574,6 +8592,50 @@ mod tests {
             branches
         );
         assert_eq!(std::fs::read(owner.path().join("index")).ok(), index);
+    }
+
+    #[test]
+    fn fork_reopen_preserves_unmerged_completion_and_partial_reopen_history() {
+        let (_tmp, dir) = project();
+        write_json(
+            &dir.join(".stateroot/manifest.json"),
+            &json!({
+                "schema_version": local_store::SCHEMA_MANIFEST_V1,
+                "project_id": "reopen-completion"
+            }),
+        )
+        .unwrap();
+        write(&dir, "work.txt", "base");
+        let plan = crate::plans::record(&dir, "fork work", "cli", None, "# Fork work\n").unwrap();
+        crate::plans::transition(&dir, &plan.id, crate::plans::PlanStatus::Approved).unwrap();
+        let (base, _) = create_root(&dir, "cli", "base", None).unwrap();
+        let (name, _) = fork_root(&dir, &base.id, Some("completed-unmerged"), "cli").unwrap();
+        let path = managed_worktree_path(&dir, &name).unwrap();
+        fork_materialize(&dir, &name, &path, Some(&plan.id)).unwrap();
+        let completed =
+            crate::plans::complete(&path, &plan.id, "fork work checked", "cli", None).unwrap();
+        park_fork(&dir, &name).unwrap();
+        assert_eq!(
+            crate::plans::load(&dir, &plan.id).unwrap().0.status(),
+            crate::plans::PlanStatus::Approved
+        );
+        reopen_fork(&dir, &name, None, None).unwrap();
+        let restored = crate::plans::load(&path, &plan.id).unwrap().0;
+        assert_eq!(
+            serde_json::to_value(restored).unwrap(),
+            serde_json::to_value(&completed).unwrap()
+        );
+        // Retry the recovery branch after checkout creation committed.
+        update_fork_record(&dir, &name, |value| {
+            value["lifecycle"]["state"] = json!("opening")
+        })
+        .unwrap();
+        reopen_fork(&dir, &name, None, None).unwrap();
+        let restored = crate::plans::load(&path, &plan.id).unwrap().0;
+        assert_eq!(
+            serde_json::to_value(restored).unwrap(),
+            serde_json::to_value(completed).unwrap()
+        );
     }
 
     #[test]
