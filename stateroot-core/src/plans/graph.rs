@@ -483,6 +483,7 @@ fn dependency_state(
     edge: &PlanDependency,
     all: &BTreeMap<String, PlanMeta>,
     comparisons: &mut SourceComparisons,
+    root_metadata: &mut BTreeMap<(PathBuf, String), bool>,
 ) -> (String, String) {
     let Some(upstream) = all.get(&edge.plan_id) else {
         return if meta_path(project, &edge.plan_id).exists() {
@@ -551,9 +552,13 @@ fn dependency_state(
         );
     };
     if repo(project).is_err()
-        || !crate::roots::get_root(project, source_root).is_ok_and(|root| {
-            matches!(root.metadata_status.as_str(), "recorded" | "legacy_unknown")
-        })
+        || !*root_metadata
+            .entry((project.to_path_buf(), source_root.clone()))
+            .or_insert_with(|| {
+                crate::roots::get_root(project, source_root).is_ok_and(|root| {
+                    matches!(root.metadata_status.as_str(), "recorded" | "legacy_unknown")
+                })
+            })
     {
         return (
             "source_unavailable".into(),
@@ -750,6 +755,11 @@ pub fn graph(project: &Path) -> PlanGraph {
         .collect();
     let mut nodes = Vec::new();
     let mut comparisons = SourceComparisons::new();
+    let mut root_metadata = BTreeMap::new();
+    let mut owner_plans = BTreeMap::new();
+    // One graph observes each store once, including degraded records. Plans
+    // sharing an executor must not repeatedly read the same worker history.
+    let mut delegation_entries = BTreeMap::new();
     for plan in all.values() {
         let declaration = plan.execution.as_ref().map(|e| &e.declaration);
         let assignment = declaration.and_then(|d| d.assignment.clone());
@@ -778,13 +788,18 @@ pub fn graph(project: &Path) -> PlanGraph {
         // The authorized programme's accepted prerequisite evidence comes
         // from its owner, even when this projection is read in an executor.
         let authority_project = automatic_owner.as_deref().unwrap_or(project);
-        let owner_plans: Option<BTreeMap<_, _>> = (authority_project != project).then(|| {
-            list(authority_project)
-                .into_iter()
-                .map(|p| (p.id.clone(), p))
-                .collect()
-        });
-        let authority_plans = owner_plans.as_ref().unwrap_or(&all);
+        let authority_plans = if authority_project == project {
+            &all
+        } else {
+            owner_plans
+                .entry(authority_project.to_path_buf())
+                .or_insert_with(|| {
+                    list(authority_project)
+                        .into_iter()
+                        .map(|p| (p.id.clone(), p))
+                        .collect()
+                })
+        };
         let mut dependencies = Vec::new();
         if let Some(declaration) = declaration {
             if let Err(error) = validate_declaration(&plan.id, declaration) {
@@ -815,6 +830,7 @@ pub fn graph(project: &Path) -> PlanGraph {
                         edge,
                         authority_plans,
                         &mut comparisons,
+                        &mut root_metadata,
                     )
                 };
                 if state != "satisfied" {
@@ -890,7 +906,11 @@ pub fn graph(project: &Path) -> PlanGraph {
             stores.push(owner);
         }
         for store in stores {
-            for entry in crate::delegation_status::read_entries(&store) {
+            for entry in delegation_entries
+                .entry(store.clone())
+                .or_insert_with(|| crate::delegation_status::read_entries(&store))
+                .iter()
+            {
                 match entry {
                     crate::delegation_status::DelegationEntry::Record(_, record)
                         if record["plan_id"] == plan.id =>
@@ -900,15 +920,13 @@ pub fn graph(project: &Path) -> PlanGraph {
                             id.clone(),
                             WorkerObservation {
                                 id,
-                                status: crate::delegation_status::interpret(&record)
-                                    .as_str()
-                                    .into(),
+                                status: crate::delegation_status::interpret(record).as_str().into(),
                             },
                         );
                     }
                     crate::delegation_status::DelegationEntry::Degraded {
                         reason: detail, ..
-                    } => blockers.push(reason("worker_evidence_degraded", detail, None)),
+                    } => blockers.push(reason("worker_evidence_degraded", detail.clone(), None)),
                     _ => {}
                 }
             }

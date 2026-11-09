@@ -16,7 +16,10 @@ struct Brief {
     plan_directive: String,
 }
 
-fn gather(ctx: &Ctx) -> Brief {
+fn gather(
+    ctx: &Ctx,
+    assessment: Option<&stateroot_core::continuity::ContinuityAssessment>,
+) -> Brief {
     // Handoff + freshness (same boundary rule as the digest).
     let handoff = local_store::read_handoff_local(&ctx.cwd).ok().flatten();
     let mut handoff_stale = false;
@@ -58,7 +61,12 @@ fn gather(ctx: &Ctx) -> Brief {
     // Plan state + state-aware directive.
     let (plan_line, plan_directive) = match plans::current(&ctx.cwd) {
         Some((plan, _)) => {
-            let directive = stateroot_core::continuity::plan_directive(&ctx.cwd, &plan);
+            let directive = assessment
+                .and_then(|view| view.plan_graph.as_ref())
+                .map(|graph| {
+                    stateroot_core::continuity::plan_directive_from_graph(&ctx.cwd, &plan, graph)
+                })
+                .unwrap_or_else(|| stateroot_core::continuity::plan_directive(&ctx.cwd, &plan));
             let mut line = format!("{} ({}) — {}", plan.title, plan.status, plan.id);
             if let Some((done, total)) =
                 stateroot_core::todo_federation::plan_todo_progress(&ctx.cwd, &plan.id)
@@ -108,7 +116,7 @@ pub fn run(ctx: &Ctx, json_out: bool) -> anyhow::Result<()> {
         Ok(report) => report,
         Err(error) => json!({"state":"unknown","reason":error.to_string()}),
     };
-    let brief = gather(ctx);
+    let brief = gather(ctx, assessment.as_ref());
 
     // Counts and boundary-journal health.
     let episodic = std::fs::read_to_string(root.join(local_store::EPISODIC_PATH))

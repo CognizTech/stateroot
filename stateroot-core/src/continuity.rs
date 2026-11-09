@@ -474,11 +474,21 @@ pub fn plan_directive(project_dir: &Path, plan: &PlanMeta) -> PlanDirective {
     if plan.status() == PlanStatus::Draft {
         return PlanDirective::Plan;
     }
-    let readiness = plans::graph(project_dir)
-        .nodes
-        .into_iter()
-        .find(|n| n.id == plan.id);
-    if let Some(row) = &readiness {
+    plan_directive_from_graph(project_dir, plan, &plans::graph(project_dir))
+}
+
+/// Derive a brief from the caller's existing graph observation. Execution
+/// admission still obtains a fresh graph rather than reusing a displayed view.
+pub fn plan_directive_from_graph(
+    project_dir: &Path,
+    plan: &PlanMeta,
+    graph: &plans::PlanGraph,
+) -> PlanDirective {
+    if plan.status() == PlanStatus::Draft {
+        return PlanDirective::Plan;
+    }
+    let readiness = graph.nodes.iter().find(|n| n.id == plan.id);
+    if let Some(row) = readiness {
         if row.dependencies_declared && row.readiness == "blocked" && row.worker_state != "running"
         {
             return PlanDirective::Wait;
@@ -971,7 +981,9 @@ pub fn assess(
         Some((plan, _)) => (
             Some(plan.id.clone()),
             Some(plan.status().as_str().to_string()),
-            plan_directive(project_dir, plan).as_str().to_string(),
+            plan_directive_from_graph(project_dir, plan, &plan_graph)
+                .as_str()
+                .to_string(),
         ),
         None => (None, None, String::new()),
     };
