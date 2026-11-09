@@ -98,7 +98,9 @@ jobs:
               cargo test -p stateroot-cli --test dot --test digest_delivery --test digest_bounds --test digest_contract --test local --test session --test finalize_journal --test obligation --test continuity --test observations_durable --test interrupted_continuity
               ;;
             cli-c)
-              cargo test -p stateroot-cli --test doctor_hooks --test editor_extensions --test ext --test handoff --test handoff_binding --test identity --test init_seed --test install_smoke --test m3 --test m4 --test memory_federation --test persona_scheduler --test plan --test projects --test remove --test service --test skill_packages --test soul_sync --test telemetry --test uninstall --test update
+              cargo test -p stateroot-cli --test doctor_hooks --test editor_extensions --test ext --test handoff --test handoff_binding --test identity --test init_seed --test install_smoke --test m3 --test m4 --test memory_federation --test persona_scheduler --test plan --test projects --test remove --test service --test skill_packages --test soul_sync --test telemetry --test uninstall
+              # Installed-executable fixtures must not overlap their copy and spawn phases.
+              cargo test -p stateroot-cli --test update -- --test-threads=1
               ;;
           esac
 
