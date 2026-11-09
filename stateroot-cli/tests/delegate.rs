@@ -519,6 +519,10 @@ fn failed_key_retries_with_same_identity_and_preserves_attempt_history() {
         .success();
     let first = wait_for_outcome(project.path(), 60);
     assert_eq!(first["outcome"], "failed");
+    assert!(
+        first["outcome_root"].is_string(),
+        "terminal failure must expose its captured root before an immediate retry: {first}"
+    );
 
     stateroot(config_home.path(), user_home.path(), project.path())
         .env("PATH", &path)

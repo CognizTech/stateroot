@@ -756,6 +756,24 @@ fn worker(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
             } else {
                 "failed"
             };
+            // Publish terminal state last. Same-key callers may retry as soon
+            // as they observe it; slow capture/lineage writes must already be
+            // finished while the admission and key guards still protect them.
+            episodic_lineage(
+                &record_root,
+                &id,
+                task,
+                outcome,
+                started.elapsed().as_secs(),
+            )?;
+            capture_outcome_root_with_guard(
+                &ctx.cwd,
+                &record_root,
+                record_id,
+                &id,
+                my_attempt,
+                Some(&final_key),
+            );
             finalize_locked(
                 &record_root,
                 record_id,
@@ -770,24 +788,6 @@ fn worker(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
                     output.stdout,
                     output.stderr
                 ),
-            )?;
-            // Outcome → immutable root (repair Phase 6B): a delegated task
-            // is not terminal until its worktree is captured into the fork
-            // lineage. Failed outcomes capture too (salvage semantics).
-            capture_outcome_root_with_guard(
-                &ctx.cwd,
-                &record_root,
-                record_id,
-                &id,
-                my_attempt,
-                Some(&final_key),
-            );
-            episodic_lineage(
-                &record_root,
-                &id,
-                task,
-                outcome,
-                started.elapsed().as_secs(),
             )?;
             Ok(output.status.code().unwrap_or(1))
         }
