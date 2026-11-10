@@ -5,12 +5,17 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+## v0.2.14 — 2026-11-10
+
+- Lineage keeps its graph connections, reuses the open Git repository during
+  history reads, and offers explicit loading/retry feedback in the editor.
+
 - CLI update rearming refreshes editor release metadata before reconciling
   extensions, so replaced rolling assets do not leave editors on an older version.
 - Current-user Windows logon tasks register without elevation, including WSL
   installations; service heartbeats report startup and scan progress.
 - Native lock identity supports proven PID reuse and prior-boot recovery;
-  Linux service rearming retains mapped executable identity after updates.
+  Linux and Windows service rearming retain mapped executable identity after updates.
 - Status briefs label their open-work plan graph while full graph inspection
   and fresh execution checks retain the complete dependency history.
 - The editor workbench displays staged integration candidates and their next

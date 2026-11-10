@@ -414,3 +414,7 @@ install software, switch accounts or reconstruct historical launch arguments.
 ### Service startup and upgrades
 
 The existing deterministic service registers Windows/WSL startup for the current user, using an interactive token at normal privileges. Its heartbeat records actual process startup and progress between projects, not acceptance of their work. On Linux and Windows, process-start, config and mapped-executable identity remain required when stopping a service whose binary has been parked by self-update. Unknown/foreign owners are retained; do not delete shared project locks or invent a running-service claim from a PID alone.
+
+### Editor lineage connections
+
+The Lineage view retains its graph rails. While the canonical CLI topology loads, root records remain visible; a failed refresh is labeled and offers Retry connections. Opening Lineage retries unavailable topology without inferring connections from checkout sidecars.

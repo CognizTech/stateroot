@@ -1503,14 +1503,22 @@ pub fn latest_root(project_dir: &Path) -> Result<Option<String>, RootsError> {
 /// Load a root manifest by hash (prefix match allowed, git-style).
 pub fn get_root(project_dir: &Path, hash_prefix: &str) -> Result<RootManifest, RootsError> {
     let id = resolve_hash(project_dir, hash_prefix)?;
+    let repo = ensure_repo(project_dir)?;
+    get_root_with_repo(&repo, project_dir, id)
+}
+
+fn get_root_with_repo(
+    repo: &git2::Repository,
+    project_dir: &Path,
+    id: String,
+) -> Result<RootManifest, RootsError> {
     let path = local_store::root(project_dir)
         .join(ROOTS_DIR)
         .join(format!("{id}.json"));
     // Sidecars are written after their commit and are checkout-local. The
     // retained object, not the presence of a sidecar, is root authority.
-    let repo = ensure_repo(project_dir)?;
     let commit = repo.find_commit(git2::Oid::from_str(&id)?)?;
-    validate_root_project(&repo, project_dir, &commit)?;
+    validate_root_project(repo, project_dir, &commit)?;
     let parents: Vec<String> = commit.parent_ids().map(|p| p.to_string()).collect();
     let (metadata_status, metadata_availability) = match std::fs::read_to_string(&path) {
         Ok(text) => match serde_json::from_str::<RootManifest>(&text) {
@@ -1705,12 +1713,13 @@ pub fn lineage(project_dir: &Path) -> Result<Vec<LineageEntry>, RootsError> {
     }
     let mut out = Vec::new();
     for id in mainline.into_iter().chain(side) {
-        let manifest = get_root(project_dir, &id).unwrap_or_else(|_| RootManifest {
-            schema_version: ROOT_SCHEMA.into(),
-            id: id.clone(),
-            coverage: "unknown".into(),
-            ..Default::default()
-        });
+        let manifest =
+            get_root_with_repo(&repo, project_dir, id.clone()).unwrap_or_else(|_| RootManifest {
+                schema_version: ROOT_SCHEMA.into(),
+                id: id.clone(),
+                coverage: "unknown".into(),
+                ..Default::default()
+            });
         out.push(LineageEntry {
             manifest,
             mainline: mainline_set.contains(&id),

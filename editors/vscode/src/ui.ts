@@ -1018,6 +1018,9 @@ function memoryPanel() {
   return '<div class="split"><div class="list">' + left + wiki + '</div><div class="col">' + record + detail + '</div></div>';
 }
 function lineage() {
+  const graphStatus = state.lineageUnavailable
+    ? '<div class="muted" role="status">' + (state.lineage ? 'Showing previously loaded connections. ' : 'Root records are available, but lineage connections could not be loaded. ') + '<button class="secondary" data-act="refresh">Retry connections</button></div>'
+    : !state.lineage ? '<div class="muted" role="status">Loading lineage connections…</div>' : '';
   const roots = (state.lineage && state.lineage.roots) || state.roots || [];
   const rails = state.lineage ? compactRails(state.lineage) : [];
   const railById = {};
@@ -1036,7 +1039,7 @@ function lineage() {
       (meta ? '<div class="muted">' + esc(meta) + '</div>' : '') +
       '</span></button>';
   }).join('') || '<div class="muted">No roots yet.</div>';
-  return '<div class="split"><div class="list">' + left + '</div><div class="col"><div class="muted">Select two roots (click twice). Receipt and fidelity inspect A without changing it.</div><div>A: <code title="' + esc(a||'') + '">' + esc((a||'').slice(0,12) || '—') + '</code> · B: <code title="' + esc(b||'') + '">' + esc((b||'').slice(0,12) || '—') + '</code></div><div class="row"><button data-act="compare">Compare</button><button class="secondary" data-act="receipt">Receipt</button><button class="secondary" data-act="fidelity">Fidelity</button><button class="secondary" data-act="openOriginal">Open original</button><button class="secondary" data-act="openSession">Session</button><button class="secondary" data-act="openEvent">Event</button><button class="secondary" data-act="diff">Open native diff</button><button class="secondary" data-act="revert">Restore</button><button class="secondary" data-act="startParallel">Start parallel work</button></div><pre class="pre">' + esc(state.compareText || '') + '</pre></div></div>';
+  return graphStatus + '<div class="split"><div class="list">' + left + '</div><div class="col"><div class="muted">Select two roots (click twice). Receipt and fidelity inspect A without changing it.</div><div>A: <code title="' + esc(a||'') + '">' + esc((a||'').slice(0,12) || '—') + '</code> · B: <code title="' + esc(b||'') + '">' + esc((b||'').slice(0,12) || '—') + '</code></div><div class="row"><button data-act="compare">Compare</button><button class="secondary" data-act="receipt">Receipt</button><button class="secondary" data-act="fidelity">Fidelity</button><button class="secondary" data-act="openOriginal">Open original</button><button class="secondary" data-act="openSession">Session</button><button class="secondary" data-act="openEvent">Event</button><button class="secondary" data-act="diff">Open native diff</button><button class="secondary" data-act="revert">Restore</button><button class="secondary" data-act="startParallel">Start parallel work</button></div><pre class="pre">' + esc(state.compareText || '') + '</pre></div></div>';
 }
 `;
   return shell(nonceVal, body, script);

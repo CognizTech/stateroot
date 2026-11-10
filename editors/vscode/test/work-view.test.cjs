@@ -20,6 +20,18 @@ const BASE = {
   integrationStale: false,
 };
 
+test("lineage keeps graph rails and makes missing topology actionable", () => {
+  const { push } = loadWorkbench();
+  const roots = [{ id: "a".repeat(40), parents: [], mainline: true }];
+  const fallback = push({ ...BASE, tab: "lineage", roots, lineageUnavailable: true });
+  assert.ok(fallback.includes("lineage connections could not be loaded"));
+  assert.ok(fallback.includes('data-act="refresh"'));
+  const recovered = push({ ...BASE, tab: "lineage", roots, lineageUnavailable: false,
+    lineage: { schema_version: "stateroot.lineage.v1", trunk: { tip: roots[0].id }, roots, forks: [] } });
+  assert.ok(recovered.includes('class="rail"'));
+  assert.ok(!recovered.includes("could not be loaded"));
+});
+
 test("lineage receipt and fidelity actions preserve full IDs and render CLI provenance", () => {
   const { panel, posted, push } = loadWorkbench();
   const id = "a".repeat(40);

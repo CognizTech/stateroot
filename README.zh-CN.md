@@ -235,7 +235,7 @@ Nightly 构建可从[滚动预览版](https://github.com/CognizTech/stateroot/re
 
 ## 支持的运行环境
 
-**钩子 + 会话记录：** Claude Code · Codex · Cursor · Kimi Code · CodeBuddy（**仅限 nightly**）· OpenClaw · Hermes · Pi
+**钩子 + 会话记录：** Claude Code · Codex · Cursor · Kimi Code · CodeBuddy· OpenClaw · Hermes · Pi
 
 **会话记录 / 委派：** DeepSeek Harness · OpenCode · 安装时检测到的其他运行环境
 

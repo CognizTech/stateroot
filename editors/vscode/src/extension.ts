@@ -84,6 +84,7 @@ export function activate(context: vscode.ExtensionContext) {
   let compareText: string | undefined;
   let liveDelegations: DelegateListReport | undefined;
   let lineage: LineageProjection | undefined;
+  let lineageUnavailable = false;
   let liveRoot: string | undefined;
   let integrationStale = false;
   let intelligence: IntelligenceInventory = emptyInventory();
@@ -116,6 +117,7 @@ export function activate(context: vscode.ExtensionContext) {
       compareText,
       liveDelegations: liveRoot === root ? liveDelegations : undefined,
       lineage: liveRoot === root ? lineage : undefined,
+      lineageUnavailable: liveRoot === root && lineageUnavailable,
       selectedForks: [...selectedForks],
       attempt: root ? context.globalState.get<MergeAttempt>(attemptKey(root)) : undefined,
       integrationStale,
@@ -188,17 +190,20 @@ export function activate(context: vscode.ExtensionContext) {
     if (!root) {
       return;
     }
-    const text = await runCliReport(["delegate", "list"], root, output, 20_000, {
-      allowInstall: false,
-      notifyOnError: false,
-    });
-    const currentLineage = await readParallelWork(root, output);
+    const [text, currentLineage] = await Promise.all([
+      runCliReport(["delegate", "list"], root, output, 20_000, {
+        allowInstall: false,
+        notifyOnError: false,
+      }),
+      readParallelWork(root, output),
+    ]);
     if (projectRoot() !== root) return;
     if (liveRoot !== root) {
       liveDelegations = undefined;
       lineage = undefined;
     }
     liveRoot = root;
+    lineageUnavailable = !currentLineage;
     if (text !== undefined) liveDelegations = parseDelegateList(text);
     if (currentLineage) lineage = currentLineage;
     push();
@@ -284,6 +289,7 @@ export function activate(context: vscode.ExtensionContext) {
       workbench.reveal(tab);
       push();
       if (tab === "intelligence") void refreshIntelligence();
+      if (tab === "lineage" && (!lineage || lineageUnavailable)) void refreshLive();
       if (tab === "plans" || tab === "work" || tab === "crew") void refreshPlanGraph();
       return;
     }
@@ -300,6 +306,7 @@ export function activate(context: vscode.ExtensionContext) {
       }
       push();
       if (selectedTab === "intelligence") void refreshIntelligence();
+      if (selectedTab === "lineage" && (!lineage || lineageUnavailable)) void refreshLive();
       if (["plans", "work", "crew"].includes(selectedTab)) void refreshPlanGraph();
       return;
     }
@@ -936,6 +943,7 @@ export function activate(context: vscode.ExtensionContext) {
       }
       workbench.reveal(selectedTab);
       push();
+      if (selectedTab === "lineage" && (!lineage || lineageUnavailable)) void refreshLive();
       if (selectedTab === "intelligence") void refreshIntelligence();
       if (["plans", "work", "crew"].includes(selectedTab)) void refreshPlanGraph();
     }),

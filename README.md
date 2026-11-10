@@ -235,7 +235,7 @@ Nightly builds are available from the [rolling preview release](https://github.c
 
 ## Supported harnesses
 
-**Hooks + transcripts:** Claude Code · Codex · Cursor · Kimi Code · CodeBuddy (**nightly only**) · OpenClaw · Hermes · Pi
+**Hooks + transcripts:** Claude Code · Codex · Cursor · Kimi Code · CodeBuddy · OpenClaw · Hermes · Pi
 
 **Transcripts / delegation:** DeepSeek Harness · OpenCode · others detected at install
 

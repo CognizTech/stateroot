@@ -99,7 +99,7 @@ export async function readParallelWork(
   output: vscode.OutputChannel
 ): Promise<LineageProjection | undefined> {
   try {
-    const text = await runCli(["log", "--json"], root, 20_000, cliPath());
+    const text = await runCli(["log", "--json"], root, 60_000, cliPath());
     const value = JSON.parse(text) as LineageProjection;
     if (value.schema_version !== "stateroot.lineage.v1" || !Array.isArray(value.roots)) {
       throw new Error("unsupported lineage projection");

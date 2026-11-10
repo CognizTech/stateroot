@@ -69,6 +69,7 @@ export interface Snapshot {
   degradedDelegations: DelegateListReport["degraded"];
   roots: RootManifest[];
   lineage?: LineageProjection;
+  lineageUnavailable?: boolean;
   work: ParallelWorkCard[];
   selectedForks: string[];
   /** Last prepared merge attempt for this project, if one was stored. */
@@ -96,6 +97,7 @@ export function snapshot(opts?: {
   compareText?: string;
   liveDelegations?: DelegateListReport;
   lineage?: LineageProjection;
+  lineageUnavailable?: boolean;
   tab?: string;
   dismissedInbox?: string[];
   thisHarness?: string;
@@ -218,6 +220,7 @@ export function snapshot(opts?: {
     degradedDelegations,
     roots,
     lineage: opts?.lineage,
+    lineageUnavailable: opts?.lineageUnavailable,
     work: lineageWork,
     selectedForks: opts?.selectedForks || [],
     attempt: opts?.attempt,
