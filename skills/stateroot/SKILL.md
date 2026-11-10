@@ -34,7 +34,7 @@ metadata:
       uploads_to_external: false
       requires_user_confirmation: true
       deletes_files: false
-      modifies_files: false
+      modifies_files: true
 ---
 
 # Install StateRoot
@@ -74,7 +74,7 @@ stateroot skill show stateroot
 
 That skill is what setup/init wrote into the harness. Resume, checkpoint, handoff, memory, learnings, wiki, roots — all of it lives there. If this bootstrap skill is still in context, ignore it.
 
-The built-in skill also covers v0.2.7 continuity: `## Needs Attention`, durable obligations, explicit plan completion receipts, optional command observations, and the authoritative-state summary in `doctor`. Follow that skill for day-to-day commands after setup.
+The built-in skill carries the current capability catalogue and workflows, including v0.2.14 fork lifecycle and shared build storage, portable exchange, exact-revision contribution review, dependency-aware plans, source-bound verification, and active continuity. Follow that skill for day-to-day commands after setup; keep this package focused on bootstrap.
 
 **Keep using this skill** only when:
 
@@ -104,7 +104,7 @@ Failures: [references/failures.md](references/failures.md)
 
 Skip if `stateroot --version` works.
 
-Ask before piping a remote script to a shell. Prefer that the user run the installer themselves if they hesitate. Official assets only.
+Use the user's existing authorization to install or set up StateRoot; do not ask them to approve that same action again. If installation was not requested or authorized, obtain authorization before running an installer. Use official assets only.
 
 **Linux (x86_64 or ARM64):**
 
@@ -197,7 +197,7 @@ Do not continue from this file. Do not summarize a homemade session protocol. Ru
 
 - Inventing download URLs or installing via `npm` / `pip` / a random clone
 - Guessing unsupported release assets or architectures
-- Piping `install.sh` without asking
+- Running an installer without installation authorization, or requesting the same authorization again after the user already asked to install
 - Creating or editing `.stateroot/` or `~/.stateroot/` with file tools
 - Running `setup --blank-slate` unprompted
 - Teaching resume / checkpoint / handoff / memory here after setup succeeded
@@ -216,9 +216,10 @@ What it does:
 - **Session continuity and handoffs** — hooks inject a bounded project digest at session start; the next agent starts knowing the goal, the plan, decisions, and next actions.
 - **Cross-agent shared memory** — a three-layer memory (curated hot-apex facts, an evidence-compiled wiki, searchable episodic history) with every fact labeled verified, observed, or synthesized.
 - **Shared learnings and self-improvement** — record a correction once and every agent on the machine lives by it immediately; the team of agents gets smarter together.
-- **Plans across agents** — a plan store with an approval lifecycle; plan with a strong model in one agent, implement with a cheaper one in another.
+- **Plans across agents** — federated plans with prerequisites, assignments and completion evidence; plan with a strong model in one agent, implement independent work with cheaper agents in parallel.
 - **Cross-agent subagents** — delegate a bounded task into another agent's CLI and get back the conclusion.
-- **State versioning** — working-tree snapshots in Git plumbing: restore, fork, merge, compare, with receipts. Your branches are never touched.
+- **State versioning and parallel work** — working-tree snapshots in Git plumbing: restore, fork, merge, compare, with receipts. Managed fork checkouts can be parked and reopened while retaining their history; qualified Rust workers share bounded build storage. Internal lineage stays outside ordinary Git branches.
+- **Portable exchange and exact-revision review** — move retained roots and shared evidence between checkouts, or review a fixed offered revision while its author continues working. Coverage and source identity remain explicit.
 - **Active continuity** — due obligations and unresolved work appear in agent digests, status, and editor surfaces; a local deterministic service reconciles registered projects. Windows/WSL startup uses a current-user logon task with an interactive token at normal privileges, without an administrator/password prompt.
 - **Plan completion and diagnostics** — explicit completion receipts, optional source-bound command observations, and an authoritative-state summary in `doctor` make work progress inspectable.
 - **Skills and MCP sync** — SKILL.md packages and MCP server configs pooled and projected across agent configs without clobbering user content.
