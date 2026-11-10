@@ -304,9 +304,33 @@ fn published_outputs_dirty_reverted_and_native_compatible_acceptance_are_source_
     let (_tmp, dir, upstream, downstream, base, _source, _work) = source_fixture();
     crate::roots::merge_forks(&dir, &["producer-fork".into()], "codex").unwrap();
     assert_eq!(node(&dir, &downstream.id).readiness, "ready");
+    let full = graph(&dir);
+    let brief = attention_graph(&dir);
+    assert_eq!(full.scope, None);
+    assert_eq!(brief.scope.as_deref(), Some("open_work"));
+    assert!(!brief.nodes.iter().any(|row| row.id == upstream.id));
+    assert_eq!(
+        serde_json::to_value(brief.nodes.iter().find(|row| row.id == downstream.id)).unwrap(),
+        serde_json::to_value(full.nodes.iter().find(|row| row.id == downstream.id)).unwrap()
+    );
+    assert_eq!(brief.ready, full.ready);
+    assert_eq!(
+        serde_json::to_value(brief.ownership_overlaps).unwrap(),
+        serde_json::to_value(full.ownership_overlaps).unwrap()
+    );
     std::fs::write(dir.join("contract.rs"), "dirty").unwrap();
     assert_eq!(
         node(&dir, &downstream.id).dependencies[0].state,
+        "source_changed"
+    );
+    assert_eq!(
+        attention_graph(&dir)
+            .nodes
+            .iter()
+            .find(|row| row.id == downstream.id)
+            .unwrap()
+            .dependencies[0]
+            .state,
         "source_changed"
     );
     assert!(accept_source(

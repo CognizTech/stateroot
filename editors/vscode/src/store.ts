@@ -323,7 +323,7 @@ export function readContinuityAdvisory(root: string): ContinuityAdvisory | undef
   );
 }
 
-export function readLatestActivity(root: string): LatestActivity | undefined {
+export function readLatestActivity(root: string, roots?: RootManifest[]): LatestActivity | undefined {
   let best: LatestActivity | undefined;
   try {
     const lines = fs
@@ -343,7 +343,7 @@ export function readLatestActivity(root: string): LatestActivity | undefined {
   } catch {
     // A missing or partially-written local journal means no checkpoint signal.
   }
-  const latestRoot = listRoots(root)[0];
+  const latestRoot = (roots ?? listRoots(root))[0];
   if (latestRoot?.created_at) {
     const candidate: LatestActivity = {
       ts: latestRoot.created_at,

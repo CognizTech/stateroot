@@ -84,6 +84,7 @@ export function activate(context: vscode.ExtensionContext) {
   let compareText: string | undefined;
   let liveDelegations: DelegateListReport | undefined;
   let lineage: LineageProjection | undefined;
+  let liveRoot: string | undefined;
   let integrationStale = false;
   let intelligence: IntelligenceInventory = emptyInventory();
   let intelligenceRoot: string | undefined;
@@ -113,8 +114,8 @@ export function activate(context: vscode.ExtensionContext) {
       rootA,
       rootB,
       compareText,
-      liveDelegations,
-      lineage,
+      liveDelegations: liveRoot === root ? liveDelegations : undefined,
+      lineage: liveRoot === root ? lineage : undefined,
       selectedForks: [...selectedForks],
       attempt: root ? context.globalState.get<MergeAttempt>(attemptKey(root)) : undefined,
       integrationStale,
@@ -191,8 +192,14 @@ export function activate(context: vscode.ExtensionContext) {
       allowInstall: false,
       notifyOnError: false,
     });
-    if (text !== undefined) liveDelegations = parseDelegateList(text);
     const currentLineage = await readParallelWork(root, output);
+    if (projectRoot() !== root) return;
+    if (liveRoot !== root) {
+      liveDelegations = undefined;
+      lineage = undefined;
+    }
+    liveRoot = root;
+    if (text !== undefined) liveDelegations = parseDelegateList(text);
     if (currentLineage) lineage = currentLineage;
     push();
   });

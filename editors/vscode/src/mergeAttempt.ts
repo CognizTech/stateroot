@@ -27,19 +27,21 @@ export interface MergeAttempt {
   harness?: string;
   trunk_tip?: string;
   forks: MergeAttemptFork[];
-  state: "ready" | "attention";
+  state: "ready" | "attention" | "staged";
   conflicts: MergeAttemptConflict[];
   folded_forks?: MergeAttemptFork[];
   pending_forks?: MergeAttemptFork[];
-  /** Absolute machine-local reconciliation worktree, present only for attention. */
+  /** Machine-local candidate, present for reconciliation and staged checks. */
   worktree?: string;
+  staged_tree?: string;
 }
 
-/** Single sentinel so a stale CLI is recognizable from the thrown message. */
+/** Unsupported evidence is distinct from an explicitly known old schema. */
 export const UNSUPPORTED_ATTEMPT_ERROR = "unsupported merge-attempt payload";
+const PRE_CONTRACT_ATTEMPT_ERROR = "pre-contract merge-attempt schema";
 
-/** Guard for the versioned contract — same pattern as the lineage projection:
- * anything that is not exactly stateroot.merge-attempt.v1 is a stale CLI. */
+/** Validate supported payloads. An unrecognized response is unavailable
+ * evidence, not proof that the installed CLI is older than the extension. */
 export function parseMergeAttempt(text: string): MergeAttempt {
   let value: MergeAttempt | undefined;
   try {
@@ -47,11 +49,14 @@ export function parseMergeAttempt(text: string): MergeAttempt {
   } catch {
     throw new Error(UNSUPPORTED_ATTEMPT_ERROR);
   }
+  if (value && (value.schema_version as string) === "stateroot.merge-attempt.v0") {
+    throw new Error(PRE_CONTRACT_ATTEMPT_ERROR);
+  }
   if (
     !value ||
     value.schema_version !== MERGE_ATTEMPT_SCHEMA ||
     typeof value.id !== "string" ||
-    (value.state !== "ready" && value.state !== "attention") ||
+    !["ready", "attention", "staged"].includes(value.state) ||
     !Array.isArray(value.forks) ||
     !Array.isArray(value.conflicts)
   ) {
@@ -61,11 +66,10 @@ export function parseMergeAttempt(text: string): MergeAttempt {
 }
 
 /** True when the installed CLI predates the integration contracts: either it
- * rejects the prepare invocation (unknown argument/subcommand) or its payload
- * does not match stateroot.merge-attempt.v1. */
+ * rejects the prepare invocation or explicitly identifies a known old schema. */
 export function isStaleIntegrationCli(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
-  if (message.includes(UNSUPPORTED_ATTEMPT_ERROR)) {
+  if (message.includes(PRE_CONTRACT_ATTEMPT_ERROR)) {
     return true;
   }
   return /unexpected argument|unrecognized (subcommand|option|argument)|unknown (option|flag|argument|subcommand)|which wasn't expected|was not expected/i.test(

@@ -595,7 +595,7 @@ pub fn assess(
     }
 
     let plan_list = plans::list(project_dir);
-    let plan_graph = plans::graph(project_dir);
+    let plan_graph = plans::attention_graph(project_dir);
     let (delegations, degraded_delegations) = read_delegations(project_dir);
     let handoff = local_store::read_handoff_local(project_dir).ok().flatten();
 

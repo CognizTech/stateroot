@@ -902,14 +902,18 @@ runs an AI agent.
   or logon Scheduled Task (native Windows, hidden wscript launcher with
   persistent log); under WSL a functional user-systemd wins, otherwise a
   Windows-host task launches the service through the current WSL
-  distribution. Scheduled-task names are scoped to the owning user, config
+  distribution. The Windows task uses the current user's logon trigger and interactive
+  token at normal privileges; no administrator or password prompt is part
+  of registration. The resident heartbeat records startup and progress
+  between projects, independently of completing the entire scan.
+  Scheduled-task names are scoped to the owning user, config
   home AND WSL distribution (`StateRoot Continuity (<user>-<hash8>)`), so
   the same path/user in two distros never collides; install/remove repair
   the pre-scoping global task name only when its descriptor verifiably
   references a stateroot launcher. Every descriptor pins the config home it
   was registered for (systemd `Environment=`, launchd
-  `EnvironmentVariables`, the Windows launchers via `set STATEROOT_HOME` /
-  `WSLENV`). Descriptors quote spaced / ampersand / Unicode paths (systemd
+  `EnvironmentVariables`, native Windows process environment, and explicit
+  Linux `env` arguments through `wsl.exe`). Descriptors quote spaced / ampersand / Unicode paths (systemd
   `%`/quote escaping, launchd XML escaping, Windows command-line quoting).
   Registration records the exact binary + config home; a registration is
   "current" only while the on-disk descriptor CONTENT matches what this
@@ -947,6 +951,10 @@ jobs parked for manual attention, an unhealthy continuity service,
 registry projects missing from disk. Attention IDs are stable
 (`<kind>:<entity>`); nothing is derived from keyword classifiers or model
 calls. `stateroot status` renders the same projection (human or `--json`).
+Its graph is explicitly labelled `scope: open_work`, retaining unfinished work,
+current fork bindings and the prerequisite evidence they need. The complete
+historical tree remains available through `stateroot plan graph --json`;
+execution admission continues to obtain a fresh complete graph.
 `delegation_status_unknown` requests inspection from the original runtime;
 `delegation_record_degraded` identifies a preserved record that cannot be
 interpreted. Neither is evidence that the worker failed or completed its plan.

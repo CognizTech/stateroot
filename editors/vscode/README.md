@@ -68,6 +68,9 @@ own runtime:
     standalone.
   - **Crew** — see parallel-ready and blocked plans from the same CLI graph,
     reassign failed delegations, and inspect logs.
+  - **Work** — distinguish prepared merges, reconciliation and staged candidates,
+    with the next CLI commands for the coordinating agent. A staged candidate
+    does not by itself prove that verification passed.
   - **Learnings** — the shared taste pool: accept, edit, reject.
   - **Memory** — the curated hot-apex of facts.
   - **Intelligence** — inspect discovered Skills and rules, canonical MCP

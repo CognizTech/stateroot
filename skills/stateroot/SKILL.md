@@ -219,7 +219,7 @@ What it does:
 - **Plans across agents** — a plan store with an approval lifecycle; plan with a strong model in one agent, implement with a cheaper one in another.
 - **Cross-agent subagents** — delegate a bounded task into another agent's CLI and get back the conclusion.
 - **State versioning** — working-tree snapshots in Git plumbing: restore, fork, merge, compare, with receipts. Your branches are never touched.
-- **Active continuity** — due obligations and unresolved work appear in agent digests, status, and editor surfaces; a local deterministic service reconciles registered projects.
+- **Active continuity** — due obligations and unresolved work appear in agent digests, status, and editor surfaces; a local deterministic service reconciles registered projects. Windows/WSL startup uses a current-user logon task with an interactive token at normal privileges, without an administrator/password prompt.
 - **Plan completion and diagnostics** — explicit completion receipts, optional source-bound command observations, and an authoritative-state summary in `doctor` make work progress inspectable.
 - **Skills and MCP sync** — SKILL.md packages and MCP server configs pooled and projected across agent configs without clobbering user content.
 - **Personality sharing** — one persona and user profile, injected in full at every session start.

@@ -37,6 +37,7 @@ const LAUNCHD_LABEL: &str = "dev.stateroot.continuity";
 const LOG_FILE: &str = "continuity-service.log";
 const LOCK_FILE: &str = "continuity-service.lock";
 const LAUNCHER_FILE: &str = "continuity-service.launcher.vbs";
+const TASK_DEFINITION_FILE: &str = "continuity-service.task.xml";
 const HEARTBEAT_SCHEMA: &str = "stateroot.continuity-heartbeat.v1";
 const REGISTRATION_SCHEMA: &str = "stateroot.continuity-registration.v1";
 /// How long install waits for the first heartbeat of a service it started.
@@ -232,7 +233,8 @@ fn windows_launcher_vbs(exe: &Path, log: &Path, config_home: &Path) -> String {
 
 /// WSL hidden launcher: wscript runs wsl.exe directly with an explicit Linux
 /// env argument. Existing WSLENV entries/flags are never rewritten; the
-/// service's own Linux-side log captures output.
+/// service's own Linux-side log captures output. Native distribution names
+/// cannot contain spaces and must not be wrapped in literal quotes.
 fn wsl_launcher_vbs(distro: &str, exe: &Path, config_home: &Path) -> String {
     let distro_v = distro.replace('"', "\"\"");
     let exe_v = exe.display().to_string().replace('"', "\"\"");
@@ -240,26 +242,49 @@ fn wsl_launcher_vbs(distro: &str, exe: &Path, config_home: &Path) -> String {
     format!(
         "' StateRoot continuity service — generated hidden launcher (WSL); do not edit\r\n\
          Set shell = CreateObject(\"Wscript.Shell\")\r\n\
-         shell.Run \"wsl.exe -d \"\"{distro_v}\"\" -e env \"\"STATEROOT_HOME={cfg_v}\"\" \"\"{exe_v}\"\" service run\", 0, False\r\n"
+         shell.Run \"wsl.exe -d {distro_v} -e env \"\"STATEROOT_HOME={cfg_v}\"\" \"\"{exe_v}\"\" service run\", 0, False\r\n"
     )
 }
 
-/// schtasks /create argv for the hidden-launcher task.
+/// Older launchers quoted the distribution name. WSL's native option parser
+/// treats those quotes as part of the name; retain exact recognition solely
+/// so an owned installation can be repaired to the current launcher.
+fn legacy_wsl_launcher_vbs(distro: &str, exe: &Path, config_home: &Path) -> String {
+    let distro_v = distro.replace('"', "\"\"");
+    wsl_launcher_vbs(distro, exe, config_home).replacen(
+        &format!("wsl.exe -d {distro_v} -e"),
+        &format!("wsl.exe -d \"\"{distro_v}\"\" -e"),
+        1,
+    )
+}
+
+/// Register the explicit current-user definition, rather than an any-user
+/// logon trigger (which a non-elevated install cannot register).
 #[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
-fn schtasks_create_args(name: &str, launcher: &Path) -> Vec<String> {
+fn schtasks_create_args(name: &str, definition: &Path) -> Vec<String> {
     vec![
         "/create".into(),
         "/f".into(),
         "/tn".into(),
         name.into(),
-        "/sc".into(),
-        "onlogon".into(),
-        "/tr".into(),
-        format!(
-            "wscript.exe //B //nologo {}",
-            cmd_quote(&launcher.display().to_string())
-        ),
+        "/xml".into(),
+        definition.display().to_string(),
     ]
+}
+
+fn schtasks_definition(launcher: &str, sid: &str) -> String {
+    let sid = xml_escape(sid);
+    let arguments = xml_escape(&format!("//B //nologo {}", cmd_quote(launcher)));
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n\
+         <Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\r\n\
+         <RegistrationInfo><Description>StateRoot continuity service</Description></RegistrationInfo>\r\n\
+         <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>{sid}</UserId></LogonTrigger></Triggers>\r\n\
+         <Principals><Principal id=\"Author\"><UserId>{sid}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>\r\n\
+         <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>true</Hidden><ExecutionTimeLimit>PT0S</ExecutionTimeLimit></Settings>\r\n\
+         <Actions Context=\"Author\"><Exec><Command>wscript.exe</Command><Arguments>{arguments}</Arguments></Exec></Actions>\r\n\
+         </Task>\r\n"
+    )
 }
 
 fn schtasks_delete_args(name: &str) -> Vec<String> {
@@ -271,6 +296,7 @@ fn schtasks_delete_args(name: &str) -> Vec<String> {
 /// Linux-side log. Both pin STATEROOT_HOME to THIS config home.
 #[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 fn write_launcher(config_dir: &Path, kind: &str, exe: &Path) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(config_dir)?;
     let launcher = launcher_path(config_dir);
     let body = if kind == "wsl-schtasks" {
         let distro = std::env::var("WSL_DISTRO_NAME").unwrap_or_else(|_| "Ubuntu".into());
@@ -318,6 +344,7 @@ fn clear_service_files(config_dir: &Path) {
     let _ = std::fs::remove_file(continuity::service_registration_path(config_dir));
     let _ = std::fs::remove_file(continuity::service_heartbeat_path(config_dir));
     let _ = std::fs::remove_file(launcher_path(config_dir));
+    let _ = std::fs::remove_file(config_dir.join(TASK_DEFINITION_FILE));
 }
 
 /// Write the heartbeat. Failures are real (C5): the caller logs them — a
@@ -328,9 +355,7 @@ fn write_heartbeat(config_dir: &Path, projects_scanned: usize) -> anyhow::Result
         pid: std::process::id(),
         beat_at: now_rfc3339(),
         version: crate::cli::BUILD_VERSION.to_string(),
-        exe: std::env::current_exe()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default(),
+        exe: running_image().0.clone(),
         namespace: safe_io::host_namespace().unwrap_or("").to_string(),
         pid_start: pid_start_token(std::process::id()).unwrap_or(0),
         config_home: config_dir.display().to_string(),
@@ -453,47 +478,8 @@ fn pid_argv(_pid: u32) -> Option<Vec<String>> {
 /// Process-start token: binds a pid to THIS process instance — a reused pid
 /// fails the comparison. unix: /proc/<pid>/stat starttime (jiffies, field
 /// 22). Windows: process creation FILETIME via GetProcessTimes.
-#[cfg(unix)]
 fn pid_start_token(pid: u32) -> Option<u64> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // The comm field may contain spaces/parens — everything after the LAST
-    // ')' is fields 3..; starttime (field 22) is index 19 there.
-    let rest = stat.rsplit(')').next()?;
-    rest.split_whitespace().nth(19)?.parse().ok()
-}
-
-#[cfg(windows)]
-fn pid_start_token(pid: u32) -> Option<u64> {
-    use std::ffi::c_void;
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
-        fn CloseHandle(handle: *mut c_void) -> i32;
-        fn GetProcessTimes(
-            handle: *mut c_void,
-            creation: *mut u64,
-            exit: *mut u64,
-            kernel: *mut u64,
-            user: *mut u64,
-        ) -> i32;
-    }
-    // PROCESS_QUERY_LIMITED_INFORMATION; SAFETY: query-only handle, closed.
-    let handle = unsafe { OpenProcess(0x1000, 0, pid) };
-    if handle.is_null() {
-        return None;
-    }
-    let (mut creation, mut exit_t, mut kernel, mut user) = (0u64, 0u64, 0u64, 0u64);
-    // SAFETY: live handle; out pointers are valid, writable u64 slots.
-    let ok = unsafe { GetProcessTimes(handle, &mut creation, &mut exit_t, &mut kernel, &mut user) };
-    unsafe {
-        CloseHandle(handle);
-    }
-    (ok != 0 && creation != 0).then_some(creation)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn pid_start_token(_pid: u32) -> Option<u64> {
-    None
+    safe_io::native_process_start_token(pid)
 }
 
 /// Two executable paths are the same binary: exact string equality after
@@ -580,17 +566,25 @@ fn file_identity(path: &Path) -> Option<String> {
 }
 
 fn running_image_identity() -> String {
-    #[cfg(target_os = "linux")]
-    {
-        file_identity(Path::new("/proc/self/exe")).unwrap_or_default()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| file_identity(&p))
-            .unwrap_or_default()
-    }
+    running_image().1.clone()
+}
+
+/// Bind heartbeats to the executable that started this process, even when
+/// an updater renames it and installs new bytes at the original path.
+fn running_image() -> &'static (String, String) {
+    static IMAGE: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
+    IMAGE.get_or_init(|| {
+        let exe = std::env::current_exe().unwrap_or_default();
+        let mapped = if cfg!(target_os = "linux") {
+            Path::new("/proc/self/exe")
+        } else {
+            &exe
+        };
+        (
+            exe.display().to_string(),
+            file_identity(mapped).unwrap_or_default(),
+        )
+    })
 }
 
 /// The service at `pid` runs against OUR config home: unix reads the pinned
@@ -711,13 +705,15 @@ impl VerifiedProcess {
             let recorded_path = recorded_exe
                 .strip_suffix(" (deleted)")
                 .unwrap_or(recorded_exe);
-            if !exe_path_eq(image_path, recorded_path) {
-                return None;
-            }
-            #[cfg(target_os = "linux")]
+            // The mapped file identity survives a renamed executable on
+            // both Linux and Windows. A pathname alone cannot prove it.
+            let mapped_file = if cfg!(target_os = "linux") {
+                PathBuf::from(format!("/proc/{pid}/exe"))
+            } else {
+                PathBuf::from(image_path)
+            };
             if beat.exe_identity.is_empty()
-                || file_identity(Path::new(&format!("/proc/{pid}/exe")))
-                    != Some(beat.exe_identity.clone())
+                || file_identity(&mapped_file) != Some(beat.exe_identity.clone())
             {
                 return None;
             }
@@ -964,6 +960,8 @@ pub async fn run_resident(ctx: &Ctx) -> anyhow::Result<()> {
         &log,
         &format!("continuity service started (pid {})", std::process::id()),
     );
+    // Startup liveness is independent of completing a potentially long sweep.
+    write_heartbeat(&ctx.config_dir, 0)?;
     let mut scans: u64 = 0;
     loop {
         let scanned = scan_all_projects(ctx).await;
@@ -1037,6 +1035,12 @@ async fn scan_all_projects(ctx: &Ctx) -> usize {
                 &log_path(&ctx.config_dir),
                 &format!("reconcile {}: {err}", dir.display()),
             ),
+        }
+        if let Err(error) = write_heartbeat(&ctx.config_dir, scanned) {
+            log_line(
+                &log_path(&ctx.config_dir),
+                &format!("heartbeat write FAILED: {error}"),
+            );
         }
     }
     scanned
@@ -1189,7 +1193,16 @@ fn install_schtasks(ctx: &Ctx, kind: &str, exe: &Path) -> anyhow::Result<String>
     let program = schtasks_program();
     let host_launcher =
         scheduler_path(&launcher).ok_or_else(|| anyhow!("launcher Windows path unavailable"))?;
-    let args = schtasks_create_args(&name, Path::new(&host_launcher));
+    let sid = current_windows_sid()
+        .ok_or_else(|| anyhow!("Windows user identity unavailable; no task mutation"))?;
+    let definition = ctx.config_dir.join(TASK_DEFINITION_FILE);
+    safe_io::atomic_replace(
+        &definition,
+        &launcher_bytes(&schtasks_definition(&host_launcher, &sid)),
+    )?;
+    let host_definition = scheduler_path(&definition)
+        .ok_or_else(|| anyhow!("task definition Windows path unavailable"))?;
+    let args = schtasks_create_args(&name, Path::new(&host_definition));
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     if run_quiet(program, &refs) {
         Ok(name)
@@ -1232,7 +1245,7 @@ fn scheduler_path(path: &Path) -> Option<String> {
 
 fn query_task(name: &str) -> anyhow::Result<Option<String>> {
     let name = name.replace('\'', "''");
-    let script = format!("[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $ErrorActionPreference='Stop'; $t=@(Get-ScheduledTask | Where-Object {{$_.TaskPath -eq '\\' -and $_.TaskName -eq '{name}'}}); if($t.Count -eq 0){{'__STATEROOT_ABSENT__'}} elseif($t.Count -eq 1){{Export-ScheduledTask -TaskName '{name}' -TaskPath '\\'}} else {{throw 'ambiguous task'}}");
+    let script = format!("[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $ErrorActionPreference='Stop'; $t=@(Get-ScheduledTask | Where-Object {{$_.TaskPath -eq '\\' -and $_.TaskName -eq '{name}'}}); if($t.Count -eq 0){{'__STATEROOT_ABSENT__'}} elseif($t.Count -eq 1){{[xml]$x=Export-ScheduledTask -TaskName '{name}' -TaskPath '\\'; $me=[Security.Principal.WindowsIdentity]::GetCurrent(); foreach($n in $x.SelectNodes(\"//*[local-name()='UserId']\")){{if($n.InnerText -ieq $me.Name){{$n.InnerText=$me.User.Value}}}}; $x.OuterXml}} else {{throw 'ambiguous task'}}");
     let out = run_output(
         "powershell.exe",
         &["-NoProfile", "-NonInteractive", "-Command", &script],
@@ -1260,7 +1273,44 @@ fn task_action_owned(xml: &str, launcher: &str, sid: &str, system_root: &str) ->
     command_ok
         && xml_value(xml, "Arguments")
             .is_some_and(|a| a == format!("//B //nologo {}", cmd_quote(launcher)))
-        && xml_value(xml, "UserId").is_some_and(|u| u.eq_ignore_ascii_case(sid))
+        && xml_value(xml, "Principals")
+            .and_then(|principal| xml_value(&principal, "UserId"))
+            .is_some_and(|u| u.eq_ignore_ascii_case(sid))
+}
+
+/// Ownership permits repairing a legacy task; readiness additionally needs
+/// the intended current-user trigger and non-elevated interactive context.
+fn current_user_task(xml: &str) -> bool {
+    let Some(principal) = xml_value(xml, "Principals") else {
+        return false;
+    };
+    let Some(sid) = xml_value(&principal, "UserId") else {
+        return false;
+    };
+    xml_value(xml, "Triggers")
+        .and_then(|triggers| xml_value(&triggers, "LogonTrigger"))
+        .filter(|trigger| xml_value(trigger, "Enabled").is_none_or(|v| v == "true"))
+        .and_then(|trigger| xml_value(&trigger, "UserId"))
+        .as_deref()
+        == Some(sid.as_str())
+        && xml_value(&principal, "LogonType").as_deref() == Some("InteractiveToken")
+        && xml_value(&principal, "RunLevel").is_none_or(|v| v == "LeastPrivilege")
+}
+
+fn current_windows_sid() -> Option<String> {
+    let identity = run_output(
+        if cfg!(windows) {
+            "whoami"
+        } else {
+            "whoami.exe"
+        },
+        &["/user", "/fo", "csv", "/nh"],
+    )?;
+    identity
+        .split(',')
+        .nth(1)
+        .map(|s| s.trim().trim_matches('"').to_string())
+        .filter(|s| s.starts_with("S-1-"))
 }
 
 fn expected_launcher(kind: &str, exe: &Path, home: &Path) -> Option<Vec<u8>> {
@@ -1286,28 +1336,26 @@ fn task_owned(ctx: &Ctx, reg: &ServiceRegistration, xml: &str) -> bool {
     let Some(expected) = expected_launcher(&reg.kind, Path::new(&reg.exe), &ctx.config_dir) else {
         return false;
     };
-    if std::fs::read(&launcher).ok().as_deref() != Some(expected.as_slice()) {
-        return false;
+    let observed = std::fs::read(&launcher).ok();
+    if observed.as_deref() != Some(expected.as_slice()) {
+        let legacy = (reg.kind == "wsl-schtasks")
+            .then(|| std::env::var("WSL_DISTRO_NAME").ok())
+            .flatten()
+            .map(|distro| {
+                launcher_bytes(&legacy_wsl_launcher_vbs(
+                    &distro,
+                    Path::new(&reg.exe),
+                    &ctx.config_dir,
+                ))
+            });
+        if legacy.is_none() || observed != legacy {
+            return false;
+        }
     }
     let Some(host_launcher) = scheduler_path(&launcher) else {
         return false;
     };
-    let Some(identity) = run_output(
-        if cfg!(windows) {
-            "whoami"
-        } else {
-            "whoami.exe"
-        },
-        &["/user", "/fo", "csv", "/nh"],
-    ) else {
-        return false;
-    };
-    let Some(sid) = identity
-        .split(',')
-        .nth(1)
-        .map(|s| s.trim().trim_matches('"'))
-        .filter(|s| s.starts_with("S-1-"))
-    else {
+    let Some(sid) = current_windows_sid() else {
         return false;
     };
     let Some(root) = run_output(
@@ -1321,7 +1369,7 @@ fn task_owned(ctx: &Ctx, reg: &ServiceRegistration, xml: &str) -> bool {
     ) else {
         return false;
     };
-    task_action_owned(xml, &host_launcher, sid, root.trim())
+    task_action_owned(xml, &host_launcher, &sid, root.trim())
 }
 
 /// Establish the manager's current action BEFORE starting/stopping/replacing
@@ -1478,7 +1526,7 @@ fn registration_current(ctx: &Ctx, exe: &Path) -> bool {
                 || query_task(&schtasks_name(&ctx.config_dir))
                     .ok()
                     .flatten()
-                    .is_some_and(|xml| task_owned(ctx, &reg, &xml))
+                    .is_some_and(|xml| task_owned(ctx, &reg, &xml) && current_user_task(&xml))
         }
         // Detached has no manager descriptor; the registration IS the record.
         _ => true,
@@ -2003,7 +2051,7 @@ mod tests {
     fn task_ownership_rejects_names_prose_extra_actions_and_other_user() {
         let launcher = r"C:\Users\Owner\工具 & Space\continuity-service.launcher.vbs";
         let sid = "S-1-5-21-123";
-        let xml=format!("<Task><UserId>{sid}</UserId><Exec><Command>wscript.exe</Command><Arguments>{}</Arguments></Exec></Task>",xml_escape(&format!("//B //nologo {}",cmd_quote(launcher))));
+        let xml=format!("<Task><Principals><Principal><UserId>{sid}</UserId></Principal></Principals><Exec><Command>wscript.exe</Command><Arguments>{}</Arguments></Exec></Task>",xml_escape(&format!("//B //nologo {}",cmd_quote(launcher))));
         assert!(task_action_owned(&xml, launcher, sid, r"C:\Windows"));
         assert!(!task_action_owned(
             &xml.replace("wscript.exe", "foreign.exe"),
@@ -2015,6 +2063,16 @@ mod tests {
             &xml,
             launcher,
             "S-1-5-21-999",
+            r"C:\Windows"
+        ));
+        // A matching trigger must not hide a different execution principal.
+        assert!(!task_action_owned(
+            &format!(
+                "<Triggers><LogonTrigger><UserId>{sid}</UserId></LogonTrigger></Triggers>{}",
+                xml.replace(sid, "S-1-5-21-999")
+            ),
+            launcher,
+            sid,
             r"C:\Windows"
         ));
         assert!(!task_action_owned(
@@ -2289,23 +2347,51 @@ mod tests {
     }
 
     #[test]
-    fn schtasks_args_register_hidden_launcher() {
+    fn schtasks_args_register_current_user_hidden_launcher() {
         let name = schtasks_name_for(Path::new("/cfg"), None);
         let launcher =
             Path::new("C:\\Users\\u\\AppData\\Roaming\\stateroot\\continuity-service.launcher.vbs");
-        let args = schtasks_create_args(&name, launcher);
-        assert!(args.contains(&"onlogon".to_string()));
+        let definition = Path::new("continuity-service.task.xml");
+        let args = schtasks_create_args(&name, definition);
+        assert!(args.contains(&"/xml".to_string()));
         assert!(args.contains(&name));
-        let tr = args.last().expect("tr");
-        assert!(tr.starts_with("wscript.exe //B //nologo"), "{tr}");
-        assert!(tr.contains("continuity-service.launcher.vbs"), "{tr}");
-        // Quoted launcher path survives spaces.
-        assert!(
-            tr.contains(
-                "\"C:\\Users\\u\\AppData\\Roaming\\stateroot\\continuity-service.launcher.vbs\""
-            ),
-            "{tr}"
+        assert_eq!(Path::new(args.last().unwrap()), definition);
+        let sid = "S-1-5-21-123";
+        let xml = schtasks_definition(&launcher.display().to_string(), sid);
+        assert!(current_user_task(&xml));
+        // Scheduler exports omit default values; their absence is not drift.
+        assert!(current_user_task(
+            &xml.replace("<Enabled>true</Enabled>", "")
+                .replace("<RunLevel>LeastPrivilege</RunLevel>", "")
+        ));
+        assert!(!current_user_task(
+            &xml.replace("<Enabled>true</Enabled>", "<Enabled>false</Enabled>")
+        ));
+        assert!(!current_user_task(
+            &xml.replace("LeastPrivilege", "HighestAvailable")
+        ));
+        assert!(!current_user_task(&xml.replacen(sid, "S-1-5-21-999", 1)));
+        let trigger = xml_value(&xml, "Triggers").unwrap();
+        assert_eq!(xml_value(&trigger, "UserId").as_deref(), Some(sid));
+        let principal = xml_value(&xml, "Principals").unwrap();
+        assert_eq!(
+            xml_value(&principal, "LogonType").as_deref(),
+            Some("InteractiveToken")
         );
+        assert_eq!(
+            xml_value(&principal, "RunLevel").as_deref(),
+            Some("LeastPrivilege")
+        );
+        assert_eq!(
+            xml_value(&xml, "ExecutionTimeLimit").as_deref(),
+            Some("PT0S")
+        );
+        assert!(task_action_owned(
+            &xml,
+            &launcher.display().to_string(),
+            sid,
+            r"C:\Windows"
+        ));
     }
 
     #[test]
@@ -2335,17 +2421,22 @@ mod tests {
     }
 
     #[test]
-    fn wsl_launcher_quotes_distro_and_exe() {
+    fn wsl_launcher_preserves_native_distribution_name() {
         let vbs = wsl_launcher_vbs(
-            "Ubuntu 24.04",
+            "Ubuntu-24.04",
             Path::new("/home/u/bin/stateroot"),
             Path::new("/home/u/.config/stateroot"),
         );
-        assert!(
-            vbs.contains(
-                "wsl.exe -d \"\"Ubuntu 24.04\"\" -e env \"\"STATEROOT_HOME=/home/u/.config/stateroot\"\" \"\"/home/u/bin/stateroot\"\" service run"
-            ),
-            "{vbs}"
+        assert!(vbs.contains("wsl.exe -d Ubuntu-24.04 -e env"), "{vbs}");
+        assert!(!vbs.contains("-d \"\""));
+        let legacy = legacy_wsl_launcher_vbs(
+            "Ubuntu-24.04",
+            Path::new("/home/u/bin/stateroot"),
+            Path::new("/home/u/.config/stateroot"),
+        );
+        assert_eq!(
+            legacy.replace("-d \"\"Ubuntu-24.04\"\"", "-d Ubuntu-24.04"),
+            vbs
         );
         assert!(vbs.contains(", 0, False"), "hidden, non-blocking: {vbs}");
         // Explicit Linux env argument leaves every inherited WSLENV entry intact.

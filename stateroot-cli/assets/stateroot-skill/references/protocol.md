@@ -277,6 +277,11 @@ existing `metadata_status` values and publication checks remain unchanged.
 
 ## Dependency execution
 
+The continuity brief labels its graph `scope: open_work`: it observes unfinished
+work, current bound history and the prerequisite evidence those plans require.
+Use `stateroot plan graph --json` for the complete historical tree. Execution
+admission still obtains a fresh complete graph; the brief is not authorization.
+
 The plan sidecar is the sole declaration owner. `plan graph --json` exposes a
 stable observation identity and each plan's current revision; `plan declare
 <exact-id> --revision <revision>` reads a replacement declaration from stdin.
@@ -401,3 +406,7 @@ Codex performs continuation. `session show <id> --operation-id <uuid>` observes
 completed native output separately; assess useful retained context from the
 actual output, never file creation alone. StateRoot does not restore credentials,
 install software, switch accounts or reconstruct historical launch arguments.
+
+### Service startup and upgrades
+
+The existing deterministic service registers Windows/WSL startup for the current user, using an interactive token at normal privileges. Its heartbeat records actual process startup and progress between projects, not acceptance of their work. On Linux and Windows, process-start, config and mapped-executable identity remain required when stopping a service whose binary has been parked by self-update. Unknown/foreign owners are retained; do not delete shared project locks or invent a running-service claim from a PID alone.

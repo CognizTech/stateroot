@@ -86,13 +86,20 @@ fn foreign_manager_descriptor_causes_zero_mutations_and_retains_controls() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn same_path_replacement_rearms_verified_predecessor() {
     let (config_home, user_home) = homes();
+    let mut config = stateroot_core::config::AppConfig::default();
+    config.continuity.poll_interval_seconds = 5;
+    stateroot_core::config::save_config(config_home.path(), &config).unwrap();
     let project = tempfile::tempdir().unwrap();
     init_project(config_home.path(), user_home.path(), project.path());
-    let executable = user_home.path().join("installed-stateroot");
+    let executable = user_home.path().join(if cfg!(windows) {
+        "installed-stateroot.exe"
+    } else {
+        "installed-stateroot"
+    });
     std::fs::copy(assert_cmd::cargo::cargo_bin("stateroot"), &executable).unwrap();
     let installed_cmd = || {
         let mut c = assert_cmd::Command::new(&executable);
@@ -126,9 +133,29 @@ fn same_path_replacement_rearms_verified_predecessor() {
         || heartbeat_path(config_home.path()).exists(),
         "owned predecessor heartbeat",
     );
+    let first_beat: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(heartbeat_path(config_home.path())).unwrap())
+            .unwrap();
     let replacement = user_home.path().join("replacement");
     std::fs::copy(assert_cmd::cargo::cargo_bin("stateroot"), &replacement).unwrap();
+    std::fs::rename(&executable, user_home.path().join("parked-predecessor")).unwrap();
     std::fs::rename(&replacement, &executable).unwrap();
+    // A later beat must still describe the running predecessor, not the new
+    // file at its original pathname. Exercise both native rename semantics.
+    wait_for(
+        || {
+            let beat: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(heartbeat_path(config_home.path())).unwrap())
+                    .unwrap();
+            if beat["beat_at"] == first_beat["beat_at"] {
+                return false;
+            }
+            assert_eq!(beat["exe"], first_beat["exe"]);
+            assert_eq!(beat["exe_identity"], first_beat["exe_identity"]);
+            true
+        },
+        "post-replacement predecessor heartbeat",
+    );
     installed_cmd()
         .args(["service", "install"])
         .assert()
@@ -142,8 +169,8 @@ fn same_path_replacement_rearms_verified_predecessor() {
     assert_eq!(before["exe"], after["exe"]);
     assert_ne!(before["exe_identity"], after["exe_identity"]);
     assert_eq!(
-        after["config_home"],
-        config_home.path().display().to_string()
+        Path::new(after["config_home"].as_str().unwrap()),
+        config_home.path()
     );
 }
 
@@ -261,6 +288,10 @@ fn resident_loop_is_single_instance_registry_wide_and_restart_safe() {
                     .path()
                     .join(".stateroot/local/projections/continuity.v1.json")
                     .exists()
+                && std::fs::read(heartbeat_path(config_home.path()))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .is_some_and(|beat| beat["projects_scanned"].as_u64().unwrap_or(0) >= 2)
         },
         "registry-wide projections",
     );

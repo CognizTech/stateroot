@@ -65,7 +65,7 @@ const READY_ATTEMPT = {
 test("attention attempt renders badge, worktree, conflict rows, and handoff commands", () => {
   const { push } = loadWorkbench();
   const html = push({ ...BASE, attempt: ATTENTION_ATTEMPT });
-  assert.ok(html.includes(">attention<"), "state badge renders");
+  assert.ok(html.includes(">Changes need reconciliation<"), "state badge renders");
   assert.ok(html.includes("/tmp/stateroot-ma-attn-1"), "worktree path renders");
   assert.ok(html.includes("src/merge.ts"));
   assert.ok(html.includes("both_modified"));
@@ -84,7 +84,7 @@ test("attention attempt renders badge, worktree, conflict rows, and handoff comm
 test("ready attempt renders the publish command and no reconciliation handoff", () => {
   const { push } = loadWorkbench();
   const html = push({ ...BASE, attempt: READY_ATTEMPT });
-  assert.ok(html.includes(">ready<"), "state badge renders");
+  assert.ok(html.includes(">Prepared for review<"), "state badge renders");
   assert.ok(html.includes('data-cmd="stateroot merge --continue ma-ready-1"'), "publish command renders");
   assert.ok(!html.includes("--abort"), "no abort command for a clean attempt");
   assert.ok(!html.includes("--evidence"), "no evidence flag for a clean attempt");
@@ -100,11 +100,23 @@ test("no stored attempt renders no attempt block", () => {
   assert.ok(!html.includes("Publish"));
 });
 
+test("staged candidate offers final checks without claiming verified publication", () => {
+  const { push } = loadWorkbench();
+  const tree = "d".repeat(40);
+  const html = push({ ...BASE, attempt: { ...READY_ATTEMPT, state: "staged", staged_tree: tree, worktree: "/tmp/candidate" } });
+  assert.ok(html.includes("Candidate staged"));
+  assert.ok(html.includes(tree));
+  assert.ok(html.includes("not evidence that source checks passed"));
+  assert.ok(html.includes('data-cmd="stateroot merge --stage ma-ready-1"'));
+  assert.ok(html.includes("restage any new verification records"));
+  assert.ok(!html.includes("No conflicts —"));
+});
+
 test("a stale integration CLI renders the compat message exactly once", () => {
   // Drive it from the failure signature, as prepareMerge does.
   let stale = false;
   try {
-    parseMergeAttempt("Merged forks: f1, f2");
+    parseMergeAttempt(JSON.stringify({ schema_version: "stateroot.merge-attempt.v0" }));
     assert.fail("guard must throw");
   } catch (err) {
     stale = isStaleIntegrationCli(err);

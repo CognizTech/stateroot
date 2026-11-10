@@ -138,6 +138,96 @@ pub struct LockOwner {
     /// ambiguous, diagnosed, never assumed local.
     #[serde(default)]
     pub namespace: String,
+    /// Native birth token, meaningful only in `namespace`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_start: Option<u64>,
+    /// OS machine identity; never a project or caller-supplied identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_host: Option<String>,
+    /// Native kernel boot identity when available, not a wall-clock estimate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_boot: Option<String>,
+}
+
+/// Native process birth identity. It is compared only in the recorded PID
+/// namespace; a reused number is not the process that acquired the lock.
+pub fn native_process_start_token(pid: u32) -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        stat.rsplit(')')
+            .next()?
+            .split_whitespace()
+            .nth(19)?
+            .parse()
+            .ok()
+    }
+    #[cfg(windows)]
+    {
+        // SAFETY: query-only process handle, valid writable FILETIME slots;
+        // the handle is closed on both success and query failure.
+        let handle = unsafe { OpenProcess(0x1000, 0, pid) };
+        if handle.is_null() {
+            return None;
+        }
+        let (mut creation, mut exit, mut kernel, mut user) = (0u64, 0u64, 0u64, 0u64);
+        let ok =
+            unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) };
+        unsafe {
+            CloseHandle(handle);
+        }
+        (ok != 0 && creation != 0).then_some(creation)
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+fn native_epoch() -> (Option<&'static str>, Option<&'static str>) {
+    static EPOCH: std::sync::OnceLock<(Option<String>, Option<String>)> =
+        std::sync::OnceLock::new();
+    let epoch = EPOCH.get_or_init(|| {
+        #[cfg(target_os = "linux")]
+        {
+            use sha2::{Digest, Sha256};
+            let host = fs::read_to_string("/etc/machine-id")
+                .ok()
+                .filter(|s| {
+                    let id = s.trim();
+                    id.len() == 32
+                        && id.bytes().all(|b| b.is_ascii_hexdigit())
+                        && id.bytes().any(|b| b != b'0')
+                })
+                .map(|s| format!("linux:{:x}", Sha256::digest(s.trim().as_bytes())));
+            let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            (host, boot)
+        }
+        #[cfg(windows)]
+        {
+            (host_namespace().map(|s| format!("windows:{s}")), None)
+        }
+        #[cfg(not(any(target_os = "linux", windows)))]
+        {
+            (None, None)
+        }
+    });
+    (epoch.0.as_deref(), epoch.1.as_deref())
+}
+
+fn previous_native_boot(owner: &LockOwner) -> bool {
+    if owner.namespace.is_empty() {
+        return false;
+    }
+    let (host, boot) = native_epoch();
+    matches!((&owner.native_host, &owner.native_boot, host, boot),
+        (Some(old_host), Some(old_boot), Some(host), Some(boot))
+        if old_host == host && uuid::Uuid::parse_str(old_boot).is_ok()
+            && old_boot != boot && !same_namespace(&owner.namespace))
 }
 
 /// The host/PID namespace of this process. Windows and WSL share the DrvFs
@@ -356,6 +446,13 @@ extern "system" {
     fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
     fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
     fn WaitForSingleObject(handle: *mut std::ffi::c_void, milliseconds: u32) -> u32;
+    fn GetProcessTimes(
+        handle: *mut std::ffi::c_void,
+        creation: *mut u64,
+        exit: *mut u64,
+        kernel: *mut u64,
+        user: *mut u64,
+    ) -> i32;
 }
 
 impl Drop for MutationGuard {
@@ -403,6 +500,8 @@ impl ResourceLock {
         // Platform identity initialization may invoke a native registry query;
         // never perform it while serializing resource mutations.
         let namespace = host_namespace().unwrap_or("unavailable");
+        let (native_host, native_boot) = native_epoch();
+        let process_start = native_process_start_token(std::process::id());
         for attempt in 0..tries.max(1) {
             let Some(guard) = MutationGuard::acquire(&path, false)? else {
                 std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
@@ -420,6 +519,9 @@ impl ResourceLock {
                         token: token.clone(),
                         acquired_at: crate::local_store::now_rfc3339(),
                         namespace: namespace.to_string(),
+                        process_start,
+                        native_host: native_host.map(str::to_string),
+                        native_boot: native_boot.map(str::to_string),
                     };
                     // Checked owner persistence: the record must be complete
                     // on disk before the lock is considered held — a crash
@@ -444,17 +546,25 @@ impl ResourceLock {
                         // Periodic stale-owner check (cheap: one read+probe).
                         if let Some(owner) = read_lock_owner(&path) {
                             last_owner = Some(owner.clone());
-                            // Stale reclaim is only safe inside OUR pid
-                            // namespace: a foreign-namespace pid (a native
+                            // A birth probe is only safe inside OUR pid
+                            // namespace. A proven previous boot of this same
+                            // native host needs no foreign PID probe. Other
+                            // foreign-namespace pids (a native
                             // Windows writer seen from WSL, or vice versa)
                             // cannot be probed here, and a legacy record
                             // without a namespace is ambiguous. Both are
                             // treated as held and diagnosed on timeout —
                             // never silently reclaimed on a cross-runtime
                             // pid assumption.
-                            let reclaimable = same_namespace(&owner.namespace)
-                                && owner.pid != 0
-                                && !pid_alive(owner.pid);
+                            let reclaimable = owner.pid != 0
+                                && (previous_native_boot(&owner)
+                                    || same_namespace(&owner.namespace)
+                                        && (!pid_alive(owner.pid)
+                                            || owner
+                                                .process_start
+                                                .filter(|start| *start != 0)
+                                                .zip(native_process_start_token(owner.pid))
+                                                .is_some_and(|(old, current)| old != current)));
                             if reclaimable {
                                 // Stale owner: the process is gone — reclaim,
                                 // but only the exact record we read (a fresh
@@ -863,6 +973,54 @@ mod tests {
         drop(lock);
         let again = ResourceLock::acquire(&path).expect("reacquire after drop");
         drop(again);
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", windows))]
+    fn process_birth_reuse_is_recoverable_but_missing_identity_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("birth.lock");
+        let held = ResourceLock::acquire(&path).unwrap();
+        let mut owner = read_lock_owner(&path).unwrap();
+        drop(held);
+        let birth = owner.process_start.expect("native process birth");
+        for token in [Some(birth), None, Some(0)] {
+            owner.process_start = token;
+            fs::write(&path, serde_json::to_vec(&owner).unwrap()).unwrap();
+            assert!(ResourceLock::acquire_with_budget(&path, 2, 1).is_err());
+        }
+        owner.process_start = Some(birth.checked_add(1).unwrap());
+        fs::write(&path, serde_json::to_vec(&owner).unwrap()).unwrap();
+        drop(ResourceLock::acquire_with_budget(&path, 4, 1).unwrap());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn previous_boot_proof_does_not_reclaim_other_hosts_or_live_namespaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("boot.lock");
+        let held = ResourceLock::acquire(&path).unwrap();
+        let mut owner = read_lock_owner(&path).unwrap();
+        drop(held);
+        let (Some(host), Some(boot)) = native_epoch() else {
+            return;
+        };
+        owner.namespace = "another-pid-namespace".into();
+        owner.native_host = Some(host.into());
+        owner.native_boot = Some(boot.into());
+        fs::write(&path, serde_json::to_vec(&owner).unwrap()).unwrap();
+        assert!(ResourceLock::acquire_with_budget(&path, 2, 1).is_err());
+        owner.native_host = Some("another-native-host".into());
+        owner.native_boot = Some(uuid::Uuid::new_v4().to_string());
+        fs::write(&path, serde_json::to_vec(&owner).unwrap()).unwrap();
+        assert!(ResourceLock::acquire_with_budget(&path, 2, 1).is_err());
+        owner.native_host = Some(host.into());
+        owner.namespace.clear();
+        fs::write(&path, serde_json::to_vec(&owner).unwrap()).unwrap();
+        assert!(ResourceLock::acquire_with_budget(&path, 2, 1).is_err());
+        owner.namespace = "previous-boot-namespace".into();
+        fs::write(&path, serde_json::to_vec(&owner).unwrap()).unwrap();
+        drop(ResourceLock::acquire_with_budget(&path, 4, 1).unwrap());
     }
 
     #[test]

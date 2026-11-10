@@ -151,7 +151,7 @@ export function snapshot(opts?: {
   const learnings = listLearnings(root);
   const memory = listMemory(root);
   const wikiPages = listWikiPages(root);
-  const latestActivity = readLatestActivity(root);
+  const latestActivity = readLatestActivity(root, roots);
   const continuity = readContinuity(root);
   const advisory = continuity
     ? advisoryTextFor(continuity, readContinuityAdvisory(root))

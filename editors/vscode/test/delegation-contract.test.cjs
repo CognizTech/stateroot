@@ -58,6 +58,27 @@ test("parallel work honors terminal outcomes before stale running or cancelling 
 });
 
 const binary = process.env.STATEROOT_CLI_TEST_BINARY;
+test("snapshot reads root history once and observes the next refresh", t => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "stateroot-root-refresh-"));
+  const previousRoot = root;
+  const readdir = fs.readdirSync;
+  t.after(() => { root = previousRoot; fs.readdirSync = readdir; fs.rmSync(temp, { recursive: true, force: true }); });
+  root = temp;
+  const rootsDir = path.join(root, ".stateroot", "roots");
+  fs.mkdirSync(rootsDir, { recursive: true });
+  fs.writeFileSync(path.join(root, ".stateroot", "manifest.json"), "{}");
+  let scans = 0;
+  fs.readdirSync = function (dir, ...args) { if (dir === rootsDir) scans++; return readdir.call(this, dir, ...args); };
+  for (const [id, created_at] of [["older", "2026-01-01T00:00:00Z"], ["newer", "2026-01-02T00:00:00Z"]]) {
+    fs.writeFileSync(path.join(rootsDir, `${id}.json`), JSON.stringify({ id, created_at }));
+    const next = snapshot();
+    assert.equal(next.roots.length, scans);
+    assert.equal(next.latestRoot, id);
+    assert.equal(next.now.latest.ts, created_at);
+  }
+  assert.equal(scans, 2, "one inventory scan per refresh, no persistent cache");
+});
+
 test("real CLI delegation report composes through snapshot, attention and existing work cards", { skip: !binary }, t => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "stateroot-extension-contract-"));
   t.after(() => fs.rmSync(temp, { recursive: true, force: true }));

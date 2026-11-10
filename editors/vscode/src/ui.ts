@@ -39,7 +39,9 @@ export function renderAttemptBlock(attempt?: MergeAttempt): string {
   if (!attempt) {
     return "";
   }
-  const state = attempt.state === "attention" ? "attention" : "ready";
+  const state = attempt.state;
+  const label = { ready: "Prepared for review", attention: "Changes need reconciliation", staged: "Candidate staged" }[state];
+  if (!label) return '<div class="card"><div>Merge details unavailable</div><div class="muted">Reinspect this preparation with the CLI.</div></div>';
   const commandRow = (command: string) =>
     `<div class="row cmd-row"><code class="cmd">${esc(command)}</code><button class="secondary" data-act="copyCmd" data-cmd="${esc(command)}">Copy</button></div>`;
   const forks = (attempt.forks || []).map((fork) => fork.name);
@@ -70,17 +72,26 @@ export function renderAttemptBlock(attempt?: MergeAttempt): string {
       `<div class="kicker">Reconciliation handoff</div>` +
       worktree +
       commandRow(`stateroot merge --status ${attempt.id} --json`) +
+      commandRow(`stateroot merge --stage ${attempt.id}`) +
       commandRow(`stateroot merge --continue ${attempt.id} --evidence "<tests run>"`) +
       commandRow(`stateroot merge --abort ${attempt.id}`) +
       `<div class="muted">Hand these to the coordinating agent — this panel never runs them and never chooses resolutions.</div>`;
+  } else if (state === "staged") {
+    handoff =
+      `<div class="kicker">Final checks</div><div class="muted">The candidate is staged; this is not evidence that source checks passed. Check the candidate workspace, then restage any new verification records before continuing.</div>` +
+      (attempt.worktree ? commandRow(attempt.worktree) : "") +
+      (attempt.staged_tree ? `<details><summary>Saved candidate details</summary><code>${esc(attempt.staged_tree)}</code></details>` : "") +
+      commandRow(`stateroot merge --stage ${attempt.id}`) +
+      commandRow(`stateroot merge --continue ${attempt.id} --evidence "<checks and review>"`);
   } else {
     handoff =
-      `<div class="kicker">Publish</div>` +
+      `<div class="kicker">Review the prepared work</div>` +
+      commandRow(`stateroot merge --stage ${attempt.id}`) +
       commandRow(`stateroot merge --continue ${attempt.id}`) +
-      `<div class="muted">No conflicts — the coordinating agent publishes with this command; this panel never runs it.</div>`;
+      `<div class="muted">Preparation found no conflicts. The coordinator reviews the work and can stage a candidate for checks before publication. This panel never chooses source resolutions or publishes work.</div>`;
   }
   return (
-    `<div class="card attempt"><div class="row"><span class="badge ${state}">${esc(state)}</span><span class="muted">${meta}</span></div>` +
+    `<div class="card attempt"><div class="row"><span class="badge ${state}">${esc(label)}</span><span class="muted">${meta}</span></div>` +
     (folded ? `<div class="muted">folded: ${folded}</div>` : "") +
     (pending ? `<div class="muted">pending: ${pending}</div>` : "") +
     conflictsBlock +

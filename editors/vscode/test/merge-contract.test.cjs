@@ -49,7 +49,7 @@ function attentionAttempt() {
   };
 }
 
-test("v1 prepare payloads parse, ready and attention", () => {
+test("v1 preparation and staged candidate payloads parse", () => {
   const ready = parseMergeAttempt(JSON.stringify(readyAttempt()));
   assert.equal(ready.id, "ma-ready-1");
   assert.equal(ready.state, "ready");
@@ -59,10 +59,14 @@ test("v1 prepare payloads parse, ready and attention", () => {
   assert.equal(attention.worktree, "/tmp/stateroot-ma-attn-1");
   assert.equal(attention.conflicts.length, 4);
   assert.equal(attention.conflicts[1].kind, "deleted_by_trunk");
+  const staged = parseMergeAttempt(JSON.stringify({ ...readyAttempt(), state: "staged", staged_tree: "d".repeat(40), worktree: "/tmp/candidate" }));
+  assert.equal(staged.state, "staged");
+  assert.equal(staged.staged_tree, "d".repeat(40));
+  assert.equal(isStaleIntegrationCli(new Error("unsupported merge-attempt payload")), false);
 });
 
 test("anything outside stateroot.merge-attempt.v1 throws the unsupported sentinel", () => {
-  const wrongSchema = { ...readyAttempt(), schema_version: "stateroot.merge-attempt.v0" };
+  const wrongSchema = { ...readyAttempt(), schema_version: "stateroot.merge-attempt.v2" };
   assert.throws(() => parseMergeAttempt(JSON.stringify(wrongSchema)), new RegExp(UNSUPPORTED_ATTEMPT_ERROR));
   const missingId = readyAttempt();
   delete missingId.id;
@@ -78,7 +82,7 @@ test("a pre-contract CLI printing human output hits the same sentinel", () => {
   assert.throws(() => parseMergeAttempt(""), new RegExp(UNSUPPORTED_ATTEMPT_ERROR));
 });
 
-test("schema and parse failures classify as a stale integration CLI", () => {
+test("known old schema is stale; malformed output does not imply CLI age", () => {
   try {
     parseMergeAttempt(JSON.stringify({ schema_version: "stateroot.merge-attempt.v0" }));
     assert.fail("guard must throw");
@@ -89,7 +93,7 @@ test("schema and parse failures classify as a stale integration CLI", () => {
     parseMergeAttempt("Merged forks: f1, f2");
     assert.fail("guard must throw");
   } catch (err) {
-    assert.equal(isStaleIntegrationCli(err), true);
+    assert.equal(isStaleIntegrationCli(err), false);
   }
 });
 

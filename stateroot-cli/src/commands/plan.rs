@@ -452,6 +452,18 @@ pub fn sync(ctx: &Ctx) -> anyhow::Result<()> {
 /// Advance only bindings already authorized by the native coordinator. This
 /// observes and launches detached workers; it never waits for model execution.
 pub(crate) fn advance_authorized(ctx: &Ctx) -> Vec<serde_json::Value> {
+    // A service sweep with no executable binding has nothing to admit.
+    // Actual admission below still obtains the complete fresh graph.
+    if !plans::list(&ctx.cwd).iter().any(|plan| {
+        matches!(plan.status(), PlanStatus::Approved | PlanStatus::Active)
+            && plan
+                .execution
+                .as_ref()
+                .and_then(|execution| execution.declaration.assignment.as_ref())
+                .is_some_and(|assignment| assignment.dispatch.is_some())
+    }) {
+        return Vec::new();
+    }
     let graph = plans::graph(&ctx.cwd);
     let mut outcomes = Vec::new();
     for node in graph.nodes.iter().filter(|n| n.readiness == "ready") {

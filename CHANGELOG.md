@@ -5,6 +5,16 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- Current-user Windows logon tasks register without elevation, including WSL
+  installations; service heartbeats report startup and scan progress.
+- Native lock identity supports proven PID reuse and prior-boot recovery;
+  Linux service rearming retains mapped executable identity after updates.
+- Status briefs label their open-work plan graph while full graph inspection
+  and fresh execution checks retain the complete dependency history.
+- The editor workbench displays staged integration candidates and their next
+  steps, avoids duplicate root-history reads, and scopes live refreshes to
+  the project that requested them.
+
 - Background retirement releases eligible fork checkouts while retaining
   source/evidence and late-work reasons; existing fork commands inspect and
   migrate qualified legacy Cargo output with source-bound operator input.

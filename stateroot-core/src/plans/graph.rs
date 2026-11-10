@@ -128,6 +128,10 @@ pub struct OwnershipOverlap {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanGraph {
     pub schema_version: String,
+    /// Absent means the complete graph. Briefs explicitly label their
+    /// open-work observation; full history remains available via `graph`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
     /// Stable digest of declarations, target/source observations and worker state.
     pub observation_id: String,
     pub nodes: Vec<PlanReadiness>,
@@ -749,6 +753,14 @@ fn reason(code: &str, detail: impl Into<String>, prerequisite: Option<String>) -
 }
 
 pub fn graph(project: &Path) -> PlanGraph {
+    graph_view(project, false)
+}
+
+pub(crate) fn attention_graph(project: &Path) -> PlanGraph {
+    graph_view(project, true)
+}
+
+fn graph_view(project: &Path, open_work_only: bool) -> PlanGraph {
     let all: BTreeMap<_, _> = list(project)
         .into_iter()
         .map(|p| (p.id.clone(), p))
@@ -760,7 +772,14 @@ pub fn graph(project: &Path) -> PlanGraph {
     // One graph observes each store once, including degraded records. Plans
     // sharing an executor must not repeatedly read the same worker history.
     let mut delegation_entries = BTreeMap::new();
+    let bound_plan = crate::local_store::fork_context(project).and_then(|c| c.plan);
     for plan in all.values() {
+        if open_work_only
+            && matches!(plan.status(), PlanStatus::Done | PlanStatus::Abandoned)
+            && bound_plan.as_deref() != Some(plan.id.as_str())
+        {
+            continue;
+        }
         let declaration = plan.execution.as_ref().map(|e| &e.declaration);
         let assignment = declaration.and_then(|d| d.assignment.clone());
         let fork = assignment
@@ -1062,6 +1081,7 @@ pub fn graph(project: &Path) -> PlanGraph {
         digest(&serde_json::to_vec(&(&nodes, &overlaps)).expect("serializable graph"));
     PlanGraph {
         schema_version: SCHEMA_GRAPH.into(),
+        scope: open_work_only.then(|| "open_work".into()),
         observation_id,
         nodes,
         ready,
