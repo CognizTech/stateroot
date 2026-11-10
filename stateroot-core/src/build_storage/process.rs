@@ -1,4 +1,5 @@
 //! Native runtime domains and producer/consumer lifetime qualification.
+#[cfg(any(target_os = "linux", windows))]
 use super::hash;
 #[cfg(windows)]
 use crate::safe_io;

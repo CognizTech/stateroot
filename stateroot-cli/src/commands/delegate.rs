@@ -1509,8 +1509,8 @@ fn group_alive(pgid: u32) -> bool {
 #[cfg(all(unix, not(target_os = "linux")))]
 fn group_alive(pgid: u32) -> bool {
     // kill(2) with a negative pid and signal 0 probes the process group.
-    unsafe { libc::kill(-(pgid as i32), 0) == 0 }
-    || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    (unsafe { libc::kill(-(pgid as i32), 0) == 0 })
+        || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
 #[cfg(windows)]

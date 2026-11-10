@@ -413,6 +413,8 @@ jobs:
 
       - name: Build release binary
         shell: bash
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
         run: |
           if [ "${{ runner.os }}" = "Linux" ]; then
             cargo zigbuild --release --target ${{ matrix.target }}.${{ matrix.glibc }} -p stateroot-cli
