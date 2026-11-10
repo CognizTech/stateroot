@@ -201,11 +201,41 @@ fn wanted() -> String {
 
 #[tokio::test]
 async fn install_keeps_editor_progress_off_the_json_channel_without_skipping_reconciliation() {
-    for json_out in [true, false] {
+    for (json_out, version, tag, cache) in [
+        (true, "0.2.2", "v0.2.2", "update-check.json"),
+        (
+            false,
+            "0.2.2-dev.10",
+            "nightly",
+            "update-check-nightly.json",
+        ),
+    ] {
         let manifest = manifest_body(&sha256_hex(VSIX_BYTES));
-        let mock = mount_release("v0.2.2", VSIX_BYTES, manifest.as_bytes(), 1).await;
+        let mock = mount_release(tag, VSIX_BYTES, manifest.as_bytes(), 1).await;
         let config = tempfile::tempdir().unwrap();
         seed_config(config.path());
+        // A fresh timestamp does not make replaced release asset IDs current.
+        std::fs::write(
+            config.path().join(cache),
+            serde_json::to_vec(&json!({
+                "latest_tag": tag,
+                "name": "StateRoot 0.2.2-dev.9",
+                "checked_at": chrono::Utc::now().to_rfc3339(),
+                "asset_url": format!("{}/cli", mock.server.uri()),
+                "checksums_url": format!("{}/checksums.txt", mock.server.uri()),
+                "extension_manifest_url": format!("{}/superseded-manifest", mock.server.uri()),
+                "extension_vsix_url": format!("{}/superseded.vsix", mock.server.uri()),
+                "extension_vsix_name": "stateroot-vscode-0.2.18.vsix",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        Mock::given(method("GET"))
+            .and(path("/superseded-manifest"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(0)
+            .mount(&mock.server)
+            .await;
         let user = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
         let code_dir = tempfile::tempdir().unwrap();
@@ -213,6 +243,8 @@ async fn install_keeps_editor_progress_off_the_json_channel_without_skipping_rec
         let mut cmd = stateroot(config.path(), user.path(), cwd.path());
         cmd.env("STATEROOT_GITHUB_API_BASE", mock.server.uri())
             .env("STATEROOT_TEST_EDITOR_CODE", &code)
+            .env("STATEROOT_TEST_BUILD_VERSION", version)
+            .env("STATEROOT_INSTALL_VIA", "self_update")
             .arg("install");
         if json_out {
             cmd.arg("--json");

@@ -208,7 +208,11 @@ async fn inspect(ctx: &Ctx, mode: Mode) -> anyhow::Result<Vec<EditorReport>> {
     };
 
     let release = if allow_release_lookup() {
-        update::selected_channel_release(ctx, matches!(mode, Mode::Explicit)).await
+        // A just-updated CLI must not re-arm against cached asset IDs from
+        // the previous release, especially when nightly assets were replaced.
+        let rearming =
+            std::env::var("STATEROOT_INSTALL_VIA").ok().as_deref() == Some("self_update");
+        update::selected_channel_release(ctx, matches!(mode, Mode::Explicit) || rearming).await
     } else {
         None
     };

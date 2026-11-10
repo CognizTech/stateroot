@@ -309,6 +309,10 @@ not a promise that graph-independent work can edit the same files safely.
 
 ## Update troubleshooting
 
+After a CLI update, rearming refreshes the current channel's release metadata
+before reconciling editor extensions. This avoids stale asset IDs and version
+information when rolling releases replace their VSIX and manifest.
+
 Release API quota is shared by public IP, so repeated Windows update failures
 can also affect other users behind the same network. Updated clients try the
 public `stateroot-release.json` asset on a confirmed API rate limit and retain

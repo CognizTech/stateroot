@@ -5,6 +5,8 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- CLI update rearming refreshes editor release metadata before reconciling
+  extensions, so replaced rolling assets do not leave editors on an older version.
 - Current-user Windows logon tasks register without elevation, including WSL
   installations; service heartbeats report startup and scan progress.
 - Native lock identity supports proven PID reuse and prior-boot recovery;
