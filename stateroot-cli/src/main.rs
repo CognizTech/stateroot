@@ -292,7 +292,9 @@ async fn main() -> anyhow::Result<()> {
             args.reason.as_deref(),
             args.harness.as_deref().or(actor.as_deref()),
         )?,
-        Command::Log(args) => commands::roots::log(&ctx, args.json)?,
+        Command::Log(args) => {
+            commands::roots::log(&ctx, args.json, args.limit.map(usize::from), args.offset)?
+        }
         Command::Show {
             hash,
             fidelity,

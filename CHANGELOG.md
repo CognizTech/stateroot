@@ -5,6 +5,12 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- Lineage pages 50 roots at a time in the editor. Optional CLI metadata windows
+  retain complete connection topology; older CLIs remain supported through local paging.
+
+- Editor lineage keeps cards readable with dense fork histories, removes empty
+  historical-lane gutters and fits connections beside the text without horizontal scrolling.
+
 ## v0.2.14 — 2026-11-10
 
 - Lineage keeps its graph connections, reuses the open Git repository during

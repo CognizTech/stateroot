@@ -148,13 +148,19 @@ pub fn snap(ctx: &Ctx, reason: Option<&str>, harness: Option<&str>) -> anyhow::R
 
 /// `stateroot log` — root lineage with coverage lines and fork markers,
 /// then the local checkpoint/handoff tails.
-pub fn log(ctx: &Ctx, json_output: bool) -> anyhow::Result<()> {
+pub fn log(
+    ctx: &Ctx,
+    json_output: bool,
+    limit: Option<usize>,
+    offset: usize,
+) -> anyhow::Result<()> {
     ctx.require_project()?;
     if json_output {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&engine::lineage_projection(&ctx.cwd)?)?
-        );
+        let projection = match limit {
+            Some(limit) => engine::lineage_projection_page(&ctx.cwd, limit, offset)?,
+            None => engine::lineage_projection(&ctx.cwd)?,
+        };
+        println!("{}", serde_json::to_string_pretty(&projection)?);
         return Ok(());
     }
     let entries = engine::lineage(&ctx.cwd)?;

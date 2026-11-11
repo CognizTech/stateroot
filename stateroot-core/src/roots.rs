@@ -1663,12 +1663,20 @@ pub struct LineageEntry {
     pub fork_point: bool,
 }
 
-/// Walk the root lineage: mainline from latest, then side roots as forks.
-pub fn lineage(project_dir: &Path) -> Result<Vec<LineageEntry>, RootsError> {
-    let repo = ensure_repo(project_dir)?;
+struct LineageIndexEntry {
+    id: String,
+    mainline: bool,
+    fork_point: bool,
+}
+
+// Enumerate topology once; paged readers enrich only their selected manifests.
+fn lineage_index(
+    repo: &git2::Repository,
+    tip: Option<git2::Oid>,
+) -> Result<Vec<LineageIndexEntry>, RootsError> {
     let mut mainline: Vec<String> = Vec::new();
     let mut children: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    if let Some(tip) = latest_oid_for(&repo, project_dir)? {
+    if let Some(tip) = tip {
         let mut current = Some(tip);
         while let Some(oid) = current {
             mainline.push(oid.to_string());
@@ -1711,31 +1719,88 @@ pub fn lineage(project_dir: &Path) -> Result<Vec<LineageEntry>, RootsError> {
             }
         }
     }
-    let mut out = Vec::new();
-    for id in mainline.into_iter().chain(side) {
-        let manifest =
-            get_root_with_repo(&repo, project_dir, id.clone()).unwrap_or_else(|_| RootManifest {
-                schema_version: ROOT_SCHEMA.into(),
-                id: id.clone(),
-                coverage: "unknown".into(),
-                ..Default::default()
-            });
-        out.push(LineageEntry {
-            manifest,
+    Ok(mainline
+        .into_iter()
+        .chain(side)
+        .map(|id| LineageIndexEntry {
             mainline: mainline_set.contains(&id),
             fork_point: children.get(&id).copied().unwrap_or(0) > 1,
+            id,
+        })
+        .collect())
+}
+
+fn lineage_entry(
+    repo: &git2::Repository,
+    project_dir: &Path,
+    entry: LineageIndexEntry,
+) -> LineageEntry {
+    let manifest =
+        get_root_with_repo(repo, project_dir, entry.id.clone()).unwrap_or_else(|_| RootManifest {
+            schema_version: ROOT_SCHEMA.into(),
+            id: entry.id,
+            coverage: "unknown".into(),
+            ..Default::default()
         });
+    LineageEntry {
+        manifest,
+        mainline: entry.mainline,
+        fork_point: entry.fork_point,
     }
-    Ok(out)
+}
+
+/// Walk the root lineage: mainline from latest, then side roots as forks.
+pub fn lineage(project_dir: &Path) -> Result<Vec<LineageEntry>, RootsError> {
+    let repo = ensure_repo(project_dir)?;
+    Ok(lineage_index(&repo, latest_oid_for(&repo, project_dir)?)?
+        .into_iter()
+        .map(|entry| lineage_entry(&repo, project_dir, entry))
+        .collect())
 }
 
 /// Stable, side-effect-free lineage projection for integrations.  It derives
 /// topology from the authoritative plumbing refs and enriches it only with
 /// persisted fork records and the machine-local worktree registry.
 pub fn lineage_projection(project_dir: &Path) -> Result<Value, RootsError> {
+    lineage_projection_window(project_dir, None)
+}
+
+/// Read a bounded metadata page plus complete lightweight connection topology.
+/// Unpaged callers retain the original v1 projection, without pagination fields.
+pub fn lineage_projection_page(
+    project_dir: &Path,
+    limit: usize,
+    offset: usize,
+) -> Result<Value, RootsError> {
+    lineage_projection_window(project_dir, Some((limit.clamp(1, 500), offset)))
+}
+
+fn lineage_projection_window(
+    project_dir: &Path,
+    page: Option<(usize, usize)>,
+) -> Result<Value, RootsError> {
     let repo = ensure_repo(project_dir)?;
-    let trunk_tip = latest_oid_for(&repo, project_dir)?.map(|oid| oid.to_string());
-    let entries = lineage(project_dir)?;
+    let tip = latest_oid_for(&repo, project_dir)?;
+    let trunk_tip = tip.map(|oid| oid.to_string());
+    let index = lineage_index(&repo, tip)?;
+    let total = index.len();
+    let topology = if page.is_some() {
+        index.iter().map(|entry| {
+            let parents = git2::Oid::from_str(&entry.id).ok()
+                .and_then(|oid| repo.find_commit(oid).ok())
+                .map(|commit| commit.parent_ids().map(|id| id.to_string()).collect::<Vec<_>>())
+                .unwrap_or_default();
+            json!({"id": entry.id, "parents": parents, "mainline": entry.mainline, "fork_point": entry.fork_point})
+        }).collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let (limit, offset) = page.unwrap_or((total, 0));
+    let entries = index
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|entry| lineage_entry(&repo, project_dir, entry));
     let roots = entries
         .into_iter()
         .map(|entry| {
@@ -1833,12 +1898,29 @@ pub fn lineage_projection(project_dir: &Path) -> Result<Value, RootsError> {
         })
         .collect::<Vec<_>>();
 
-    Ok(json!({
+    let mut projection = json!({
         "schema_version": "stateroot.lineage.v1",
         "trunk": {"ref": LATEST_REF, "tip": trunk_tip},
         "forks": forks,
         "roots": roots,
-    }))
+    });
+    if page.is_some() {
+        // Identity covers ordering, connections and fork state. Readers never
+        // join metadata pages from different observed histories.
+        use sha2::Digest;
+        let history = format!(
+            "{:x}",
+            sha2::Sha256::digest(serde_json::to_vec(&json!([topology, projection["forks"]]))?)
+        );
+        projection["topology"] = json!(topology);
+        projection["pagination"] = json!({
+            "schema_version": "stateroot.lineage.pagination.v1",
+            "offset": offset, "limit": limit, "total": total,
+            "has_more": offset.saturating_add(limit) < total,
+            "history": history,
+        });
+    }
+    Ok(projection)
 }
 
 /// A file delta entry for `diff` (name + status).

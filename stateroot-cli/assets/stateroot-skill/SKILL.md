@@ -205,7 +205,7 @@ without refreshing it. See the protocol reference for tool names and evidence li
 | `stateroot memory recall <query> [--limit N]` | find decisions, failures, memories | indexed memory/wiki/episodic/transcripts plus bounded raw observations; inspect index and raw coverage separately |
 | `stateroot memory sync [--harness H] [--dry-run]` | federate harness memory into the pool | pulls claude/codex/codebuddy/openclaw memories in as `observed` wiki pages / episodic; dedups by content hash, preserves conflicts; `--push` writes a curated brief into managed harness memory files |
 | `stateroot snap [--reason R]` | explicit milestones (checkpoints and turn ends auto-snap real changes) | records verified root under `refs/stateroot` |
-| `stateroot log` / `stateroot show <root>` | inspect lineage | current root, transitions, coverage |
+| `stateroot log` / `stateroot show <root>` | inspect lineage | current root, transitions, coverage; optional `log --json --limit 50 --offset 50` loads bounded metadata with complete connection topology. Unpaged output remains complete; see `docs/cli.md` for paging and compatibility |
 | `stateroot diff` / `stateroot compare A B` | inspect tree deltas | verified git diff between roots |
 | `stateroot revert <root>` | verified restoration | append-only — creates a new root |
 | `stateroot fork <root>` | divergent work | branch lineage from an earlier root |

@@ -570,6 +570,63 @@ fn log_json_projects_parallel_lineage_from_refs_and_records() {
         .and_then(|roots| roots.iter().find(|entry| entry["id"] == root))
         .expect("root projection");
     assert_eq!(root_entry["parents"].as_array().map(Vec::len), Some(0));
+    assert!(projection.get("pagination").is_none());
+    for i in 1..=2 {
+        write(project.path(), "work.txt", &format!("revision {i}\n"));
+        stateroot(config_home.path(), user_home.path(), project.path())
+            .args(["snap", "--reason", "page fixture"])
+            .assert()
+            .success();
+    }
+    let read = |args: &[&str]| {
+        let out = stateroot(config_home.path(), user_home.path(), project.path())
+            .args(args)
+            .assert()
+            .success();
+        serde_json::from_slice::<serde_json::Value>(&out.get_output().stdout).unwrap()
+    };
+    let full = read(&["log", "--json"]);
+    let first = read(&["log", "--json", "--limit", "2"]);
+    let second = read(&["log", "--json", "--limit", "2", "--offset", "2"]);
+    let total = full["roots"].as_array().unwrap().len();
+    assert_eq!(first["pagination"]["total"], total);
+    assert_eq!(first["pagination"]["has_more"], true);
+    assert_eq!(second["pagination"]["has_more"], false);
+    assert_eq!(
+        first["pagination"]["history"],
+        second["pagination"]["history"]
+    );
+    assert_eq!(first["forks"], full["forks"]);
+    assert_eq!(first["topology"], second["topology"]);
+    let combined: Vec<_> = first["roots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(second["roots"].as_array().unwrap())
+        .cloned()
+        .collect();
+    assert_eq!(combined, *full["roots"].as_array().unwrap());
+    for (node, detail) in first["topology"].as_array().unwrap().iter().zip(&combined) {
+        for field in ["id", "parents", "mainline", "fork_point"] {
+            assert_eq!(node[field], detail[field]);
+        }
+        assert!(
+            node.get("created_reason").is_none(),
+            "metadata stays page-bounded"
+        );
+    }
+    let beyond = read(&["log", "--json", "--limit", "2", "--offset", "999"]);
+    assert_eq!(beyond["pagination"]["total"], total);
+    assert!(beyond["roots"].as_array().unwrap().is_empty());
+    for args in [
+        vec!["log", "--json", "--limit", "0"],
+        vec!["log", "--json", "--offset", "1"],
+    ] {
+        stateroot(config_home.path(), user_home.path(), project.path())
+            .args(args)
+            .assert()
+            .failure();
+    }
 }
 
 #[test]

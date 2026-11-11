@@ -325,6 +325,38 @@ delegation preserves native breakaway behavior and remains unmanaged;
 short-lived command-helper qualification is a separate supported envelope.
 Only observed managed entry points carry these ownership guarantees.
 
+## `stateroot log` — bounded lineage reads
+
+Without paging flags, `log` and `log --json` retain their complete existing output.
+Integrations can load root metadata progressively:
+
+```bash
+stateroot log --json --limit 50
+stateroot log --json --limit 50 --offset 50
+```
+
+`--limit` accepts 1–500 and requires `--json`; `--offset` requires `--limit`.
+The response retains `stateroot.lineage.v1` and adds:
+
+- `pagination` (`stateroot.lineage.pagination.v1`): offset, limit, total,
+  `has_more` and a history identity;
+- `topology`: complete lightweight root IDs, parents, mainline and fork-point
+  flags, so connections spanning page boundaries remain visible;
+- `roots`: only the requested metadata window. The reader enriches those
+  manifests, rather than opening every root manifest for each page.
+
+The history identity binds the ordered topology and observed fork state. Do not
+join pages from different identities; refresh the first page when history changes.
+Topology traversal still covers retained history; this is bounded metadata loading,
+not a constant-time history lookup. Beyond-end requests return an empty window
+with the actual total. No history is removed.
+
+The editor paginates 50 roots at a time and uses these reads when supported.
+Older CLIs remain usable: only a confirmed unsupported `--limit` flag causes a
+fallback to the full v1 response, paginated locally. Operational errors and invalid
+pages remain errors. Selections survive page navigation; loading failures retain
+the last good page. The extension can ship independently of these CLI flags.
+
 ## `stateroot fork` / `stateroot merge` — parallel plan execution
 
 ```bash

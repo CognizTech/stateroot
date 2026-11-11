@@ -980,6 +980,12 @@ pub struct LogArgs {
     /// Emit the stable `stateroot.lineage.v1` projection for integrations.
     #[arg(long)]
     pub json: bool,
+    /// Load at most this many root records, with complete connection topology.
+    #[arg(long, requires = "json", value_parser = clap::value_parser!(u16).range(1..=500))]
+    pub limit: Option<u16>,
+    /// Skip root records in the canonical lineage order (requires --limit).
+    #[arg(long, requires = "limit", default_value_t = 0)]
+    pub offset: usize,
 }
 
 #[derive(Debug, Args)]

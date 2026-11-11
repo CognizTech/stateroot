@@ -418,3 +418,14 @@ The existing deterministic service registers Windows/WSL startup for the current
 ### Editor lineage connections
 
 The Lineage view retains its graph rails. While the canonical CLI topology loads, root records remain visible; a failed refresh is labeled and offers Retry connections. Opening Lineage retries unavailable topology without inferring connections from checkout sidecars.
+
+
+### Paged lineage inspection
+
+`stateroot log --json --limit 50 --offset 50` reads a metadata window while
+retaining complete lightweight connection topology. Compare pagination history
+identities before combining windows; refresh the first page if topology or fork
+state changes. Traversal still covers retained history. No paging flags preserves
+the full existing response. On older CLIs, only a confirmed unsupported `--limit`
+argument justifies retrying unpaged; do not mask an operational failure as an old
+CLI. The editor supports both responses and keeps selections across pages.
