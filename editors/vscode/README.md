@@ -1,60 +1,61 @@
 # StateRoot
 
-**Persistent, federated meta-harness for AI agents.**
-
 **The harness is disposable. The work is not.**
 
-StateRoot federates Claude Code, Codex, Cursor, Kimi, OpenClaw, Pi, DeepSeek
-Harness and other agent harnesses through shared working intelligence and
-versioned project state. Continue work in another harness. Delegate bounded
-tasks across tools. Run agents in parallel on independent StateRoot forks.
-Merge the results when the work converges — while each harness keeps its own
-runtime and strengths. One local CLI, everything on your machine.
+StateRoot connects the AI agents you already use so they share knowledge, tools and what they learn across sessions. Pick up where another agent stopped, ask one to plan and others to work in parallel, then combine their results or restore an earlier saved version of your project.
 
-This extension is the Conductor UI for that CLI: the sidebar glance and the
-workbench for the human directing several harnesses at once.
+*Persistent, federated meta-harness for AI agents.*
+
+## You direct the work. Your agents handle StateRoot.
+
+After setup, use your normal agent conversations. Ask an agent to continue work,
+record a plan, remember a preference or give independent tasks to other agents.
+Your agents follow their installed StateRoot Skill to operate the CLI. Each agent keeps its own model, interface and strengths.
+
+This extension gives you a view of that work in **VS Code and Cursor**. See plans,
+agent activity, shared knowledge and project history without memorizing the
+agent's commands.
+
+> Give Kimi and Cursor separate StateRoot forks for these independent tasks,
+> then review and combine their results.
+
+> Show me what changed, what was checked and what still needs attention.
+
+These are ordinary requests, not special prompt syntax. Supported execution routes
+depend on the connected agent and its installed CLI.
 
 <p align="center">
-  <img alt="Close one agent, open another — it just knows" src="https://raw.githubusercontent.com/CognizTech/stateroot/main/demo.gif">
+  <img alt="Agents carrying shared knowledge and project work across tools" src="https://raw.githubusercontent.com/CognizTech/stateroot/main/demo.gif">
 </p>
 
-## What the StateRoot CLI does
+## Get started
 
-One `stateroot` binary next to Git, sharing everything above each harness's
-own runtime:
+1. Install the extension in Cursor or VS Code and follow its guided CLI and project setup.
+2. Open your project in a supported agent and tell it what you want done.
+3. Open **StateRoot: Open workbench** from the command palette when you want to inspect progress.
 
-- **Continue anywhere** — hooks inject a bounded digest (goal, plan,
-  decisions, memories, next actions) at session start. No pasting
-  transcripts between tools.
-- **Plan in one harness, implement in another** — a strong model authors the
-  plan in its plan mode; a cheaper model executes it. `stateroot plan`
-  carries the artifact and its approval state, and the executor's digest
-  says *"execute this plan; do not re-plan."*
-- **Spawn subagents across harnesses** — `stateroot delegate --to codex
-  --task "…"` runs a bounded task inside another harness with full project
-  context. The parent gets the conclusion, not the transcript.
-- **Move the session itself** — sessions canonicalize from every supported
-  harness into one store, and transfer into Pi / DeepSeek Harness as real,
-  resumable native sessions.
-- **Branch and restore the work** — snapshots live in Git plumbing under
-  `refs/stateroot`; your branches are never rewritten. Restore exactly, fork
-  safely, merge the forks back, compare honestly, and read the receipt of
-  what changed.
-- **One personality everywhere** — soul + USER.md injected in full at every
-  session start, never trimmed. The same persona, USER.md and working
-  identity project into every harness; the agents stay distinct, and the
-  working relationship does not reset when the harness changes.
-- **Portable project state** — the CLI exports and validates local bundles of
-  retained roots, shared intelligence and referenced evidence. Import retains
-  state without moving the current head; materialization applies a compatible
-  checkout. Use these commands in the terminal alongside the workbench.
-- **Memory in three layers** — a curated hot-apex every session sees, a
-  compiled wiki distilled from evidence, and an episodic log with full-text
-  recall (`stateroot memory recall`). Every fact carries provenance:
-  verified, observed, or synthesized.
-- **Learnings that compound** — record one judgment (`prefer X over Y`,
-  `never Z`, with *when it applies*) and it activates immediately for every
-  harness. A correction made in one tool becomes a rule for all of them.
+[Quickstart](https://stateroot.dev/docs/getting-started/quickstart) ·
+[Working with your agents](https://stateroot.dev/docs/guides/daily-workflow)
+
+## Continue. Delegate. Fork. Merge.
+
+- **Continue:** pick up where another agent stopped, or return later with project knowledge still available.
+- **Delegate:** give a specific task to another supported agent and bring its result back for review.
+- **Fork:** use separate project copies for independent tasks while sharing useful knowledge.
+- **Merge:** ask your coordinator to review, check and combine the accepted work while preserving its history.
+
+## What carries forward
+
+- **Personality and preferences:** how you want agents to address you, communicate and approach the work.
+- **Project knowledge:** goals, plans, decisions, rules, facts and earlier approaches, with searchable history and a project wiki.
+- **Skills and tools:** reusable Skill packages and compatible MCP configuration, plus native capabilities available through delegation.
+- **Shared self-improvement:** useful corrections recorded as guidance for later agent sessions. Teach one agent and carry the lesson forward.
+- **Saved project versions:** compare changes, try alternatives and restore earlier versions while preserving your normal Git branches.
+
+The CLI also supports [native session transfer and qualified recovery](https://stateroot.dev/docs/features/sessions),
+[portable project exchange](https://stateroot.dev/docs/guides/sharing-a-project#portable-local-exchange)
+and [commands agents can extend](https://stateroot.dev/docs/features/extensions).
+Ask your agent to use these capabilities when the task calls for them.
 
 ## What the extension adds
 
@@ -77,8 +78,7 @@ own runtime:
     servers and local tools, plus named harness health and repair guidance.
     Identity, origin, compatibility and native route come from the CLI;
     unobserved loading and use remain labeled unknown.
-  - **Lineage** — compare roots, native diff, restore, or fork the work
-    itself.
+  - **Lineage** — browse 50 saved roots per page, compare changes, inspect a native diff, restore or fork the work. Comparison selections stay available across pages.
 
 Writes go through the `stateroot` CLI only — the extension never edits
 project state directly.
@@ -106,7 +106,7 @@ project state directly.
 
 ## Links
 
-- [Website](https://stateroot.dev) · [Docs](https://stateroot.dev/docs/intro) ·
+- [Website](https://stateroot.dev) · [Human guide](https://stateroot.dev/docs/guides/daily-workflow) · [Docs](https://stateroot.dev/docs/intro) ·
   [GitHub](https://github.com/CognizTech/stateroot) ·
   [Releases](https://github.com/CognizTech/stateroot/releases)
 
