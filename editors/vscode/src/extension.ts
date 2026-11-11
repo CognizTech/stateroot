@@ -85,6 +85,9 @@ export function activate(context: vscode.ExtensionContext) {
   let liveDelegations: DelegateListReport | undefined;
   let lineage: LineageProjection | undefined;
   let lineageUnavailable = false;
+  let lineageLoading = false;
+  let lineageLoadError: string | undefined;
+  let lineageRequest = 0;
   let liveRoot: string | undefined;
   let integrationStale = false;
   let intelligence: IntelligenceInventory = emptyInventory();
@@ -118,6 +121,8 @@ export function activate(context: vscode.ExtensionContext) {
       liveDelegations: liveRoot === root ? liveDelegations : undefined,
       lineage: liveRoot === root ? lineage : undefined,
       lineageUnavailable: liveRoot === root && lineageUnavailable,
+      lineageLoading: liveRoot === root && lineageLoading,
+      lineageLoadError: liveRoot === root ? lineageLoadError : undefined,
       selectedForks: [...selectedForks],
       attempt: root ? context.globalState.get<MergeAttempt>(attemptKey(root)) : undefined,
       integrationStale,
@@ -190,24 +195,62 @@ export function activate(context: vscode.ExtensionContext) {
     if (!root) {
       return;
     }
+    if (lineageLoading && liveRoot === root) return;
+    const request = ++lineageRequest;
+    const offset = liveRoot === root ? lineage?.pagination?.offset || 0 : 0;
     const [text, currentLineage] = await Promise.all([
       runCliReport(["delegate", "list"], root, output, 20_000, {
         allowInstall: false,
         notifyOnError: false,
       }),
-      readParallelWork(root, output),
+      readParallelWork(root, output, offset),
     ]);
-    if (projectRoot() !== root) return;
+    if (projectRoot() !== root || request !== lineageRequest) return;
     if (liveRoot !== root) {
       liveDelegations = undefined;
       lineage = undefined;
+      lineageLoading = false;
+      lineageLoadError = undefined;
     }
     liveRoot = root;
     lineageUnavailable = !currentLineage;
     if (text !== undefined) liveDelegations = parseDelegateList(text);
-    if (currentLineage) lineage = currentLineage;
+    if (currentLineage) {
+      if (offset && lineage?.pagination && currentLineage.pagination?.history !== lineage.pagination.history) {
+        const latest = await readParallelWork(root, output);
+        if (projectRoot() !== root || request !== lineageRequest) return;
+        if (latest) { lineage = latest; lineageLoadError = "History changed; showing the latest roots."; }
+        else { lineageUnavailable = true; lineageLoadError = "History changed; refresh to load the latest roots."; }
+      } else {
+        lineage = currentLineage;
+        lineageLoadError = undefined;
+      }
+    }
     push();
   });
+
+  const loadLineagePage = async (offset: number) => {
+    const root = projectRoot();
+    const page = liveRoot === root ? lineage?.pagination : undefined;
+    if (!root || !page || lineageLoading || !Number.isSafeInteger(offset) || offset < 0 || offset >= page.total) return;
+    const request = ++lineageRequest;
+    lineageLoading = true;
+    lineageLoadError = undefined;
+    push();
+    let next = await readParallelWork(root, output, offset);
+    const changed = !!next?.pagination && next.pagination.history !== page.history;
+    if (changed) next = await readParallelWork(root, output);
+    if (projectRoot() !== root || request !== lineageRequest) return;
+    lineageLoading = false;
+    if (next) {
+      lineage = next;
+      lineageUnavailable = false;
+      lineageLoadError = changed ? "History changed; showing the latest roots." : undefined;
+    } else {
+      lineageLoadError = "Could not load this page. The previous page is retained; retry navigation.";
+    }
+    push();
+  };
 
   // Catalogs are read only when requested. They are larger than the polling
   // projection and must not be logged as full JSON in the extension output.
@@ -267,6 +310,10 @@ export function activate(context: vscode.ExtensionContext) {
 
   const onMessage = async (msg: Record<string, unknown>) => {
     const type = String(msg.type || "");
+    if (type === "lineagePage") {
+      void loadLineagePage(Number(msg.offset));
+      return;
+    }
     if (type === "ready") {
       push();
       return;

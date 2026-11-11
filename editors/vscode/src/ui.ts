@@ -260,6 +260,13 @@ button.dismiss {
 .conflict-row { margin: 2px 0; }
 .attempt .kicker { margin-top: 8px; }
 .rail-row { display: flex; align-items: stretch; gap: 8px; }
+.lineage-split { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.lineage-browser { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.lineage-list { min-width: 0; min-height: 0; flex: 1 1 auto; container-type: inline-size; }
+.lineage-pagination { flex: 0 0 auto; padding: 6px 0; }
+.lineage-pagination button:disabled { opacity: 0.5; cursor: default; }
+.lineage-split > .col { min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 800px) { .lineage-split { grid-template-columns: minmax(0, 1fr); height: auto; } }
 .rail {
   position: relative;
   display: flex;
@@ -268,7 +275,7 @@ button.dismiss {
   margin: -8px 0;
   min-height: 26px;
 }
-.rail .lane-line { width: 2px; align-self: stretch; }
+.rail .lane-line { position: absolute; top: 0; bottom: 0; width: 2px; transform: translateX(-1px); }
 .rail svg {
   position: absolute;
   left: 0;
@@ -277,11 +284,10 @@ button.dismiss {
   display: block;
 }
 .rail .node { cursor: pointer; }
-.rail-label {
-  font-size: 10px;
-  fill: var(--vscode-descriptionForeground);
-}
+.rail-connectors path { vector-effect: non-scaling-stroke; }
+.rail-tip { display: block; overflow-wrap: anywhere; }
 .rail-row .row-main { flex: 1 1 auto; min-width: 0; padding: 8px 0; }
+.lineage-list .row-main { overflow-wrap: anywhere; }
 `;
 
 function shell(nonceVal: string, body: string, script: string): string {
@@ -635,17 +641,26 @@ export function workbenchHtml(nonceVal: string): string {
   const script = `
 const vscode = acquireVsCodeApi();
 let state = Object.assign({ tab: 'control', harnesses: ['claude','codex','kimi'] }, vscode.getState() || {});
+function saveView() {
+  vscode.setState({ tab: state.tab, selectedPlanId: state.selectedPlanId, projectPath: state.projectPath,
+    lineageOffset: state.lineageOffset, lineageAnchor: state.lineageAnchor });
+}
 window.addEventListener('message', (e) => {
-  state = Object.assign(state, e.data || {});
-  if (state.tab) vscode.setState({ tab: state.tab, selectedPlanId: state.selectedPlanId });
-  render();
+  const data = e.data || {};
+  const projectChanged = data.initialized === false || (data.projectPath && state.projectPath && data.projectPath !== state.projectPath);
+  const pageChanged = data.lineage && data.lineage.pagination &&
+    data.lineage.pagination.offset !== (state.lineage && state.lineage.pagination && state.lineage.pagination.offset);
+  if (projectChanged) { state.lineageOffset = 0; state.lineageAnchor = undefined; }
+  state = Object.assign(state, data);
+  render(projectChanged || pageChanged);
+  if (state.tab) saveView();
 });
 vscode.postMessage({ type: 'ready' });
 document.querySelectorAll('.tab').forEach(btn => {
   btn.addEventListener('click', () => {
     const tab = btn.getAttribute('data-tab');
     state.tab = tab;
-    vscode.setState({ tab: state.tab, selectedPlanId: state.selectedPlanId });
+    saveView();
     vscode.postMessage({ type: 'openTab', tab: state.tab });
     render();
   });
@@ -657,12 +672,24 @@ document.getElementById('panel').addEventListener('click', (event) => {
   if (!btn) return;
   const act = btn.getAttribute('data-act');
   const id = btn.getAttribute('data-id');
-  if (act === 'jump') {
+  if (act === 'lineagePage') {
+    if (btn.disabled || state.lineageLoading) return;
+    const offset = Number(id);
+    if (!Number.isSafeInteger(offset) || offset < 0) return;
+    if (state.lineage && state.lineage.pagination) {
+      vscode.postMessage({ type: 'lineagePage', offset });
+    } else {
+      state.lineageOffset = offset;
+      state.lineageAnchor = undefined;
+      render(true);
+      saveView();
+    }
+  } else if (act === 'jump') {
     const item = (state.inbox || [])[Number(btn.getAttribute('data-i'))];
     if (!item) return;
     if (item.tab) state.tab = item.tab;
     if (item.planId) state.selectedPlanId = item.planId;
-    vscode.setState({ tab: state.tab, selectedPlanId: state.selectedPlanId });
+    saveView();
     vscode.postMessage({
       type: 'openTab',
       tab: item.tab,
@@ -717,7 +744,7 @@ ${renderAttemptBlock.toString()}
 ${assignLanes.toString()}
 ${compactRails.toString()}
 ${renderRail.toString()}
-function render() {
+function render(resetScroll = false) {
   document.querySelectorAll('.tab').forEach(btn => btn.classList.toggle('active', btn.getAttribute('data-tab') === state.tab));
   const panel = document.getElementById('panel');
   // Poll pushes re-render wholesale; preserve the scroll position of the
@@ -736,10 +763,10 @@ function render() {
   else if (state.tab === 'memory') panel.innerHTML = memoryPanel();
   else if (state.tab === 'intelligence') panel.innerHTML = intelligencePanel();
   else panel.innerHTML = lineage();
-  panel.scrollTop = keepTop;
-  panel.scrollLeft = keepLeft;
+  panel.scrollTop = resetScroll ? 0 : keepTop;
+  panel.scrollLeft = resetScroll ? 0 : keepLeft;
   const newList = panel.querySelector('.list');
-  if (newList && (keepListTop || keepListLeft)) {
+  if (newList && !resetScroll && (keepListTop || keepListLeft)) {
     newList.scrollTop = keepListTop;
     newList.scrollLeft = keepListLeft;
   }
@@ -1027,19 +1054,43 @@ function lineage() {
   rails.forEach(rail => { railById[rail.rootId] = rail; });
   const a = state.rootA, b = state.rootB;
   const currentId = (state.lineage && state.lineage.trunk && state.lineage.trunk.tip) || (roots[0] && roots[0].id);
-  const left = roots.map(r => {
+  const page = state.lineage && state.lineage.pagination;
+  const size = page ? page.limit : 50;
+  const total = page ? page.total : roots.length;
+  let offset = page ? page.offset : Math.max(0, Number.isSafeInteger(state.lineageOffset) ? state.lineageOffset : 0);
+  if (!page && offset && state.lineageAnchor) {
+    const anchored = roots.findIndex(r => r.id === state.lineageAnchor);
+    if (anchored >= 0) offset = anchored;
+  }
+  if (page) state.lineageOffset = offset;
+  if (!page) {
+    offset = Math.min(offset, Math.floor(Math.max(0, total - 1) / size) * size);
+    state.lineageOffset = offset;
+    state.lineageAnchor = offset && roots[offset] ? roots[offset].id : undefined;
+  }
+  const visible = page ? roots : roots.slice(offset, offset + size);
+  const hasMore = offset + visible.length < total;
+  const navButton = (label, target, disabled) => '<button class="secondary" data-act="lineagePage" data-id="' + target + '"' + (disabled || state.lineageLoading ? ' disabled' : '') + '>' + label + '</button>';
+  const pager = total ? '<nav class="lineage-pagination" aria-label="Lineage history pages"><div class="muted" role="status">Roots ' + (offset + 1) + '–' + (offset + visible.length) + ' of ' + total + (state.lineageLoading ? ' · Loading…' : '') + '</div><div class="row">' +
+    navButton('First', 0, offset === 0) + navButton('Previous', Math.max(0, offset - size), offset === 0) +
+    navButton('Next', offset + size, !hasMore) + navButton('Last', Math.floor((total - 1) / size) * size, !hasMore) + '</div></nav>' : '';
+  const boundary = offset || hasMore ? '<div class="muted">Connections continue beyond this page.</div>' : '';
+  const pageError = state.lineageLoadError ? '<div class="warning" role="status">' + esc(state.lineageLoadError) + '</div>' : '';
+  const left = visible.map(r => {
     const hash = (r.id || '').slice(0, 12);
     const reason = clip(r.created_reason, 88);
     const meta = lineageMeta(r);
     const mark = r.id === currentId ? ' <span class="muted">current</span>' : '';
+    const rail = railById[r.id];
     return '<button class="item rail-row' + (r.id === a || r.id === b ? ' active' : '') + '" data-act="selectRoot" data-id="' + esc(r.id) + '">' +
-      renderRail(railById[r.id]) +
+      renderRail(rail) +
       '<span class="row-main"><div><code>' + esc(hash) + '</code>' + mark + '</div>' +
+      (rail && rail.label ? '<span class="muted rail-tip" title="' + esc(rail.node.title) + '">' + esc(rail.label) + '</span>' : '') +
       (reason ? '<div>' + esc(reason) + '</div>' : '') +
       (meta ? '<div class="muted">' + esc(meta) + '</div>' : '') +
       '</span></button>';
   }).join('') || '<div class="muted">No roots yet.</div>';
-  return graphStatus + '<div class="split"><div class="list">' + left + '</div><div class="col"><div class="muted">Select two roots (click twice). Receipt and fidelity inspect A without changing it.</div><div>A: <code title="' + esc(a||'') + '">' + esc((a||'').slice(0,12) || '—') + '</code> · B: <code title="' + esc(b||'') + '">' + esc((b||'').slice(0,12) || '—') + '</code></div><div class="row"><button data-act="compare">Compare</button><button class="secondary" data-act="receipt">Receipt</button><button class="secondary" data-act="fidelity">Fidelity</button><button class="secondary" data-act="openOriginal">Open original</button><button class="secondary" data-act="openSession">Session</button><button class="secondary" data-act="openEvent">Event</button><button class="secondary" data-act="diff">Open native diff</button><button class="secondary" data-act="revert">Restore</button><button class="secondary" data-act="startParallel">Start parallel work</button></div><pre class="pre">' + esc(state.compareText || '') + '</pre></div></div>';
+  return graphStatus + pageError + '<div class="split lineage-split"><div class="lineage-browser">' + pager + '<div class="list lineage-list">' + left + '</div>' + boundary + pager + '</div><div class="col"><div class="muted">Select two roots (click twice). Receipt and fidelity inspect A without changing it.</div><div>A: <code title="' + esc(a||'') + '">' + esc((a||'').slice(0,12) || '—') + '</code> · B: <code title="' + esc(b||'') + '">' + esc((b||'').slice(0,12) || '—') + '</code></div><div class="row"><button data-act="compare">Compare</button><button class="secondary" data-act="receipt">Receipt</button><button class="secondary" data-act="fidelity">Fidelity</button><button class="secondary" data-act="openOriginal">Open original</button><button class="secondary" data-act="openSession">Session</button><button class="secondary" data-act="openEvent">Event</button><button class="secondary" data-act="diff">Open native diff</button><button class="secondary" data-act="revert">Restore</button><button class="secondary" data-act="startParallel">Start parallel work</button></div><pre class="pre">' + esc(state.compareText || '') + '</pre></div></div>';
 }
 `;
   return shell(nonceVal, body, script);

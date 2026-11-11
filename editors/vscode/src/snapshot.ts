@@ -41,6 +41,7 @@ import type { PlanGraphView } from "./planGraph";
 
 export interface Snapshot {
   initialized: boolean;
+  projectPath?: string;
   now: {
     objective: string;
     task?: string;
@@ -70,6 +71,8 @@ export interface Snapshot {
   roots: RootManifest[];
   lineage?: LineageProjection;
   lineageUnavailable?: boolean;
+  lineageLoading?: boolean;
+  lineageLoadError?: string;
   work: ParallelWorkCard[];
   selectedForks: string[];
   /** Last prepared merge attempt for this project, if one was stored. */
@@ -98,6 +101,8 @@ export function snapshot(opts?: {
   liveDelegations?: DelegateListReport;
   lineage?: LineageProjection;
   lineageUnavailable?: boolean;
+  lineageLoading?: boolean;
+  lineageLoadError?: string;
   tab?: string;
   dismissedInbox?: string[];
   thisHarness?: string;
@@ -199,6 +204,7 @@ export function snapshot(opts?: {
   const selectedTodos = selectedPlanId ? bound.get(selectedPlanId) : undefined;
   return {
     initialized: true,
+    projectPath: root,
     now,
     emptyProject: !handoff && roots.length === 0 && !latestActivity,
     inbox,
@@ -221,6 +227,8 @@ export function snapshot(opts?: {
     roots,
     lineage: opts?.lineage,
     lineageUnavailable: opts?.lineageUnavailable,
+    lineageLoading: opts?.lineageLoading,
+    lineageLoadError: opts?.lineageLoadError,
     work: lineageWork,
     selectedForks: opts?.selectedForks || [],
     attempt: opts?.attempt,

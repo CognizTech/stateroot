@@ -282,6 +282,31 @@ test("compactRails follows the projection's root array order exactly — no re-s
   );
 });
 
+test("dense fork history preserves every connection without reserving its empty gutter on trunk rows", () => {
+  const tips = Array.from({ length: 60 }, (_, i) => root("tip-" + i, { parents: ["base"] }));
+  const proj = projection([
+    root("new", { mainline: true, parents: ["merge"] }),
+    root("merge", { mainline: true, parents: ["base", ...tips.map(r => r.id)] }),
+    ...tips,
+    root("base", { mainline: true, fork_point: true }),
+  ], tips.map((r, i) => fork("worker-" + i, r.id, "base", { contained: true })));
+  const rails = compactRails(proj);
+  assert.deepEqual(compactRails({ ...proj, roots: proj.roots.slice(20, 40), topology: proj.roots }), rails,
+    "metadata page boundaries never change connection topology");
+  const trunk = rail(rails, "new"), merge = rail(rails, "merge"), base = rail(rails, "base");
+  assert.equal(trunk.width, compactRails(projection([root("only", { mainline: true })]))[0].width,
+    "historical lanes leave no blank space beside a trunk-only row");
+  assert.equal(merge.diagonals.length, tips.length, "all merge parents retained");
+  assert.equal(base.diagonals.length, tips.length, "all branch connections retained");
+  assert.equal(merge.lanes.length, tips.length + 1);
+  assert.equal(trunk.layoutWidth, merge.layoutWidth, "rows use a common compression scale");
+  for (const entry of rails) {
+    for (const d of entry.diagonals) assert.ok(d.x2 < entry.width, "connector stays within its row rail");
+    assert.ok(renderRail(entry).includes('preserveAspectRatio="none"'));
+    assert.ok(renderRail(entry).includes('class="rail-marker"'), "node hit targets keep their physical size");
+  }
+});
+
 test("a row with no fork activity renders the plain trunk lane only", () => {
   const proj = projection(
     [

@@ -113,3 +113,39 @@ test("a running delegation marks the card running", () => {
   ]);
   assert.deepEqual(phases(cards), ["running"]);
 });
+
+
+test("lineage reader supports paged and legacy CLI responses without masking operational failures", async () => {
+  const cli = require("../out/cli");
+  const { readParallelWork } = require("../out/parallelWork");
+  const previousRun = cli.runCli, previousPath = cli.cliPath;
+  let binary = "legacy-page-test";
+  let calls = [];
+  const output = { appendLine() {} };
+  const full = lineageWith([]);
+  try {
+    cli.cliPath = () => binary;
+    cli.runCli = async args => {
+      calls.push(args);
+      if (args.includes("--limit")) throw new Error("error: unexpected argument '--limit' found");
+      return JSON.stringify(full);
+    };
+    assert.deepEqual(await readParallelWork("/project", output), full);
+    assert.equal(calls.length, 2);
+    await readParallelWork("/project", output, 50);
+    assert.deepEqual(calls.at(-1), ["log", "--json"]);
+    assert.equal(calls.length, 3, "old CLI capability is cached");
+    binary = "paged-page-test";
+    const paged = { ...full, topology: [], pagination: { schema_version: "stateroot.lineage.pagination.v1", offset: 0, limit: 50, total: 0, has_more: false, history: "empty" } };
+    cli.runCli = async args => { calls.push(args); return JSON.stringify(paged); };
+    assert.deepEqual(await readParallelWork("/project", output), paged);
+    assert.ok(calls.at(-1).includes("--limit"));
+    paged.pagination.total = 12;
+    assert.equal(await readParallelWork("/project", output), undefined, "invalid pages stay errors");
+    binary = "broken-page-test";
+    calls = [];
+    cli.runCli = async args => { calls.push(args); throw new Error("permission denied"); };
+    assert.equal(await readParallelWork("/project", output), undefined);
+    assert.equal(calls.length, 1, "real failures never trigger a legacy retry");
+  } finally { cli.runCli = previousRun; cli.cliPath = previousPath; }
+});

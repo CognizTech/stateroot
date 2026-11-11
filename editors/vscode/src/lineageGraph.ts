@@ -165,10 +165,12 @@ export interface CompactRailDiagonal {
 export interface CompactRail {
   rootId: string;
   width: number;
+  /** Shared coordinate extent keeps compressed lanes aligned across rows. */
+  layoutWidth: number;
   lanes: CompactRailLane[];
   node: CompactRailNode;
   diagonals: CompactRailDiagonal[];
-  /** Truncated fork name on tip rows when the tip's lane is the row's rightmost. */
+  /** Tip label displayed with the row text, outside the responsive rail. */
   label?: string;
 }
 
@@ -180,7 +182,7 @@ export interface CompactRail {
 export function compactRails(projection?: LineageProjection): CompactRail[] {
   const LANE_W = 10;
   const PAD = 4;
-  const roots = projection?.roots ?? [];
+  const roots = projection?.topology ?? projection?.roots ?? [];
   if (!roots.length) return [];
   const forks = projection?.forks ?? [];
   const { laneOf, laneNames, merges, chainOf, laneColor } = assignLanes(roots, forks);
@@ -247,7 +249,7 @@ export function compactRails(projection?: LineageProjection): CompactRail[] {
   }
 
   const maxLane = Math.max(0, ...spans.keys());
-  const baseWidth = Math.max(14, xAt(maxLane) + 6);
+  const layoutWidth = Math.max(14, xAt(maxLane) + 6);
 
   return roots.map((r, row) => {
     const lanes: CompactRailLane[] = [
@@ -277,27 +279,25 @@ export function compactRails(projection?: LineageProjection): CompactRail[] {
       title: fullName ? `${r.id} · ${fullName}` : r.id,
     };
     const diagonals = [...(mergeDiags.get(row) ?? []), ...(branchDiags.get(row) ?? [])];
-    const width = label ? Math.max(baseWidth, node.x + 8 + label.length * 6 + 4) : baseWidth;
-    return { rootId: r.id, width, lanes, node, diagonals, label };
+    // Only reserve the lanes present on this row, including branch diagonals.
+    // Historical forks must not leave an empty gutter beside newer trunk rows.
+    const width = Math.max(14, node.x + 6, ...lanes.map(l => l.x + 6), ...diagonals.map(d => d.x2 + 6));
+    return { rootId: r.id, width, layoutWidth, lanes, node, diagonals, label };
   });
 }
 
 /** One rail cell: full-height lane lines as flex divs plus a small
  * top-anchored SVG for the node marker and short diagonals — per-row
  * self-contained, so variable row heights and list scrolling never require
- * cross-row measurements. The node group carries data-act="showRoot". */
+ * cross-row measurements. All rows share a responsive coordinate scale, while
+ * node markers keep their physical size. The node group carries data-act="showRoot". */
 export function renderRail(rail?: CompactRail): string {
   if (!rail) return "";
   const CY = 9;
   const DIAG_BOTTOM = 26;
   const lines: string[] = [];
-  let prevX = 0;
-  let first = true;
   for (const lane of rail.lanes) {
-    const delta = first ? lane.x : lane.x - prevX - 2;
-    lines.push(`<div class="lane-line" style="margin-left:${delta}px;background:${lane.color}"></div>`);
-    prevX = lane.x;
-    first = false;
+    lines.push(`<div class="lane-line" style="left:${(lane.x + 1) / rail.width * 100}%;background:${lane.color}"></div>`);
   }
   const diagonals = rail.diagonals
     .map((d) =>
@@ -307,17 +307,19 @@ export function renderRail(rail?: CompactRail): string {
     )
     .join("");
   const n = rail.node;
-  const cx = n.x + 1;
+  const cx = 6;
   const marker =
     n.kind === "merge"
       ? `<circle cx="${cx}" cy="${CY}" r="5" fill="none" stroke="${n.color}" stroke-width="1.5"/><circle cx="${cx}" cy="${CY}" r="2.2" fill="none" stroke="${n.color}" stroke-width="1.5"/>`
       : n.forkPoint
         ? `<circle cx="${cx}" cy="${CY}" r="3" fill="none" stroke="${n.color}" stroke-width="1.5"/>`
         : `<circle cx="${cx}" cy="${CY}" r="3.2" fill="${n.color}"/>`;
-  const label = rail.label
-    ? `<text class="rail-label" x="${n.x + 8}" y="${CY + 3}"><title>${esc(n.title)}</title>${esc(rail.label)}</text>`
-    : "";
-  return `<span class="rail" style="width:${rail.width}px">${lines.join("")}<svg width="${rail.width}" height="${DIAG_BOTTOM}">${diagonals}<g class="node ${n.kind}" data-act="showRoot" data-id="${esc(rail.rootId)}"><title>${esc(n.title)}</title>${marker}</g>${label}</svg></span>`;
+  // Scale the rail to at most 35% of the list and 128px. Use the same scale
+  // even on sparse rows so connectors remain aligned across row boundaries.
+  const share = rail.width / rail.layoutWidth;
+  const width = `min(${rail.width}px, ${share * 35}cqw, ${share * 128}px)`;
+  const nodeLeft = (n.x + 1) / rail.width * 100;
+  return `<span class="rail" style="width:${width}">${lines.join("")}<svg class="rail-connectors" width="100%" height="${DIAG_BOTTOM}" viewBox="0 0 ${rail.width} ${DIAG_BOTTOM}" preserveAspectRatio="none">${diagonals}</svg><svg class="rail-marker" style="left:calc(${nodeLeft}% - 6px)" width="12" height="${DIAG_BOTTOM}"><g class="node ${n.kind}" data-act="showRoot" data-id="${esc(rail.rootId)}"><title>${esc(n.title)}</title>${marker}</g></svg></span>`;
 }
 
 export interface LineageGraphNode {

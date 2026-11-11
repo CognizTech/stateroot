@@ -224,3 +224,54 @@ test("render preserves panel scroll position across poll pushes", () => {
   assert.equal(panel.scrollTop, 480, "scrollTop preserved across re-render");
   assert.equal(listEl.scrollTop, 640, "inner .list scrollTop preserved across re-render");
 });
+
+
+test("lineage pages legacy history locally and keeps comparison selections across refresh and page boundaries", () => {
+  const { panel, posted, push } = loadWorkbench();
+  const roots = Array.from({ length: 103 }, (_, i) => ({ id: "root-" + i, mainline: true, parents: [] }));
+  const click = offset => panel.listeners.click({ target: { nodeType: 1, closest: () => ({
+    getAttribute: key => key === "data-act" ? "lineagePage" : key === "data-id" ? String(offset) : null,
+  }) } });
+  let html = push({ ...BASE, tab: "lineage", roots, rootA: "root-0", rootB: "root-102" });
+  assert.equal(occurrences(html, 'class="item rail-row'), 50);
+  assert.ok(html.includes('Roots 1–50 of 103'));
+  panel.scrollTop = 500;
+  click(50);
+  html = panel.innerHTML;
+  assert.equal(panel.scrollTop, 0, "explicit navigation starts at the new page top");
+  assert.ok(html.includes('Roots 51–100 of 103'));
+  assert.ok(html.includes('data-id="root-50"'));
+  assert.ok(!html.includes('data-act="selectRoot" data-id="root-0"'));
+  assert.ok(html.includes('title="root-0"') && html.includes('title="root-102"'), "cross-page selections remain usable");
+  html = push({ roots });
+  assert.ok(html.includes('Roots 51–100 of 103'), "poll preserves page");
+  html = push({ roots: [{ id: "inserted" }, ...roots] });
+  assert.ok(html.includes('Roots 52–101 of 104'), "new roots preserve the viewed anchor");
+  click(100);
+  assert.equal(occurrences(panel.innerHTML, 'class="item rail-row'), 4);
+  html = push({ roots: roots.slice(0, 1) });
+  assert.ok(html.includes('Roots 1–1 of 1'), "shrinking histories clamp safely");
+  assert.ok(!posted.some(msg => msg.type === "lineagePage"), "legacy pagination needs no CLI reads");
+});
+
+test("paged lineage requests metadata while retaining topology across page boundaries", () => {
+  const { panel, posted, push } = loadWorkbench();
+  const all = Array.from({ length: 52 }, (_, i) => ({ id: "r" + i, mainline: true, parents: i < 51 ? ["r" + (i + 1)] : [] }));
+  const lineage = { schema_version: "stateroot.lineage.v1", trunk: { tip: "r0" }, forks: [],
+    roots: all.slice(0, 50), topology: all,
+    pagination: { schema_version: "stateroot.lineage.pagination.v1", offset: 0, limit: 50, total: 52, has_more: true, history: "h1" } };
+  let html = push({ ...BASE, tab: "lineage", lineage });
+  assert.ok(html.includes('Roots 1–50 of 52'));
+  panel.listeners.click({ target: { nodeType: 1, closest: () => ({ getAttribute: key => key === "data-act" ? "lineagePage" : key === "data-id" ? "50" : null }) } });
+  assert.equal(posted.at(-1).type, "lineagePage");
+  assert.equal(posted.at(-1).offset, 50);
+  html = push({ lineageLoading: true });
+  assert.ok(html.includes("Loading…"));
+  html = push({ lineageLoading: false, lineage: { ...lineage, roots: all.slice(50), pagination: { ...lineage.pagination, offset: 50, has_more: false } } });
+  assert.equal(occurrences(html, 'class="item rail-row'), 2);
+  assert.ok(html.includes('Roots 51–52 of 52'));
+  assert.ok(html.includes('Connections continue beyond this page.'));
+  html = push({ lineageLoadError: "Page unavailable; retry navigation." });
+  assert.ok(html.includes("Page unavailable"));
+  assert.equal(occurrences(html, 'class="item rail-row'), 2, "failure retains the last good page");
+});

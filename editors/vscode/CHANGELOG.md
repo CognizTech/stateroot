@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.29
+
+- Lineage shows 50 roots per page with First, Previous, Next and Last controls.
+  Comparison selections survive navigation and refreshes.
+- Uses progressive metadata reads when the CLI supports them; existing CLIs
+  continue to work through local pagination of their full history response.
+- Dense fork histories keep readable cards and responsive connections without
+  empty historical-lane gutters or horizontal scrolling.
+
 ## 0.2.22
 
 - A full editor-event queue no longer silently loses a version's
