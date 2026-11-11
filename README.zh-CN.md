@@ -31,6 +31,8 @@ StateRoot 通过共享的工作知识与版本化项目状态，将 Claude Code�
   <a href="https://qm.qq.com/q/ZFoqWSP9yo"><img src="https://img.shields.io/badge/QQ-Join%20group-12B7F5?style=for-the-badge&logo=qq&logoColor=white&labelColor=0c1016" alt="加入 StateRoot QQ 群"></a>
 </p>
 
+日常使用请从[快速入门](https://stateroot.dev/docs/getting-started/quickstart)和[通过智能体工作](https://stateroot.dev/docs/guides/daily-workflow)开始。[内置 Skill](stateroot-cli/assets/stateroot-skill/SKILL.md)提供智能体的操作指引。
+
 ## 为什么选择 StateRoot
 
 每个模型都有适合自己的运行环境：Claude 擅长在 Claude Code 中工作，GPT 在 Codex 中发挥优势，DeepSeek 也有自己的选择。但每个运行环境都各自保存上下文，包括会话记录、规则、技能和计划。因此，现代 AI 工作中的常见情况，比如任务做到一半碰到用量上限、另一款工具推出了更好的模型，或者只想让昂贵模型负责规划，都会带来同一种隐性成本：重新解释项目、重新阅读代码、重新教智能体你的工作方式。
@@ -56,11 +58,11 @@ Claude Code ──→ 状态 A ──→ 状态 B
                              └── 恢复到更早的状态
 ```
 
-**委派（Delegate）。** `stateroot delegate --to codex --task "…"` 在另一个运行环境的 CLI 中执行范围明确的任务，携带完整项目上下文，限制委派深度，并记录状态谱系。父智能体收到结论，无需接收整个会话记录。
+**委派（Delegate）。** 请智能体把范围明确的任务交给另一个受支持的运行环境 CLI，携带完整项目上下文。委派深度受到限制，状态谱系会被记录。父智能体收到结论，无需接收整个会话记录。
 
-**分叉（Fork）。** `stateroot fork` 在 `refs/stateroot/forks/` 下创建内部状态引用；加上 `--worktree`，即可在受管理的本地区域创建独立工作树。多个智能体可以在同一项目的不同状态上并行工作，共享智能、独立执行。已保留的工作可以暂停并释放工作树，需要时重建同一分叉。你的 Git 分支不会被改动。
+**分叉（Fork）。** 需要并行执行时，请智能体创建独立的 StateRoot 分叉。每个物化后的分叉都有受管理的本地工作树和内部状态引用。多个智能体可以在同一项目的不同状态上并行工作，共享智能、独立执行。已保留的工作可以暂停并释放工作树，需要时重建同一分叉。你的 Git 分支不会被改动。
 
-**合并（Merge）。** `stateroot merge` 将各分叉的状态谱系合并回主线：每个分叉通过三方合并纳入累积结果，最后生成一个根状态，以主线和所有分叉的末端状态作为父节点。冲突按路径报告；已包含在现有结果中的分叉会报告无需合并。工作汇合后，其状态谱系仍然完整。
+**合并（Merge）。** 请负责协调的智能体审查并合并完成的分叉。StateRoot 将各分叉的状态谱系合并回主线：每个分叉通过三方合并纳入累积结果，最后生成一个根状态，以主线和所有分叉的末端状态作为父节点。冲突按路径报告；已包含在现有结果中的分叉会报告无需合并。工作汇合后，其状态谱系仍然完整。
 
 ```text
                     一个项目，三个分叉
@@ -84,7 +86,7 @@ Claude Code ──→ 状态 A ──→ 状态 B
 
 智能体启动时，StateRoot 会在 `## Needs Attention` 中提示到期工作和尚未处理的交接；同样的信息也会出现在 `stateroot status` 和编辑器扩展中。持久化的 `stateroot obligation` 待办事项可以跨运行环境延续，用户级 `stateroot service` 则在后台协调这些事项。本地连续性机制按确定性规则运行，无需内置 AI 智能体。
 
-计划需要通过显式执行 `stateroot plan done <id> --evidence "…"` 并提供完成凭据来关闭。即使计划关联的待办事项已经完成，StateRoot 仍会持续显示计划收尾提醒，直到智能体记录结果。[CLI 指南](docs/cli.md)介绍了持久待办、服务控制和计划生命周期。
+智能体通过显式完成凭据记录实际执行的检查，并关闭计划。待办事项完成不会自动关闭计划；StateRoot 会持续显示收尾提醒，直到结果被记录。你可以询问智能体尚未解决的事项，也可以在工作台查看。
 
 ## 原生运行环境保持原生
 
@@ -141,7 +143,7 @@ Git 为你主动创建的提交做版本管理。StateRoot 则在智能体工作
 
 每个快照都是完整、不可变、按内容寻址的状态。你可以精确恢复、从中安全分叉、如实比较任意两个状态，并查看状态之间变更的凭据。
 
-物化历史状态时，仍然遵循当前的 `.gitignore` 和 `.staterootignore` 排除规则。`stateroot doctor` 会分别报告当前根状态、元数据兼容性、捕获证据和恢复限制，以及一般安装健康状况。若需将一次命令执行记录关联到计划及符合条件的项目文件，可运行 `stateroot plan verify <id> -- <command> [args...]`；之后使用 `stateroot plan done <id> --evidence "…" --verification <observation-id>` 附上成功的执行记录。记录到命令执行成功，并不代表所有验收条件都已通过。具体范围见 [CLI 指南](docs/cli.md#optional-plan-command-observations-and-state-compatibility)。
+物化历史状态时，仍然遵循当前的 `.gitignore` 和 `.staterootignore` 排除规则。`stateroot doctor` 会分别报告当前根状态、元数据兼容性、捕获证据和恢复限制，以及一般安装健康状况。请智能体展示根状态比较，以及支持其完成结论的检查。可选的命令执行记录会关联到计划及符合条件的项目文件；记录到命令执行成功，并不代表所有验收条件都已通过。具体范围见 [CLI 指南](docs/cli.md#optional-plan-command-observations-and-state-compatibility)。
 
 恢复报告和摘要会注明信息来自哪里：**已验证（verified）**，来自 Git；**已观察（observed）**，来自会话记录；或**已综合（synthesized）**，来自 LLM。没有记录就保持为空。
 
@@ -194,24 +196,48 @@ stateroot init
 stateroot setup      # once per machine: identity, harnesses, skills
 ```
 
-照常在你常用的智能体中工作，会话钩子会注入摘要，无需手动粘贴内容。
+在项目中打开你常用的智能体，直接描述想完成的工作。StateRoot 安装的内置 Skill 会指导智能体保存进度并使用共享项目状态；受支持的会话钩子会自动提供接续摘要。
 
-**接下来体验它的价值：** 关闭当前智能体，在同一项目中打开另一个受支持的运行环境。会话开始时，它已经知道目标、计划、决策和下一步操作，无需重新解释，也无需从头重读代码库。
+第一次使用时，可以这样说：
+
+> 在这个项目中使用 StateRoot。先告诉我当前目标和下一步，再帮我完成任务。
+
+切换工具前，对当前智能体说：
+
+> 准备一份 StateRoot 交接，记录改了什么、验证了什么、还剩什么。我接下来会在 Codex 中继续。
+
+然后在同一项目中打开另一个受支持的智能体：
+
+> 从最新的 StateRoot 交接继续。开始之前，先说明当前进展。
+
+你负责指挥工作，智能体负责检查点、共享计划和交接。如果新智能体没有获得上下文，请让它加载 StateRoot Skill 并诊断集成。钩子支持取决于运行环境和使用界面；需要手动恢复时，Skill 会提供操作流程。
+
+### 通过智能体使用 StateRoot
+
+| 你的目标 | 可以对智能体说 |
+| --- | --- |
+| 在这里规划，在别处实施 | “把任务记录为共享 StateRoot 计划。我审核后，再由另一个智能体实施。” |
+| 委派一个明确任务 | “通过 StateRoot 把这项审查委派给 Codex，带回审查结果。” |
+| 并行推进工作 | “给这些独立任务各建一个 StateRoot fork，并跟踪每个智能体的进度。” |
+| 汇总结果 | “审查完成的 fork、解决冲突、执行相关检查，再合并接受的工作。” |
+| 恢复到之前的状态 | “先展示上一个良好根状态之后的变化，再恢复到那个状态。” |
+| 保留纠正意见 | “把这个偏好记录到 StateRoot，让其他智能体也遵循。” |
+
+这些是自然语言示例，不是固定提示词语法。跨运行环境执行需要目标智能体支持的 CLI 及可用账户。智能体应报告实际的交接、计划、fork 或验证结果，并明确说明阻塞和未完成事项。
+
+[用户指南](https://stateroot.dev/docs/guides/daily-workflow)介绍具体流程与结果判断方法。智能体遵循[内置 Skill](stateroot-cli/assets/stateroot-skill/SKILL.md)。
+
+### 自己查看进展
+
+编辑器工作台可以查看计划、智能体、共享知识和状态谱系。如果偏好终端，也可以手动检查：
 
 ```bash
-stateroot status
-stateroot log
-stateroot resume --harness cursor
-stateroot checkpoint --note "wired auth middleware — unblocks handlers" --files src/auth.rs
-stateroot handoff write --from cursor \
-  --objective "Ship local handoffs" \
-  --task "Finish adversarial CLI tests" \
-  --context-summary "Structured write path is in; remaining work is workspace checks."
+stateroot status     # 当前工作及需要关注的事项
+stateroot log        # 保留的项目历史
+stateroot doctor     # 安装健康状态及恢复诊断
 ```
 
-如果没有出现摘要，请使用你实际所在的运行环境标识（`claude`、`codex`、`cursor`、`kimi`、`openclaw`、`hermes`）运行 `stateroot resume --harness <id>`。直接读取完整输出，不要接 `| head` / `| tail` 等截断命令。完整摘要才是权威状态记录。
-
-操作指南：[快速入门](https://stateroot.dev/docs/getting-started/quickstart)。
+从[快速入门](https://stateroot.dev/docs/getting-started/quickstart)开始。完整 [CLI 参考](https://stateroot.dev/docs/reference/cli)供智能体、集成开发和直接操作使用。
 
 ### 添加或刷新编程智能体集成
 
@@ -235,7 +261,7 @@ Nightly 构建可从[滚动预览版](https://github.com/CognizTech/stateroot/re
 
 ## 支持的运行环境
 
-**钩子 + 会话记录：** Claude Code · Codex · Cursor · Kimi Code · CodeBuddy· OpenClaw · Hermes · Pi
+**钩子 + 会话记录：** Claude Code · Codex · Cursor · Kimi Code · CodeBuddy · OpenClaw · Hermes · Pi
 
 **会话记录 / 委派：** DeepSeek Harness · OpenCode · 安装时检测到的其他运行环境
 
@@ -248,11 +274,13 @@ Nightly 构建可从[滚动预览版](https://github.com/CognizTech/stateroot/re
 | 章节 | 内容 |
 | --- | --- |
 | [安装](https://stateroot.dev/docs/getting-started/installation) | Cursor、VS Code、Linux、Windows、macOS、源码构建 |
-| [快速入门](https://stateroot.dev/docs/getting-started/quickstart) | 初始化 → 设置 → 首次恢复上下文 |
+| [快速入门](https://stateroot.dev/docs/getting-started/quickstart) | 设置 → 首个任务 → 换一个智能体继续 |
+| [用户指南](https://stateroot.dev/docs/guides/daily-workflow) | 指挥智能体、审查结果、恢复和接续工作 |
 | [概念](https://stateroot.dev/docs/concepts/overview) | 根状态、连续性、身份、记忆、来源 |
-| [能力](https://stateroot.dev/docs/features/roots) | 状态谱系、交接、记忆、wiki、技能、MCP、规则 |
+| [能力详情](https://stateroot.dev/docs/features/roots) | 技术行为、限制与命令示例 |
 | [运行环境](https://stateroot.dev/docs/harnesses/overview) | 各工具的安装方式与协议 |
-| [CLI 参考](https://stateroot.dev/docs/reference/cli) | 所有命令 |
+| [智能体 Skill](stateroot-cli/assets/stateroot-skill/SKILL.md) | 安装给智能体的操作指引 |
+| [CLI 参考](https://stateroot.dev/docs/reference/cli) | 智能体及直接操作所需的完整命令 |
 | [MCP 工具](https://stateroot.dev/docs/reference/mcp-tools) | 本地 stdio 服务器 |
 
 机器可读索引：[stateroot.dev/llms.txt](https://stateroot.dev/llms.txt)。
@@ -270,10 +298,10 @@ Nightly 构建可从[滚动预览版](https://github.com/CognizTech/stateroot/re
 将 `.stateroot/` 提交到仓库后，项目的权威状态记录就能成为团队共享的资产。共享边界经过明确划分，便于合并：
 
 - **随仓库共享：** 目标与项目状态、计划、经验准则、规则、技能池、wiki 与记忆页面、交接历史、项目级 soul 覆盖层和状态转换记录。你的 persona 和 USER.md 保存在 `~/.stateroot/`，不会随仓库共享，因此每位成员都能保有自己智能体的个性。
-- **仅保留在本地**（初始化时写入 `.stateroot/.gitignore`）：搜索索引、捕获暂存区（spool）、委派记录、同步游标、核心记忆 `memories/MEMORY.md` 与 `memories/episodic.jsonl`（个人视角与私有日志；共享知识保存在 wiki 和经验准则中）、当前交接（用于当前会话连续性；历史会共享），以及 `roots/`。状态谱系通过 Git 本身传递：`git push origin 'refs/stateroot/*'`。
+- **仅保留在本地**（初始化时写入 `.stateroot/.gitignore`）：搜索索引、捕获暂存区（spool）、委派记录、同步游标、核心记忆 `memories/MEMORY.md` 与 `memories/episodic.jsonl`（个人视角与私有日志；共享知识保存在 wiki 和经验准则中）、当前交接（用于当前会话连续性；历史会共享），以及 `roots/`。如果团队成员需要保留的状态谱系，请让智能体单独传递。
 - 追加式日志通过 `.stateroot/.gitattributes` 按并集合并。如果某个应仅保留在本地的路径被 Git 跟踪，`stateroot doctor` 会发出提醒。
 
-团队成员的使用流程：克隆仓库，运行一次 `stateroot install`，打开任意运行环境。摘要已经包含目标、计划和项目积累的经验。
+团队成员的使用流程：克隆共享项目、完成机器设置，再在项目中打开受支持的智能体。请它先检查共享目标、计划和经验准则，再继续工作。[共享项目指南](https://stateroot.dev/docs/guides/sharing-a-project)介绍仓库共享与便携交换方式。
 
 ## 参与贡献
 

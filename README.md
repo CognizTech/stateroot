@@ -31,6 +31,8 @@ Memory, personality, rules, skills, tools, plans and hard-won learnings persist 
   <a href="https://qm.qq.com/q/ZFoqWSP9yo"><img src="https://img.shields.io/badge/QQ-Join%20group-12B7F5?style=for-the-badge&logo=qq&logoColor=white&labelColor=0c1016" alt="Join the StateRoot QQ group"></a>
 </p>
 
+For everyday use, start with the [Quickstart](https://stateroot.dev/docs/getting-started/quickstart) and [Working with your agents](https://stateroot.dev/docs/guides/daily-workflow). The [built-in Skill](stateroot-cli/assets/stateroot-skill/SKILL.md) carries the agent's operating instructions.
+
 ## Why StateRoot
 
 Every model wants its own harness — Claude works best in Claude Code, GPT in Codex, DeepSeek in its own. And every harness keeps its own context: its own transcripts, rules, skills, and plans. So the everyday moments of modern AI work — a usage limit hit mid-task, a better model launching in a rival tool, an expensive model you'd rather only plan with — all carry the same hidden tax: re-explaining the project, re-reading the codebase, re-teaching how you work.
@@ -56,11 +58,11 @@ Claude Code ──→ State A ──→ State B
                              └── restore an earlier state
 ```
 
-**Delegate.** `stateroot delegate --to codex --task "…"` runs a bounded task inside another harness CLI with full project context — depth-capped, lineage recorded. The parent gets the conclusion, not the transcript.
+**Delegate.** Ask your agent to give a bounded task to another supported harness CLI with full project context. Delegation is depth-capped and recorded in lineage. The parent gets the conclusion, not the transcript.
 
-**Fork.** `stateroot fork` creates an internal lineage ref under `refs/stateroot/forks/`; add `--worktree` to materialize an isolated checkout in the managed local area. Agents work in parallel on independent states of the same project — shared intelligence, independent execution. Park retained work and reopen the same fork when needed. Your Git branches are never touched.
+**Fork.** Ask for an independent StateRoot fork when work should run in parallel. Each materialized fork has an isolated checkout in the managed local area and an internal lineage ref. Agents work in parallel on independent states of the same project — shared intelligence, independent execution. Park retained work and reopen the same fork when needed. Your Git branches are never touched.
 
-**Merge.** `stateroot merge` folds fork lineages back into the trunk: each fork is 3-way-merged into the accumulated union and committed as one root with the trunk and every fork tip as parents. Conflicts are reported per path; contained forks report nothing-to-merge. The work converges with its lineage intact.
+**Merge.** Ask your coordinating agent to review and merge the completed forks. StateRoot folds their lineages back into the trunk: each fork is 3-way-merged into the accumulated union and committed as one root with the trunk and every fork tip as parents. Conflicts are reported per path; contained forks report nothing-to-merge. The work converges with its lineage intact.
 
 ```text
                     one project, three forks
@@ -84,7 +86,7 @@ Switch harnesses, change models, retire tools — the project, the persona, and 
 
 StateRoot surfaces due work and unfinished handoffs in `## Needs Attention` when an agent starts, in `stateroot status`, and in the editor extension. Durable `stateroot obligation` items carry follow-ups across harnesses; the per-user `stateroot service` reconciles them in the background. Local continuity is deterministic and runs without an AI agent of its own.
 
-Plans close with an explicit `stateroot plan done <id> --evidence "…"` receipt. When plan-bound todos finish, StateRoot keeps a completion obligation visible until the agent records the result. The [CLI guide](docs/cli.md) covers obligations, service controls, and plan lifecycle.
+Agents close plans with an explicit completion receipt and the checks actually performed. Finished todos alone do not close a plan; StateRoot keeps a completion obligation visible until the result is recorded. Ask your agent about unresolved items, or inspect them in the workbench.
 
 ## Native harnesses stay native
 
@@ -141,7 +143,7 @@ Git versions the commits you make. StateRoot snapshots the working tree during a
 
 Every snapshot is a complete, immutable, content-addressed state: restore it exactly, fork it safely, compare any two states honestly, and read the receipt of what changed between them.
 
-Current `.gitignore` and `.staterootignore` exclusions still apply when materializing an older state. `stateroot doctor` reports the current root, metadata compatibility, capture evidence, and restoration limits separately from general setup health. For an optional command observation tied to a plan and the eligible project files, run `stateroot plan verify <id> -- <command> [args...]`; attach a successful observation with `stateroot plan done <id> --evidence "…" --verification <observation-id>`. A recorded command result does not establish that every acceptance criterion passed. See the [CLI guide](docs/cli.md#optional-plan-command-observations-and-state-compatibility) for the exact scope.
+Current `.gitignore` and `.staterootignore` exclusions still apply when materializing an older state. `stateroot doctor` reports the current root, metadata compatibility, capture evidence, and restoration limits separately from general setup health. Ask your agent to show the root comparison and the checks supporting its completion claim. Optional command observations bind actual results to the plan and eligible project files; a recorded command result does not establish that every acceptance criterion passed. See the [CLI guide](docs/cli.md#optional-plan-command-observations-and-state-compatibility) for the exact scope.
 
 Restores and digests say where information came from: **verified** (Git), **observed** (transcripts), or **synthesized** (LLM). Empty stays empty.
 
@@ -194,24 +196,48 @@ stateroot init
 stateroot setup      # once per machine: identity, harnesses, skills
 ```
 
-Work in your usual agent. Session hooks inject a digest. You do not need to paste anything.
+Open your usual agent in this project and describe the work you want done. StateRoot's installed Skill tells the agent how to retain progress and use shared project state; supported session hooks supply the continuation brief automatically.
 
-**Then the aha:** close that agent and open any other supported harness in the same project. It starts the session already knowing the goal, the plan, the decisions, and the next actions — no re-explaining, no re-reading the codebase.
+For your first task, try:
+
+> Use StateRoot for this project. Tell me the current goal and next step, then help me finish the task.
+
+Before switching tools, tell that agent:
+
+> Prepare a StateRoot handoff with what changed, what was checked and what remains. I will continue in Codex.
+
+Then open the same project in the next supported agent and ask:
+
+> Continue from the latest StateRoot handoff. Explain where the work stands before proceeding.
+
+You direct the work; the agents handle checkpoints, shared plans and handoffs. If the new agent lacks context, ask it to load the StateRoot Skill and diagnose the integration. Native hook support varies by harness and interface; the Skill supplies the manual resume procedure where needed.
+
+### Work through your agents
+
+| What you want | What to ask your agent |
+| --- | --- |
+| Plan now, implement elsewhere | “Record a shared StateRoot plan for this task. I will review it before another agent implements it.” |
+| Delegate a bounded task | “Delegate this review to Codex through StateRoot and bring back its findings.” |
+| Work in parallel | “Give these independent tasks separate StateRoot forks. Track each agent's progress.” |
+| Bring the results together | “Review the completed forks, resolve conflicts, run the relevant checks and merge the accepted work.” |
+| Recover an earlier state | “Show what changed since the last good root and restore that state.” |
+| Carry a correction forward | “Remember this preference in StateRoot so the other agents follow it too.” |
+
+These are example requests, not special prompt syntax. Cross-harness execution requires the destination's supported CLI and account access. Your agent should report the actual handoff, plan, fork or verification result, including anything blocked or unfinished.
+
+The [human guide](https://stateroot.dev/docs/guides/daily-workflow) explains these workflows and how to recognize success. Agents follow the [built-in Skill](stateroot-cli/assets/stateroot-skill/SKILL.md).
+
+### Inspect the work yourself
+
+The editor workbench shows plans, agents, intelligence and lineage. If you prefer a terminal, these manual checks are useful:
 
 ```bash
-stateroot status
-stateroot log
-stateroot resume --harness cursor
-stateroot checkpoint --note "wired auth middleware — unblocks handlers" --files src/auth.rs
-stateroot handoff write --from cursor \
-  --objective "Ship local handoffs" \
-  --task "Finish adversarial CLI tests" \
-  --context-summary "Structured write path is in; remaining work is workspace checks."
+stateroot status     # current work and items needing attention
+stateroot log        # retained project history
+stateroot doctor     # setup health and restoration diagnostics
 ```
 
-If a digest did not appear, run `stateroot resume --harness <id>` with the harness you are actually in (`claude`, `codex`, `cursor`, `kimi`, `openclaw`, `hermes`). Run it unpiped — never `| head` / `| tail`. The full digest is the state of record.
-
-Walkthrough: [Quickstart](https://stateroot.dev/docs/getting-started/quickstart).
+Start with the [Quickstart](https://stateroot.dev/docs/getting-started/quickstart). The complete [CLI reference](https://stateroot.dev/docs/reference/cli) remains available for agents, integrations and direct use.
 
 ### Add or refresh coding-agent integrations
 
@@ -248,11 +274,13 @@ User docs live at **[stateroot.dev](https://stateroot.dev)**. This repository is
 | Section | Contents |
 | --- | --- |
 | [Install](https://stateroot.dev/docs/getting-started/installation) | Cursor, VS Code, Linux, Windows, macOS, from source |
-| [Quickstart](https://stateroot.dev/docs/getting-started/quickstart) | Init → setup → first resume |
+| [Quickstart](https://stateroot.dev/docs/getting-started/quickstart) | Setup → first task → continue in another agent |
+| [Human guide](https://stateroot.dev/docs/guides/daily-workflow) | Direct agents, review results, recover and continue |
 | [Concepts](https://stateroot.dev/docs/concepts/overview) | Roots, continuity, identity, memory, provenance |
-| [Capabilities](https://stateroot.dev/docs/features/roots) | Lineage, handoffs, memory, wiki, skills, MCP, rules |
+| [Capability details](https://stateroot.dev/docs/features/roots) | Technical behavior, limits and command examples |
 | [Harnesses](https://stateroot.dev/docs/harnesses/overview) | Per-tool install and protocol |
-| [CLI reference](https://stateroot.dev/docs/reference/cli) | Every command |
+| [Agent Skill](stateroot-cli/assets/stateroot-skill/SKILL.md) | Installed operating instructions for agents |
+| [CLI reference](https://stateroot.dev/docs/reference/cli) | Complete command surface for agents and direct use |
 | [MCP tools](https://stateroot.dev/docs/reference/mcp-tools) | Local stdio server |
 
 Machine-readable index: [stateroot.dev/llms.txt](https://stateroot.dev/llms.txt).
@@ -270,10 +298,10 @@ Details: [Privacy](https://stateroot.dev/docs/guides/privacy).
 Committing `.stateroot/` makes the project's state of record a team asset — and the boundary is deliberate so it merges cleanly:
 
 - **Travels with the repo:** goal and project state, plans, learnings, rules, the skill pool, wiki and memory pages, handoff history, the project soul overlay, transitions. Your persona and USER.md never travel — they live in `~/.stateroot/` by design, so every teammate keeps their own agent's personality.
-- **Stays local** (written to `.stateroot/.gitignore` at init): the search index, spool, delegations, sync cursors, the hot-apex `memories/MEMORY.md` and `memories/episodic.jsonl` (per-person lens and private journal — shared truth lives in the wiki and learnings), the current handoff (per-session continuity; history is shared), and `roots/` — lineage travels through Git itself: `git push origin 'refs/stateroot/*'`.
+- **Stays local** (written to `.stateroot/.gitignore` at init): the search index, spool, delegations, sync cursors, the hot-apex `memories/MEMORY.md` and `memories/episodic.jsonl` (per-person lens and private journal — shared truth lives in the wiki and learnings), the current handoff (per-session continuity; history is shared), and `roots/`. Ask your agent to transfer retained lineage separately when teammates need it.
 - Append-only journals merge by union via `.stateroot/.gitattributes`. `stateroot doctor` warns when a local-set path is tracked in git.
 
-A teammate's flow: clone, `stateroot install` once, open any harness — the digest already knows the goal, the plans, and every lesson the project has learned.
+A teammate's flow: clone the shared project, finish machine setup, then open a supported agent in the checkout. Ask it to inspect the shared goal, plans and learnings before continuing. See [Sharing a project](https://stateroot.dev/docs/guides/sharing-a-project) for repository and portable-exchange options.
 
 ## Contributing
 
