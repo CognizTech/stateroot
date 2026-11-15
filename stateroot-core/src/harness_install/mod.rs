@@ -576,8 +576,10 @@ pub fn install_quirk_full(home: &Path, quirk: &registry::HarnessQuirk, block: &s
     }
     if quirk.id == "dsh" {
         actions.push(
-            "delegation note: `dsh --profile headless` needs its own DEEPSEEK_API_KEY \
-             (the interactive web profile's login is not inherited)"
+            "delegation note: `dsh --profile headless` needs a provider credential DSH \
+             can resolve (its credential store, profile config, or DEEPSEEK_API_KEY in \
+             that process); the web profile's account session is not inherited. \
+             StateRoot's optional synthesis key reuses the DEEPSEEK_API_KEY name and is unrelated"
                 .to_string(),
         );
     }

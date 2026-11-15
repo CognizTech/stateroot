@@ -221,6 +221,9 @@ fn root_key_for_shape(shape: &str) -> Option<&'static str> {
 }
 
 fn read_servers(path: &Path, shape: &str) -> Result<BTreeMap<String, Value>, String> {
+    if shape == "cordis" {
+        return read_cordis_patch_servers(path);
+    }
     if shape == "mcp_servers" {
         let map = read_named_yaml_mcp_servers(path).map_err(|e| e.to_string())?;
         return Ok(map.into_iter().collect());
@@ -233,8 +236,8 @@ fn read_servers(path: &Path, shape: &str) -> Result<BTreeMap<String, Value>, Str
 /// Read MCP servers from DSH's home-level Cordis patch. DSH has no MCP JSON
 /// file: each server is an `- insert: [{id, name, config}]` entry whose
 /// `name` is `@deepseek-ai/dsh-mcp-client` and whose `config.serverName` is
-/// the model-facing namespace. Discovery only — the DSH installer owns
-/// writes through its marked block.
+/// the model-facing namespace. Strip native namespace/transport framing from
+/// pooled entries; the Cordis writer restores it at the destination.
 fn read_cordis_patch_servers(path: &Path) -> Result<BTreeMap<String, Value>, String> {
     let text = fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     if text.trim().is_empty() {
@@ -257,20 +260,62 @@ fn read_cordis_patch_servers(path: &Path) -> Result<BTreeMap<String, Value>, Str
             let Some(config) = entry.get("config") else {
                 continue;
             };
-            let value = serde_json::to_value(config).map_err(|e| e.to_string())?;
+            let mut value = serde_json::to_value(config).map_err(|e| e.to_string())?;
             let name = value
                 .get("serverName")
                 .and_then(|v| v.as_str())
                 .or_else(|| entry.get("id").and_then(|v| v.as_str()))
                 .unwrap_or("dsh-mcp")
                 .to_string();
+            normalize_cordis_entry(&mut value);
             out.insert(name, value);
         }
     }
     Ok(out)
 }
 
+fn normalize_cordis_entry(value: &mut Value) {
+    if let Some(config) = value.as_object_mut() {
+        config.remove("serverName");
+        if let Some(transport) = config.remove("transport") {
+            if transport.as_str() != Some("stdio") {
+                config.insert("type".into(), transport);
+            }
+        }
+    }
+}
+
+fn cordis_config(name: &str, entry: &Value) -> Result<Value, String> {
+    if name.is_empty()
+        || name.len() > 32
+        || !name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+    {
+        return Err(
+            "DSH requires server names of 1-32 letters, digits, underscores or hyphens".into(),
+        );
+    }
+    let transport = match classify_mcp_transport(entry) {
+        TransportHint::Stdio => "stdio",
+        TransportHint::StreamableHttp | TransportHint::HttpUrl => "streamable-http",
+        hint => return Err(format!("DSH does not support transport {}", hint.as_str())),
+    };
+    let mut config = entry
+        .as_object()
+        .cloned()
+        .ok_or("MCP entry is not an object")?;
+    config.remove("type");
+    config.insert("transport".into(), json!(transport));
+    config.insert("serverName".into(), json!(name));
+    Ok(Value::Object(config))
+}
+
 fn write_server(path: &Path, shape: &str, name: &str, entry: &Value) -> Result<bool, String> {
+    if shape == "cordis" {
+        return harness_install::dsh::merge_mcp_server(path, name, &cordis_config(name, entry)?)
+            .map_err(|error| error.to_string());
+    }
     if shape == "mcp_servers" {
         return merge_named_yaml_mcp_entry(path, name, entry).map_err(|e| e.to_string());
     }
@@ -370,7 +415,9 @@ fn collect_targets_with(
     let mut out = Vec::new();
     for entry in &reg.harnesses {
         for target in &entry.mcp_config.global {
-            let path = if entry.id == "codebuddy" {
+            let path = if entry.id == "dsh" {
+                crate::harness_install::dsh::patch_path(home)
+            } else if entry.id == "codebuddy" {
                 crate::harness_install::paths::resolve_registry_path(home, &entry.id, &target.path)
             } else {
                 expand_home_relative(&target.path, home)
@@ -449,9 +496,31 @@ pub fn discover_all(
                 continue;
             }
         };
-        for (name, entry) in servers {
+        let pool = (target.shape == "cordis")
+            .then(|| load_store(&canonical_path(&home, project_dir, &scope)));
+        let ledger = (target.shape == "cordis")
+            .then(|| load_ledger(&projections_path(&home, project_dir, &scope)));
+        for (name, mut entry) in servers {
             if is_reserved_mcp_key(&name) {
                 continue;
+            }
+            // Native framing can add an explicit HTTP transport to a URL-only
+            // pool entry. Recognize our exact ledger-bound projection instead
+            // of reimporting that framing as a conflicting foreign revision.
+            if let (Some(pool), Some(ledger)) = (&pool, &ledger) {
+                let key = ledger_key(&scope, &harness, &path, &name);
+                if harness_install::dsh::pooled_mcp_owned(&path, &name)
+                    && ledger.entries.get(&key) == Some(&entry_digest(&entry))
+                {
+                    if let Some(server) = pool.servers.get(&name) {
+                        if let Ok(mut projected) = cordis_config(&name, &server.entry) {
+                            normalize_cordis_entry(&mut projected);
+                            if projected == entry {
+                                entry = server.entry.clone();
+                            }
+                        }
+                    }
+                }
             }
             let digest = entry_digest(&entry);
             let transport_hint = classify_mcp_transport(&entry);
@@ -467,35 +536,6 @@ pub fn discover_all(
             });
         }
     }
-    // DSH keeps MCP servers in its Cordis home patch rather than a JSON
-    // config; include them as discovery origins. `mcp sync` does not write
-    // this file — the DSH installer owns its managed block.
-    let dsh_patch = crate::harness_install::paths::dsh_root(&home).join("cordis.patch.yml");
-    if dsh_patch.is_file() {
-        match read_cordis_patch_servers(&dsh_patch) {
-            Ok(servers) => {
-                for (name, entry) in servers {
-                    if is_reserved_mcp_key(&name) {
-                        continue;
-                    }
-                    let digest = entry_digest(&entry);
-                    let transport_hint = classify_mcp_transport(&entry);
-                    found.push(DiscoveredMcpServer {
-                        name,
-                        entry,
-                        entry_digest: digest,
-                        origin_harness: "dsh".into(),
-                        origin_path: dsh_patch.display().to_string(),
-                        scope: "global".into(),
-                        shape: "cordis".into(),
-                        transport_hint,
-                    });
-                }
-            }
-            Err(err) => tracing::warn!("mcp federation: skip dsh patch: {err}"),
-        }
-    }
-
     found.sort_by(|a, b| {
         (
             a.scope.as_str(),
@@ -647,12 +687,30 @@ fn project_store(
             let Some(existing) = existing else {
                 continue;
             };
+            let mut projected_entry = server.entry.clone();
+            if target.shape == "cordis" {
+                match cordis_config(name, &server.entry) {
+                    Ok(mut config) => {
+                        normalize_cordis_entry(&mut config);
+                        projected_entry = config;
+                    }
+                    Err(error) => {
+                        actions.push(SyncAction {
+                            action: "unsupported".into(),
+                            name: name.clone(),
+                            detail: format!("{harness} → {}: {error}", path.display()),
+                        });
+                        continue;
+                    }
+                }
+            }
+            let projected_digest = entry_digest(&projected_entry);
             let key = ledger_key(scope, harness, path, name);
             let managed_digest = ledger.entries.get(&key).cloned();
             match existing.get(name) {
-                Some(current) if entry_digest(current) == server.entry_digest => {
+                Some(current) if entry_digest(current) == projected_digest => {
                     if !dry_run {
-                        ledger.entries.insert(key, server.entry_digest.clone());
+                        ledger.entries.insert(key, projected_digest.clone());
                     }
                     actions.push(SyncAction {
                         action: "unchanged".into(),
@@ -662,7 +720,9 @@ fn project_store(
                 }
                 Some(current) => {
                     let current_digest = entry_digest(current);
-                    if managed_digest.as_deref() == Some(current_digest.as_str()) {
+                    let owned = target.shape != "cordis"
+                        || harness_install::dsh::pooled_mcp_owned(path, name);
+                    if owned && managed_digest.as_deref() == Some(current_digest.as_str()) {
                         if dry_run {
                             actions.push(SyncAction {
                                 action: "would_update".into(),
@@ -671,7 +731,7 @@ fn project_store(
                             });
                         } else {
                             write_server(path, &target.shape, name, &server.entry)?;
-                            ledger.entries.insert(key, server.entry_digest.clone());
+                            ledger.entries.insert(key, projected_digest.clone());
                             actions.push(SyncAction {
                                 action: "updated".into(),
                                 name: name.clone(),
@@ -698,7 +758,7 @@ fn project_store(
                         });
                     } else {
                         write_server(path, &target.shape, name, &server.entry)?;
-                        ledger.entries.insert(key, server.entry_digest.clone());
+                        ledger.entries.insert(key, projected_digest.clone());
                         actions.push(SyncAction {
                             action: "projected".into(),
                             name: name.clone(),
@@ -1107,10 +1167,98 @@ mod tests {
         assert_eq!(github.origin_harness, "dsh");
         assert_eq!(github.shape, "cordis");
         assert_eq!(github.transport_hint, TransportHint::Stdio);
+        assert!(github.entry.get("serverName").is_none());
+        assert!(github.entry.get("transport").is_none());
         assert!(
             found.iter().all(|s| s.name != "stateroot"),
             "reserved key must be filtered from the canonical catalog"
         );
+    }
+
+    #[test]
+    fn dsh_pool_projection_roundtrips_and_preserves_operator_configuration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        fs::create_dir_all(home.join(".dsh")).unwrap();
+        fs::create_dir_all(home.join(".cursor")).unwrap();
+        let patch = harness_install::dsh::patch_path(home);
+        let operator = "# operator bytes stay here\n- insert:\n  - id: mine\n    name: '@deepseek-ai/dsh-mcp-client'\n    config:\n      transport: stdio\n      serverName: native\n      command: native-cli\n";
+        fs::write(&patch, operator).unwrap();
+        fs::write(
+            home.join(".cursor/mcp.json"),
+            json!({"mcpServers": {
+                "github": {"command": "npx", "args": ["github-mcp"]},
+                "remote": {"url": "https://example.com/mcp", "headers": {"X-Test": "value"}},
+                "legacy": {"type": "sse", "url": "https://example.com/sse"}
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        let options = SyncOptions {
+            pull: true,
+            push: true,
+            cmd_probe: Some(vec![]),
+            ..Default::default()
+        };
+        let actions = sync(Some(home), None, &options).unwrap();
+        assert!(actions
+            .iter()
+            .any(|a| a.action == "projected" && a.name == "github" && a.detail.starts_with("dsh")));
+        assert!(actions
+            .iter()
+            .any(|a| a.action == "unsupported" && a.name == "legacy"));
+        let text = fs::read_to_string(&patch).unwrap();
+        assert!(text.starts_with(operator));
+        let servers = read_cordis_patch_servers(&patch).unwrap();
+        assert_eq!(
+            servers["github"],
+            json!({"command": "npx", "args": ["github-mcp"]})
+        );
+        assert_eq!(servers["remote"]["type"], "streamable-http");
+        assert_eq!(servers["remote"]["headers"]["X-Test"], "value");
+        let cursor = read_servers(&home.join(".cursor/mcp.json"), "mcpServers").unwrap();
+        assert_eq!(cursor["native"], json!({"command": "native-cli"}));
+        // Projection framing must not create a new pool collision next pass.
+        let again = sync(Some(home), None, &options).unwrap();
+        assert!(!again.iter().any(|a| a.action == "collision"));
+        assert_eq!(fs::read_to_string(&patch).unwrap(), text);
+
+        // A reviewed pool update may refresh our own block through the ledger.
+        let mut pool = load_store(&canonical_path(home, None, "global"));
+        let server = pool.servers.get_mut("github").unwrap();
+        server.entry["args"] = json!(["new-version"]);
+        server.entry_digest = entry_digest(&server.entry);
+        let mut ledger = load_ledger(&projections_path(home, None, "global"));
+        let updated =
+            project_store(&pool, &mut ledger, home, None, "global", false, Some(&[])).unwrap();
+        assert!(updated
+            .iter()
+            .any(|a| a.action == "updated" && a.detail.starts_with("dsh")));
+        assert_eq!(
+            read_cordis_patch_servers(&patch).unwrap()["github"]["args"],
+            json!(["new-version"])
+        );
+        // Exact marker lines keep a new `git` entry separate from `github`.
+        let mut short = pool.servers["github"].clone();
+        short.entry["args"] = json!(["short-name"]);
+        short.entry_digest = entry_digest(&short.entry);
+        pool.servers.insert("git".into(), short);
+        project_store(&pool, &mut ledger, home, None, "global", false, Some(&[])).unwrap();
+        let servers = read_cordis_patch_servers(&patch).unwrap();
+        assert_eq!(servers["git"]["args"], json!(["short-name"]));
+        assert_eq!(servers["github"]["args"], json!(["new-version"]));
+
+        // Native edits defeat the old ownership digest; never overwrite them.
+        let edited = fs::read_to_string(&patch)
+            .unwrap()
+            .replace("command: npx", "command: operator-edit");
+        fs::write(&patch, &edited).unwrap();
+        let conflicts =
+            project_store(&pool, &mut ledger, home, None, "global", false, Some(&[])).unwrap();
+        assert!(conflicts
+            .iter()
+            .any(|a| a.action == "conflict" && a.name == "github" && a.detail.starts_with("dsh")));
+        assert_eq!(fs::read_to_string(&patch).unwrap(), edited);
     }
 
     #[test]

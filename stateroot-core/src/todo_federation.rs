@@ -534,7 +534,7 @@ fn cursor_merge_flag(input: &Value) -> bool {
 pub fn harness_has_sources(harness: &str) -> bool {
     matches!(
         harness,
-        "cursor" | "claude" | "claude-code" | "codebuddy" | "kimi" | "kimi-code" | "codex"
+        "cursor" | "claude" | "claude-code" | "codebuddy" | "kimi" | "kimi-code" | "codex" | "dsh"
     )
 }
 
@@ -547,8 +547,102 @@ pub fn sync_from(home: &Path, project_dir: &Path, harness: &str) -> TodoSyncRepo
         "codebuddy" => sync_codebuddy(home, project_dir),
         "kimi" | "kimi-code" => sync_kimi(home, project_dir),
         "codex" => sync_codex(home, project_dir),
+        "dsh" => sync_dsh(home, project_dir),
         _ => TodoSyncReport::default(),
     }
+}
+
+fn sync_dsh(home: &Path, project_dir: &Path) -> TodoSyncReport {
+    let mut report = TodoSyncReport::default();
+    let (plain, compressed) = crate::transcripts::dsh::session_files(home);
+    for path in plain.iter().chain(&compressed) {
+        let Some(raw) = crate::transcripts::dsh::parse_session_file(path) else {
+            report
+                .notes
+                .push(format!("dsh: unreadable session {}", path.display()));
+            continue;
+        };
+        let Some(cwd) = raw.header.get("cwd").and_then(Value::as_str) else {
+            continue;
+        };
+        if !crate::transcripts::cwd_matches(cwd, project_dir) {
+            continue;
+        }
+        let Some(session_id) = raw.header.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(event) = raw
+            .events
+            .iter()
+            .rev()
+            .find(|event| event.get("type").and_then(Value::as_str) == Some("todo/write"))
+        else {
+            continue;
+        };
+        let Some(todos) = event.pointer("/data/todos").and_then(Value::as_array) else {
+            report
+                .notes
+                .push(format!("dsh/{session_id}: malformed todo snapshot"));
+            continue;
+        };
+        let items: Option<Vec<TodoItem>> = todos
+            .iter()
+            .map(|item| {
+                let content = item.get("content")?.as_str()?.to_string();
+                Some(TodoItem {
+                    key: content.clone(),
+                    content,
+                    status: normalize_status(item.get("status")?.as_str()?),
+                })
+            })
+            .collect();
+        let Some(items) = items else {
+            report.notes.push(format!(
+                "dsh/{session_id}: malformed todo item (retained prior list)"
+            ));
+            continue;
+        };
+        let plan_id = bound_plan_id(project_dir, "dsh", session_id);
+        if load_record(project_dir, "dsh", session_id)
+            .is_some_and(|record| record.items == items && record.plan_id == plan_id)
+        {
+            continue;
+        }
+        let mut record = TodoRecord {
+            schema_version: SCHEMA_TODO_V1.into(),
+            harness: "dsh".into(),
+            session_id: session_id.into(),
+            plan_id,
+            items,
+            updated_at: event
+                .get("time")
+                .and_then(Value::as_i64)
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .map(|time| time.to_rfc3339())
+                .unwrap_or_else(now_rfc3339),
+            provenance: format!("observed · {}", path.display()),
+        };
+        // A torn/corrupt tail may omit a newer whole-list write. Retain the
+        // last accepted list rather than replacing it with an older prefix.
+        if let Some(previous) = load_record(project_dir, "dsh", session_id) {
+            if (raw.torn || raw.truncated) && previous.updated_at > record.updated_at {
+                report.notes.push(format!(
+                    "dsh/{session_id}: incomplete source (retained newer list)"
+                ));
+                continue;
+            }
+            if previous.items == record.items {
+                record.updated_at = previous.updated_at;
+            }
+        }
+        match write_record(project_dir, &record) {
+            Ok(_) => report
+                .written
+                .push(format!("dsh/{session_id} ({} items)", record.items.len())),
+            Err(error) => report.notes.push(error),
+        }
+    }
+    report
 }
 
 fn sync_cursor_standalone(home: &Path, project_dir: &Path) -> TodoSyncReport {
@@ -1126,6 +1220,99 @@ mod tests {
         let tmp = tempfile::tempdir().expect("project");
         crate::local_store::init_skeleton(tmp.path(), "p", "n", "default").expect("init");
         tmp
+    }
+
+    #[test]
+    fn dsh_todos_use_latest_project_scoped_snapshot_and_verified_binding() {
+        let home = tempfile::tempdir().unwrap();
+        let project = project();
+        let dir = home.path().join(".dsh/sessions/workspace/s1");
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("s1.jsonl");
+        let seed = |cwd: &Path, todos: Value| {
+            let rows = [
+                serde_json::json!({"type": "session", "version": 4, "id": "s1", "cwd": cwd}),
+                serde_json::json!({"type": "todo/write", "seq": 0, "time": 1000, "data": {"todos": [{"content": "old", "status": "pending"}]}}),
+                serde_json::json!({"type": "todo/write", "seq": 1, "time": 2000, "data": {"todos": todos}}),
+            ];
+            std::fs::write(
+                &source,
+                rows.iter().map(|r| format!("{r}\n")).collect::<String>(),
+            )
+            .unwrap();
+        };
+        seed(
+            home.path(),
+            serde_json::json!([{ "content": "foreign", "status": "pending" }]),
+        );
+        assert!(sync_from(home.path(), project.path(), "dsh")
+            .written
+            .is_empty());
+        seed(
+            project.path(),
+            serde_json::json!([{ "content": "check result", "status": "completed" }]),
+        );
+        assert_eq!(
+            sync_from(home.path(), project.path(), "dsh").written.len(),
+            1
+        );
+        let record = load_record(project.path(), "dsh", "s1").unwrap();
+        assert_eq!(record.items[0].content, "check result");
+        assert_eq!(record.items[0].status, "completed");
+        assert!(record.plan_id.is_none(), "wording never invents a binding");
+        assert!(sync_from(home.path(), project.path(), "dsh").is_quiet());
+        let plan = plans::record(project.path(), "DSH work", "codex", None, "# Work\n").unwrap();
+        plans::transition(project.path(), &plan.id, PlanStatus::Approved).unwrap();
+        record_binding(project.path(), "dsh", "s1", &plan.id, "verified delivery").unwrap();
+        assert_eq!(
+            sync_from(home.path(), project.path(), "dsh").written.len(),
+            1
+        );
+        assert_eq!(
+            load_record(project.path(), "dsh", "s1")
+                .unwrap()
+                .plan_id
+                .as_deref(),
+            Some(plan.id.as_str())
+        );
+        // Empty is a real replacement, not absence of source.
+        seed(project.path(), serde_json::json!([]));
+        assert_eq!(
+            sync_from(home.path(), project.path(), "dsh").written.len(),
+            1
+        );
+        assert!(load_record(project.path(), "dsh", "s1")
+            .unwrap()
+            .items
+            .is_empty());
+        // An incomplete list cannot erase the last accepted snapshot.
+        seed(project.path(), serde_json::json!([{ "status": "pending" }]));
+        assert!(!sync_from(home.path(), project.path(), "dsh")
+            .notes
+            .is_empty());
+        assert!(load_record(project.path(), "dsh", "s1")
+            .unwrap()
+            .items
+            .is_empty());
+        seed(
+            project.path(),
+            serde_json::json!([{ "content": "compressed", "status": "in_progress" }]),
+        );
+        let bytes = std::fs::read(&source).unwrap();
+        std::fs::write(
+            source.with_extension("jsonl.zstd"),
+            zstd::stream::encode_all(bytes.as_slice(), 1).unwrap(),
+        )
+        .unwrap();
+        std::fs::remove_file(&source).unwrap();
+        assert_eq!(
+            sync_from(home.path(), project.path(), "dsh").written.len(),
+            1
+        );
+        assert_eq!(
+            load_record(project.path(), "dsh", "s1").unwrap().items[0].content,
+            "compressed"
+        );
     }
 
     const FRONTMATTER: &str = r#"---

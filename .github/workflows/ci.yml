@@ -74,6 +74,15 @@ jobs:
 
       # git2 is built with vendored libgit2 (workspace feature
       # `vendored-libgit2`), so no system libgit2 is needed on either OS.
+      - uses: actions/setup-node@v4
+        if: matrix.shard == 'core'
+        with:
+          node-version: 20
+
+      - name: DSH plugin behavior
+        if: matrix.shard == 'core'
+        run: node --test stateroot-core/src/harness_install/dsh/hooks.test.mjs
+
       - name: fmt
         if: matrix.shard == 'core'
         run: cargo fmt --all -- --check

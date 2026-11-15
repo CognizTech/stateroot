@@ -102,6 +102,61 @@ fn kimi_plan_paths(home: &Path, project_dir: &Path) -> Vec<PathBuf> {
     paths.into_iter().rev().take(1).collect()
 }
 
+/// DSH plan mode does not write plan files: `exit_plan_mode` carries the
+/// complete markdown plan in its tool arguments, and the session log is the
+/// durable artifact. Read those calls back for sessions bound to this project.
+fn dsh_plan_candidates(home: &Path, project_dir: &Path) -> Vec<(String, String)> {
+    let (plain, zstd) = crate::transcripts::dsh::session_files(home);
+    let mut out = Vec::new();
+    for file in plain.iter().chain(zstd.iter()) {
+        let Some(raw) = crate::transcripts::dsh::parse_session_file(file) else {
+            continue;
+        };
+        let session_id = raw
+            .header
+            .get("id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("session");
+        let cwd = raw
+            .header
+            .get("cwd")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        if !crate::transcripts::cwd_matches(cwd, project_dir) {
+            continue;
+        }
+        for event in &raw.events {
+            if event.get("type").and_then(|value| value.as_str()) != Some("tool/call") {
+                continue;
+            }
+            let Some(data) = event.get("data") else {
+                continue;
+            };
+            if data.get("name").and_then(|value| value.as_str()) != Some("exit_plan_mode") {
+                continue;
+            }
+            let Some(arguments) = data.get("arguments").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let Ok(arguments) = serde_json::from_str::<Value>(arguments) else {
+                continue;
+            };
+            let Some(plan) = arguments.get("plan").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            if plan.trim().is_empty() {
+                continue;
+            }
+            let call = data
+                .get("callId")
+                .and_then(|value| value.as_str())
+                .unwrap_or("plan");
+            out.push((format!("dsh:{session_id}#{call}"), plan.to_string()));
+        }
+    }
+    out
+}
+
 fn codebuddy_plan_path(value: &Value) -> Option<PathBuf> {
     value
         .get("planFilePath")
@@ -290,8 +345,8 @@ fn hash(text: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// Plan title: frontmatter `name:`, else the first heading, else the file stem.
-fn plan_title(file: &Path, text: &str) -> String {
+/// Plan title: frontmatter `name:`, else the first heading, else `fallback`.
+fn title_from_text(text: &str, fallback: &str) -> String {
     let mut in_frontmatter = false;
     let mut frontmatter_done = false;
     for line in text.lines() {
@@ -320,10 +375,17 @@ fn plan_title(file: &Path, text: &str) -> String {
             }
         }
     }
-    file.file_stem()
+    fallback.to_string()
+}
+
+/// Plan title for a native plan file.
+fn plan_title(file: &Path, text: &str) -> String {
+    let fallback = file
+        .file_stem()
         .and_then(|s| s.to_str())
         .map(|s| s.trim_end_matches(".plan").to_string())
-        .unwrap_or_else(|| "harness plan".to_string())
+        .unwrap_or_else(|| "harness plan".to_string());
+    title_from_text(text, &fallback)
 }
 
 /// One pass over a harness's native plan dirs into this project's store.
@@ -503,6 +565,50 @@ pub fn sync_from(home: &Path, project_dir: &Path, harness: &str) -> PlanSyncRepo
             }
         }
     }
+    if harness == "dsh" {
+        for (key, text) in dsh_plan_candidates(home, project_dir) {
+            let file_hash = hash(&text);
+            let title = title_from_text(&text, "dsh plan");
+            match state.files.get(&key) {
+                None => match crate::plans::record(project_dir, &title, "dsh", Some(&key), &text) {
+                    Ok(meta) => {
+                        report
+                            .ingested
+                            .push(format!("{title} → {} (draft)", meta.id));
+                        state.files.insert(
+                            key,
+                            SeenFile {
+                                hash: file_hash,
+                                plan_id: meta.id,
+                            },
+                        );
+                    }
+                    Err(err) => report.notes.push(format!("{title}: record failed: {err}")),
+                },
+                Some(seen) if seen.hash == file_hash => {}
+                Some(seen) => match crate::plans::update_draft_body(
+                    project_dir,
+                    &seen.plan_id,
+                    &text,
+                    "native plan edited — body refreshed",
+                ) {
+                    Ok(_) => {
+                        report.updated.push(format!("{title} → {}", seen.plan_id));
+                        state.files.insert(
+                            key,
+                            SeenFile {
+                                hash: file_hash,
+                                plan_id: seen.plan_id.clone(),
+                            },
+                        );
+                    }
+                    Err(err) => report
+                        .notes
+                        .push(format!("{title}: {err} (left alone — it is owned now)")),
+                },
+            }
+        }
+    }
     state.last_run = chrono::Utc::now().to_rfc3339();
     save_state(project_dir, &state);
     let todos = crate::todo_federation::sync_from(home, project_dir, harness);
@@ -573,7 +679,7 @@ pub fn maybe_auto(
     interval_mins: i64,
 ) -> Option<PlanSyncReport> {
     if plan_dirs(home, harness).is_empty()
-        && !matches!(harness, "kimi" | "kimi-code")
+        && !matches!(harness, "kimi" | "kimi-code" | "dsh")
         && !crate::todo_federation::harness_has_sources(harness)
     {
         return None;
@@ -746,6 +852,64 @@ mod tests {
         assert_eq!(report.ingested.len(), 1);
         // Interval gate: an immediate second pass is silent.
         assert!(maybe_auto(home.path(), project.path(), "cursor", 15).is_none());
+    }
+
+    fn seed_dsh_plan(home: &Path, cwd: &Path, id: &str, plan: &str) -> PathBuf {
+        let dir = home.join(format!(".dsh/sessions/--tmp-dsh--/{id}"));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("session.jsonl");
+        let header = serde_json::json!({
+            "type": "session",
+            "version": 4,
+            "id": id,
+            "createdAt": 1,
+            "cwd": cwd.to_string_lossy(),
+        });
+        let arguments = serde_json::json!({ "plan": plan }).to_string();
+        let call = serde_json::json!({
+            "type": "tool/call",
+            "seq": 0,
+            "time": 1,
+            "data": {
+                "turn": 1,
+                "step": 1,
+                "callId": "c1",
+                "name": "exit_plan_mode",
+                "arguments": arguments,
+            },
+        });
+        std::fs::write(&path, format!("{header}\n{call}\n")).expect("write");
+        path
+    }
+
+    #[test]
+    fn dsh_exit_plan_mode_lands_as_draft_and_refreshes() {
+        let home = tempfile::tempdir().expect("home");
+        let project = project();
+        let other = tempfile::tempdir().expect("other");
+        seed_dsh_plan(
+            home.path(),
+            other.path(),
+            "foreign",
+            "# Foreign\n\nnot ours\n",
+        );
+        seed_dsh_plan(home.path(), project.path(), "s1", "# DSH Plan\n\nBody A\n");
+
+        let report = sync_from(home.path(), project.path(), "dsh");
+        assert_eq!(report.ingested.len(), 1, "only this project's session");
+        let (meta, _) = crate::plans::current(project.path()).expect("draft plan");
+        assert_eq!(meta.created_by_harness, "dsh");
+        assert_eq!(meta.status, "draft");
+
+        let again = sync_from(home.path(), project.path(), "dsh");
+        assert!(again.ingested.is_empty() && again.updated.is_empty());
+
+        seed_dsh_plan(home.path(), project.path(), "s1", "# DSH Plan\n\nBody B\n");
+        let edited = sync_from(home.path(), project.path(), "dsh");
+        assert_eq!(edited.updated.len(), 1);
+        let (_, body_path) = crate::plans::load(project.path(), &meta.id).expect("load");
+        let body = std::fs::read_to_string(body_path).expect("body");
+        assert!(body.contains("Body B"));
     }
 
     #[test]

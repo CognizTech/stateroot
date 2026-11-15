@@ -1349,15 +1349,35 @@ cordis plugin and a home-level patch entry instead:
 
 `stateroot mcp scan` also reads DSH's `@deepseek-ai/dsh-mcp-client` patch
 entries as discovery origins (for example `github @ dsh`); `mcp sync` pulls
-them into the canonical store but never writes into the installer-owned
-patch block.
+them into the canonical store and projects pooled global servers into separate
+marked entries. Operator entries and the installer-owned lifecycle block stay
+intact. Projection uses DSH's native stdio and Streamable HTTP transports;
+unsupported transports or server names are reported, not silently converted.
+
+`session sync --harness dsh` reads v0 and v4 sessions, including default zstd
+artifacts. DSH plan-mode plans (`exit_plan_mode`) federate into the central
+store as drafts from the session log. Native `todo/write` snapshots federate
+as session lists, including explicit clearing; only verified session-to-plan
+bindings supply plan links. DSH has no native memory file: its
+sessions reach recall through the canonical store, and curated
+memory/learnings arrive in the digest.
+
+The bridge retries failed identity delivery and consumes prompt fallback
+output. Compaction recovery is awaited before the next model step, including
+within a turn. Tool observations retain full payloads and native call IDs,
+queue under load, and finish before stop/finalization. Hook failures appear
+in DSH's log. Installer read/validation errors preserve existing configuration;
+successful edits use atomic file replacement.
 
 `dsh --profile <name> --dump-config` shows the composed entries. Delegation
 uses `dsh --profile headless --approval-policy never`, and handoff/resume
 accept `dsh` as a first-class harness id. The shipped `headless` profile is
-separate from the interactive `web` profile: it needs its own provider
-credentials (`DEEPSEEK_API_KEY` in the delegated process, or the profile's
-credentials configuration) before `delegate --to dsh` can answer.
+separate from the interactive `web` profile: DSH must be able to resolve a
+provider credential there (its credential store, profile configuration, or
+`DEEPSEEK_API_KEY` in the delegated process); the `web` profile's account
+session is not inherited. StateRoot's optional local synthesis compiler also
+reads `DEEPSEEK_API_KEY`, but that is an unrelated use and is not required
+for install or setup.
 
 ## `stateroot doctor` — hook-binary health
 

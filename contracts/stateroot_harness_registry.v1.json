@@ -1478,7 +1478,9 @@
         "native_sessions"
       ],
       "mcp_config": {
-        "global": [],
+        "global": [
+          { "path": ".dsh/cordis.patch.yml", "shape": "cordis" }
+        ],
         "project": []
       }
     }

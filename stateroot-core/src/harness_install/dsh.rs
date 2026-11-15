@@ -127,10 +127,24 @@ fn render_block(command: &Path) -> Result<String, HarnessError> {
 
 /// Byte range of the managed block, markers included.
 fn block_range(text: &str) -> Option<(usize, usize)> {
-    let start = text.find(MANAGED_BEGIN)?;
-    let after_start = start + MANAGED_BEGIN.len();
-    let relative_end = text[after_start..].find(MANAGED_END)?;
-    let end = after_start + relative_end + MANAGED_END.len();
+    block_range_for(text, MANAGED_BEGIN, MANAGED_END)
+}
+
+fn block_range_for(text: &str, begin: &str, end: &str) -> Option<(usize, usize)> {
+    fn marker_offset(text: &str, marker: &str) -> Option<usize> {
+        let mut offset = 0;
+        for line in text.split_inclusive('\n') {
+            if line.trim_end_matches(['\r', '\n']) == marker {
+                return Some(offset);
+            }
+            offset += line.len();
+        }
+        None
+    }
+    let start = marker_offset(text, begin)?;
+    let after_start = start + begin.len();
+    let relative_end = marker_offset(&text[after_start..], end)?;
+    let end = after_start + relative_end + end.len();
     Some((start, end))
 }
 
@@ -151,21 +165,62 @@ pub fn strip_managed_block(text: &str) -> String {
 
 /// Replace or append the managed block in a patch document.
 fn upsert_block(existing: &str, block: &str) -> String {
-    if let Some((start, end)) = block_range(existing) {
-        let before = existing[..start].trim_end_matches(['\r', '\n']);
-        let after = existing[end..].trim_start_matches(['\r', '\n']);
-        return match (before.is_empty(), after.is_empty()) {
-            (true, true) => format!("{block}\n"),
-            (true, false) => format!("{block}\n\n{after}\n"),
-            (false, true) => format!("{before}\n\n{block}\n"),
-            (false, false) => format!("{before}\n\n{block}\n\n{after}\n"),
-        };
+    upsert_named_block(existing, block, MANAGED_BEGIN, MANAGED_END)
+}
+
+fn upsert_named_block(existing: &str, block: &str, begin: &str, end: &str) -> String {
+    if let Some((start, end)) = block_range_for(existing, begin, end) {
+        return format!("{}{block}{}", &existing[..start], &existing[end..]);
     }
     let trimmed = existing.trim();
     if trimmed.is_empty() || trimmed == "[]" || trimmed == "---\n[]" {
         return format!("{block}\n");
     }
     format!("{}\n\n{block}\n", existing.trim_end_matches(['\r', '\n']))
+}
+
+fn pooled_markers(name: &str) -> (String, String) {
+    (
+        format!("# >>> stateroot pooled MCP {name}"),
+        format!("# <<< stateroot pooled MCP {name}"),
+    )
+}
+
+pub(crate) fn pooled_mcp_owned(path: &Path, name: &str) -> bool {
+    let (begin, end) = pooled_markers(name);
+    read_optional(path).is_ok_and(|text| block_range_for(&text, &begin, &end).is_some())
+}
+
+/// Project one pooled server without reserializing operator entries or the
+/// separate lifecycle-plugin block. Ownership is checked by MCP federation.
+pub(crate) fn merge_mcp_server(
+    path: &Path,
+    name: &str,
+    config: &serde_json::Value,
+) -> Result<bool, HarnessError> {
+    let existing = read_optional(path)?;
+    let (begin, end) = pooled_markers(name);
+    let entries = vec![insert_entry(
+        &format!("stateroot-pooled-{name}"),
+        "@deepseek-ai/dsh-mcp-client",
+        Some(
+            serde_yaml::to_value(config)
+                .map_err(|error| HarnessError::Invalid(error.to_string()))?,
+        ),
+    )];
+    let body = serde_yaml::to_string(&entries)
+        .map_err(|error| HarnessError::Invalid(error.to_string()))?;
+    let block = format!("{begin}\n{}{end}", body);
+    let next = upsert_named_block(&existing, &block, &begin, &end);
+    validate_patch(path, &next)?;
+    if next == existing {
+        return Ok(false);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(io_err(parent))?;
+    }
+    crate::safe_io::atomic_replace(path, next.as_bytes()).map_err(io_err(path))?;
+    Ok(true)
 }
 
 fn validate_patch(path: &Path, text: &str) -> Result<(), HarnessError> {
@@ -185,12 +240,25 @@ fn validate_patch(path: &Path, text: &str) -> Result<(), HarnessError> {
     }
 }
 
+fn read_optional(path: &Path) -> Result<String, HarnessError> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(io_err(path)(error)),
+    }
+}
+
 /// Install/refresh the plugin file and both patch entries. Returns action lines.
 pub fn install(home: &Path, command: &Path) -> Result<Vec<String>, HarnessError> {
     let mut actions = Vec::new();
 
     let plugin = plugin_path(home);
-    let current_plugin = std::fs::read_to_string(&plugin).unwrap_or_default();
+    let current_plugin = read_optional(&plugin)?;
+    let path = patch_path(home);
+    let existing = read_optional(&path)?;
+    let block = render_block(command)?;
+    let next = upsert_block(&existing, &block);
+    validate_patch(&path, &next)?;
     if current_plugin == PLUGIN_SOURCE {
         actions.push(format!(
             "hook plugin already up to date ({})",
@@ -200,15 +268,11 @@ pub fn install(home: &Path, command: &Path) -> Result<Vec<String>, HarnessError>
         if let Some(parent) = plugin.parent() {
             std::fs::create_dir_all(parent).map_err(io_err(parent))?;
         }
-        std::fs::write(&plugin, PLUGIN_SOURCE).map_err(io_err(&plugin))?;
+        crate::safe_io::atomic_replace(&plugin, PLUGIN_SOURCE.as_bytes())
+            .map_err(io_err(&plugin))?;
         actions.push(format!("hook plugin → {}", plugin.display()));
     }
 
-    let path = patch_path(home);
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let block = render_block(command)?;
-    let next = upsert_block(&existing, &block);
-    validate_patch(&path, &next)?;
     if next == existing {
         actions.push(format!(
             "hooks + MCP already configured ({})",
@@ -218,7 +282,7 @@ pub fn install(home: &Path, command: &Path) -> Result<Vec<String>, HarnessError>
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(io_err(parent))?;
         }
-        std::fs::write(&path, next).map_err(io_err(&path))?;
+        crate::safe_io::atomic_replace(&path, next.as_bytes()).map_err(io_err(&path))?;
         actions.push(format!("hooks + MCP → {}", path.display()));
     }
     Ok(actions)
@@ -229,7 +293,8 @@ pub fn uninstall(home: &Path) -> Result<Vec<String>, HarnessError> {
     let mut actions = Vec::new();
 
     let path = patch_path(home);
-    if let Ok(existing) = std::fs::read_to_string(&path) {
+    let existing = read_optional(&path)?;
+    if !existing.is_empty() {
         let stripped = strip_managed_block(&existing);
         if stripped != existing {
             let next = if stripped.trim().is_empty() {
@@ -238,7 +303,7 @@ pub fn uninstall(home: &Path) -> Result<Vec<String>, HarnessError> {
                 stripped
             };
             validate_patch(&path, &next)?;
-            std::fs::write(&path, next).map_err(io_err(&path))?;
+            crate::safe_io::atomic_replace(&path, next.as_bytes()).map_err(io_err(&path))?;
             actions.push(format!("hooks + MCP removed → {}", path.display()));
         }
     }
@@ -319,7 +384,7 @@ mod tests {
         assert!(patch.contains("@deepseek-ai/dsh-mcp-client"));
         assert!(patch.contains("serverName: stateroot"));
         assert!(patch.contains("mcp-stdio"));
-        assert!(patch.contains("/opt/stateroot/bin/stateroot"));
+        assert!(patch.contains(command.to_string_lossy().as_ref()));
 
         let parsed: serde_yaml::Value = serde_yaml::from_str(&patch).expect("valid yaml");
         assert!(parsed.is_sequence());
@@ -430,20 +495,24 @@ mod tests {
     }
 
     #[test]
-    fn plugin_source_forwards_every_boundary() {
-        for event in [
-            "session_start",
-            "user_prompt_submit",
-            "post_tool_use",
-            "tool_failure",
-            "stop",
-            "post_compaction",
-            "session_end",
-        ] {
-            assert!(PLUGIN_SOURCE.contains(event), "plugin must forward {event}");
+    fn failed_patch_reads_and_validation_preserve_existing_files() {
+        for original in [b"# operator\n\xff".as_slice(), b"not-a-patch: true\n"] {
+            let home = temp_home();
+            let path = patch_path(home.path());
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, original).unwrap();
+            assert!(install(home.path(), Path::new("stateroot")).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+            assert!(
+                !plugin_path(home.path()).exists(),
+                "validate before editing"
+            );
         }
-        assert!(PLUGIN_SOURCE.contains("agent/pre-step"));
-        assert!(PLUGIN_SOURCE.contains("compaction/end"));
-        assert!(PLUGIN_SOURCE.contains("session/disposed"));
+        let home = temp_home();
+        let path = patch_path(home.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"\xff").unwrap();
+        assert!(uninstall(home.path()).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), b"\xff");
     }
 }

@@ -10,10 +10,8 @@ import { randomUUID } from 'node:crypto'
 
 export const name = 'stateroot'
 
-/** Hard ceiling on concurrent background hook processes. */
+/** Bound processes, not captured events: excess work waits for a slot. */
 const MAX_INFLIGHT = 8
-/** Cap for tool payloads forwarded to the observation store (characters). */
-const TOOL_PAYLOAD_MAX = 8000
 
 function commandOf(config) {
   if (typeof config?.command === 'string' && config.command.trim() !== '') return config.command
@@ -21,16 +19,6 @@ function commandOf(config) {
     return process.env.STATEROOT_BIN
   }
   return process.platform === 'win32' ? 'stateroot.cmd' : 'stateroot'
-}
-
-function bounded(value, limit) {
-  try {
-    const text = typeof value === 'string' ? value : JSON.stringify(value)
-    if (typeof text !== 'string') return undefined
-    return text.length <= limit ? text : `${text.slice(0, limit)}…[truncated]`
-  } catch {
-    return undefined
-  }
 }
 
 function frozenMessage(text) {
@@ -52,69 +40,104 @@ export function apply(ctx, config = {}) {
   const harness = 'dsh'
   const started = new WeakSet()
   const reanchor = new WeakMap()
+  const captures = new WeakMap()
+  const waiters = []
   let inflight = 0
+
+  const acquire = () => new Promise((resolve) => {
+    if (inflight < MAX_INFLIGHT) {
+      inflight += 1
+      resolve()
+    } else waiters.push(resolve)
+  })
+  const release = () => {
+    const next = waiters.shift()
+    if (next) next()
+    else inflight -= 1
+  }
 
   /**
    * Run one StateRoot hook. Never throws: a missing binary, timeout, or abort
    * resolves to an empty string and leaves a warning in the DSH log.
    * @returns the hook's stdout (the digest when the event delivers one).
    */
-  const invoke = (event, payload, options = {}) =>
-    new Promise((resolve) => {
-      let settled = false
-      const finish = (value) => {
-        if (settled) return
-        settled = true
-        resolve(value)
-      }
-      if (!options.await && inflight >= MAX_INFLIGHT) {
-        finish('')
-        return
-      }
-      inflight += 1
-      let child
-      try {
-        child = execFile(
-          command,
-          ['hook', event, '--harness', harness],
-          {
-            cwd: typeof payload?.cwd === 'string' && payload.cwd !== '' ? payload.cwd : undefined,
-            timeout: options.timeout ?? 12000,
-            windowsHide: true,
-            maxBuffer: 8 * 1024 * 1024,
-          },
-          (error, stdout) => {
-            inflight -= 1
-            if (error && options.report) {
-              ctx.logger?.warn?.(`stateroot ${event}: ${error.message}`)
-            }
-            finish(error ? '' : String(stdout ?? ''))
-          },
-        )
-      } catch (error) {
-        inflight -= 1
-        ctx.logger?.warn?.(`stateroot ${event}: ${error?.message ?? error}`)
-        finish('')
-        return
-      }
-      if (options.signal) {
-        const abort = () => {
-          try {
-            child.kill()
-          } catch {
-            // the child already exited
-          }
-          finish('')
+  const invoke = async (event, payload, options = {}) => {
+    await acquire()
+    try {
+      return await new Promise((resolve) => {
+        let settled = false
+        let abort
+        const finish = (value) => {
+          if (settled) return
+          settled = true
+          if (abort) options.signal.removeEventListener('abort', abort)
+          resolve(value)
         }
-        if (options.signal.aborted) abort()
-        else options.signal.addEventListener('abort', abort, { once: true })
-      }
-      try {
-        child.stdin.end(JSON.stringify(payload ?? {}))
-      } catch {
-        // stdin may already be closed when the spawn failed fast
-      }
-    })
+        if (options.signal?.aborted) {
+          ctx.logger?.warn?.(`stateroot ${event}: aborted before delivery`)
+          finish('')
+          return
+        }
+        let child
+        try {
+          child = execFile(
+            command,
+            ['hook', event, '--harness', harness],
+            {
+              cwd: typeof payload?.cwd === 'string' && payload.cwd !== '' ? payload.cwd : undefined,
+              timeout: options.timeout ?? 12000,
+              windowsHide: true,
+              maxBuffer: 8 * 1024 * 1024,
+            },
+            (error, stdout, stderr) => {
+              if (String(stderr ?? '').trim() !== '') {
+                ctx.logger?.warn?.(`stateroot ${event}: ${String(stderr).trim()}`)
+              }
+              if (error) {
+                ctx.logger?.warn?.(`stateroot ${event}: ${error.message}`)
+              }
+              finish(error ? '' : String(stdout ?? ''))
+            },
+          )
+        } catch (error) {
+          ctx.logger?.warn?.(`stateroot ${event}: ${error?.message ?? error}`)
+          finish('')
+          return
+        }
+        if (options.signal) {
+          abort = () => {
+            try {
+              child.kill()
+            } catch {
+              // the child already exited
+            }
+            ctx.logger?.warn?.(`stateroot ${event}: aborted before delivery`)
+          }
+          if (options.signal.aborted) abort()
+          else options.signal.addEventListener('abort', abort, { once: true })
+        }
+        child.stdin.on('error', (error) => {
+          ctx.logger?.warn?.(`stateroot ${event}: ${error.message}`)
+        })
+        try {
+          child.stdin.end(JSON.stringify(payload ?? {}))
+        } catch (error) {
+          ctx.logger?.warn?.(`stateroot ${event}: cannot forward payload: ${error.message}`)
+          child.kill()
+        }
+      })
+    } finally {
+      release()
+    }
+  }
+
+  // Each session's boundary waits for every observation already submitted.
+  const capture = (session, event, payload, options = {}) => {
+    const previous = captures.get(session) ?? Promise.resolve()
+    const pending = previous.then(() => invoke(event, payload, options))
+    captures.set(session, pending)
+    return pending
+  }
 
   const payloadFor = (session, event) => ({
     session_id: String(session?.id ?? ''),
@@ -128,30 +151,34 @@ export function apply(ctx, config = {}) {
     const decision = await next()
     if (decision.kind === 'reject') return decision
     const { agent, messages, step, signal } = payload
-    if (step !== 1) return decision
     const session = agent?.session
     const cwd = session?.header?.cwd
     if (!cwd) return decision
 
     let text = ''
     const stashed = reanchor.get(session)
-    if (typeof stashed === 'string' && stashed.trim() !== '') {
-      text = stashed.trim()
-      reanchor.delete(session)
-      started.add(session)
-    } else if (!started.has(session)) {
-      started.add(session)
+    if (stashed) {
+      text = (await stashed).trim()
+      if (reanchor.get(session) === stashed) reanchor.delete(session)
+      started.delete(session)
+    }
+    if (text === '' && !started.has(session)) {
       text = (await invoke('session_start', payloadFor(session, 'SessionStart'), {
         signal,
         timeout: 60000,
-        report: true,
-        await: true,
       })).trim()
     }
-    void invoke('user_prompt_submit', payloadFor(session, 'UserPromptSubmit'), {
-      timeout: 10000,
-    })
+    if (step === 1) {
+      const fallback = (await capture(session, 'user_prompt_submit', {
+        ...payloadFor(session, 'UserPromptSubmit'),
+        prompt: messages.filter(message => message.role === 'user')
+          .flatMap(message => message.content ?? [])
+          .filter(part => part.type === 'text').map(part => part.text).join('\n'),
+      }, { timeout: 10000 })).trim()
+      if (fallback !== '') text = fallback
+    }
     if (text === '') return decision
+    started.add(session)
     const message = frozenMessage(text)
     const last = decision.messages.findLastIndex((candidate) => messages.includes(candidate))
     return { ...decision, messages: decision.messages.toSpliced(last + 1, 0, message) }
@@ -163,13 +190,15 @@ export function apply(ctx, config = {}) {
     const cwd = session?.header?.cwd
     if (!cwd) return
     const event = result?.isError ? 'tool_failure' : 'post_tool_use'
-    void invoke(
+    void capture(
+      session,
       event,
       {
         ...payloadFor(session, 'PostToolUse'),
         tool_name: exec.name,
+        tool_call_id: exec.callId,
         tool_input: exec.arguments,
-        tool_response: bounded(result, TOOL_PAYLOAD_MAX),
+        tool_response: result,
       },
       { timeout: 8000 },
     )
@@ -180,29 +209,20 @@ export function apply(ctx, config = {}) {
     const session = agent?.session
     const cwd = session?.header?.cwd
     if (!cwd) return
-    await invoke('stop', payloadFor(session, 'Stop'), {
+    await capture(session, 'stop', payloadFor(session, 'Stop'), {
       timeout: 60000,
-      report: true,
-      await: true,
     })
   })
 
-  // Compaction invalidates prior identity: capture the bounded re-anchor now
-  // and inject it on the next model step. An empty digest re-arms a full one.
+  // Store the promise immediately so the next step waits for re-anchoring,
+  // including compaction between steps of the same turn.
   ctx.on('session/event', (session, event) => {
     if (event?.type !== 'compaction/end') return
     const cwd = session?.header?.cwd
     if (!cwd) return
-    void invoke('post_compaction', payloadFor(session, 'PostCompact'), {
+    reanchor.set(session, capture(session, 'post_compaction', payloadFor(session, 'PostCompact'), {
       timeout: 30000,
-    }).then((text) => {
-      if (text.trim() !== '') {
-        reanchor.set(session, text.trim())
-        started.add(session)
-      } else {
-        started.delete(session)
-      }
-    })
+    }))
   })
 
   // Session teardown finalizes continuity best-effort; the turn stop already
@@ -210,6 +230,6 @@ export function apply(ctx, config = {}) {
   ctx.on('session/disposed', (session) => {
     const cwd = session?.header?.cwd
     if (!cwd) return
-    void invoke('session_end', payloadFor(session, 'SessionEnd'), { timeout: 30000 })
+    return capture(session, 'session_end', payloadFor(session, 'SessionEnd'), { timeout: 30000 })
   })
 }

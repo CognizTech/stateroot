@@ -1,6 +1,6 @@
 # Harness Install Layout
 
-`stateroot skill install --harness H` (also run by `stateroot init`) writes the per-harness stubs from `assets/` into the project. Harness identifiers are lowercase; the server-side canonical set includes `planner`, `cursor`, `codex`, `kimi`, `opencode`, `hermes`, `openclaw`, `statesmith`, and others in the harness registry contract.
+`stateroot skill install --harness H` (also run by `stateroot init`) writes the per-harness stubs from `assets/` into the project. Harness identifiers are lowercase; the server-side canonical set includes `planner`, `cursor`, `codex`, `kimi`, `opencode`, `hermes`, `openclaw`, `dsh`, `statesmith`, and others in the harness registry contract.
 
 After upgrading the CLI, run `stateroot install` (machine hooks/plugins) **and** `stateroot skill install` (project stubs) so identity injection stays current.
 
@@ -20,6 +20,7 @@ Automatic harnesses inject persona + USER.md + work context onto the first usabl
 | Antigravity | Automatic | `SessionStart` injects via the `injectSteps`/`systemMessage` envelope; on hosts that never fire `SessionStart`, the first-seen `PreInvocation` delivers once — at any invocation number |
 | Hermes | Automatic | Native YAML shell hooks in `~/.hermes/config.yaml`; `pre_llm_call` injects `{context: digest}` into the turn's user message |
 | VS Code Copilot | Automatic | Session-start inject via `additionalContext`; one `~/.copilot/hooks` file serves VS Code + Copilot CLI |
+| DeepSeek Harness | Automatic | Generated cordis plugin injects via `agent/pre-step`; turn stop checkpoints, compaction re-anchors |
 | Crush, Zero, ChatGPT Dot | Degraded | No verified injection — run `stateroot resume` |
 
 `stateroot doctor` prints each detected harness's honest tier.
@@ -52,6 +53,18 @@ Automatic harnesses inject persona + USER.md + work context onto the first usabl
 - Plans and todos: session-attributed `planFilePath` files under `.codebuddy/plans/` enter the central store as drafts; current per-session task files under `.codebuddy/tasks/` federate without inventing plan links.
 - Memory: global and native-session-linked project auto-memory plus project team memory are imported. `--push` writes the managed project brief to `.codebuddy/rules/stateroot.md`, including current learnings.
 - Delegation: `stateroot delegate --to codebuddy --task "…"` uses `codebuddy --print` with the registry's non-interactive permission policy.
+
+## DeepSeek Harness
+
+- Hooks: no hook config file exists. `stateroot install` writes a dependency-free cordis plugin at `$DSH_HOME/stateroot/hooks.mjs` and merges a marked block into `$DSH_HOME/cordis.patch.yml` — the home-level patch layer applied to every profile. The block inserts the plugin (`stateroot-hooks`) and an `@deepseek-ai/dsh-mcp-client` instance (`stateroot-mcp`).
+- Delivery: the plugin injects the digest through the `agent/pre-step` waterfall, retries failed delivery and consumes prompt fallback output. Compaction recovery is awaited on the next model step, including within a turn. Full tool observations queue with native call IDs; turn stop and session finalization wait for submitted captures. Failures appear in DSH's log. `stateroot resume --harness dsh` remains the fallback.
+- Instruction: `$DSH_HOME/AGENTS.md` is DSH's user-global instruction file, read before workspace files.
+- MCP: the patch entry runs `stateroot mcp-stdio`; no npm install is needed because `@deepseek-ai/dsh-mcp-client` resolves from DSH's installation scope. `stateroot mcp scan` reads DSH's own mcp-client patch entries; sync projects pooled global servers into separate owned entries, preserving operator configuration and reporting conflicts. Native transports are stdio and Streamable HTTP; unsupported transports/names are reported explicitly.
+- Sessions: `stateroot session sync --harness dsh` reads v0 and current v4, including default `.jsonl.zstd` artifacts and concatenated frames. `session transfer --to dsh` writes v0.
+- Plans and todos: DSH plan mode stores no plan files; `exit_plan_mode` carries the markdown plan in its tool arguments, and federation drafts it from the session log. The latest `todo/write` whole-list snapshot, including an empty list, enters shared todos. Existing verified session bindings supply plan links; task wording never creates them.
+- Memory: DSH has no native memory file. Its sessions reach recall through the canonical session store, and curated memory/learnings arrive in the digest.
+- Delegation: `dsh --profile headless` needs a provider credential DSH can resolve (its credential store, profile config, or `DEEPSEEK_API_KEY` in that process). The interactive `web` profile's account session is not inherited. StateRoot's optional `DEEPSEEK_API_KEY` synthesis compiler is a separate consumer and is not required for install/setup.
+- Proof level: verified live against DSH 0.2.2-rc.1 (install, dump-config, MCP tools, digest injection, stop checkpoint, v4 zstd sync); source reviewed at 0.2.2-rc.3.
 
 ## Hermes
 

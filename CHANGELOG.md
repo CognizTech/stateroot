@@ -23,10 +23,24 @@ StateRoot is pre-1.0 and milestones land as minor versions.
   frames). Corrupt or future-format artifacts stay counted skips, never
   fabricated entries.
 
+- DSH plan-mode plans (`exit_plan_mode`) federate into the central plan store
+  as drafts from the session log; DSH keeps no native plan file. The embedded
+  StateRoot skill and harness reference now document DSH delivery, sessions,
+  plans, memory and delegation, including the distinction between DSH's
+  provider credential and StateRoot's optional synthesis key.
+
 - DSH's Cordis patch is an MCP discovery origin: `stateroot mcp scan` reports
   servers declared as `@deepseek-ai/dsh-mcp-client` entries (`github @ dsh`),
-  and sync pulls them into the canonical store without writing into the
-  installer-owned patch block.
+  and sync projects pooled global servers through separate owned entries while
+  preserving operator configuration and the installer-owned lifecycle block.
+  Unsupported native transports/names and edited destinations are reported.
+
+- DSH retries failed identity delivery, consumes prompt fallback output and
+  awaits compaction recovery before the next model step. Full tool payloads
+  and native call identities are retained; queued captures finish before
+  stop/finalization and failures are logged. Installer read/validation errors
+  preserve existing files; successful writes use atomic replacement.
+  Native whole-list todos now federate with verified session-plan bindings.
 
 - Doctor's store-footprint walk is bounded by entries and time; a truncated
   measurement is marked with `+`. Multi-gigabyte `.stateroot/local` stores no
