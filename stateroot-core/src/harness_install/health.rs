@@ -317,6 +317,25 @@ pub fn extract_hook_commands(path: &Path, format: HookFormat) -> Vec<String> {
             }
             out
         }
+        HookFormat::CordisPlugin => {
+            // The generated plugin is the command holder; the patch file only
+            // names it. Read the plugin beside the patch (`<home>/stateroot/
+            // hooks.mjs` for `$DSH_HOME/cordis.patch.yml`).
+            let plugin = path
+                .parent()
+                .map(|dir| dir.join("stateroot").join("hooks.mjs"))
+                .unwrap_or_default();
+            match std::fs::read_to_string(&plugin) {
+                Ok(text)
+                    if text.contains("'hook'")
+                        && text.contains("--harness")
+                        && text.contains("stateroot") =>
+                {
+                    vec!["stateroot".to_string()]
+                }
+                _ => Vec::new(),
+            }
+        }
         _ => {
             // NestedJson / FlatJson / CopilotJson: `{"hooks": {<event>:
             // [entries]}}`; devin's hooks.v1.json IS the event map.
@@ -447,6 +466,23 @@ fn hooks_component(home: &Path, quirk: &HarnessQuirk) -> ComponentHealth {
     let Some(target) = quirk.hooks else {
         return ComponentHealth::not_applicable();
     };
+    if target.format == HookFormat::CordisPlugin {
+        let patch = paths::hook_target_path(home, quirk).unwrap_or_else(|| home.join(target.path));
+        let plugin = super::dsh::plugin_path(home);
+        return if super::dsh::hooks_configured(home) {
+            ComponentHealth::new(
+                ComponentState::Ok,
+                format!("cordis plugin {} via {}", plugin.display(), patch.display()),
+            )
+        } else if plugin.is_file() {
+            ComponentHealth::new(
+                ComponentState::Missing,
+                format!("{} has no stateroot-hooks entry", patch.display()),
+            )
+        } else {
+            ComponentHealth::new(ComponentState::Missing, "no cordis hook plugin")
+        };
+    }
     let mut found: Vec<(PathBuf, usize)> = Vec::new();
     let mut unreadable: Vec<PathBuf> = Vec::new();
     let mut absent: Vec<PathBuf> = Vec::new();
@@ -562,6 +598,20 @@ fn mcp_component(home: &Path, quirk: &HarnessQuirk) -> ComponentHealth {
     let Some(target) = quirk.mcp else {
         return ComponentHealth::not_applicable();
     };
+    if target.shape == super::registry::McpShape::CordisPatch {
+        let path = paths::mcp_target_path(home, quirk).unwrap_or_else(|| home.join(target.path));
+        return if super::dsh::mcp_configured(home) {
+            ComponentHealth::new(
+                ComponentState::Ok,
+                format!("stateroot MCP client in {}", path.display()),
+            )
+        } else {
+            ComponentHealth::new(
+                ComponentState::Missing,
+                format!("{} has no stateroot MCP entry", path.display()),
+            )
+        };
+    }
     let path = paths::mcp_target_path(home, quirk).unwrap_or_else(|| home.join(target.path));
     if !path.is_file() {
         return ComponentHealth::new(ComponentState::Missing, "no MCP registration");

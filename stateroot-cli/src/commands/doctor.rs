@@ -883,23 +883,41 @@ fn update_journal_check(config_dir: &Path) -> Option<Check> {
     })
 }
 
-/// Recursive directory size in bytes (best-effort; unreadable entries
-/// contribute zero).
-fn dir_size(path: &std::path::Path) -> u64 {
-    let Ok(entries) = std::fs::read_dir(path) else {
-        return 0;
-    };
-    entries
-        .flatten()
-        .map(|entry| {
-            let p = entry.path();
-            if p.is_dir() {
-                dir_size(&p)
-            } else {
-                entry.metadata().map(|m| m.len()).unwrap_or(0)
+/// Bounded directory size: `(bytes, truncated)`. The store footprint is
+/// informational, and `.stateroot/local` can hold worktrees and retained
+/// trees far beyond a doctor run's budget — an unbounded walk turns a
+/// diagnostic into a multi-minute hang. A truncated walk reports `+` so the
+/// number is never mistaken for the full size.
+fn dir_size(path: &std::path::Path) -> (u64, bool) {
+    const MAX_ENTRIES: usize = 200_000;
+    const MAX_MILLIS: u128 = 1_500;
+    let started = std::time::Instant::now();
+    let mut entries_seen = 0usize;
+    let mut bytes = 0u64;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if entries_seen >= MAX_ENTRIES || started.elapsed().as_millis() > MAX_MILLIS {
+            return (bytes, true);
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            entries_seen += 1;
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.is_file() {
+                bytes += meta.len();
+            } else if meta.is_dir() {
+                stack.push(entry.path());
             }
-        })
-        .sum()
+            if entries_seen >= MAX_ENTRIES || started.elapsed().as_millis() > MAX_MILLIS {
+                return (bytes, true);
+            }
+        }
+    }
+    (bytes, false)
 }
 
 /// Human-readable byte size (`512 B`, `12.4 KB`, `2.3 MB`, `1.1 GB`).
@@ -949,21 +967,25 @@ fn continuity_chain_checks(home: &Path, project_dir: &Path) -> Vec<Check> {
     // this line is how an operator watches it.
     let root = stateroot_core::local_store::root(project_dir);
     if root.is_dir() {
-        let total = dir_size(&root);
+        let (total, total_capped) = dir_size(&root);
         let episodic = std::fs::metadata(root.join("memories/episodic.jsonl"))
             .map(|m| m.len())
             .unwrap_or(0);
-        let local = dir_size(&root.join("local"));
-        let spool = dir_size(&root.join("spool"));
+        let (local, local_capped) = dir_size(&root.join("local"));
+        let (spool, spool_capped) = dir_size(&root.join("spool"));
+        let mark = |capped: bool| if capped { "+" } else { "" };
         checks.push(Check {
             label: "store footprint".into(),
             ok: true,
             detail: format!(
-                "{} total · episodic {} · search {} · spool {}",
+                "{}{} total · episodic {} · search {}{} · spool {}{}",
                 human_size(total),
+                mark(total_capped),
                 human_size(episodic),
                 human_size(local),
-                human_size(spool)
+                mark(local_capped),
+                human_size(spool),
+                mark(spool_capped)
             ),
             hard: false,
             repair: None,
@@ -1233,8 +1255,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         write(&tmp.path().join("a/b/c.txt"), "1234");
         write(&tmp.path().join("d.txt"), "12");
-        assert_eq!(dir_size(tmp.path()), 6);
-        assert_eq!(dir_size(&tmp.path().join("missing")), 0);
+        assert_eq!(dir_size(tmp.path()), (6, false));
+        assert_eq!(dir_size(&tmp.path().join("missing")), (0, false));
     }
 
     fn write(path: &Path, body: &str) {

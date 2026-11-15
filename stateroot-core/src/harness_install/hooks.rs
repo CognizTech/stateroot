@@ -311,6 +311,7 @@ pub fn install_hooks(home: &Path, quirk: &HarnessQuirk) -> Result<Vec<String>, H
         HookFormat::NamedGroupsJson => install_named_groups(&path, quirk),
         HookFormat::NativePlugin => install_native_plugin(&path, quirk),
         HookFormat::YamlHooks => install_yaml_hooks(&path, quirk),
+        HookFormat::CordisPlugin => super::dsh::install(home, &super::dsh::install_command()),
     }
 }
 
@@ -731,6 +732,9 @@ pub fn remove_hooks(home: &Path, quirk: &HarnessQuirk) -> Result<Vec<String>, Ha
             return Ok(vec![format!("plugin removed → {}", path.display())]);
         }
         return Ok(Vec::new());
+    }
+    if target.format == HookFormat::CordisPlugin {
+        return super::dsh::uninstall(home);
     }
     let mut actions = Vec::new();
     for path in paths::hook_target_candidates(home, quirk) {

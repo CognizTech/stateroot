@@ -1418,6 +1418,69 @@
         "global": [],
         "project": []
       }
+    },
+    {
+      "id": "dsh",
+      "display": "DeepSeek Harness",
+      "aliases": [
+        "dsh",
+        "deepseek-harness",
+        "deepseek"
+      ],
+      "framing": "DeepSeek Harness native harness: a generated cordis plugin injects the resume digest through agent/pre-step, forwards tool and turn boundaries to the CLI hooks, and registers StateRoot's local MCP tools through the home-level profile patch.",
+      "tier": "A",
+      "detect": [
+        ".dsh"
+      ],
+      "detect_cmds": [
+        "dsh"
+      ],
+      "skill_source_roots": {
+        "global": [
+          ".agents/skills",
+          ".dsh/skills"
+        ],
+        "project": [
+          ".agents/skills",
+          ".dsh/skills"
+        ]
+      },
+      "builtin_policy": "shareable",
+      "builtin_roots": [],
+      "projection_roots": {
+        "global": [
+          ".agents/skills"
+        ],
+        "project": [
+          ".agents/skills"
+        ]
+      },
+      "delegation": {
+        "mode": "cli",
+        "command": "dsh",
+        "pty": false,
+        "print_mode": false,
+        "handoff_only": false,
+        "argv": [
+          "--profile",
+          "headless",
+          "--approval-policy",
+          "never",
+          "{prompt}"
+        ]
+      },
+      "reload": "runtime",
+      "capabilities": [
+        "skills",
+        "hooks",
+        "mcp",
+        "delegation",
+        "native_sessions"
+      ],
+      "mcp_config": {
+        "global": [],
+        "project": []
+      }
     }
   ]
 }

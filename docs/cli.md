@@ -672,10 +672,12 @@ archived duplicates).
   `local/memory-index/<host-namespace>/memory.sqlite`): full session logs
   stay out of snapshots to protect root size. Promotion into synced state is a later,
   retention-tiered decision.
-- **Honest skips** — DSH `.jsonl.zstd` artifacts are counted and skipped
-  (no zstd in the dependency tree); torn tails and seq gaps are recorded,
-  not hidden; `assistant/chunk` stream deltas are skipped (assembled text
-  lives in `assistant/message`) with the omission counted.
+- **Honest skips** — DSH v0 history and the current v4 store are both read,
+  including the default `.jsonl.zstd` compression (concatenated frames
+  included); an unreadable zstd artifact or a future format version is
+  counted, never fabricated. Torn tails and seq gaps are recorded, not
+  hidden; `assistant/chunk` stream deltas are skipped (assembled text lives
+  in `assistant/message`) with the omission counted.
 - **OpenClaw trajectory companions** — native trajectory companion files
   are excluded from canonical session enumeration; they remain on disk.
   This is a format-specific enumeration rule, not general evidence suppression.
@@ -1325,6 +1327,37 @@ interruption. A leftover in-progress journal means the process died
 mid-swap: `stateroot doctor` surfaces it as a soft `self-update` warning
 (`update interrupted (from … to … at …) — rerun \`stateroot self-update\``),
 never a hard failure.
+
+## DeepSeek Harness — generated cordis integration
+
+DSH has no lifecycle-hook config file, so StateRoot installs a generated
+cordis plugin and a home-level patch entry instead:
+
+- `$DSH_HOME/stateroot/hooks.mjs` — dependency-free plugin that forwards
+  `agent/pre-step`, `tools/result`, `agent/turn-stopping`, `compaction/end`
+  and `session/disposed` to `stateroot hook … --harness dsh`, and injects the
+  resume digest as a user message on the first model step of a session.
+- `$DSH_HOME/cordis.patch.yml` — one marked block containing
+  `stateroot-hooks` (the plugin insert) and `stateroot-mcp` (an
+  `@deepseek-ai/dsh-mcp-client` instance running `stateroot mcp-stdio`).
+  The home layer applies to every profile, so no per-profile duplication is
+  needed. Operator comments and foreign entries are preserved; reinstall is a
+  byte-identical no-op and uninstall removes only the managed block.
+- `$DSH_HOME/AGENTS.md` — the user-global instruction block (DSH reads it
+  before workspace files), including the manual `resume --harness dsh`
+  fallback.
+
+`stateroot mcp scan` also reads DSH's `@deepseek-ai/dsh-mcp-client` patch
+entries as discovery origins (for example `github @ dsh`); `mcp sync` pulls
+them into the canonical store but never writes into the installer-owned
+patch block.
+
+`dsh --profile <name> --dump-config` shows the composed entries. Delegation
+uses `dsh --profile headless --approval-policy never`, and handoff/resume
+accept `dsh` as a first-class harness id. The shipped `headless` profile is
+separate from the interactive `web` profile: it needs its own provider
+credentials (`DEEPSEEK_API_KEY` in the delegated process, or the profile's
+credentials configuration) before `delegate --to dsh` can answer.
 
 ## `stateroot doctor` — hook-binary health
 

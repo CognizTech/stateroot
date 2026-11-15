@@ -18,6 +18,10 @@ pub enum McpShape {
     /// YAML `mcp_servers` mapping (hermes `~/.hermes/config.yaml`; setup
     /// writes MCP server defs there as a dict — `hermes_cli/config.py`).
     YamlMcpServers,
+    /// Cordis entry-list YAML (DSH `$DSH_HOME/cordis.patch.yml`): one
+    /// `- insert: [{id, name, config}]` patch entry per server, loaded as an
+    /// `@deepseek-ai/dsh-mcp-client` plugin instance (stdio or streamable-http).
+    CordisPatch,
 }
 
 /// One MCP registration target.
@@ -58,6 +62,12 @@ pub enum HookFormat {
     /// config (hermes `~/.hermes/config.yaml` shell hooks — the file also
     /// carries `mcp_servers` and operator settings; merge, never replace).
     YamlHooks,
+    /// Generated cordis plugin file + one `- insert: [{id, name}]` entry in
+    /// the DSH home-level patch (`$DSH_HOME/cordis.patch.yml`). DSH has no
+    /// hook config: a plugin subscribes to `agent/pre-step`, `tools/result`,
+    /// `agent/turn-stopping`, `compaction/end` and `session/disposed`, and
+    /// shells `stateroot hook …` per boundary.
+    CordisPlugin,
 }
 
 /// One hook target: home-relative file (or directory for plugins).
@@ -208,6 +218,14 @@ impl DigestDeliveryPolicy {
                 prompt_submit_injects: false,
                 tier: DeliveryTier::Automatic,
                 note: "session-start inject via additionalContext; one ~/.copilot/hooks file serves VS Code + Copilot CLI",
+            },
+            "dsh" => Self {
+                primary_event: "session_start",
+                session_start_prints: true,
+                session_start_marks: true,
+                prompt_submit_injects: true,
+                tier: DeliveryTier::Automatic,
+                note: "generated cordis plugin injects the digest via agent/pre-step; the first prompt covers a plugin that mounted late",
             },
             "dot" => Self {
                 primary_event: "", session_start_prints: false, session_start_marks: false,
@@ -510,6 +528,19 @@ const PI_EVENTS: &[(&str, &str)] = &[
     ("stop", "stop"),
     ("session_shutdown", "session_end"),
     ("session_end", "session_end"),
+];
+
+/// DeepSeek Harness (DSH): the generated cordis plugin observes these native
+/// events and forwards the canonical boundary to `stateroot hook`. Identity
+/// delivery is synthesized on `agent/pre-step` with the canonical
+/// `session_start` / `user_prompt_submit` names (DSH has no SessionStart hook
+/// event of its own).
+const DSH_EVENTS: &[(&str, &str)] = &[
+    ("session/created", "session_start"),
+    ("tools/result", "post_tool_use"),
+    ("agent/turn-stopping", "stop"),
+    ("compaction/end", "post_compaction"),
+    ("session/disposed", "session_end"),
 ];
 
 /// Native hook/MCP adapters. This is deliberately not the harness registry;
@@ -893,6 +924,38 @@ pub const ADAPTERS: &[HarnessQuirk] = &[
         legacy_id: None,
         event_map: HERMES_EVENTS,
     },
+    HarnessQuirk {
+        id: "dsh",
+        display: "DeepSeek Harness",
+        tier: Tier::A,
+        detect: &[".dsh"],
+        detect_cmds: &["dsh"],
+        // DSH reads user-global AGENTS.md from `$DSH_HOME/AGENTS.md` (and the
+        // shared `~/.agents/AGENTS.md`) before workspace files; this is the
+        // protocol block and the manual-resume fallback.
+        instruction_file: Some(".dsh/AGENTS.md"),
+        // Both the MCP server and the hook plugin live in DSH's home-level
+        // Cordis patch layer, which applies to every profile.
+        mcp: Some(McpTarget {
+            path: ".dsh/cordis.patch.yml",
+            shape: McpShape::CordisPatch,
+        }),
+        hooks: Some(HookTarget {
+            path: ".dsh/cordis.patch.yml",
+            format: HookFormat::CordisPlugin,
+        }),
+        injection: Injection::McpPull,
+        compact_injection: true,
+        events: es::SESSION_START
+            | es::USER_PROMPT_SUBMIT
+            | es::POST_TOOL_USE
+            | es::TOOL_FAILURE
+            | es::PRE_COMPACT
+            | es::STOP
+            | es::SESSION_END,
+        legacy_id: None,
+        event_map: DSH_EVENTS,
+    },
 ];
 
 /// Look up a quirk by canonical id.
@@ -1053,8 +1116,40 @@ mod tests {
     }
 
     #[test]
-    fn registry_has_19_unique_rows() {
-        assert_eq!(ADAPTERS.len(), 19);
+    fn dsh_row_shape_and_native_event_map() {
+        let dsh = quirk("dsh").expect("dsh");
+        assert_eq!(dsh.tier, Tier::A);
+        assert_eq!(dsh.instruction_file, Some(".dsh/AGENTS.md"));
+        let hooks = dsh.hooks.expect("hooks");
+        assert_eq!(hooks.path, ".dsh/cordis.patch.yml");
+        assert_eq!(hooks.format, HookFormat::CordisPlugin);
+        let mcp = dsh.mcp.expect("mcp");
+        assert_eq!(mcp.path, ".dsh/cordis.patch.yml");
+        assert_eq!(mcp.shape, McpShape::CordisPatch);
+        assert_eq!(dsh.injection, Injection::McpPull);
+        assert!(dsh.compact_injection);
+        assert_eq!(normalize_event(dsh, "tools/result"), Some("post_tool_use"));
+        assert_eq!(normalize_event(dsh, "agent/turn-stopping"), Some("stop"));
+        assert_eq!(
+            normalize_event(dsh, "compaction/end"),
+            Some("post_compaction")
+        );
+        assert_eq!(
+            normalize_event(dsh, "session/disposed"),
+            Some("session_end")
+        );
+        assert_eq!(normalize_event(dsh, "session_start"), Some("session_start"));
+        let policy = dsh.delivery();
+        assert_eq!(policy.tier, DeliveryTier::Automatic);
+        assert!(policy.session_start_prints);
+        assert!(policy.session_start_marks);
+        assert!(policy.prompt_submit_injects);
+        assert_eq!(transcript_reader_id("dsh"), Some("dsh"));
+    }
+
+    #[test]
+    fn registry_has_20_unique_rows() {
+        assert_eq!(ADAPTERS.len(), 20);
         let mut ids: Vec<&str> = ADAPTERS.iter().map(|q| q.id).collect();
         ids.sort_unstable();
         ids.dedup();
@@ -1356,6 +1451,17 @@ mod tests {
                     assert!(
                         policy.note.contains("additionalContext"),
                         "copilot note must name the verified injection channel"
+                    );
+                }
+                "dsh" => {
+                    assert_eq!(policy.primary_event, "session_start");
+                    assert!(policy.session_start_prints);
+                    assert!(policy.session_start_marks);
+                    assert!(policy.prompt_submit_injects);
+                    assert_eq!(policy.tier, DeliveryTier::Automatic);
+                    assert!(
+                        policy.note.contains("agent/pre-step"),
+                        "dsh note must name the verified injection channel"
                     );
                 }
                 "claude-code" | "codex" | "kimi" | "codebuddy" | "devin" => {

@@ -230,6 +230,46 @@ fn read_servers(path: &Path, shape: &str) -> Result<BTreeMap<String, Value>, Str
     Ok(map.into_iter().collect())
 }
 
+/// Read MCP servers from DSH's home-level Cordis patch. DSH has no MCP JSON
+/// file: each server is an `- insert: [{id, name, config}]` entry whose
+/// `name` is `@deepseek-ai/dsh-mcp-client` and whose `config.serverName` is
+/// the model-facing namespace. Discovery only — the DSH installer owns
+/// writes through its marked block.
+fn read_cordis_patch_servers(path: &Path) -> Result<BTreeMap<String, Value>, String> {
+    let text = fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    if text.trim().is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let doc: serde_yaml::Value =
+        serde_yaml::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    let Some(entries) = doc.as_sequence() else {
+        return Ok(BTreeMap::new());
+    };
+    let mut out = BTreeMap::new();
+    for patch in entries {
+        let Some(insert) = patch.get("insert").and_then(|v| v.as_sequence()) else {
+            continue;
+        };
+        for entry in insert {
+            if entry.get("name").and_then(|v| v.as_str()) != Some("@deepseek-ai/dsh-mcp-client") {
+                continue;
+            }
+            let Some(config) = entry.get("config") else {
+                continue;
+            };
+            let value = serde_json::to_value(config).map_err(|e| e.to_string())?;
+            let name = value
+                .get("serverName")
+                .and_then(|v| v.as_str())
+                .or_else(|| entry.get("id").and_then(|v| v.as_str()))
+                .unwrap_or("dsh-mcp")
+                .to_string();
+            out.insert(name, value);
+        }
+    }
+    Ok(out)
+}
+
 fn write_server(path: &Path, shape: &str, name: &str, entry: &Value) -> Result<bool, String> {
     if shape == "mcp_servers" {
         return merge_named_yaml_mcp_entry(path, name, entry).map_err(|e| e.to_string());
@@ -427,6 +467,35 @@ pub fn discover_all(
             });
         }
     }
+    // DSH keeps MCP servers in its Cordis home patch rather than a JSON
+    // config; include them as discovery origins. `mcp sync` does not write
+    // this file — the DSH installer owns its managed block.
+    let dsh_patch = crate::harness_install::paths::dsh_root(&home).join("cordis.patch.yml");
+    if dsh_patch.is_file() {
+        match read_cordis_patch_servers(&dsh_patch) {
+            Ok(servers) => {
+                for (name, entry) in servers {
+                    if is_reserved_mcp_key(&name) {
+                        continue;
+                    }
+                    let digest = entry_digest(&entry);
+                    let transport_hint = classify_mcp_transport(&entry);
+                    found.push(DiscoveredMcpServer {
+                        name,
+                        entry,
+                        entry_digest: digest,
+                        origin_harness: "dsh".into(),
+                        origin_path: dsh_patch.display().to_string(),
+                        scope: "global".into(),
+                        shape: "cordis".into(),
+                        transport_hint,
+                    });
+                }
+            }
+            Err(err) => tracing::warn!("mcp federation: skip dsh patch: {err}"),
+        }
+    }
+
     found.sort_by(|a, b| {
         (
             a.scope.as_str(),
@@ -994,6 +1063,54 @@ mod tests {
         assert!(is_reserved_mcp_key("statesmith-stateroot"));
         assert!(!is_reserved_mcp_key("github"));
         assert!(!is_reserved_mcp_key("foreign-bridge"));
+    }
+
+    #[test]
+    fn dsh_cordis_patch_servers_are_discovered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(home.join(".dsh")).unwrap();
+        std::fs::write(
+            home.join(".dsh/cordis.patch.yml"),
+            r#"- insert:
+  - id: foreign-bridge
+    name: '@deepseek-ai/dsh-mcp-client'
+    config:
+      transport: stdio
+      serverName: github
+      command: npx
+      args: ['-y', 'github-mcp']
+- insert:
+  - id: stateroot-mcp
+    name: '@deepseek-ai/dsh-mcp-client'
+    config:
+      transport: stdio
+      serverName: stateroot
+      command: stateroot
+      args: ['mcp-stdio']
+"#,
+        )
+        .unwrap();
+
+        let servers = read_cordis_patch_servers(&home.join(".dsh/cordis.patch.yml")).unwrap();
+        assert!(servers.contains_key("github"));
+        assert!(
+            servers.contains_key("stateroot"),
+            "reserved server stays visible to the parser"
+        );
+
+        let found = discover_all(Some(&home), None).unwrap();
+        let github = found
+            .iter()
+            .find(|s| s.name == "github")
+            .expect("dsh server discovered");
+        assert_eq!(github.origin_harness, "dsh");
+        assert_eq!(github.shape, "cordis");
+        assert_eq!(github.transport_hint, TransportHint::Stdio);
+        assert!(
+            found.iter().all(|s| s.name != "stateroot"),
+            "reserved key must be filtered from the canonical catalog"
+        );
     }
 
     #[test]

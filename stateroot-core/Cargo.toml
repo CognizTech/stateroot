@@ -24,8 +24,11 @@ rusqlite.workspace = true
 async-trait.workspace = true
 git2.workspace = true
 tempfile.workspace = true
+# Last pure-Rust zstd decoder without a rust-version = 1.87 bump.
+ruzstd = "=0.8.1"
 
 [dev-dependencies]
+zstd = "0.13"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

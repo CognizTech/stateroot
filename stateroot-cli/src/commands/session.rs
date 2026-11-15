@@ -56,7 +56,7 @@ pub fn sync(ctx: &Ctx, harness: Option<&str>) -> anyhow::Result<()> {
     }
     if report.skipped_zstd > 0 {
         println!(
-            "  ({} zstd-compressed dsh log(s) skipped — no zstd support in v1)",
+            "  ({} zstd-compressed dsh log(s) skipped — unreadable or corrupt)",
             report.skipped_zstd
         );
     }

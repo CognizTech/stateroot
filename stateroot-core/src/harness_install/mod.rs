@@ -12,6 +12,7 @@
 //! projection from it so older `installed_harnesses` values keep working.
 
 pub mod detect;
+pub mod dsh;
 pub mod health;
 pub mod hooks;
 pub mod paths;
@@ -502,7 +503,9 @@ pub fn install_quirk_mcp(
             let root_key = match target.shape {
                 registry::McpShape::McpServersJson => "mcpServers",
                 registry::McpShape::ServersJson => "servers",
-                registry::McpShape::YamlMcpServers => unreachable!(),
+                registry::McpShape::YamlMcpServers | registry::McpShape::CordisPatch => {
+                    unreachable!()
+                }
             };
             let changed = merge_mcp_entry_at(&path, root_key, &mcp_entry())?;
             Ok(vec![format!(
@@ -515,6 +518,10 @@ pub fn install_quirk_mcp(
                 path.display()
             )])
         }
+        // DSH's MCP server and hook plugin share one managed block in the
+        // home-level cordis patch. The hook installer writes both atomically
+        // and reports one combined action line.
+        registry::McpShape::CordisPatch => Ok(Vec::new()),
     }
 }
 
@@ -566,6 +573,13 @@ pub fn install_quirk_full(home: &Path, quirk: &registry::HarnessQuirk, block: &s
             Ok(None) => {}
             Err(err) => actions.push(format!("ERROR: {} agent file failed: {err}", quirk.id)),
         }
+    }
+    if quirk.id == "dsh" {
+        actions.push(
+            "delegation note: `dsh --profile headless` needs its own DEEPSEEK_API_KEY \
+             (the interactive web profile's login is not inherited)"
+                .to_string(),
+        );
     }
     let policy = quirk.delivery();
     let tier = match policy.tier {
@@ -712,6 +726,13 @@ pub fn uninstall_quirk_mcp(
             registry::McpShape::McpServersJson => uninstall_json_mcp_entry_at(&path, "mcpServers"),
             registry::McpShape::ServersJson => uninstall_json_mcp_entry_at(&path, "servers"),
             registry::McpShape::YamlMcpServers => uninstall_yaml_mcp_entry(&path),
+            registry::McpShape::CordisPatch => {
+                // The home patch block is a unit: hooks + MCP leave together.
+                // `stateroot uninstall` removes hooks first, so a second call
+                // here is a no-op.
+                let actions = dsh::uninstall(home)?;
+                Ok(!actions.is_empty())
+            }
         }?;
         removed |= outcome;
     }

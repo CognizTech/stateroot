@@ -12,11 +12,11 @@
 //! DSH's own scanner); a seq gap truncates the log (DSH refuses to
 //! reconstruct past it — so do we).
 //!
-//! Two honest skips: `.jsonl.zstd` artifacts are not read at all (the zstd
-//! crate is not in the dependency tree — no new compression dep for v1), and
-//! `assistant/chunk` stream deltas (including their packed `text-chunks` /
-//! `reasoning-chunks` / `tool-call-chunks` storage rows) are redundant with
-//! the assembled `assistant/message` — counted, never reconstructed.
+//! Both the plain `.jsonl` and the zstd `.jsonl.zstd` artifacts current DSH
+//! writes are read. `assistant/chunk` stream deltas (including their packed
+//! `text-chunks` / `reasoning-chunks` / `tool-call-chunks` storage rows) are
+//! redundant with the assembled `assistant/message` — counted, never
+//! reconstructed.
 
 use std::path::{Path, PathBuf};
 
@@ -38,7 +38,8 @@ const TAIL_ENTRY_MAX: usize = 1500;
 pub struct DshReader;
 
 /// Session artifacts under the DSH store: `(plain jsonl, zstd-compressed)`.
-/// The zstd list is reported, never read (no zstd in the dependency tree).
+/// Both forms are read; the split is kept so import accounting can say which
+/// artifacts failed to decode.
 pub(crate) fn session_files(home: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let root = paths::dsh_root(home).join("sessions");
     let plain = walk_files(&root, &|p| {
@@ -82,10 +83,45 @@ fn chunk_row_members(value: &Value) -> Option<usize> {
     Some(seq0 + members) // next expected seq after this row
 }
 
-/// Parse a DSH session log. `None` when line 1 is not a version-0 session
-/// header (a foreign format version is DSH's own refusal — we mirror it).
+/// Read one DSH session artifact as UTF-8 text, transparently decoding the
+/// zstd frames DSH writes by default. `None` when the file is unreadable or
+/// not a valid zstd stream.
+fn read_session_text(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    if path.extension().and_then(|e| e.to_str()) == Some("zstd") {
+        let decoded = decode_zstd_frames(bytes)?;
+        return String::from_utf8(decoded).ok();
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// Decode every zstd frame in `bytes`. DSH appends compressed batches, so a
+/// session artifact is commonly several concatenated frames; `ruzstd`
+/// decodes one frame per decoder and a single `decode_all` would silently
+/// stop at the first boundary.
+fn decode_zstd_frames(bytes: Vec<u8>) -> Option<Vec<u8>> {
+    let mut cursor = std::io::Cursor::new(bytes);
+    let mut out = Vec::new();
+    loop {
+        if cursor.position() >= cursor.get_ref().len() as u64 {
+            break;
+        }
+        let mut decoder = ruzstd::decoding::StreamingDecoder::new(&mut cursor).ok()?;
+        std::io::copy(&mut decoder, &mut out).ok()?;
+    }
+    Some(out)
+}
+
+/// True when `path` is a zstd-compressed DSH session artifact.
+pub(crate) fn is_zstd_session(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()) == Some("zstd")
+}
+
+/// Parse a DSH session log. `None` when line 1 is not a supported session
+/// header (v0 history or the current v4 store; a foreign version is DSH's
+/// own refusal — we mirror it).
 pub(crate) fn parse_session_file(path: &Path) -> Option<RawSession> {
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = read_session_text(path)?;
     // `str::lines` yields a final partial line when the file lacks a trailing
     // newline — that is DSH's torn tail, never a complete record: drop it.
     let torn = !text.ends_with('\n');
@@ -97,12 +133,19 @@ pub(crate) fn parse_session_file(path: &Path) -> Option<RawSession> {
     if header.get("type").and_then(|v| v.as_str()) != Some("session") {
         return None;
     }
-    if header.get("version").and_then(|v| v.as_u64()) != Some(0) {
-        tracing::warn!(
-            "dsh session {}: unsupported format version — skipped",
-            path.display()
-        );
-        return None;
+    // v0 is the historical format this reader was written against; v4 is the
+    // current store. The event envelope is unchanged between them (typed
+    // `data` records with contiguous `seq`), so both decode through the same
+    // path. A foreign version is DSH's own refusal boundary — mirror it.
+    match header.get("version").and_then(|v| v.as_u64()) {
+        Some(0..=4) => {}
+        _ => {
+            tracing::warn!(
+                "dsh session {}: unsupported format version — skipped",
+                path.display()
+            );
+            return None;
+        }
     }
     let mut events = Vec::new();
     let mut skipped_chunks = 0;
@@ -249,6 +292,17 @@ pub(crate) fn summarize(raw: &RawSession, project_dir: &Path) -> Option<Transcri
                 match data.pointer("/reason/kind").and_then(|v| v.as_str()) {
                     Some("completed") => completed = true,
                     Some("interrupted") | Some("aborted") => interrupted = true,
+                    Some("error") => {
+                        if let Some(failure) = data
+                            .pointer("/reason/error/message")
+                            .and_then(|v| v.as_str())
+                        {
+                            push_unique(
+                                &mut session.failed_approaches,
+                                clean(failure, FAILURE_MAX),
+                            );
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -309,8 +363,46 @@ pub(crate) fn summarize(raw: &RawSession, project_dir: &Path) -> Option<Transcri
                 }
                 session.plan_state = plan; // whole-list snapshot: latest wins
             }
-            "step/start" | "step/end" | "request/header" | "request/context"
-            | "session/end-seed" | "assistant/chunk" => {}
+            "assistant/attempt" => {
+                // Current stores emit this on a failed attempt: the finish
+                // chunk carries the provider failure instead of a message.
+                if let Some(failure) =
+                    data.get("stream")
+                        .and_then(|v| v.as_array())
+                        .and_then(|stream| {
+                            stream.iter().find_map(|entry| {
+                                entry
+                                    .pointer("/chunk/reason/failure/message")
+                                    .and_then(|v| v.as_str())
+                            })
+                        })
+                {
+                    push_unique(&mut session.failed_approaches, clean(failure, FAILURE_MAX));
+                }
+            }
+            // Store/driver control records: they carry no conversation text
+            // and are not losses.
+            "step/start"
+            | "step/end"
+            | "request/header"
+            | "request/context"
+            | "session/end-seed"
+            | "assistant/chunk"
+            | "agent/inbox/spliced"
+            | "job/registered"
+            | "job/settled"
+            | "session-log-deepseek/delivery-accepted"
+            | "permission/preset"
+            | "sandbox/mode"
+            | "approval/policy"
+            | "system/message"
+            | "session/title"
+            | "session/title-llm-request"
+            | "model/selection"
+            | "command/run"
+            | "command/done"
+            | "goal/change"
+            | "developer/message" => {}
             other => {
                 if !other.is_empty() && !noted.iter().any(|n| n == other) {
                     noted.push(other.to_string());
@@ -341,14 +433,9 @@ impl TranscriptReader for DshReader {
 
     fn scan(&self, home: &Path, project_dir: &Path) -> Vec<TranscriptSession> {
         let (plain, zstd) = session_files(home);
-        for file in &zstd {
-            tracing::warn!(
-                "dsh session {}: .jsonl.zstd artifacts are not read in v1 — skipped",
-                file.display()
-            );
-        }
         plain
             .iter()
+            .chain(zstd.iter())
             .filter_map(|file| {
                 let mut session = summarize(&parse_session_file(file)?, project_dir)?;
                 session.source_path = file.to_string_lossy().into_owned();
@@ -483,5 +570,106 @@ mod tests {
         let session = summarize(&raw, project.path()).expect("session");
         assert_eq!(session.user_prompts, vec!["before the gap"]);
         assert!(session.losses.iter().any(|l| l.what == "truncated log"));
+    }
+}
+
+#[cfg(test)]
+mod zstd_tests {
+    use super::*;
+
+    fn write_zstd(home: &Path, proj: &str, id: &str, body: &str, frames: usize) -> PathBuf {
+        let dir = home.join(format!(".dsh/sessions/{proj}/{id}"));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("session.v4.jsonl.zstd");
+        let mut bytes = Vec::new();
+        if frames <= 1 {
+            bytes = zstd::stream::encode_all(body.as_bytes(), 3).expect("encode");
+        } else {
+            // DSH appends compressed batches; exercise concatenated frames.
+            let lines: Vec<&str> = body.lines().collect();
+            let chunk = lines.len().div_ceil(frames);
+            for group in lines.chunks(chunk.max(1)) {
+                let mut part = group.join("\n");
+                part.push('\n');
+                bytes.extend(zstd::stream::encode_all(part.as_bytes(), 3).expect("encode"));
+            }
+        }
+        std::fs::write(&path, bytes).expect("write");
+        path
+    }
+
+    #[test]
+    fn v4_zstd_session_reads_and_summarizes() {
+        let home = tempfile::tempdir().expect("home");
+        let project = tempfile::tempdir().expect("project");
+        let cwd = crate::transcripts::path_for_json(project.path());
+        let body = format!(
+            r#"{{"type":"session","version":4,"id":"s-4","createdAt":1794674498468,"cwd":"{cwd}","isSeeded":false,"delegationDepth":0}}
+{{"type":"permission/preset","seq":0,"time":1794674498478,"data":{{"preset":"workspace-write"}}}}
+{{"type":"turn/start","seq":1,"time":1794674498484,"data":{{"turn":1}}}}
+{{"type":"user/message","seq":2,"time":1794674498485,"data":{{"id":"u1","role":"user","content":[{{"type":"text","text":"ship the v4 reader"}}],"source":{{"kind":"user"}}}}}}
+{{"type":"step/start","seq":3,"time":1794674498486,"data":{{"turn":1,"step":1}}}}
+{{"type":"assistant/message","seq":4,"time":1794674498487,"data":{{"turn":1,"step":1,"message":{{"id":"a1","role":"assistant","content":[{{"type":"text","text":"shipping it"}}],"source":{{"kind":"model","provider":"deepseek","model":"m"}}}}}}}}
+{{"type":"turn/end","seq":5,"time":1794674498488,"data":{{"turn":1,"reason":{{"kind":"completed"}}}}}}
+"#
+        );
+        let path = write_zstd(home.path(), "--tmp-proj--", "s-4", &body, 1);
+        let raw = parse_session_file(&path).expect("v4 zstd parses");
+        assert_eq!(raw.header.get("version").and_then(|v| v.as_u64()), Some(4));
+        assert!(raw
+            .events
+            .iter()
+            .any(|e| e.get("type").and_then(|v| v.as_str()) == Some("user/message")));
+
+        let summary = summarize(&raw, project.path()).expect("summary");
+        assert_eq!(summary.session_id, "s-4");
+        assert_eq!(summary.objective, "ship the v4 reader");
+        assert_eq!(summary.outcome, Outcome::Completed);
+        assert!(
+            summary
+                .losses
+                .iter()
+                .all(|l| !l.what.contains("permission/preset")),
+            "control records must not be reported as losses: {:?}",
+            summary.losses
+        );
+
+        let scanned = DshReader.scan(home.path(), project.path());
+        assert_eq!(scanned.len(), 1);
+        assert_eq!(scanned[0].session_id, "s-4");
+    }
+
+    #[test]
+    fn concatenated_zstd_frames_decode() {
+        let home = tempfile::tempdir().expect("home");
+        let project = tempfile::tempdir().expect("project");
+        let cwd = crate::transcripts::path_for_json(project.path());
+        let body = format!(
+            r#"{{"type":"session","version":4,"id":"s-frames","createdAt":1794674498468,"cwd":"{cwd}"}}
+{{"type":"turn/start","seq":0,"time":1794674498484,"data":{{"turn":1}}}}
+{{"type":"user/message","seq":1,"time":1794674498485,"data":{{"role":"user","content":[{{"type":"text","text":"frame one"}}],"source":{{"kind":"user"}}}}}}
+{{"type":"assistant/message","seq":2,"time":1794674498487,"data":{{"message":{{"role":"assistant","content":[{{"type":"text","text":"frame two"}}],"source":{{"kind":"model"}}}}}}}}
+{{"type":"turn/end","seq":3,"time":1794674498488,"data":{{"turn":1,"reason":{{"kind":"completed"}}}}}}
+"#
+        );
+        let path = write_zstd(home.path(), "--tmp-proj--", "s-frames", &body, 3);
+        let raw = parse_session_file(&path).expect("concatenated zstd frames parse");
+        assert_eq!(raw.header.get("version").and_then(|v| v.as_u64()), Some(4));
+        // Every event of the single logical log must survive the frame join.
+        assert!(raw
+            .events
+            .iter()
+            .any(|e| e.get("type").and_then(|v| v.as_str()) == Some("turn/end")));
+    }
+
+    #[test]
+    fn corrupt_zstd_is_not_fabricated() {
+        let home = tempfile::tempdir().expect("home");
+        let dir = home.path().join(".dsh/sessions/p/x");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("session.jsonl.zstd");
+        std::fs::write(&path, b"not a zstd frame").expect("write");
+        assert!(parse_session_file(&path).is_none());
+        assert!(is_zstd_session(&path));
     }
 }

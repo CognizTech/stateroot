@@ -429,7 +429,8 @@ pub struct SyncReport {
     pub written: usize,
     /// Per-harness counts.
     pub per_harness: BTreeMap<String, usize>,
-    /// DSH `.jsonl.zstd` artifacts skipped (no zstd in the dependency tree).
+    /// DSH `.jsonl.zstd` artifacts that could not be decoded (corrupt or
+    /// foreign compression), so no canonical session was produced.
     pub skipped_zstd: usize,
     /// Tombstoned session ids skipped (not rewritten).
     pub skipped_tombstoned: usize,
@@ -523,9 +524,11 @@ pub fn import_from_readers_filtered(
 
     if harness.is_none_or(|h| h == "dsh") {
         let (plain, zstd) = dsh::session_files(home);
-        report.skipped_zstd = zstd.len();
-        for file in &plain {
+        for file in plain.iter().chain(zstd.iter()) {
             let Some(raw) = dsh::parse_session_file(file) else {
+                if dsh::is_zstd_session(file) {
+                    report.skipped_zstd += 1;
+                }
                 continue;
             };
             let cwd = raw.header.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
@@ -1078,16 +1081,49 @@ mod tests {
     }
 
     #[test]
-    fn zstd_artifacts_are_counted_and_skipped() {
+    fn corrupt_zstd_artifact_is_counted_not_written() {
         let home = tempfile::tempdir().expect("home");
         let project = tempfile::tempdir().expect("project");
         write_file(
             &home.path().join(".dsh/sessions/p/x/session.jsonl.zstd"),
-            &["not really zstd — we must never try to read it"],
+            &["not a zstd frame — decode must fail honestly"],
         );
         let report = import_from_readers(home.path(), project.path());
         assert_eq!(report.skipped_zstd, 1);
         assert_eq!(report.written, 0);
+    }
+
+    #[test]
+    fn v4_zstd_session_imports_canonically() {
+        let home = tempfile::tempdir().expect("home");
+        let project = tempfile::tempdir().expect("project");
+        let cwd = crate::transcripts::path_for_json(project.path());
+        let body = format!(
+            r#"{{"type":"session","version":4,"id":"z-4","createdAt":1794674498468,"cwd":"{cwd}"}}
+{{"type":"turn/start","seq":0,"time":1794674498484,"data":{{"turn":1}}}}
+{{"type":"user/message","seq":1,"time":1794674498485,"data":{{"role":"user","content":[{{"type":"text","text":"import the zstd session"}}],"source":{{"kind":"user"}}}}}}
+{{"type":"assistant/message","seq":2,"time":1794674498487,"data":{{"message":{{"role":"assistant","content":[{{"type":"text","text":"imported"}}],"source":{{"kind":"model"}}}}}}}}
+{{"type":"turn/end","seq":3,"time":1794674498488,"data":{{"turn":1,"reason":{{"kind":"completed"}}}}}}
+"#
+        );
+        let path = home
+            .path()
+            .join(".dsh/sessions/--tmp-zstd--/z-4/session.v4.jsonl.zstd");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(
+            &path,
+            zstd::stream::encode_all(body.as_bytes(), 3).expect("encode"),
+        )
+        .expect("write");
+
+        let report = import_from_readers(home.path(), project.path());
+        assert_eq!(report.written, 1, "current DSH store must import");
+        assert_eq!(report.skipped_zstd, 0);
+        let stored = load(project.path(), "z-4").expect("stored");
+        assert!(stored.entries.iter().any(|e| e.kind == "message"
+            && e.content
+                .as_deref()
+                .is_some_and(|text| text.contains("import the zstd session"))));
     }
 
     fn write_pi_session(home: &Path, project: &Path, id: &str, phrase: &str) {

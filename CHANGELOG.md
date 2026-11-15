@@ -5,6 +5,33 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- DeepSeek Harness is a Tier-A harness. `stateroot install` writes a
+  dependency-free cordis plugin (`$DSH_HOME/stateroot/hooks.mjs`) plus a
+  marked block in the home-level `$DSH_HOME/cordis.patch.yml`: the plugin
+  injects the resume digest through `agent/pre-step` and forwards tool,
+  turn-stop, compaction and session-end boundaries to `stateroot hook
+  --harness dsh`; an `@deepseek-ai/dsh-mcp-client` entry serves
+  `stateroot mcp-stdio` without an npm install. Detection, doctor, handoff,
+  `resume --harness dsh` and `delegate --to dsh` (`dsh headless`) now resolve.
+  The patch block preserves operator comments and foreign entries, reinstall
+  is byte-identical, and uninstall removes only the managed block.
+  Relocated/test homes are no longer redirected into a live store by an
+  ambient `DSH_HOME`.
+
+- DSH canonical sessions read the current v4 store as well as v0 history,
+  transparently decoding the default zstd artifacts (including concatenated
+  frames). Corrupt or future-format artifacts stay counted skips, never
+  fabricated entries.
+
+- DSH's Cordis patch is an MCP discovery origin: `stateroot mcp scan` reports
+  servers declared as `@deepseek-ai/dsh-mcp-client` entries (`github @ dsh`),
+  and sync pulls them into the canonical store without writing into the
+  installer-owned patch block.
+
+- Doctor's store-footprint walk is bounded by entries and time; a truncated
+  measurement is marked with `+`. Multi-gigabyte `.stateroot/local` stores no
+  longer turn `stateroot doctor` into a multi-minute hang.
+
 - Lineage pages 50 roots at a time in the editor. Optional CLI metadata windows
   retain complete connection topology; older CLIs remain supported through local paging.
 

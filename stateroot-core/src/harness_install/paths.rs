@@ -84,8 +84,31 @@ pub fn dsh_root_in(home: &Path, env: Option<OsString>) -> PathBuf {
 }
 
 /// DSH home using the process environment.
+///
+/// `DSH_HOME` addresses a relocated store and always wins when it names one.
+/// The *default* `$HOME/.dsh` value is ambient (a running DSH exports it to
+/// every child), so when the caller passes a different home — a test or
+/// sandbox home — that explicit home is authoritative and the ambient
+/// default cannot redirect it into the operator's live store.
 pub fn dsh_root(home: &Path) -> PathBuf {
-    dsh_root_in(home, std::env::var_os(ENV_DSH_HOME))
+    let raw_home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    if let Some(raw) = std::env::var_os(ENV_DSH_HOME) {
+        let configured = PathBuf::from(&raw);
+        let default = raw_home
+            .as_ref()
+            .map(|process_home| process_home.join(".dsh"));
+        if default.as_deref() == Some(configured.as_path())
+            && raw_home
+                .as_deref()
+                .is_some_and(|process_home| process_home != home)
+        {
+            return home.join(".dsh");
+        }
+        return configured;
+    }
+    home.join(".dsh")
 }
 
 /// Hermes home override (`$HERMES_HOME`; default `~/.hermes`) — the harness's
