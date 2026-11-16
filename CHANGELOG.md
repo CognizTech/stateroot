@@ -5,6 +5,13 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+## v0.2.15 — 2026-11-16
+
+- Updated the built-in Skill's lineage-pagination guidance and the bootstrap
+  Skill's capability summary and installation-authorization instructions.
+- Updated human-facing usage guides and product copy across the CLI and editor
+  READMEs.
+
 - DeepSeek Harness is a Tier-A harness. `stateroot install` writes a
   dependency-free cordis plugin (`$DSH_HOME/stateroot/hooks.mjs`) plus a
   marked block in the home-level `$DSH_HOME/cordis.patch.yml`: the plugin
