@@ -1069,7 +1069,9 @@ mod tests {
         let (meta, _) = crate::plans::current(project.path()).expect("plan");
         assert_eq!(meta.status, "draft");
         assert_eq!(meta.created_by_harness, "claude-code");
-        assert!(meta.source_path.unwrap().contains(".claude/plans"));
+        // Separator-agnostic: the source path is native to this host.
+        let source = meta.source_path.unwrap().replace('\\', "/");
+        assert!(source.contains(".claude/plans"), "{source}");
         // Second pass: no duplicate.
         assert!(sync_from(home.path(), project.path(), "claude-code").is_quiet());
     }
@@ -1125,22 +1127,27 @@ mod tests {
         assert_eq!(report.ingested.len(), 1, "{report:?}");
         let (meta, _) = crate::plans::current(project.path()).expect("plan");
         assert!(
-            meta.source_path.unwrap().contains(".claude/custom-plans"),
+            meta.source_path
+                .unwrap()
+                .replace('\\', "/")
+                .contains(".claude/custom-plans"),
             "the configured directory is the source"
         );
     }
 
     #[test]
     fn claude_plans_directory_foreign_path_fails_closed() {
-        // A Windows-shaped value is not project-relative on this host, and
-        // must not become a bogus directory inside the project.
-        assert_eq!(
-            resolve_plans_directory(Path::new("/work/demo"), "C:\\Users\\a\\plans"),
-            None
-        );
+        // A Windows-shaped value is absolute on Windows (accepted as written)
+        // and is not project-relative elsewhere (fails closed to the default).
+        let windows_value =
+            resolve_plans_directory(Path::new("C:\\work\\demo"), "C:\\Users\\a\\plans");
+        #[cfg(windows)]
+        assert_eq!(windows_value, Some(PathBuf::from("C:\\Users\\a\\plans")));
+        #[cfg(not(windows))]
+        assert_eq!(windows_value, None);
         assert_eq!(
             resolve_plans_directory(Path::new("/work/demo"), "notes/plans"),
-            Some(PathBuf::from("/work/demo/notes/plans"))
+            Some(PathBuf::from("/work/demo").join("notes/plans"))
         );
         assert_eq!(resolve_plans_directory(Path::new("/work/demo"), "  "), None);
     }

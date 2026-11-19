@@ -60,13 +60,32 @@ pub fn claude_projects_root(home: &Path) -> PathBuf {
 /// exactly.
 pub fn claude_slug_to_cwd(slug: &str) -> String {
     let rest = slug.strip_prefix('-').unwrap_or(slug);
+    // Windows drive form: `c--users-me` decodes to `c:/users/me`.
+    if rest.len() > 2 && rest.as_bytes()[0].is_ascii_alphabetic() && rest[1..].starts_with("--") {
+        return format!("{}:/{}", &rest[..1], rest[3..].replace('-', "/"));
+    }
     format!("/{}", rest.replace('-', "/"))
 }
 
 /// Encode an absolute path as a Claude project slug (best-effort fallback when
 /// no existing slug directory matches).
+///
+/// Every separator becomes `-`. A Windows drive separator (`c:/…`) keeps the
+/// drive letter and folds the colon too (`c--users-me`), because a slug
+/// containing `:` is not a valid directory name on Windows.
 pub fn claude_slug_encode(path: &str) -> String {
-    let replaced = crate::path_identity::normalize_host_path(path).replace('/', "-");
+    let normalized = crate::path_identity::normalize_host_path(path);
+    if normalized.len() > 1
+        && normalized.as_bytes()[1] == b':'
+        && normalized.as_bytes()[0].is_ascii_alphabetic()
+    {
+        return format!(
+            "{}{}",
+            &normalized[..1],
+            normalized[1..].replace([':', '/'], "-")
+        );
+    }
+    let replaced = normalized.replace('/', "-");
     if replaced.starts_with('-') {
         replaced
     } else {
@@ -436,6 +455,27 @@ mod tests {
                 PathBuf::from("/home/alice/.claude/projects")
             );
         }
+    }
+
+    #[test]
+    fn claude_slug_folds_windows_separators_into_a_valid_directory_name() {
+        // POSIX shape: a leading `/` becomes a leading `-`.
+        assert_eq!(claude_slug_encode("/home/alice"), "-home-alice");
+        assert_eq!(claude_slug_to_cwd("-home-alice"), "/home/alice");
+        // Windows shape: the drive colon must not survive — `:` is not a
+        // valid directory character there.
+        let encoded = claude_slug_encode("C:\\Users\\Me\\work");
+        assert_eq!(encoded, "c--Users-Me-work");
+        assert!(
+            !encoded.contains(':'),
+            "a slug with a colon cannot be created on Windows"
+        );
+        assert_eq!(claude_slug_to_cwd(&encoded), "c:/Users/Me/work");
+        // Both shapes decode back to something the project matcher can compare.
+        assert_eq!(
+            crate::path_identity::normalize_host_path(&claude_slug_to_cwd(&encoded)),
+            crate::path_identity::normalize_host_path("C:\\Users\\Me\\work")
+        );
     }
 
     #[test]
