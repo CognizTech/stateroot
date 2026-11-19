@@ -1040,6 +1040,18 @@ fn continuity_chain_checks(home: &Path, project_dir: &Path) -> Vec<Check> {
     // Session-boundary journal (repair Phase 3): state-grouped report with
     // retained errors, and a recovery kick (doctor is a safe entrypoint).
     super::drain_finalize::kick(project_dir);
+    let worker = stateroot_core::safe_io::journal_worker::inspect(project_dir);
+    if worker.state != stateroot_core::safe_io::journal_worker::State::Available {
+        checks.push(Check {
+            label: "boundary worker".into(),
+            ok: !worker.blocked(),
+            detail: worker.detail.clone(),
+            hard: false,
+            repair: worker
+                .blocked()
+                .then(|| "stateroot handoff inspect --summary".to_string()),
+        });
+    }
     let journal_lines = super::drain_finalize::report(project_dir);
     if !journal_lines.iter().all(|l| l.contains("no boundary jobs")) {
         checks.push(Check {

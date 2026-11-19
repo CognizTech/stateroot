@@ -70,6 +70,11 @@ async fn main() -> anyhow::Result<()> {
     if cli.project.is_some() {
         ctx.cwd = std::env::current_dir()?;
     }
+    if let Command::Resume(args) = &cli.command {
+        if let Some(id) = args.continuation.as_deref() {
+            return commands::hook_context::read_page(&ctx, id, args.page.unwrap_or(1) as usize);
+        }
+    }
     let actor = cli
         .actor
         .as_deref()
@@ -245,7 +250,18 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or(commands::checkpoint::LOCAL_HARNESS),
         )?,
         Command::Handoff(args) => match args.action {
-            HandoffAction::Inspect { job } => commands::handoff::inspect(&ctx, job.as_deref())?,
+            HandoffAction::Inspect {
+                job,
+                summary,
+                worker_recovery,
+            } => {
+                commands::handoff::inspect(
+                    &ctx,
+                    job.as_deref(),
+                    summary,
+                    worker_recovery.as_deref(),
+                )?;
+            }
             HandoffAction::Write(args) => {
                 let flags = commands::handoff::HandoffWriteFlags {
                     plan: args.plan.as_deref(),
@@ -283,6 +299,28 @@ async fn main() -> anyhow::Result<()> {
                 commands::handoff::finalize(&ctx, from.as_deref().or(actor.as_deref())).await?
             }
             HandoffAction::Repair => commands::handoff::repair(&ctx).await?,
+            HandoffAction::RecoverWorker {
+                expected_owner,
+                writers_stopped,
+                reason,
+            } => {
+                anyhow::ensure!(
+                    writers_stopped,
+                    "all writers must be stopped before explicit worker recovery"
+                );
+                commands::handoff::recover_worker(
+                    &ctx,
+                    &expected_owner,
+                    &reason,
+                    actor.as_deref().unwrap_or("cli"),
+                )?;
+            }
+            HandoffAction::Retire { job, reason } => commands::handoff::retire_job(
+                &ctx,
+                &job,
+                &reason,
+                actor.as_deref().unwrap_or("cli"),
+            )?,
             HandoffAction::Recover { job, transcript } => {
                 commands::handoff::recover(&ctx, &job, transcript.as_deref()).await?
             }
@@ -292,9 +330,13 @@ async fn main() -> anyhow::Result<()> {
             args.reason.as_deref(),
             args.harness.as_deref().or(actor.as_deref()),
         )?,
-        Command::Log(args) => {
-            commands::roots::log(&ctx, args.json, args.limit.map(usize::from), args.offset)?
-        }
+        Command::Log(args) => commands::roots::log(
+            &ctx,
+            args.json,
+            args.limit.map(usize::from),
+            args.offset,
+            args.roots_only,
+        )?,
         Command::Show {
             hash,
             fidelity,

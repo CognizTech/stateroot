@@ -129,6 +129,14 @@ over newer floor entries, including when recovering previously saved journals.
 A successful apply is synthesized output,
 not semantic verification. Undeclared dependencies remain unknown.
 
+## Continue an oversized hook delivery
+
+Use the exact continuation ID from the hook in the same checkout. Read required
+pages in order before relying on the working brief, and follow supporting pages
+when they answer a question from the task. Repeating a page reads the same
+capture, even after a new handoff. Treat a missing or changed capture as
+incomplete and obtain the current full context through the usual resume path.
+
 ## Progressive Skill reuse and source-linked authoring
 
 Without shell access, local MCP `skill_inspect` reads package identity and

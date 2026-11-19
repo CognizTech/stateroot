@@ -239,7 +239,7 @@ fn idle(owner: &Path, checkout: &Path, name: &str, locator: &Path) -> Result<(),
     if !crate::finalize_journal::invalid_records(checkout).is_empty()
         || crate::finalize_journal::load_all(checkout)
             .iter()
-            .any(|job| job.state != "terminal")
+            .any(|job| job.state != "terminal" && !job.retired())
     {
         return Err(RootsError::Merge(
             "durable finalization remains unresolved; checkout retained".into(),
@@ -398,8 +398,7 @@ fn close_guards(checkout: &Path) -> Result<(Vec<ResourceLock>, CaptureLocks), Ro
             .map_err(crate::safe_io::RefCasError::from)?,
         ResourceLock::acquire(Repository::open(checkout)?.path().join("HEAD.lock"))
             .map_err(crate::safe_io::RefCasError::from)?,
-        ResourceLock::acquire(local_store::root(checkout).join(local_store::FINALIZE_LOCK_PATH))
-            .map_err(crate::safe_io::RefCasError::from)?,
+        crate::safe_io::journal_worker::reserve_for_checkout_move(checkout)?,
         ResourceLock::acquire(
             local_store::root(checkout)
                 .join(crate::finalize_journal::JOURNAL_DIR)

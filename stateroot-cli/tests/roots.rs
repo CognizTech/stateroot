@@ -588,6 +588,11 @@ fn log_json_projects_parallel_lineage_from_refs_and_records() {
     let full = read(&["log", "--json"]);
     let first = read(&["log", "--json", "--limit", "2"]);
     let second = read(&["log", "--json", "--limit", "2", "--offset", "2"]);
+    let agent = read(&["log", "--json", "--limit", "2", "--roots-only"]);
+    assert_eq!(agent["roots"], first["roots"]);
+    assert_eq!(agent["pagination"], first["pagination"]);
+    assert!(agent.get("topology").is_none());
+    assert!(agent.get("forks").is_none());
     let total = full["roots"].as_array().unwrap().len();
     assert_eq!(first["pagination"]["total"], total);
     assert_eq!(first["pagination"]["has_more"], true);

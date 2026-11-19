@@ -1005,7 +1005,8 @@ fn append_handoff_work(work: &mut String, handoff: &Value, project_dir: &Path) {
 
 /// Build the full hook digest. Identity (persona + USER) and work body are
 /// both uncapped — product-intent forbids char truncation on the compiler path.
-pub fn hook_digest(config_dir: &Path, project_dir: &Path, harness_id: &str) -> Option<String> {
+#[cfg(test)]
+fn hook_digest(config_dir: &Path, project_dir: &Path, harness_id: &str) -> Option<String> {
     let home = stateroot_core::harness_install::home_dir().ok();
     let identity = home
         .as_ref()
@@ -1051,16 +1052,80 @@ pub(crate) fn reset_delivery_counters() {
 /// [`hook_digest`] with an explicit identity block (the scheduler decides
 /// what the identity section carries: full prefix, compressed pointer, or
 /// nothing).
-pub fn hook_digest_with_identity(
+#[cfg(test)]
+fn hook_digest_with_identity(
     config_dir: &Path,
     project_dir: &Path,
     harness_id: &str,
     identity: &str,
 ) -> Option<String> {
+    assemble_hook_context(config_dir, project_dir, harness_id, identity).map(|context| context.full)
+}
+
+struct HookContext {
+    full: String,
+    working: Vec<String>,
+    supporting: Vec<String>,
+}
+
+impl HookContext {
+    fn emit(
+        self,
+        ctx: &Ctx,
+        quirk: &registry::HarnessQuirk,
+        canonical: &str,
+        project_dir: &Path,
+        payload: &Value,
+    ) -> bool {
+        let hook_ctx = Ctx {
+            cwd: project_dir.to_path_buf(),
+            ..ctx.clone()
+        };
+        let working: Vec<_> = self.working.iter().map(String::as_str).collect();
+        let supporting: Vec<_> = self.supporting.iter().map(String::as_str).collect();
+        let delivery = super::hook_context::render(
+            &hook_ctx,
+            quirk.id,
+            hook_event_name(canonical),
+            payload,
+            self.full,
+            &working,
+            &supporting,
+        );
+        if !delivery.text.is_empty() {
+            print_hook_injection(quirk, canonical, &delivery.text);
+        }
+        if delivery.retry {
+            let home = stateroot_core::harness_install::home_dir()
+                .unwrap_or_else(|_| ctx.config_dir.clone());
+            let key = format!(
+                "{}:{}",
+                quirk.id,
+                stateroot_core::persona_injection::session_key(project_dir, payload)
+            );
+            stateroot_core::persona_injection::decide_and_record(
+                &home,
+                &key,
+                "post_compaction",
+                "",
+                hook_now(),
+                false,
+                false,
+            );
+        }
+        delivery.working_inline && !delivery.text.is_empty()
+    }
+}
+
+fn assemble_hook_context(
+    config_dir: &Path,
+    project_dir: &Path,
+    harness_id: &str,
+    identity: &str,
+) -> Option<HookContext> {
     #[cfg(test)]
     FULL_DIGEST_BUILDS.with(|c| c.set(c.get() + 1));
     let _ = (config_dir, harness_id);
-    let identity = identity.to_string();
     let handoff = local_store::read_handoff_local(project_dir).ok().flatten();
     let mut work = String::new();
     // Corruption banners first — a quiet unreadable handoff silently degraded
@@ -1093,12 +1158,15 @@ pub fn hook_digest_with_identity(
     if let Some(section) = super::resume::needs_attention_section(project_dir) {
         work.push_str(&section);
     }
+    let plan_start = work.len();
     if let Some(section) = super::resume::central_plan_section(Some(project_dir)) {
         work.push_str(&section);
     }
+    let plan_end = work.len();
     if let Some(section) = super::resume::shared_capabilities_section(project_dir) {
         work.push_str(&section);
     }
+    let capabilities_end = work.len();
     if let Some(ref handoff) = handoff {
         append_handoff_work(&mut work, handoff, project_dir);
     } else {
@@ -1107,6 +1175,7 @@ pub fn hook_digest_with_identity(
             work.push_str(&lineage);
         }
     }
+    let work_end = work.len();
     if let Some(section) = super::resume::recent_checkpoints_section(project_dir) {
         work.push_str(&section);
     }
@@ -1114,6 +1183,7 @@ pub fn hook_digest_with_identity(
         work.push_str(&section);
     }
 
+    let history_end = work.len();
     if !work.trim().is_empty() {
         work.push_str(&format!("\n{}", super::resume::NO_REFETCH_FOOTER));
     }
@@ -1130,64 +1200,77 @@ pub fn hook_digest_with_identity(
     let rules = home
         .as_ref()
         .map(|home| stateroot_core::rules::compose_section(project_dir, home));
-    let work = work.trim().to_string();
-    if identity.trim().is_empty()
-        && work.is_empty()
-        && learnings.is_none()
-        && durable
-            .as_ref()
-            .map(|t| t.trim().is_empty())
-            .unwrap_or(true)
-        && rules.is_none()
-    {
+    let wiki = stateroot_core::wiki::compose_digest_section(project_dir);
+    let pack = stateroot_core::context_pack::build(project_dir).render_markdown();
+    let instructions = learnings.as_deref().unwrap_or_default();
+    let preferences = durable.as_deref().unwrap_or_default();
+    let rules = rules.as_deref().unwrap_or_default();
+
+    let mut full = identity.to_string();
+    for section in [instructions, preferences, rules, &wiki, &pack, &work] {
+        if !section.trim().is_empty() {
+            if !full.is_empty() && !full.ends_with('\n') {
+                full.push('\n');
+            }
+            full.push_str(section.trim());
+            full.push('\n');
+        }
+    }
+    if full.trim().is_empty() {
         return None;
     }
-    let mut digest = identity;
-    if let Some(learnings) = learnings.filter(|text| !text.trim().is_empty()) {
-        if !digest.is_empty() && !digest.ends_with('\n') {
-            digest.push('\n');
+
+    // These are producer boundaries, not Markdown heading guesses. A
+    // handoff can contain arbitrary Markdown, including the same headings.
+    let mut assignment = String::new();
+    if let Some(packet) = &handoff {
+        if let Some(seq) = packet["seq"].as_i64() {
+            assignment.push_str(&format!("Handoff #{seq}\n"));
         }
-        digest.push_str(learnings.trim());
-        digest.push('\n');
-    }
-    if let Some(durable) = durable.filter(|text| !text.trim().is_empty()) {
-        if !digest.is_empty() && !digest.ends_with('\n') {
-            digest.push('\n');
+        if let Some(task) = packet["task"]
+            .as_str()
+            .or(packet["immediate_task"].as_str())
+        {
+            assignment.push_str(&format!("Recorded handoff task: {task}\n"));
         }
-        digest.push_str(durable.trim());
-        digest.push('\n');
-    }
-    if let Some(rules) = rules.filter(|text| !text.trim().is_empty()) {
-        if !digest.is_empty() && !digest.ends_with('\n') {
-            digest.push('\n');
+        if let Some(root) = packet["latest_root"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+        {
+            assignment.push_str(&format!("Handoff root: {root}\n"));
         }
-        digest.push_str(rules.trim());
-        digest.push('\n');
-    }
-    // Wiki catalog (index + recent log) — never page bodies.
-    let wiki = stateroot_core::wiki::compose_digest_section(project_dir);
-    if !wiki.trim().is_empty() {
-        if !digest.is_empty() && !digest.ends_with('\n') {
-            digest.push('\n');
+        if let Some(plan) = packet["plan_ref"]["id"].as_str() {
+            assignment.push_str(&format!("Handoff plan reference: {plan}\n"));
         }
-        digest.push_str(wiki.trim());
-        digest.push('\n');
     }
-    let pack_md = stateroot_core::context_pack::build(project_dir).render_markdown();
-    if !pack_md.trim().is_empty() {
-        if !digest.is_empty() && !digest.ends_with('\n') {
-            digest.push('\n');
-        }
-        digest.push_str(pack_md.trim());
-        digest.push('\n');
+    let recorded_plan = &work[plan_start..plan_end];
+    let active_plan = recorded_plan.starts_with("## Active Plan");
+    let mut working = vec![
+        identity.to_string(),
+        work[..plan_start].to_string(),
+        assignment,
+        work[capabilities_end..work_end].to_string(),
+    ];
+    if active_plan {
+        working.push(recorded_plan.to_string());
     }
-    if !work.is_empty() {
-        if !digest.is_empty() && !digest.ends_with('\n') {
-            digest.push('\n');
-        }
-        digest.push_str(&work);
-    }
-    Some(digest.trim().to_string())
+    working.extend([preferences.to_string(), rules.to_string()]);
+    let supporting = [
+        instructions,
+        if active_plan { "" } else { recorded_plan },
+        &work[plan_end..capabilities_end],
+        &work[work_end..history_end],
+        &wiki,
+        &pack,
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    Some(HookContext {
+        full: full.trim().to_string(),
+        working,
+        supporting,
+    })
 }
 
 fn hook_event_name(canonical: &str) -> &'static str {
@@ -1332,10 +1415,11 @@ async fn resume_output(
         decide_delivery(ctx, quirk, canonical, project_dir, payload)
     {
         if let Some(digest) =
-            hook_digest_with_identity(&ctx.config_dir, project_dir, quirk.id, &identity)
+            assemble_hook_context(&ctx.config_dir, project_dir, quirk.id, &identity)
         {
-            print_hook_injection(quirk, canonical, &digest);
-            record_delivery_effects(ctx, quirk, canonical, project_dir, payload);
+            if digest.emit(ctx, quirk, canonical, project_dir, payload) {
+                record_delivery_effects(ctx, quirk, canonical, project_dir, payload);
+            }
         }
     }
     // Maintenance is eligible at the session boundary whether or not this
@@ -1817,10 +1901,16 @@ async fn checkpoint_from_spool(
             let _ = super::compiler::try_ingest(&hook_ctx, false).await;
             reconcile_boundary(&hook_ctx, project_dir);
         }
-        if let Some(digest) = hook_digest(&hook_ctx.config_dir, project_dir, quirk.id) {
-            print_hook_injection(quirk, canonical, &digest);
-            // Post-compaction re-injection delivered a non-empty digest.
-            crate::telemetry::continuity_delivered(&hook_ctx.config_dir, project_dir, quirk.id);
+        let home = stateroot_core::harness_install::home_dir()
+            .unwrap_or_else(|_| hook_ctx.config_dir.clone());
+        let identity =
+            hook_identity_prefix(&hook_ctx.config_dir, &home, Some(project_dir), quirk.id);
+        if let Some(digest) =
+            assemble_hook_context(&hook_ctx.config_dir, project_dir, quirk.id, &identity)
+        {
+            if digest.emit(&hook_ctx, quirk, canonical, project_dir, payload) {
+                crate::telemetry::continuity_delivered(&hook_ctx.config_dir, project_dir, quirk.id);
+            }
         }
     }
 
@@ -1882,6 +1972,22 @@ async fn checkpoint_from_spool(
                 &occurrence,
                 Some(capture_watermark),
             ) {
+                Ok(job) if job.requires_attention() => {
+                    note!(
+                        "boundary {} retained for attention: {}",
+                        job.id,
+                        job.last_error.as_deref().unwrap_or("inspect the job")
+                    );
+                }
+                Ok(job) if job.queue_state() != "active" => {
+                    hook_note(
+                        quirk,
+                        &format!(
+                            "boundary occurrence already retained ({})",
+                            job.queue_state()
+                        ),
+                    );
+                }
                 Ok(_) => {
                     hook_note(quirk, "boundary job queued (durable journal)");
                     super::drain_finalize::kick(project_dir);

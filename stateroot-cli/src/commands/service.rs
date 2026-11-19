@@ -1006,6 +1006,9 @@ async fn scan_all_projects(ctx: &Ctx) -> usize {
         let Some(_project_guard) = stateroot_core::fs_lock::FileLock::acquire(&lock) else {
             continue;
         };
+        // Resume abandoned boundary work even when the project receives no
+        // further hooks. Busy and blocked owners are diagnosed without spawning.
+        super::drain_finalize::kick(&dir);
         match continuity::reconcile(&dir, &ctx.config_dir, &ctx.config.continuity) {
             Ok(_) => {
                 scanned += 1;

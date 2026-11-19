@@ -481,3 +481,369 @@ fn boundary_freezes_one_session_frontier_and_acknowledges_only_that_prefix() {
         .iter()
         .any(|record| record.text.contains("captured after boundary")));
 }
+
+/// Exercise process death, including a retained owner record that never ran
+/// Drop. The subprocess holds the actual product claim, without test hooks
+/// in the worker or a timing-dependent attempt to kill it mid-snapshot.
+#[test]
+fn killed_worker_resumes_the_queue_on_the_next_drain() {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    const CHILD: &str = "STATEROOT_FIXTURE_BOUNDARY_OWNER";
+    if let Some(dir) = std::env::var_os(CHILD) {
+        let dir = Path::new(&dir);
+        let _claim = stateroot_core::safe_io::journal_worker::claim(&dir.join("project")).unwrap();
+        std::fs::write(dir.join("ready"), b"held").unwrap();
+        let _ = std::io::stdin().read(&mut [0u8]);
+        return;
+    }
+    let (config, home) = homes();
+    let fixture = tempfile::tempdir().unwrap();
+    let project = fixture.path().join("project");
+    init_project(config.path(), home.path(), &project);
+    write_pi_session(home.path(), &project, "crash-1", "finish retained work");
+    let job = stateroot_core::finalize_journal::enqueue(
+        &project,
+        "pi",
+        "crash-1",
+        None,
+        "refs/stateroot/latest",
+    )
+    .unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "killed_worker_resumes_the_queue_on_the_next_drain",
+        ])
+        .env(CHILD, fixture.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let start = Instant::now();
+    while !fixture.path().join("ready").exists() {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "worker exited before holding the claim"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "worker never acquired the claim"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let cli = || stateroot(config.path(), home.path(), &project);
+    let inspect = || -> serde_json::Value {
+        serde_json::from_slice(
+            &cli()
+                .args(["handoff", "inspect", "--job", &job.id])
+                .assert()
+                .success()
+                .get_output()
+                .stdout,
+        )
+        .unwrap()
+    };
+    let before = inspect();
+    assert_eq!(before["worker"]["state"], "busy");
+    cli().arg("_drain-finalize").assert().success();
+    cli()
+        .args([
+            "handoff",
+            "recover-worker",
+            "--writers-stopped",
+            "--expected-owner",
+            before["worker"]["owner_sha256"].as_str().unwrap(),
+            "--reason",
+            "must refuse a live owner",
+        ])
+        .assert()
+        .failure();
+    assert_eq!(inspect()["jobs"], before["jobs"]);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_eq!(inspect()["worker"]["state"], "recoverable");
+    cli().arg("_drain-finalize").assert().success();
+    let after = inspect();
+    assert_eq!(after["worker"]["state"], "available");
+    assert_eq!(after["jobs"][0]["queue_state"], "terminal");
+    assert_eq!(after["jobs"][0]["ingest_key"], job.ingest_key);
+    cli().arg("_drain-finalize").assert().success();
+    assert_eq!(inspect()["jobs"], after["jobs"]);
+}
+
+#[test]
+fn legacy_worker_recovery_is_inspectable_exact_and_preserves_owner_bytes() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use sha2::{Digest, Sha256};
+    let (config, home) = homes();
+    let project = tempfile::tempdir().unwrap();
+    init_project(config.path(), home.path(), project.path());
+    let local = project.path().join(".stateroot/local");
+    let lock = local.join("drain-finalize.lock");
+    let legacy = br#"{"pid":547167,"token":"previous-owner","namespace":"unrelated-namespace","acquired_at":"2025-02-01T00:00:00Z"}"#;
+    std::fs::write(&lock, legacy).unwrap();
+    write_pi_session(
+        home.path(),
+        project.path(),
+        "legacy-job",
+        "verify legacy recovery",
+    );
+    let job = stateroot_core::finalize_journal::enqueue(
+        project.path(),
+        "pi",
+        "legacy-job",
+        None,
+        "refs/stateroot/latest",
+    )
+    .unwrap();
+    let cli = || stateroot(config.path(), home.path(), project.path());
+    let inspect = || -> serde_json::Value {
+        serde_json::from_slice(
+            &cli()
+                .args(["handoff", "inspect"])
+                .assert()
+                .success()
+                .get_output()
+                .stdout,
+        )
+        .unwrap()
+    };
+    let document = inspect();
+    assert_eq!(document["worker"]["state"], "unverified");
+    assert_eq!(document["summary"]["due"], 1);
+    let small = cli()
+        .args(["handoff", "inspect", "--summary"])
+        .assert()
+        .success();
+    let small: serde_json::Value = serde_json::from_slice(&small.get_output().stdout).unwrap();
+    assert_eq!(small["worker"], document["worker"]);
+    assert_eq!(small["summary"], document["summary"]);
+    assert!(small.get("jobs").is_none());
+
+    let digest = format!("{:x}", Sha256::digest(legacy));
+    assert_eq!(document["worker"]["owner_sha256"], digest);
+    assert!(document["worker_recovery"]
+        .as_str()
+        .unwrap()
+        .contains(&digest));
+    cli().arg("_drain-finalize").assert().failure();
+    assert_eq!(std::fs::read(&lock).unwrap(), legacy);
+    assert_eq!(inspect()["jobs"], document["jobs"]);
+    cli()
+        .args([
+            "handoff",
+            "recover-worker",
+            "--expected-owner",
+            &digest,
+            "--reason",
+            "lacks confirmation",
+        ])
+        .assert()
+        .failure();
+
+    // The prior inspection cannot release an owner that replaced it.
+    std::fs::write(&lock, b"another owner").unwrap();
+    cli()
+        .args([
+            "handoff",
+            "recover-worker",
+            "--expected-owner",
+            &digest,
+            "--writers-stopped",
+            "--reason",
+            "reviewed",
+        ])
+        .assert()
+        .failure();
+    assert_eq!(std::fs::read(&lock).unwrap(), b"another owner");
+    assert_eq!(inspect()["worker"]["state"], "malformed");
+    std::fs::write(&lock, legacy).unwrap();
+    for _ in 0..2 {
+        cli()
+            .args([
+                "handoff",
+                "recover-worker",
+                "--expected-owner",
+                &digest,
+                "--writers-stopped",
+                "--reason",
+                "all writers separately stopped",
+            ])
+            .assert()
+            .success();
+    }
+    let saved = cli()
+        .args(["handoff", "inspect", "--worker-recovery", &digest])
+        .assert()
+        .success();
+    let evidence: serde_json::Value = serde_json::from_slice(&saved.get_output().stdout).unwrap();
+    assert_eq!(evidence["worker"]["state"], "available");
+    let receipt = &evidence["recovery"];
+    assert_eq!(receipt["by"], "cli");
+    cli()
+        .args(["handoff", "inspect", "--worker-recovery", "../invalid"])
+        .assert()
+        .failure();
+    assert_eq!(
+        STANDARD
+            .decode(receipt["owner_bytes_base64"].as_str().unwrap())
+            .unwrap(),
+        legacy
+    );
+    assert_eq!(receipt["reason"], "all writers separately stopped");
+    assert_eq!(inspect()["worker"]["state"], "available");
+    assert_eq!(inspect()["jobs"], document["jobs"]);
+    cli().arg("_drain-finalize").assert().success();
+    assert_eq!(inspect()["jobs"][0]["id"], job.id);
+    assert_eq!(inspect()["jobs"][0]["phase"], "complete");
+
+    // A legacy record with positive same-namespace PID-reuse proof is
+    // reclaimed in one drain, even if the numeric PID still exists.
+    if let (Some(ns), Some(birth)) = (
+        stateroot_core::safe_io::host_namespace(),
+        stateroot_core::safe_io::native_process_start_token(std::process::id()),
+    ) {
+        std::fs::write(
+            &lock,
+            serde_json::json!({"pid":std::process::id(), "namespace":ns,
+            "process_start":birth.saturating_add(1), "token":"older-acquisition"})
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(inspect()["worker"]["state"], "recoverable");
+        cli().arg("_drain-finalize").assert().success();
+        assert!(!lock.exists());
+    }
+    std::fs::create_dir(&lock).unwrap();
+    assert_eq!(inspect()["worker"]["state"], "io_error");
+    cli().arg("_drain-finalize").assert().failure();
+    assert!(lock.is_dir());
+}
+
+#[test]
+fn foreign_transcripts_park_before_snapshot_and_disposition_preserves_evidence() {
+    use stateroot_core::finalize_journal as journal;
+    let (config, home) = homes();
+    let project = tempfile::tempdir().unwrap();
+    init_project(config.path(), home.path(), project.path());
+    let session = "same-id";
+    let cursor = home
+        .path()
+        .join(".cursor/projects/fixture/agent-transcripts")
+        .join(session)
+        .join(format!("{session}.jsonl"));
+    std::fs::create_dir_all(cursor.parent().unwrap()).unwrap();
+    std::fs::write(&cursor, serde_json::json!({"role":"user","message":{"content":[{"type":"text","text":"cursor work"}]}}).to_string()).unwrap();
+    let cli = || stateroot(config.path(), home.path(), project.path());
+    let payload =
+        serde_json::json!({"session_id":session,"cwd":project.path(),"transcript_path":cursor,
+        "event_id":"same-boundary"})
+        .to_string();
+    for _ in 0..2 {
+        cli()
+            .args(["hook", "stop", "--harness", "claude-code"])
+            .write_stdin(payload.clone())
+            .assert()
+            .success();
+    }
+    let jobs = journal::load_all(project.path());
+    assert_eq!(jobs.len(), 1);
+    let mut wrong = jobs[0].clone();
+    assert!(wrong.requires_attention());
+    assert_eq!(wrong.phase, journal::Phase::Queued);
+    assert_eq!(wrong.attempt, 0);
+    assert!(wrong.last_error.as_ref().unwrap().contains("cursor"));
+    let original_error = wrong.last_error.clone();
+
+    // A pre-upgrade queue can already contain the same mismatch.
+    wrong.state = "active".into();
+    wrong.last_error = None;
+    journal::save(project.path(), &wrong).unwrap();
+    write_pi_session(
+        home.path(),
+        project.path(),
+        "healthy",
+        "independent healthy work",
+    );
+    let good = journal::enqueue(
+        project.path(),
+        "pi",
+        "healthy",
+        None,
+        "refs/stateroot/latest",
+    )
+    .unwrap();
+    cli().arg("_drain-finalize").assert().success();
+    let jobs = journal::load_all(project.path());
+    assert_eq!(
+        jobs.iter().find(|j| j.id == good.id).unwrap().state,
+        "terminal"
+    );
+    let parked = jobs.iter().find(|j| j.id == wrong.id).unwrap();
+    assert!(parked.requires_attention());
+    assert!(parked.root.is_none() && parked.handoff_seq.is_none());
+    for _ in 0..2 {
+        cli()
+            .args([
+                "handoff",
+                "retire",
+                "--job",
+                &wrong.id,
+                "--reason",
+                "emitter supplied the wrong native transcript",
+            ])
+            .assert()
+            .success();
+    }
+    let inspect = || -> serde_json::Value {
+        serde_json::from_slice(
+            &cli()
+                .args(["handoff", "inspect", "--job", &wrong.id])
+                .assert()
+                .success()
+                .get_output()
+                .stdout,
+        )
+        .unwrap()
+    };
+    let retired = inspect();
+    assert_eq!(retired["summary"]["retired"], 1);
+    assert_eq!(retired["summary"]["manual_attention"], 0);
+    assert_eq!(retired["summary"]["complete"], 1);
+    assert_eq!(retired["jobs"][0]["queue_state"], "retired");
+    assert_eq!(retired["jobs"][0]["ingest_key"], wrong.ingest_key);
+    assert_eq!(
+        retired["jobs"][0]["recoveries"].as_array().unwrap().len(),
+        1
+    );
+    cli()
+        .args(["handoff", "recover", "--job", &wrong.id, "--transcript"])
+        .arg(&cursor)
+        .assert()
+        .failure();
+    assert_eq!(inspect()["jobs"], retired["jobs"]);
+
+    // Exact same Claude session/project evidence can still reopen the job.
+    let relocated = home.path().join("verified-claude.jsonl");
+    std::fs::write(&relocated,serde_json::json!({"type":"user","sessionId":session,"cwd":project.path(),
+        "timestamp":"2026-11-01T00:00:00Z","message":{"role":"user","content":"genuine Claude work"}}).to_string()).unwrap();
+    cli()
+        .args(["handoff", "recover", "--job", &wrong.id, "--transcript"])
+        .arg(&relocated)
+        .assert()
+        .success();
+    let recovered = inspect();
+    assert_eq!(recovered["jobs"][0]["queue_state"], "terminal");
+    assert_eq!(
+        recovered["jobs"][0]["recoveries"][1]["last_error"],
+        original_error.unwrap()
+    );
+    assert_eq!(
+        recovered["jobs"][0]["recoveries"][1]["previous_transcript"]
+            .as_str()
+            .map(Path::new),
+        Some(cursor.as_path())
+    );
+}

@@ -926,3 +926,156 @@ fn antigravity_identity_change_redelivers_mid_conversation() {
         "post-redelivery repeat must be silent: {out}"
     );
 }
+
+#[test]
+fn constrained_handoffs_keep_work_inline_and_continue_the_exact_capture() {
+    let (config, home) = support::homes();
+    let project = tempfile::tempdir().expect("project");
+    seed_marid(config.path(), home.path());
+    init_project(config.path(), home.path(), project.path());
+    let cli = || stateroot(config.path(), home.path(), project.path());
+    let older_constraint =
+        "Only merge main into the cloud branch because private code must stay there.";
+    let summary = format!(
+        "Rejected approach: back-merge moves cloud-only code.\n{}\n{older_constraint}",
+        "Evidence includes quotes \" and 中文 🧭. ".repeat(350)
+    );
+    cli()
+        .args([
+            "handoff",
+            "write",
+            "--from",
+            "dsh",
+            "--no-plan",
+            "--objective",
+            "Verify and continue the cloud sync",
+            "--task",
+            "Check the merge direction",
+            "--context-summary",
+            &summary,
+            "--next",
+            "Inspect the recorded source root",
+        ])
+        .assert()
+        .success();
+
+    let hook = |harness: &str, event: &str, session: &str| {
+        let mut cmd = cli();
+        if harness == "codex" {
+            cmd.env("CODEX_HOME", home.path().join(".codex"));
+        }
+        let result = cmd
+            .args(["hook", event, "--harness", harness])
+            .write_stdin(serde_json::json!({"session_id":session,"cwd":project.path()}).to_string())
+            .assert()
+            .success();
+        stdout_of(&result)
+    };
+    let context = |out: &str| {
+        serde_json::from_str::<serde_json::Value>(out).unwrap()["hookSpecificOutput"]
+            ["additionalContext"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let claude = context(&hook("claude-code", "SessionStart", "claude-session"));
+    assert!(claude.encode_utf16().count() <= 10_000);
+    assert!(claude.contains("Check the merge direction"));
+    assert!(contains_marid(&claude));
+    assert!(claude.contains("Before acting, read required pages"));
+    assert!(hook("claude-code", "SessionStart", "claude-session")
+        .trim()
+        .is_empty());
+
+    let codex_home = home.path().join(".codex");
+    std::fs::create_dir_all(&codex_home).unwrap();
+    let config_path = codex_home.join("hooks.json");
+    let write_limit = |limit| {
+        std::fs::write(
+            &config_path,
+            serde_json::json!({
+                "hooks": {"SessionStart": [{"hooks":[{"type":"command",
+                "command":"stateroot hook session_start --harness codex",
+                "additionalContextLimit":limit}]}]}
+            })
+            .to_string(),
+        )
+        .unwrap();
+    };
+    write_limit(512);
+    let codex = context(&hook("codex", "SessionStart", "codex-session"));
+    assert!(codex.len() <= 2_048);
+    assert!(codex.contains("Before acting, read required pages"));
+    let path = codex_home.join("rollout-test.jsonl");
+    std::fs::write(&path, serde_json::json!({"type":"session_meta",
+        "payload":{"id":"legacy-session","originator":"codex_exec","cli_version":"0.149.1","cwd":project.path()}}).to_string()).unwrap();
+    std::fs::remove_file(&config_path).unwrap();
+    let legacy_start = cli()
+        .env("CODEX_HOME", &codex_home)
+        .args(["hook", "SessionStart", "--harness", "codex"])
+        .write_stdin(
+            serde_json::json!({"session_id":"legacy-session","cwd":project.path(),
+            "source":"startup","transcript_path":path})
+            .to_string(),
+        )
+        .assert()
+        .success();
+    assert!(context(&stdout_of(&legacy_start)).contains(older_constraint));
+    assert!(!context(&stdout_of(&legacy_start)).contains("--continuation"));
+
+    write_limit(0);
+    let unlimited = context(&hook("codex", "SessionStart", "codex-unlimited"));
+    assert!(unlimited.contains(older_constraint));
+    assert!(!unlimited.contains("--continuation"));
+    let dsh = hook("dsh", "session_start", "dsh-session");
+    assert!(dsh.contains(older_constraint));
+    assert!(!dsh.contains("--continuation"));
+
+    let ids: Vec<_> = [&claude, &codex]
+        .iter()
+        .map(|out| {
+            out.split_once("--continuation ")
+                .unwrap()
+                .1
+                .split_whitespace()
+                .next()
+                .unwrap()
+        })
+        .collect();
+    assert_ne!(ids[0], ids[1]);
+    cli()
+        .args([
+            "handoff",
+            "write",
+            "--from",
+            "dsh",
+            "--no-plan",
+            "--objective",
+            "NEW_REVISION_CANARY",
+            "--context-summary",
+            "Different work now",
+        ])
+        .assert()
+        .success();
+    for id in ids {
+        let mut delivered = String::new();
+        for page in 1..10 {
+            let output = cli()
+                .args(["resume", "--continuation", id, "--page", &page.to_string()])
+                .assert()
+                .success();
+            let text = stdout_of(&output);
+            assert!(text.len() <= 8_400);
+            assert!(!text.contains("NEW_REVISION_CANARY"));
+            delivered.push_str(&text);
+            if !text.contains("Required next page") {
+                break;
+            }
+        }
+        assert!(delivered.contains(older_constraint));
+        cli()
+            .args(["resume", "--continuation", id, "--page", "999"])
+            .assert()
+            .failure();
+    }
+}

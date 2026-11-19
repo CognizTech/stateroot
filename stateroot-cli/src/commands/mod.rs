@@ -29,6 +29,7 @@ pub mod harness;
 pub mod harness_cli;
 pub mod harness_display;
 pub mod hook;
+pub mod hook_context;
 pub mod import;
 pub mod init;
 pub mod install;

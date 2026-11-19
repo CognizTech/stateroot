@@ -12,6 +12,8 @@
 //!   silent last-writer-wins. Granularity is per-ref: independent fork refs
 //!   never serialize against each other.
 
+pub mod journal_worker;
+
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -115,6 +117,9 @@ pub fn atomic_replace_json(path: &Path, value: &serde_json::Value) -> std::io::R
 pub struct ResourceLock {
     path: PathBuf,
     token: String,
+    // Journal workers keep this kernel guard until release. Ordinary locks
+    // keep the existing, short mutation critical section.
+    _lifetime_guard: Option<MutationGuard>,
 }
 
 /// Owner metadata persisted inside the lock file (checked on release and on
@@ -147,6 +152,34 @@ pub struct LockOwner {
     /// Native kernel boot identity when available, not a wall-clock estimate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_boot: Option<String>,
+}
+
+impl LockOwner {
+    fn current() -> Self {
+        let (host, boot) = native_epoch();
+        let pid = std::process::id();
+        Self {
+            pid,
+            token: mint_lock_token(),
+            acquired_at: crate::local_store::now_rfc3339(),
+            namespace: host_namespace().unwrap_or("unavailable").into(),
+            process_start: native_process_start_token(pid),
+            native_host: host.map(str::to_owned),
+            native_boot: boot.map(str::to_owned),
+        }
+    }
+
+    fn provably_stale(&self) -> bool {
+        self.pid != 0
+            && (previous_native_boot(self)
+                || same_namespace(&self.namespace)
+                    && (!pid_alive(self.pid)
+                        || self
+                            .process_start
+                            .filter(|start| *start != 0)
+                            .zip(native_process_start_token(self.pid))
+                            .is_some_and(|(old, current)| old != current)))
+    }
 }
 
 /// Native process birth identity. It is compared only in the recorded PID
@@ -211,7 +244,29 @@ fn native_epoch() -> (Option<&'static str>, Option<&'static str>) {
         {
             (host_namespace().map(|s| format!("windows:{s}")), None)
         }
-        #[cfg(not(any(target_os = "linux", windows)))]
+        #[cfg(target_os = "macos")]
+        {
+            let mut bytes = [0u8; 16];
+            let timeout = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 100_000_000,
+            };
+            // SAFETY: gethostuuid writes 16 bytes and only reads timeout.
+            let host = (unsafe { libc::gethostuuid(bytes.as_mut_ptr(), &timeout) } == 0
+                && bytes != [0; 16])
+                .then(|| format!("macos:{}", uuid::Uuid::from_bytes(bytes)));
+            let boot = std::process::Command::new("sysctl")
+                .args(["-n", "kern.bootsessionuuid"])
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .and_then(|out| {
+                    uuid::Uuid::parse_str(String::from_utf8(out.stdout).ok()?.trim()).ok()
+                })
+                .map(|id| id.to_string());
+            (host, boot)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
         {
             (None, None)
         }
@@ -339,20 +394,57 @@ fn read_lock_owner(path: &Path) -> Option<LockOwner> {
 }
 
 /// Kernel-owned mutation guard, released on crash. Its inode is never unlinked.
+#[derive(Debug)]
 struct MutationGuard {
     file: fs::File,
 }
 
 impl MutationGuard {
     fn acquire(path: &Path, blocking: bool) -> std::io::Result<Option<Self>> {
+        Self::open(path, blocking, true, false)
+    }
+
+    fn worker(path: &Path, create: bool) -> std::io::Result<Option<Self>> {
+        Self::open(path, false, create, true)
+    }
+
+    fn open(
+        path: &Path,
+        blocking: bool,
+        create: bool,
+        worker: bool,
+    ) -> std::io::Result<Option<Self>> {
         let mut name = path.as_os_str().to_os_string();
         name.push(".guard");
-        let file = fs::OpenOptions::new()
+        let mut options = fs::OpenOptions::new();
+        options
             .read(true)
             .write(true)
-            .create(true)
-            .truncate(false)
-            .open(PathBuf::from(name))?;
+            .create(create)
+            .truncate(false);
+        #[cfg(unix)]
+        if worker {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        #[cfg(windows)]
+        if worker {
+            use std::os::windows::fs::OpenOptionsExt;
+            // DrvFs and Windows do not necessarily share advisory byte locks.
+            // Native deny-sharing also excludes a WSL process's open guard handle.
+            options.share_mode(0).custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
+        }
+        let file = match options.open(PathBuf::from(name)) {
+            Ok(file) => file,
+            #[cfg(windows)]
+            Err(err) if worker && matches!(err.raw_os_error(), Some(32 | 33)) => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        if worker && !file.metadata()?.is_file() {
+            return Err(std::io::Error::other(
+                "boundary worker guard is not a regular file",
+            ));
+        }
         #[cfg(unix)]
         {
             use std::os::fd::AsRawFd;
@@ -499,9 +591,7 @@ impl ResourceLock {
         let mut last_owner: Option<LockOwner> = None;
         // Platform identity initialization may invoke a native registry query;
         // never perform it while serializing resource mutations.
-        let namespace = host_namespace().unwrap_or("unavailable");
-        let (native_host, native_boot) = native_epoch();
-        let process_start = native_process_start_token(std::process::id());
+        let owner = LockOwner::current();
         for attempt in 0..tries.max(1) {
             let Some(guard) = MutationGuard::acquire(&path, false)? else {
                 std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
@@ -513,16 +603,6 @@ impl ResourceLock {
                 .open(&path)
             {
                 Ok(mut file) => {
-                    let token = mint_lock_token();
-                    let owner = LockOwner {
-                        pid: std::process::id(),
-                        token: token.clone(),
-                        acquired_at: crate::local_store::now_rfc3339(),
-                        namespace: namespace.to_string(),
-                        process_start,
-                        native_host: native_host.map(str::to_string),
-                        native_boot: native_boot.map(str::to_string),
-                    };
                     // Checked owner persistence: the record must be complete
                     // on disk before the lock is considered held — a crash
                     // mid-write leaves a file no one can reclaim, so a failed
@@ -536,7 +616,11 @@ impl ResourceLock {
                         let _ = fs::remove_file(&path);
                         return Err(LockError::Io(err));
                     }
-                    return Ok(Self { path, token });
+                    return Ok(Self {
+                        path,
+                        token: owner.token,
+                        _lifetime_guard: None,
+                    });
                 }
                 Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => {
                     return Err(LockError::Io(error))
@@ -556,16 +640,7 @@ impl ResourceLock {
                             // treated as held and diagnosed on timeout —
                             // never silently reclaimed on a cross-runtime
                             // pid assumption.
-                            let reclaimable = owner.pid != 0
-                                && (previous_native_boot(&owner)
-                                    || same_namespace(&owner.namespace)
-                                        && (!pid_alive(owner.pid)
-                                            || owner
-                                                .process_start
-                                                .filter(|start| *start != 0)
-                                                .zip(native_process_start_token(owner.pid))
-                                                .is_some_and(|(old, current)| old != current)));
-                            if reclaimable {
+                            if owner.provably_stale() {
                                 // Stale owner: the process is gone — reclaim,
                                 // but only the exact record we read (a fresh
                                 // owner appearing between the probe and the

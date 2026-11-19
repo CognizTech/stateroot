@@ -5,6 +5,17 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- Preserve working context when Claude Code or Codex would clip a StateRoot
+  hook. Fitting digests stay inline, and oversized deliveries provide bounded
+  continuation pages tied to the original context.
+- Read paginated root summaries with `stateroot log --json --limit N --roots-only`.
+
+- Boundary workers resume interrupted journals using native lifetime ownership
+  and a compatible cross-runtime record. Status, doctor and handoff inspection
+  expose blockers. Exact-owner recovery archives old lock evidence, and
+  conflicting session locators park without delaying independent jobs.
+  Parked jobs support reasoned retirement and later exact-session recovery.
+
 - Command Code is a Tier-A harness. `stateroot install` writes a matcher-less
   `~/.commandcode/settings.json` hooks block with exactly the events Command
   Code implements (`SessionStart`, `PreToolUse`, `PostToolUse`, `Stop`), the

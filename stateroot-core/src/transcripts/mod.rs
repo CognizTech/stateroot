@@ -163,6 +163,79 @@ pub fn reader_for(harness: &str) -> Option<Box<dyn TranscriptReader>> {
     readers().into_iter().find(|reader| reader.id() == id)
 }
 
+/// Diagnose a contradictory explicit boundary locator. A directory name by
+/// itself proves nothing: require an expected native store, exact session
+/// identity and a native record shape. Relocated or temporarily unavailable
+/// evidence stays eligible for the normal exact-session verifier.
+pub(crate) fn boundary_locator_conflict(
+    home: &Path,
+    harness: &str,
+    session_id: &str,
+    locator: &Path,
+) -> Option<String> {
+    use crate::harness_install::{paths, registry};
+    use std::io::{BufRead, BufReader, Read};
+    let claimed = registry::transcript_reader_id(harness).unwrap_or(harness);
+    let path = crate::path_identity::resolve_existing_file(locator)?
+        .canonicalize()
+        .ok()?;
+    if path.extension()?.to_str()? != "jsonl" || session_id.is_empty() {
+        return None;
+    }
+    let stem = path.file_stem()?.to_str()?;
+    let parent = path.parent()?;
+    let under = |root: PathBuf| root.canonicalize().is_ok_and(|root| path.starts_with(root));
+    let candidate = if stem == session_id
+        && parent.file_name()?.to_str()? == session_id
+        && parent.parent()?.file_name()?.to_str()? == "agent-transcripts"
+        && under(home.join(".cursor/projects"))
+    {
+        "cursor"
+    } else if stem == session_id
+        && under(
+            paths::claude_config_root_in(std::env::var_os(paths::ENV_CLAUDE_CONFIG_DIR))
+                .unwrap_or_else(|| home.join(".claude"))
+                .join("projects"),
+        )
+    {
+        "claude"
+    } else if stem.starts_with("rollout-") && under(paths::codex_root(home).join("sessions")) {
+        "codex"
+    } else {
+        return None;
+    };
+    if claimed == candidate {
+        return None;
+    }
+    let reader = BufReader::new(std::fs::File::open(path).ok()?.take(64 * 1024));
+    let owned = reader.lines().take(16).map_while(Result::ok).any(|line| {
+        let Ok(row) = serde_json::from_str::<serde_json::Value>(&line) else {
+            return false;
+        };
+        match candidate {
+            "cursor" => {
+                row.get("type").is_none()
+                    && matches!(row["role"].as_str(), Some("user" | "assistant"))
+                    && row
+                        .pointer("/message/content")
+                        .is_some_and(|v| v.is_array())
+            }
+            "claude" => {
+                row["sessionId"].as_str() == Some(session_id)
+                    && row["cwd"].is_string()
+                    && row["type"].is_string()
+            }
+            "codex" => {
+                row["type"] == "session_meta"
+                    && row.pointer("/payload/id").and_then(|v| v.as_str()) == Some(session_id)
+                    && row.pointer("/payload/cwd").is_some_and(|v| v.is_string())
+            }
+            _ => false,
+        }
+    });
+    owned.then(|| format!("transcript locator and native record identify {candidate}, but the boundary declares {harness}"))
+}
+
 /// Compare exact checkout paths across native Windows and WSL path spellings.
 pub fn same_worktree(left: &Path, right: &Path) -> bool {
     normalize_path(&left.to_string_lossy()) == normalize_path(&right.to_string_lossy())

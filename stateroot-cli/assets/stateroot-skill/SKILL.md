@@ -82,6 +82,13 @@ At the start of every session in a stateroot project, before doing any work:
 5. do not run resume again in the same session unless the user explicitly asks (`--force` reprints)
 6. do not re-derive project state by scanning the tree when resume already answers the question
 
+For an oversized Claude Code or Codex hook, consume the inline working brief
+and follow its required `stateroot resume --continuation <id> --page N` links
+before relying on the handoff. The pages are pinned to that delivery. Read
+supporting pages when the task needs them. For earlier lineage, inspect the
+named root or use `stateroot log --json --limit 10 --roots-only` and page
+back as needed.
+
 A silent repeat hook can be intentional delivery deduplication, not missing continuity. Session-boundary maintenance still runs; do not force another resume solely because a hook emitted no digest.
 
 ### 2) State-changing step -> checkpoint
@@ -122,6 +129,14 @@ Session-start injection and explicit resume share the capped **Failed approaches
 ### Attend to unresolved work
 
 `## Needs Attention` in the digest and `stateroot status` surface due obligations, plan closure, routed handoffs, service health, and other deterministic obligations. Inspect and resolve the named item; do not restart a completed plan. Use `stateroot obligation add/list/show/done/snooze/cancel` for durable follow-ups and `stateroot service status` to check background reconciliation. The local service does not run an AI agent.
+
+When boundary work is overdue, `stateroot handoff inspect --summary` reports worker
+ownership, due jobs and evidence problems. Proven crashed workers recover
+automatically. Use the reported exact-owner recovery command only after
+confirming all runtimes sharing a legacy checkout have stopped writing.
+For a parked job, supply verified session evidence with `handoff recover` or
+record an explicit disposition with `handoff retire --job ID --reason …`.
+Retirement retains the evidence and carries no completion claim.
 
 Unknown delegation status is not worker failure, a missing executor or plan completion: inspect it from its original runtime. Degraded records stay preserved and visible; process completion alone never replaces a plan's evidence-bearing completion receipt.
 

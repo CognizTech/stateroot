@@ -12,6 +12,7 @@ use std::path::Path;
 use anyhow::Result;
 use stateroot_core::finalize_journal::{self as journal, BoundaryJob, Phase};
 use stateroot_core::local_store::{self, now_rfc3339};
+use stateroot_core::safe_io::journal_worker;
 
 use super::{detached, Ctx};
 
@@ -25,6 +26,10 @@ pub fn kick(project_dir: &Path) {
         return;
     }
     if journal::due(project_dir).is_empty() {
+        return;
+    }
+    let worker = journal_worker::inspect(project_dir);
+    if worker.blocked() || worker.state == journal_worker::State::Busy {
         return;
     }
     let log = local_store::root(project_dir).join(local_store::FINALIZE_LOG_PATH);
@@ -45,10 +50,6 @@ pub fn kick(project_dir: &Path) {
     }
 }
 
-fn lock_path(project_dir: &Path) -> std::path::PathBuf {
-    local_store::root(project_dir).join(local_store::FINALIZE_LOCK_PATH)
-}
-
 /// CLI entry: drain the current project's journal.
 pub async fn run(ctx: &Ctx) -> Result<()> {
     run_drain(ctx).await?;
@@ -62,31 +63,58 @@ pub async fn run(ctx: &Ctx) -> Result<()> {
 /// advance every due job one phase at a time until none are due. Safe to
 /// call from tests.
 pub async fn run_drain(ctx: &Ctx) -> Result<()> {
-    // Single-flight: another live drainer is a skip (not an error); a
-    // crashed drainer's stale lock is reclaimed by ResourceLock.
-    let Ok(_lock) =
-        stateroot_core::safe_io::ResourceLock::acquire_with_budget(lock_path(&ctx.cwd), 1, 0)
-    else {
+    let Some(_lock) = journal_worker::try_claim(&ctx.cwd)? else {
+        tracing::debug!("another worker or lock transition is active");
         return Ok(());
     };
+    let mut unsaved = std::collections::BTreeMap::new();
     loop {
-        let due = journal::due(&ctx.cwd);
+        let mut due = journal::due(&ctx.cwd);
+        due.retain(|job| !unsaved.contains_key(&job.id));
         if due.is_empty() {
             break;
         }
         for mut job in due {
+            match journal::park_conflicting_locator(&ctx.cwd, &mut job) {
+                Ok(true) => continue,
+                Err(err) => {
+                    unsaved.insert(job.id.clone(), err.to_string());
+                    continue;
+                }
+                Ok(false) => {}
+            }
             if let Err(err) = advance_one(ctx, &mut job).await {
-                journal::mark_error(&ctx.cwd, &mut job, &format!("{err:#}"))?;
+                if let Err(save_err) = journal::mark_error(&ctx.cwd, &mut job, &format!("{err:#}"))
+                {
+                    unsaved.insert(
+                        job.id,
+                        format!("{err:#}; recording the failure: {save_err}"),
+                    );
+                }
             }
         }
+    }
+    if let Some((id, error)) = unsaved.first_key_value() {
+        anyhow::bail!(
+            "{} boundary job(s) could not persist progress; {id}: {error}",
+            unsaved.len()
+        );
     }
     Ok(())
 }
 
 /// Explicit recovery advances only the requested retained job.
 pub async fn recover_one(ctx: &Ctx, id: &str, transcript: Option<&str>) -> Result<()> {
-    let _lock = stateroot_core::safe_io::ResourceLock::acquire(lock_path(&ctx.cwd))?;
+    let _lock = journal_worker::claim(&ctx.cwd)?;
     let mut job = journal::recover(&ctx.cwd, id, transcript)?;
+    if journal::park_conflicting_locator(&ctx.cwd, &mut job)? {
+        anyhow::bail!(
+            "{}",
+            job.last_error
+                .as_deref()
+                .unwrap_or("conflicting transcript locator")
+        );
+    }
     if job
         .capture_watermark
         .as_ref()
@@ -232,22 +260,15 @@ pub fn report(project_dir: &Path) -> Vec<String> {
         ));
     }
     let active: Vec<&BoundaryJob> = jobs.iter().filter(|j| j.state == "active").collect();
-    let attention: Vec<&BoundaryJob> = jobs
-        .iter()
-        .filter(|j| j.state == "manual_attention")
-        .collect();
+    let attention: Vec<&BoundaryJob> = jobs.iter().filter(|j| j.requires_attention()).collect();
     let terminal: Vec<&BoundaryJob> = jobs.iter().filter(|j| j.state == "terminal").collect();
-    for job in active {
+    if !active.is_empty() {
+        let counts = journal::summary(&jobs);
         lines.push(format!(
-            "  active: {} {} · phase {:?} · attempt {}{}",
-            job.harness,
-            job.session_id,
-            job.phase,
-            job.attempt,
-            job.last_error
-                .as_deref()
-                .map(|e| format!(" · last error: {e}"))
-                .unwrap_or_default()
+            "  active: {} · due: {} · oldest due job enqueued: {} · stateroot handoff inspect",
+            counts.active,
+            counts.due,
+            counts.oldest_due_enqueued_at.as_deref().unwrap_or("none")
         ));
     }
     // Presentation grouping only (WS3 C2): dozens of identical parked rows
@@ -294,6 +315,10 @@ pub fn report(project_dir: &Path) -> Vec<String> {
                 id_list
             ));
         }
+    }
+    let retired = jobs.iter().filter(|job| job.retired()).count();
+    if retired > 0 {
+        lines.push(format!("  retired with evidence retained: {retired}"));
     }
     if !terminal.is_empty() {
         lines.push(format!("  complete: {}", terminal.len()));

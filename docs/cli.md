@@ -333,6 +333,7 @@ Integrations can load root metadata progressively:
 ```bash
 stateroot log --json --limit 50
 stateroot log --json --limit 50 --offset 50
+stateroot log --json --limit 10 --roots-only
 ```
 
 `--limit` accepts 1–500 and requires `--json`; `--offset` requires `--limit`.
@@ -352,6 +353,11 @@ not a constant-time history lookup. Beyond-end requests return an empty window
 with the actual total. No history is removed.
 
 The editor paginates 50 roots at a time and uses these reads when supported.
+
+For agent exploration, `--roots-only` returns the requested root summaries,
+trunk and pagination identity. Use the same offset and history checks across
+pages. Inspect a known root with `stateroot show <root>` and a known change
+with `stateroot diff <from> <to> --content`.
 Older CLIs remain usable: only a confirmed unsupported `--limit` flag causes a
 fallback to the full v1 response, paginated locally. Operational errors and invalid
 pages remain errors. Selections survive page navigation; loading failures retain
@@ -1137,6 +1143,54 @@ guarantee.
 
 ## Recovery diagnostics — an interrupted-work example
 
+The boundary worker takes a per-checkout lifetime lock and publishes a complete
+owner record that older processes and other runtimes can see. A killed worker
+releases its native lock. The next hook, service scan, or other drain trigger
+can resume when the lock or native process/boot evidence proves ownership ended.
+On qualified shared Windows drives, a versioned binding identifies the
+permanent guard held by the WSL DrvFs or native Windows worker. Either runtime
+can resume after the other releases that guard, including on process death.
+Each job resumes from its persisted phase. Healthy jobs can finish alongside
+jobs that lack evidence.
+
+`stateroot handoff inspect --summary` reads the owner, exact owner SHA256, due queue,
+oldest due enqueue time, and parked/retired/completed counts. `status --json`
+and `doctor` also report a blocked worker. The service and hooks avoid
+repeatedly spawning workers behind a known blocker. An unverifiable owner and
+a filesystem error have distinct diagnostics. The age of a record cannot
+establish the death of its owner across Windows and WSL.
+
+For an unverifiable legacy record, check the originating runtime and stop
+all writers using that checkout, including other native runtimes. After
+confirming shutdown, run the command from the inspection with the observed
+digest and a reason:
+
+```bash
+stateroot handoff recover-worker --expected-owner <sha256> --writers-stopped --reason "confirmed earlier runtime stopped"
+```
+
+The CLI preserves the exact prior owner bytes and the reason in local recovery
+evidence before releasing the marker. Read that receipt with
+`stateroot handoff inspect --worker-recovery <sha256>`. Live native ownership or a changed
+digest refuses the operation. Ordinary proven crash recovery is automatic.
+
+A conflicting native transcript is retained for attention before it can
+produce a snapshot or handoff. The check uses native path, session identity
+and record shape for supported Cursor, Claude and Codex sources. Missing or
+unrecognized evidence keeps its normal exact-verification and retry behavior.
+To supply the correct transcript or explicitly retire an orphan:
+
+```bash
+stateroot handoff inspect --job <id>
+stateroot handoff recover --job <id> --transcript <verified-path>
+stateroot handoff retire --job <parked-id> --reason "original session evidence unavailable"
+```
+
+Retirement records the reason and preserves the job ID, phase, original
+errors, source and history. `queue_state` reports `retired` and no completion
+is claimed. Older CLIs see the retained v1 parked record. Exact-job recovery
+can reopen it when evidence becomes available.
+
 The durable observation, finalize-journal and resume primitives compose into
 one inspectable recovery flow. An already-queued boundary job retains its
 frozen identity across interruption, and a safe entrypoint can retry that
@@ -1252,6 +1306,30 @@ active plan, next actions, handoff fields) stays fully inline.
   instructions)`, hard-capped at 8 items and 4000 chars; what does not fit
   appears as a `- … +N more` tail — bounded in the digest, never dropped
   from the packet.
+
+### Oversized Claude and Codex hooks
+
+StateRoot sends the rich digest when it fits. Claude Code has a 10,000-character
+decoded field limit. Codex uses its approximate token threshold. StateRoot
+reads the applicable StateRoot handler settings in the user and workspace Codex
+configuration, with the documented default of 2,500 tokens when absent.
+A fresh Codex CLI 0.149.1 session with a matching native transcript preserves
+the full digest when its handler has no limit. A previous session's version
+cannot identify the executable on a resumed session.
+
+When a hook would overflow, the inline text carries identity and working context
+first. Read any required continuation before taking a decision that depends on
+the delivery. The hook gives the exact command. Follow its required page links
+and read supporting pages when the task calls for them.
+
+```bash
+stateroot resume --continuation <id> --page 1
+```
+
+The capture is local to the checkout and contains the text from that delivery.
+New handoffs cannot substitute different text under the same ID. A split hook
+that still has required pages does not record a complete working-context
+emission. An ordinary explicit `resume` provides the full current digest.
 
 ## The digest's freshness lines — Latest Activity & update notice
 

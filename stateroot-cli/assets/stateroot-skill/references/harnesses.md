@@ -6,6 +6,11 @@ After upgrading the CLI, run `stateroot install` (machine hooks/plugins) **and**
 
 ## Identity delivery
 
+Claude Code and Codex have different hook output limits. A fitting digest
+arrives inline. When it exceeds the host limit, StateRoot sends working context
+first and includes exact read commands for any required continuation.
+See [oversized hook delivery](protocol.md#continue-an-oversized-hook-delivery).
+
 Automatic harnesses inject persona + USER.md + work context onto the first usable prompt (session-start and/or first-prompt fallback). Manual `stateroot resume` is the last fallback, not the primary reliability mechanism.
 
 | Harness | Delivery | Notes |

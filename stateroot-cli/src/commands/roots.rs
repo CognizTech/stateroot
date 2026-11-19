@@ -153,13 +153,20 @@ pub fn log(
     json_output: bool,
     limit: Option<usize>,
     offset: usize,
+    roots_only: bool,
 ) -> anyhow::Result<()> {
     ctx.require_project()?;
     if json_output {
-        let projection = match limit {
+        let mut projection = match limit {
             Some(limit) => engine::lineage_projection_page(&ctx.cwd, limit, offset)?,
             None => engine::lineage_projection(&ctx.cwd)?,
         };
+        if roots_only {
+            if let Some(doc) = projection.as_object_mut() {
+                doc.remove("topology");
+                doc.remove("forks");
+            }
+        }
         println!("{}", serde_json::to_string_pretty(&projection)?);
         return Ok(());
     }

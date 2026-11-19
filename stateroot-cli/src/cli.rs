@@ -561,6 +561,12 @@ pub enum ServiceAction {
 
 #[derive(Debug, Args)]
 pub struct ResumeArgs {
+    /// Read one page of an exact context delivery referenced by a hook.
+    #[arg(long, conflicts_with_all = ["force", "deterministic"])]
+    pub continuation: Option<String>,
+    /// Page of the captured hook context (one-based).
+    #[arg(long, requires = "continuation", value_parser = clap::value_parser!(u32).range(1..))]
+    pub page: Option<u32>,
     /// Harness to tailor the digest for.
     #[arg(long)]
     pub harness: Option<String>,
@@ -738,6 +744,12 @@ pub enum HandoffAction {
     Inspect {
         #[arg(long)]
         job: Option<String>,
+        /// Only queue counts and worker ownership.
+        #[arg(long, conflicts_with_all = ["job", "worker_recovery"])]
+        summary: bool,
+        /// Inspect the archived evidence for an exact worker owner SHA256.
+        #[arg(long, conflicts_with = "job")]
+        worker_recovery: Option<String>,
     },
     /// Write a new handoff packet (local store).
     Write(Box<HandoffWriteArgs>),
@@ -774,6 +786,25 @@ pub enum HandoffAction {
     /// Recover a malformed current handoff from the newest valid history
     /// packet, preserving the invalid bytes in local quarantine.
     Repair,
+    /// Archive and release an exact unverifiable worker record after all writers are stopped.
+    RecoverWorker {
+        /// SHA256 from handoff inspect for this checkout.
+        #[arg(long)]
+        expected_owner: String,
+        /// Confirm workers in all runtimes sharing this checkout have been stopped.
+        #[arg(long, required = true)]
+        writers_stopped: bool,
+        /// Why the operator knows the old owner is no longer writing.
+        #[arg(long)]
+        reason: String,
+    },
+    /// Retain a parked boundary as explicitly retired without claiming completion.
+    Retire {
+        #[arg(long)]
+        job: String,
+        #[arg(long)]
+        reason: String,
+    },
     /// Retry a retained boundary job after its evidence becomes available.
     Recover {
         #[arg(long)]
@@ -978,6 +1009,9 @@ pub struct CompareArgs {
 
 #[derive(Debug, Args)]
 pub struct LogArgs {
+    /// Omit the editor connection map when reading a page of root summaries.
+    #[arg(long, requires = "limit")]
+    pub roots_only: bool,
     /// Emit the stable `stateroot.lineage.v1` projection for integrations.
     #[arg(long)]
     pub json: bool,

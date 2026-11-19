@@ -870,8 +870,24 @@ pub fn assess(
     }
 
     // 7. Boundary-journal jobs parked for manual attention.
-    for job in crate::finalize_journal::load_all(project_dir) {
-        if job.state != "manual_attention" {
+    let jobs = crate::finalize_journal::load_all(project_dir);
+    let queue = crate::finalize_journal::summary(&jobs);
+    if queue.due > 0 {
+        let worker = safe_io::journal_worker::inspect(project_dir);
+        if worker.blocked() {
+            let mut item = AttentionItem::new(
+                "boundary_worker_blocked",
+                24,
+                "worker",
+                format!("Boundary worker blocked with {} job(s) due", queue.due),
+            );
+            item.detail = worker.detail;
+            item.action = "stateroot handoff inspect --summary".into();
+            attention.push(item);
+        }
+    }
+    for job in jobs {
+        if !job.requires_attention() {
             continue;
         }
         let mut item = AttentionItem::new(

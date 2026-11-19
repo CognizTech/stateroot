@@ -97,6 +97,98 @@ pub struct BoundaryJob {
     pub state: String,
 }
 
+impl BoundaryJob {
+    /// Keep the on-disk v1 parked state so older writers still recognize
+    /// this occurrence and never enqueue it a second time.
+    pub fn retired(&self) -> bool {
+        self.state == "manual_attention"
+            && self
+                .recoveries
+                .last()
+                .is_some_and(|entry| entry["action"] == "retire")
+    }
+
+    pub fn requires_attention(&self) -> bool {
+        self.state == "manual_attention" && !self.retired()
+    }
+
+    pub fn queue_state(&self) -> &str {
+        if self.retired() {
+            "retired"
+        } else {
+            &self.state
+        }
+    }
+
+    pub fn locator_conflict(&self) -> Option<String> {
+        let home = crate::harness_install::home_dir().ok()?;
+        let locator = self.transcript.as_deref()?;
+        crate::transcripts::boundary_locator_conflict(
+            &home,
+            &self.harness,
+            &self.session_id,
+            Path::new(locator),
+        )
+    }
+
+    fn park_conflict(&mut self) -> bool {
+        if self.state != "active" || !matches!(self.phase, Phase::Queued | Phase::Snapped) {
+            return false;
+        }
+        let Some(reason) = self.locator_conflict() else {
+            return false;
+        };
+        self.state = "manual_attention".into();
+        self.last_error = Some(reason);
+        true
+    }
+}
+
+pub fn park_conflicting_locator(project: &Path, job: &mut BoundaryJob) -> std::io::Result<bool> {
+    if !job.park_conflict() {
+        return Ok(false);
+    }
+    save(project, job)?;
+    Ok(true)
+}
+
+#[derive(Default, Debug, Serialize)]
+pub struct QueueSummary {
+    pub active: usize,
+    pub due: usize,
+    pub oldest_due_enqueued_at: Option<String>,
+    pub manual_attention: usize,
+    pub retired: usize,
+    pub complete: usize,
+}
+
+pub fn summary(jobs: &[BoundaryJob]) -> QueueSummary {
+    let now = now_rfc3339();
+    let mut counts = QueueSummary::default();
+    for job in jobs {
+        match job.queue_state() {
+            "active" => {
+                counts.active += 1;
+                if job.next_attempt_at <= now {
+                    counts.due += 1;
+                    if counts
+                        .oldest_due_enqueued_at
+                        .as_ref()
+                        .is_none_or(|at| at > &job.enqueued_at)
+                    {
+                        counts.oldest_due_enqueued_at = Some(job.enqueued_at.clone());
+                    }
+                }
+            }
+            "manual_attention" => counts.manual_attention += 1,
+            "retired" => counts.retired += 1,
+            "terminal" => counts.complete += 1,
+            _ => {}
+        }
+    }
+    counts
+}
+
 /// Journal phases, in commit order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -204,7 +296,7 @@ pub fn enqueue_with_capture(
         return Ok(existing);
     }
     let now = now_rfc3339();
-    let job = BoundaryJob {
+    let mut job = BoundaryJob {
         artifact_refs: crate::harness_install::home_dir()
             .ok()
             .and_then(|home| {
@@ -239,6 +331,7 @@ pub fn enqueue_with_capture(
         last_error: None,
         state: "active".to_string(),
     };
+    job.park_conflict();
     save(project_dir, &job)?;
     Ok(job)
 }
@@ -308,12 +401,40 @@ pub fn health(project_dir: &Path) -> JournalHealth {
     let jobs = load_all(project_dir);
     JournalHealth {
         active: jobs.iter().filter(|job| job.state == "active").count(),
-        manual_attention: jobs
-            .iter()
-            .filter(|job| job.state == "manual_attention")
-            .count(),
+        manual_attention: jobs.iter().filter(|job| job.requires_attention()).count(),
         invalid: invalid_records(project_dir).len(),
     }
+}
+
+/// Caller holds the journal worker claim. A disposition is reversible by
+/// exact-job recovery and never fabricates a snapshot, handoff or completion.
+pub fn retire(project: &Path, id: &str, reason: &str, actor: &str) -> std::io::Result<BoundaryJob> {
+    if reason.trim().is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "a retirement reason is required",
+        ));
+    }
+    let mut job = load_all(project)
+        .into_iter()
+        .find(|job| job.id == id)
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "boundary job unavailable")
+        })?;
+    if job.retired() {
+        return Ok(job);
+    }
+    if !job.requires_attention() {
+        return Err(std::io::Error::other(
+            "only a parked boundary can be retired",
+        ));
+    }
+    job.recoveries.push(
+        serde_json::json!({"action":"retire","by":actor,"reason":reason.trim(),"at":now_rfc3339(),
+        "phase":job.phase,"attempt":job.attempt,"last_error":job.last_error}),
+    );
+    save(project, &job)?;
+    Ok(job)
 }
 
 /// Retry one parked job with a permanent recovery trail, preserving its original errors.
@@ -334,7 +455,7 @@ pub fn recover(
     if job.state == "terminal" {
         return Ok(job);
     }
-    job.recoveries.push(serde_json::json!({"at": now_rfc3339(), "phase": job.phase, "attempt": job.attempt, "last_error": job.last_error, "transcript": transcript}));
+    job.recoveries.push(serde_json::json!({"at": now_rfc3339(), "phase": job.phase, "attempt": job.attempt, "last_error": job.last_error, "previous_transcript": job.transcript, "transcript": transcript}));
     if let Some(locator) = transcript {
         job.transcript = Some(locator.to_string());
     }

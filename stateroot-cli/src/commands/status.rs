@@ -127,11 +127,8 @@ pub fn run(ctx: &Ctx, json_out: bool) -> anyhow::Result<()> {
         .unwrap_or(0);
     let persona = super::persona::read_cache(&ctx.config_dir).is_some();
     let jobs = stateroot_core::finalize_journal::load_all(&ctx.cwd);
-    let jobs_active = jobs.iter().filter(|j| j.state == "active").count();
-    let jobs_manual = jobs
-        .iter()
-        .filter(|j| j.state == "manual_attention")
-        .count();
+    let queue = stateroot_core::finalize_journal::summary(&jobs);
+    let worker = stateroot_core::safe_io::journal_worker::inspect(&ctx.cwd);
     let latest_root = stateroot_core::roots::latest_root(&ctx.cwd).ok().flatten();
     let advisory = assessment
         .as_ref()
@@ -160,8 +157,12 @@ pub fn run(ctx: &Ctx, json_out: bool) -> anyhow::Result<()> {
             "continuity": assessment,
             "advisory": advisory,
             "boundary_journal": {
-                "active": jobs_active,
-                "manual_attention": jobs_manual,
+                "active": queue.active,
+                "due": queue.due,
+                "oldest_due_enqueued_at": queue.oldest_due_enqueued_at,
+                "retired": queue.retired,
+                "worker": worker,
+                "manual_attention": queue.manual_attention,
                 "job_ids": jobs.iter().map(|job| &job.id).collect::<Vec<_>>(),
                 "inspect": "stateroot handoff inspect --job <id>",
             },
@@ -174,6 +175,12 @@ pub fn run(ctx: &Ctx, json_out: bool) -> anyhow::Result<()> {
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else {
         println!("project: {} ({})", project.name, project.project_id);
+        if queue.due > 0 && worker.blocked() {
+            println!(
+                "boundary journal: {} due · {} · stateroot handoff inspect --summary",
+                queue.due, worker.detail
+            );
+        }
         if let Some(root) = &latest_root {
             println!("root: {}", &root[..12.min(root.len())]);
         }
@@ -217,7 +224,8 @@ pub fn run(ctx: &Ctx, json_out: bool) -> anyhow::Result<()> {
             println!("continuity: disabled");
         }
         println!(
-            "boundary journal: {jobs_active} active · {jobs_manual} parked for manual attention"
+            "boundary journal: {} active · {} parked for manual attention",
+            queue.active, queue.manual_attention
         );
         match &index_health {
             Some(h) if matches!(h.generation, "legacy_read_only" | "prior_runtime_read_only") => println!(

@@ -1291,9 +1291,38 @@ fn can_publish_boundary(
 }
 
 /// Inspect retained jobs without recovering, advancing, or rewriting them.
-pub fn inspect(ctx: &Ctx, id: Option<&str>) -> anyhow::Result<()> {
+pub fn inspect(
+    ctx: &Ctx,
+    id: Option<&str>,
+    summary_only: bool,
+    owner: Option<&str>,
+) -> anyhow::Result<()> {
     ctx.require_project()?;
+    if let Some(owner) = owner {
+        let recovery = stateroot_core::safe_io::journal_worker::recovery(&ctx.cwd, owner)?;
+        let worker = stateroot_core::safe_io::journal_worker::inspect(&ctx.cwd);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "schema_version":"stateroot.boundary-inspection.v1","read_only":true,"recovery":recovery,"worker":worker
+            }))?
+        );
+        return Ok(());
+    }
     let mut jobs = stateroot_core::finalize_journal::load_all(&ctx.cwd);
+    let worker = stateroot_core::safe_io::journal_worker::inspect(&ctx.cwd);
+    let summary = stateroot_core::finalize_journal::summary(&jobs);
+    if summary_only {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "schema_version":"stateroot.boundary-inspection.v1","read_only":true,
+                "worker":worker,"worker_recovery":worker.recovery_hint(),"summary":summary,
+                "unsupported_records":stateroot_core::finalize_journal::invalid_records(&ctx.cwd).len()
+            }))?
+        );
+        return Ok(());
+    }
     if let Some(id) = id {
         jobs.retain(|job| job.id == id);
         anyhow::ensure!(
@@ -1301,15 +1330,48 @@ pub fn inspect(ctx: &Ctx, id: Option<&str>) -> anyhow::Result<()> {
             "boundary job unavailable or unsupported; original bytes retained: {id}"
         );
     }
+    let jobs = jobs
+        .iter()
+        .map(|job| -> anyhow::Result<Value> {
+            let mut record = serde_json::to_value(job)?;
+            record["queue_state"] = json!(job.queue_state());
+            if id.is_some() {
+                record["locator_conflict"] = json!(job.locator_conflict());
+            }
+            Ok(record)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
     let invalid = stateroot_core::finalize_journal::invalid_records(&ctx.cwd);
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
             "schema_version": "stateroot.boundary-inspection.v1",
             "read_only": true,
+            "worker_recovery": worker.recovery_hint(),
+            "worker": worker,
+            "summary": summary,
             "jobs": jobs,
             "unsupported_records_retained": invalid,
         }))?
+    );
+    Ok(())
+}
+
+pub fn recover_worker(ctx: &Ctx, expected: &str, reason: &str, actor: &str) -> anyhow::Result<()> {
+    ctx.require_project()?;
+    stateroot_core::safe_io::journal_worker::recover_stopped(&ctx.cwd, expected, reason, actor)?;
+    println!("Worker recovery recorded for {expected}. Queued phases will resume at the next automatic drain.");
+    super::drain_finalize::kick(&ctx.cwd);
+    Ok(())
+}
+
+pub fn retire_job(ctx: &Ctx, id: &str, reason: &str, actor: &str) -> anyhow::Result<()> {
+    ctx.require_project()?;
+    let _worker = stateroot_core::safe_io::journal_worker::claim(&ctx.cwd)?;
+    let job = stateroot_core::finalize_journal::retire(&ctx.cwd, id, reason, actor)?;
+    println!(
+        "Retired boundary {} at {:?}. Original evidence retained.",
+        job.id, job.phase
     );
     Ok(())
 }
@@ -1320,6 +1382,17 @@ pub async fn recover(ctx: &Ctx, id: &str, transcript: Option<&str>) -> anyhow::R
         .into_iter()
         .find(|job| job.id == id)
         .ok_or_else(|| anyhow::anyhow!("boundary job unavailable or quarantined: {id}"))?;
+    if transcript.is_none()
+        && matches!(
+            job.phase,
+            stateroot_core::finalize_journal::Phase::Queued
+                | stateroot_core::finalize_journal::Phase::Snapped
+        )
+    {
+        if let Some(conflict) = job.locator_conflict() {
+            anyhow::bail!("{conflict}; supply the exact replacement with --transcript");
+        }
+    }
     if let Some(locator) = transcript {
         anyhow::ensure!(
             handoff_continuity::verified_session(
