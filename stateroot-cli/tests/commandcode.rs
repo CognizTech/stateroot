@@ -26,15 +26,31 @@ fn seed_transcript(user_home: &Path, project: &Path, session_id: &str) {
         .join(".commandcode/projects")
         .join(slug)
         .join(format!("{session_id}.jsonl"));
-    let cwd = project.to_string_lossy().to_string();
-    let lines = [
-        format!(
-            r#"{{"type":"session","version":3,"id":"{session_id}","timestamp":"2026-11-18T10:00:00.000Z","cwd":"{cwd}"}}"#
-        ),
-        r#"{"type":"message","id":"m1","parentId":null,"timestamp":"2026-11-18T10:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"implement the adapter"}]}}"#.to_string(),
-        r#"{"type":"message","id":"m2","parentId":"m1","timestamp":"2026-11-18T10:00:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Adapter implemented and verified against fixtures."}]}}"#.to_string(),
+    let events = [
+        serde_json::json!({
+            "type": "session",
+            "version": 3,
+            "id": session_id,
+            "timestamp": "2026-11-18T10:00:00.000Z",
+            "cwd": project,
+        }),
+        serde_json::json!({
+            "type": "message",
+            "id": "m1",
+            "parentId": null,
+            "timestamp": "2026-11-18T10:00:01.000Z",
+            "message": {"role": "user", "content": [{"type": "text", "text": "implement the adapter"}]},
+        }),
+        serde_json::json!({
+            "type": "message",
+            "id": "m2",
+            "parentId": "m1",
+            "timestamp": "2026-11-18T10:00:02.000Z",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "Adapter implemented and verified against fixtures."}]},
+        }),
     ];
-    write(&file, &(lines.join("\n") + "\n"));
+    let body: Vec<String> = events.iter().map(serde_json::Value::to_string).collect();
+    write(&file, &(body.join("\n") + "\n"));
     // A sidecar must never be mistaken for a transcript.
     write(
         &file.with_extension("checkpoints.jsonl"),
