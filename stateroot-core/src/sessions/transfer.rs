@@ -326,6 +326,143 @@ pub fn plan_pi(
 }
 
 // ---------------------------------------------------------------------
+// Claude Code writer
+// ---------------------------------------------------------------------
+
+/// Claude Code writer: the canonical timeline becomes native JSONL records
+/// (`user` / `assistant` with a `uuid` / `parentUuid` chain, `sessionId`, `cwd`).
+///
+/// History is transferred whole, matching Pi and DSH. Claude has no record
+/// type for a compaction summary, and no public write contract for its
+/// internals, so: a compaction summary becomes a clearly marked user note, a
+/// plan is dropped, and anything else without a native counterpart is dropped
+/// under its native type name. No `version` field is invented — we do not know
+/// which Claude build will read the file.
+pub fn plan_claude(
+    session: &StoredSession,
+    home: &Path,
+    cwd: &Path,
+    new_id: &str,
+) -> Result<TransferPlan, String> {
+    let target = crate::sessions::claude_native::project_session_dir(home, cwd)
+        .join(format!("{new_id}.jsonl"));
+    let created_ms = now_ms();
+    let session_id = new_id.to_string();
+    let cwd_text = cwd.display().to_string();
+    let mut lines: Vec<String> = Vec::new();
+    let mut fidelity = Fidelity::default();
+    let mut parent: Option<String> = None;
+
+    let push = |record: Value, lines: &mut Vec<String>, parent: &mut Option<String>| {
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut record = record;
+        record["uuid"] = json!(id);
+        record["parentUuid"] = match parent.as_ref() {
+            Some(previous) => json!(previous),
+            None => Value::Null,
+        };
+        record["sessionId"] = json!(session_id);
+        record["cwd"] = json!(cwd_text);
+        lines.push(serde_json::to_string(&record).map_err(|e| e.to_string())?);
+        *parent = Some(id);
+        Ok::<(), String>(())
+    };
+
+    for (idx, entry) in session.entries.iter().enumerate() {
+        let iso = ts_to_iso(entry.ts.as_deref(), created_ms + idx as i64);
+        match entry.kind.as_str() {
+            "message" => {
+                let role = entry.role.as_deref().unwrap_or("user");
+                let text = entry.content.as_deref().unwrap_or("");
+                if role == "assistant" {
+                    push(
+                        json!({"type":"assistant","timestamp":iso,
+                            "message":{"role":"assistant","content":[{"type":"text","text":text}]}}),
+                        &mut lines,
+                        &mut parent,
+                    )?;
+                } else {
+                    push(
+                        json!({"type":"user","timestamp":iso,
+                            "message":{"role":"user","content":text}}),
+                        &mut lines,
+                        &mut parent,
+                    )?;
+                }
+                fidelity.native();
+            }
+            "tool_call" => {
+                let raw_args = entry.content.as_deref().unwrap_or("{}");
+                let input = match serde_json::from_str::<Value>(raw_args) {
+                    Ok(Value::Object(map)) => Value::Object(map),
+                    _ => {
+                        fidelity.adapt("tool_call arguments rewrapped");
+                        json!({ "_stateroot_raw": raw_args })
+                    }
+                };
+                let call_id = entry
+                    .id
+                    .clone()
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                push(
+                    json!({"type":"assistant","timestamp":iso,
+                        "message":{"role":"assistant","content":[{
+                            "type":"tool_use",
+                            "id":call_id,
+                            "name": entry.name.as_deref().unwrap_or("tool"),
+                            "input": input}]}}),
+                    &mut lines,
+                    &mut parent,
+                )?;
+                fidelity.native();
+            }
+            "tool_result" => {
+                push(
+                    json!({"type":"user","timestamp":iso,
+                        "message":{"role":"user","content":[{
+                            "type":"tool_result",
+                            "tool_use_id": entry.parent_id.as_deref().unwrap_or(""),
+                            "content": entry.content.as_deref().unwrap_or(""),
+                            "is_error": false}]}}),
+                    &mut lines,
+                    &mut parent,
+                )?;
+                fidelity.native();
+            }
+            "compaction" => {
+                let note = format!(
+                    "[imported from {} by stateroot — compaction summary]\n\n{}",
+                    session.harness,
+                    entry.content.as_deref().unwrap_or("")
+                );
+                push(
+                    json!({"type":"user","timestamp":iso,
+                        "message":{"role":"user","content":note}}),
+                    &mut lines,
+                    &mut parent,
+                )?;
+                fidelity.adapt("compaction→marked user note");
+            }
+            "plan" => fidelity.drop("plan"),
+            other => {
+                let native = entry.native_type.as_deref().unwrap_or(other);
+                fidelity.drop(native);
+            }
+        }
+    }
+    Ok(TransferPlan {
+        resume_hint: format!(
+            "claude --resume {new_id} (in {}), or claude --resume {}",
+            cwd.display(),
+            target.display()
+        ),
+        target_path: target,
+        lines,
+        fidelity,
+    })
+}
+
+// ---------------------------------------------------------------------
 // DSH writer
 // ---------------------------------------------------------------------
 
@@ -938,5 +1075,112 @@ mod tests {
             !text.contains("\"reason\":{\"kind\":\"pending\"}"),
             "the call dangled as pending: {text}"
         );
+    }
+
+    #[test]
+    fn claude_transfer_writes_a_resumable_record_chain() {
+        use crate::sessions::CanonicalEntry;
+        let home = tempfile::tempdir().expect("home");
+        let project = tempfile::tempdir().expect("project");
+        let cwd = project.path();
+        let entry = |seq: usize,
+                     kind: &str,
+                     role: Option<&str>,
+                     content: &str,
+                     id: Option<&str>,
+                     parent_id: Option<&str>,
+                     name: Option<&str>| CanonicalEntry {
+            seq,
+            kind: kind.into(),
+            id: id.map(str::to_string),
+            parent_id: parent_id.map(str::to_string),
+            ts: Some(format!("2026-07-01T10:00:0{seq}Z")),
+            role: role.map(str::to_string),
+            content: Some(content.into()),
+            name: name.map(str::to_string),
+            native_type: None,
+        };
+        let stored = StoredSession {
+            session_id: "src-session".into(),
+            harness: "codex".into(),
+            path: std::path::PathBuf::from("/x/rollout.jsonl"),
+            cwd: cwd.display().to_string(),
+            imported_at: "2026-07-01T10:00:09Z".into(),
+            source_path: "/x/rollout.jsonl".into(),
+            entries: vec![
+                entry(0, "message", Some("user"), "hello", None, None, None),
+                entry(
+                    1,
+                    "tool_call",
+                    None,
+                    r#"{"cmd":"ls"}"#,
+                    Some("call-1"),
+                    None,
+                    Some("Bash"),
+                ),
+                entry(
+                    2,
+                    "tool_result",
+                    None,
+                    "file.txt",
+                    None,
+                    Some("call-1"),
+                    Some("Bash"),
+                ),
+                entry(3, "compaction", None, "earlier summary", None, None, None),
+                entry(4, "plan", None, "", None, None, None),
+                entry(5, "message", Some("assistant"), "done", None, None, None),
+            ],
+        };
+        let plan = plan_claude(&stored, home.path(), cwd, "claude-new").expect("plan");
+        crate::sessions::transfer::write(&plan).expect("write");
+
+        let text = std::fs::read_to_string(&plan.target_path).expect("read");
+        assert!(plan.target_path.ends_with("claude-new.jsonl"));
+        let records: Vec<Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("record json"))
+            .collect();
+        // The plan is dropped; every other entry has a native counterpart.
+        assert_eq!(records.len(), 5, "{text}");
+        assert!(
+            records[0]["parentUuid"].is_null(),
+            "first record starts the chain"
+        );
+        for pair in records.windows(2) {
+            assert_eq!(
+                pair[1]["parentUuid"], pair[0]["uuid"],
+                "records form one parent chain"
+            );
+        }
+        for record in &records {
+            assert_eq!(record["sessionId"], "claude-new");
+            assert_eq!(record["cwd"], cwd.display().to_string());
+            assert!(record["version"].is_null(), "no version is invented");
+        }
+        assert_eq!(records[1]["message"]["content"][0]["type"], "tool_use");
+        assert_eq!(records[1]["message"]["content"][0]["id"], "call-1");
+        assert_eq!(records[2]["message"]["content"][0]["tool_use_id"], "call-1");
+        assert!(records[3]["message"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("compaction summary"));
+        let fidelity = plan.fidelity.line();
+        assert!(fidelity.contains("adapted"), "{fidelity}");
+        assert!(fidelity.contains("compaction"), "{fidelity}");
+        assert!(
+            fidelity.contains("dropped") && fidelity.contains("plan"),
+            "{fidelity}"
+        );
+
+        // The real Claude reader accepts what we wrote.
+        let parsed =
+            crate::transcripts::claude::parse_session(&plan.target_path, cwd).expect("parse");
+        assert_eq!(parsed.session_id, "claude-new");
+        // Both resume keys are handed back.
+        assert!(plan.resume_hint.contains("claude --resume claude-new"));
+        assert!(plan
+            .resume_hint
+            .contains(&plan.target_path.display().to_string()));
     }
 }

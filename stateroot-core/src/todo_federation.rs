@@ -803,7 +803,7 @@ fn walk_tool_use<'a>(value: &'a Value, name: &str) -> Option<&'a Value> {
 
 fn sync_claude(home: &Path, project_dir: &Path) -> TodoSyncReport {
     let mut report = TodoSyncReport::default();
-    let projects = home.join(".claude/projects");
+    let projects = crate::harness_install::paths::claude_projects_root(home);
     let Ok(entries) = std::fs::read_dir(&projects) else {
         return report;
     };

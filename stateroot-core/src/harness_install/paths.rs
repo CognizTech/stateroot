@@ -35,6 +35,45 @@ pub fn codex_root_in(home: &Path, env: Option<OsString>) -> PathBuf {
     agent_config_home(env).unwrap_or_else(|| home.join(".codex"))
 }
 
+/// Claude Code config root: `$CLAUDE_CONFIG_DIR` or `home/.claude`.
+///
+/// The installer already honored this relocation for skills and commands;
+/// every reader (transcripts, plans, memory, todos) must resolve through the
+/// same root or a relocated install reads nothing while reporting health.
+pub fn claude_root_in(home: &Path, env: Option<OsString>) -> PathBuf {
+    claude_config_root_in(env).unwrap_or_else(|| home.join(".claude"))
+}
+
+/// Claude config root using the process environment.
+pub fn claude_root(home: &Path) -> PathBuf {
+    claude_root_in(home, std::env::var_os(ENV_CLAUDE_CONFIG_DIR))
+}
+
+/// Claude session store (`projects/<slug>/<session>.jsonl` lives below this).
+pub fn claude_projects_root(home: &Path) -> PathBuf {
+    claude_root(home).join("projects")
+}
+
+/// Decode a Claude project slug back to its cwd: a leading `-` was `/`, every
+/// other `-` was `/`. Inherently ambiguous for directory names containing
+/// `-`, so callers must match tolerantly (walk-up/walk-down overlap), never
+/// exactly.
+pub fn claude_slug_to_cwd(slug: &str) -> String {
+    let rest = slug.strip_prefix('-').unwrap_or(slug);
+    format!("/{}", rest.replace('-', "/"))
+}
+
+/// Encode an absolute path as a Claude project slug (best-effort fallback when
+/// no existing slug directory matches).
+pub fn claude_slug_encode(path: &str) -> String {
+    let replaced = crate::path_identity::normalize_host_path(path).replace('/', "-");
+    if replaced.starts_with('-') {
+        replaced
+    } else {
+        format!("-{replaced}")
+    }
+}
+
 /// Codex config root using the process environment.
 pub fn codex_root(home: &Path) -> PathBuf {
     codex_root_in(home, std::env::var_os(ENV_CODEX_HOME))
@@ -370,6 +409,34 @@ pub fn hook_command(quirk_id: &str, canonical: &str) -> String {
 mod tests {
     use super::*;
     use std::ffi::OsString;
+
+    #[test]
+    fn claude_root_honors_config_dir_for_readers() {
+        let home = Path::new("/home/alice");
+        // Default: the documented `~/.claude` layout.
+        assert_eq!(
+            claude_root_in(home, None),
+            PathBuf::from("/home/alice/.claude")
+        );
+        // Relocated install: readers must follow the installer.
+        assert_eq!(
+            claude_root_in(home, Some(OsString::from("/stores/claude"))),
+            PathBuf::from("/stores/claude")
+        );
+        // An empty override is not a relocation (falls back to the default).
+        assert_eq!(
+            claude_root_in(home, Some(OsString::from("  "))),
+            PathBuf::from("/home/alice/.claude")
+        );
+        // The session store hangs off the same root (only asserted when the
+        // ambient environment does not relocate it — tests run in parallel).
+        if std::env::var_os(ENV_CLAUDE_CONFIG_DIR).is_none() {
+            assert_eq!(
+                claude_projects_root(home),
+                PathBuf::from("/home/alice/.claude/projects")
+            );
+        }
+    }
 
     #[test]
     fn codex_home_honors_env_override() {

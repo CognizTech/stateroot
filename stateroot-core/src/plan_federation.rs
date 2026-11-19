@@ -1,15 +1,24 @@
 //! Plan federation — harness-native plans (Cursor plan mode's
-//! `~/.cursor/plans/*.plan.md`, Claude's `~/.claude/plans/`, Kimi's session
+//! `~/.cursor/plans/*.plan.md`, Claude's plan directories, Kimi's session
 //! plans, and CodeBuddy's session-linked `~/.codebuddy/plans/`) land in the
 //! central plan store as drafts. Without this, a plan authored in a harness's
 //! native plan mode never reaches the shared store, and the next harness
 //! cannot see it (the cursor-plan continuity gap).
 //!
-//! Attribution is by construction: a harness ingests its *own* plan dir, at
-//! its own session boundaries, into the project it was working on. No
-//! cross-harness guessing. Dedup is by content hash; a native plan edited
-//! while still a draft updates the draft in place; once a plan moves past
-//! draft it is owned and never overwritten.
+//! Attribution is explicit per source, never guessed from the harness name:
+//! a *structural* source proves its project by its own path (a project-local
+//! directory, or a store keyed by session metadata); a *session-window*
+//! source is a user-global pile, so a file belongs to this project only when
+//! one of this project's transcripts was active near the file's mtime.
+//!
+//! Claude resolves up to three sources — its documented `plansDirectory`
+//! setting (project-local, then shared project, then user settings), the
+//! default `<config root>/plans`, and `<project>/.claude/plans` — through
+//! `paths::claude_root`, so a relocated `CLAUDE_CONFIG_DIR` is honored.
+//!
+//! Dedup is by content hash; a native plan edited while still a draft updates
+//! the draft in place; once a plan moves past draft it is owned and never
+//! overwritten.
 
 use std::path::{Path, PathBuf};
 
@@ -20,41 +29,136 @@ use sha2::Digest as _;
 /// Per-project sync cursor (local lane — never in snapshots or git).
 const STATE_REL: &str = "local/plan-federation.json";
 
+/// How a source directory's plan files are attributed to this project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Attribution {
+    /// The path itself proves the project: a project-local directory, or a
+    /// store whose session metadata names the workspace.
+    Structural,
+    /// A user-global pile: a plan belongs to this project only when one of
+    /// this project's own transcripts was active near the file's mtime.
+    SessionWindow,
+}
+
 /// One harness-native plan source directory.
 struct PlanSource {
     harness: &'static str,
     dir: PathBuf,
     /// File suffix that marks a plan (`*.plan.md` for cursor, `*.md` claude).
     suffix: &'static str,
+    attribution: Attribution,
 }
 
 /// Known native plan dirs for a harness id (already normalized).
-fn plan_dirs(home: &Path, harness: &str) -> Vec<PlanSource> {
+fn plan_dirs(home: &Path, project_dir: &Path, harness: &str) -> Vec<PlanSource> {
     match harness {
         "cursor" => vec![PlanSource {
             harness: "cursor",
             dir: home.join(".cursor/plans"),
             suffix: ".plan.md",
+            attribution: Attribution::SessionWindow,
         }],
         "codebuddy" => vec![PlanSource {
             harness: "codebuddy",
             dir: crate::harness_install::paths::codebuddy_root(home).join("plans"),
             suffix: ".md",
+            attribution: Attribution::Structural,
         }],
-        "claude" | "claude-code" => vec![PlanSource {
-            harness: "claude-code",
-            dir: home.join(".claude/plans"),
-            suffix: ".md",
-        }],
+        "claude" | "claude-code" => claude_plan_sources(home, project_dir),
         // `~/.commandcode/plans/` is a global pile with no project binding —
         // attribution is by this project's own session activity (below).
         "commandcode" => vec![PlanSource {
             harness: "commandcode",
             dir: crate::harness_install::paths::commandcode_root(home).join("plans"),
             suffix: ".md",
+            attribution: Attribution::SessionWindow,
         }],
         _ => Vec::new(),
     }
+}
+
+/// Claude's plan sources, deduped: the resolved `plansDirectory`, the default
+/// config-root `plans` dir, and the project-local `.claude/plans`.
+///
+/// A directory inside this project is structural; anything under the Claude
+/// config root (or a configured absolute path elsewhere) is a user-global
+/// pile and needs session-window attribution.
+fn claude_plan_sources(home: &Path, project_dir: &Path) -> Vec<PlanSource> {
+    let root = crate::harness_install::paths::claude_root(home);
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = claude_plans_directory(home, project_dir) {
+        candidates.push(dir);
+    }
+    candidates.push(root.join("plans"));
+    candidates.push(project_dir.join(".claude/plans"));
+
+    let project_key = crate::path_identity::normalize_host_path(&project_dir.to_string_lossy());
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for dir in candidates {
+        let key = crate::path_identity::normalize_host_path(&dir.to_string_lossy());
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        let attribution = if key == project_key || key.starts_with(&format!("{project_key}/")) {
+            Attribution::Structural
+        } else {
+            Attribution::SessionWindow
+        };
+        out.push(PlanSource {
+            harness: "claude-code",
+            dir,
+            suffix: ".md",
+            attribution,
+        });
+    }
+    out
+}
+
+/// Claude's documented `plansDirectory` setting, highest scope first:
+/// project-local settings, shared project settings, then user settings.
+fn claude_plans_directory(home: &Path, project_dir: &Path) -> Option<PathBuf> {
+    let candidates = [
+        project_dir.join(".claude/settings.local.json"),
+        project_dir.join(".claude/settings.json"),
+        crate::harness_install::paths::claude_root(home).join("settings.json"),
+    ];
+    for path in candidates {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(doc) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        let Some(raw) = doc.get("plansDirectory").and_then(Value::as_str) else {
+            continue;
+        };
+        if let Some(dir) = resolve_plans_directory(project_dir, raw) {
+            return Some(dir);
+        }
+    }
+    None
+}
+
+/// Resolve a `plansDirectory` value: absolute as written, relative against the
+/// project root, and a foreign-OS path fails closed to the default instead of
+/// joining a meaningless directory.
+fn resolve_plans_directory(project_dir: &Path, raw: &str) -> Option<PathBuf> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let path = Path::new(value);
+    if path.is_absolute() {
+        return Some(path.to_path_buf());
+    }
+    let windows_shaped = value.len() > 1
+        && value.as_bytes()[1] == b':'
+        && matches!(value.as_bytes().get(2), Some(b'\\') | Some(b'/'));
+    if windows_shaped {
+        return None;
+    }
+    Some(project_dir.join(path))
 }
 
 /// Kimi stores its plan history below each session rather than in a shared
@@ -284,6 +388,38 @@ fn commandcode_project_transcript_times(
         .collect()
 }
 
+/// Claude's home plan directory (`<config root>/plans`) is the same kind of
+/// user-global pile as Cursor's. Claude transcripts are project-scoped by
+/// slug and every record carries `cwd`, so a bounded head read attributes a
+/// session to this project without parsing whole files.
+fn claude_project_transcript_times(home: &Path, project_dir: &Path) -> Vec<std::time::SystemTime> {
+    crate::transcripts::claude::session_files(home)
+        .into_iter()
+        .filter(|file| {
+            read_head(file, 8192)
+                .ok()
+                .and_then(|head| claude_transcript_cwd(&head))
+                .is_some_and(|cwd| crate::transcripts::cwd_matches(&cwd, project_dir))
+        })
+        .filter_map(|file| std::fs::metadata(&file).and_then(|m| m.modified()).ok())
+        .collect()
+}
+
+/// First `cwd` in a Claude session head (every record type carries it).
+fn claude_transcript_cwd(head: &str) -> Option<String> {
+    for line in head.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(cwd) = value.get("cwd").and_then(Value::as_str) {
+            if !cwd.trim().is_empty() {
+                return Some(cwd.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// The first absolute path in the transcript head that resolves (walking up)
 /// to a stateroot project root. Tool inputs carry the workspace explicitly.
 fn transcript_project(head: &str) -> Option<PathBuf> {
@@ -419,7 +555,7 @@ fn plan_title(file: &Path, text: &str) -> String {
 /// One pass over a harness's native plan dirs into this project's store.
 pub fn sync_from(home: &Path, project_dir: &Path, harness: &str) -> PlanSyncReport {
     let mut report = PlanSyncReport::default();
-    let sources = plan_dirs(home, harness);
+    let sources = plan_dirs(home, project_dir, harness);
     let mut state = load_state(project_dir);
     for source in sources {
         if !source.dir.is_dir() {
@@ -428,10 +564,13 @@ pub fn sync_from(home: &Path, project_dir: &Path, harness: &str) -> PlanSyncRepo
         let Ok(entries) = std::fs::read_dir(&source.dir) else {
             continue;
         };
-        let session_times = if source.harness == "cursor" {
-            cursor_project_transcript_times(home, project_dir)
-        } else if source.harness == "commandcode" {
-            commandcode_project_transcript_times(home, project_dir)
+        let session_times = if source.attribution == Attribution::SessionWindow {
+            match source.harness {
+                "cursor" => cursor_project_transcript_times(home, project_dir),
+                "commandcode" => commandcode_project_transcript_times(home, project_dir),
+                "claude-code" => claude_project_transcript_times(home, project_dir),
+                _ => Vec::new(),
+            }
         } else {
             Vec::new()
         };
@@ -455,7 +594,7 @@ pub fn sync_from(home: &Path, project_dir: &Path, harness: &str) -> PlanSyncRepo
                     continue;
                 }
             }
-            if source.harness == "cursor" || source.harness == "commandcode" {
+            if source.attribution == Attribution::SessionWindow {
                 // Attribute by session activity: a plan is this project's
                 // only if one of this project's transcripts was active
                 // within the window of the plan's mtime.
@@ -709,7 +848,7 @@ pub fn maybe_auto(
     harness: &str,
     interval_mins: i64,
 ) -> Option<PlanSyncReport> {
-    if plan_dirs(home, harness).is_empty()
+    if plan_dirs(home, project_dir, harness).is_empty()
         && !matches!(harness, "kimi" | "kimi-code" | "dsh")
         && !crate::todo_federation::harness_has_sources(harness)
     {
@@ -743,6 +882,30 @@ mod tests {
         let path = dir.join(name);
         std::fs::write(&path, body).expect("write");
         path
+    }
+
+    /// Write a plan into the Claude config-root plans dir (the global pile).
+    fn write_claude_plan(home: &Path, name: &str, body: &str) -> PathBuf {
+        let dir = crate::harness_install::paths::claude_root(home).join("plans");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join(name);
+        std::fs::write(&path, body).expect("write");
+        path
+    }
+
+    /// Seed a Claude session file whose records carry this project's `cwd` —
+    /// the session-activity evidence the attribution gate requires.
+    fn seed_claude_transcript(home: &Path, project_dir: &Path) {
+        let dir = crate::harness_install::paths::claude_projects_root(home).join("test-slug");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let record = serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": "plan this"},
+            "cwd": project_dir.to_string_lossy(),
+            "sessionId": "s1",
+            "timestamp": "2026-11-18T00:00:00Z",
+        });
+        std::fs::write(dir.join("s1.jsonl"), format!("{record}\n")).expect("transcript");
     }
 
     /// Seed a cursor transcript whose tool inputs name `project_dir` — the
@@ -883,6 +1046,103 @@ mod tests {
             "{report:?}"
         );
         assert!(crate::plans::current(project.path()).is_none());
+    }
+
+    #[test]
+    fn claude_home_plan_needs_this_projects_session_activity() {
+        let home = tempfile::tempdir().expect("home");
+        let project = project();
+        write_claude_plan(home.path(), "parity-plan.md", PLAN_A);
+
+        // No transcript for this project → the global pile must not leak.
+        let report = sync_from(home.path(), project.path(), "claude-code");
+        assert!(report.ingested.is_empty(), "{report:?}");
+        assert!(
+            report.notes.iter().any(|n| n.contains("skipped")),
+            "{report:?}"
+        );
+
+        // With this project's activity near the plan's mtime → a draft.
+        seed_claude_transcript(home.path(), project.path());
+        let report = sync_from(home.path(), project.path(), "claude-code");
+        assert_eq!(report.ingested.len(), 1, "{report:?}");
+        let (meta, _) = crate::plans::current(project.path()).expect("plan");
+        assert_eq!(meta.status, "draft");
+        assert_eq!(meta.created_by_harness, "claude-code");
+        assert!(meta.source_path.unwrap().contains(".claude/plans"));
+        // Second pass: no duplicate.
+        assert!(sync_from(home.path(), project.path(), "claude-code").is_quiet());
+    }
+
+    #[test]
+    fn claude_global_plan_does_not_leak_into_another_project() {
+        let home = tempfile::tempdir().expect("home");
+        let project_a = project();
+        let project_b = project();
+        write_claude_plan(home.path(), "parity-plan.md", PLAN_A);
+        seed_claude_transcript(home.path(), project_a.path());
+
+        let report_a = sync_from(home.path(), project_a.path(), "claude-code");
+        assert_eq!(report_a.ingested.len(), 1, "{report_a:?}");
+        // Project B has no Claude activity: the same global file is not its
+        // plan, even though it fed the identical sync pass.
+        let report_b = sync_from(home.path(), project_b.path(), "claude-code");
+        assert!(report_b.ingested.is_empty(), "{report_b:?}");
+        assert!(crate::plans::current(project_b.path()).is_none());
+    }
+
+    #[test]
+    fn claude_project_plans_dir_is_structural() {
+        let home = tempfile::tempdir().expect("home");
+        let project = project();
+        let dir = project.path().join(".claude/plans");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("local-plan.md"), PLAN_A).expect("write");
+
+        // Inside the project the path itself proves ownership: no transcript
+        // activity required.
+        let report = sync_from(home.path(), project.path(), "claude-code");
+        assert_eq!(report.ingested.len(), 1, "{report:?}");
+        let (meta, _) = crate::plans::current(project.path()).expect("plan");
+        assert_eq!(meta.created_by_harness, "claude-code");
+    }
+
+    #[test]
+    fn claude_plans_directory_setting_resolves_against_the_project() {
+        let home = tempfile::tempdir().expect("home");
+        let project = project();
+        std::fs::create_dir_all(project.path().join(".claude")).expect("mkdir");
+        std::fs::write(
+            project.path().join(".claude/settings.json"),
+            serde_json::json!({"plansDirectory": ".claude/custom-plans"}).to_string(),
+        )
+        .expect("settings");
+        let dir = project.path().join(".claude/custom-plans");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("custom-plan.md"), PLAN_A).expect("write");
+
+        let report = sync_from(home.path(), project.path(), "claude-code");
+        assert_eq!(report.ingested.len(), 1, "{report:?}");
+        let (meta, _) = crate::plans::current(project.path()).expect("plan");
+        assert!(
+            meta.source_path.unwrap().contains(".claude/custom-plans"),
+            "the configured directory is the source"
+        );
+    }
+
+    #[test]
+    fn claude_plans_directory_foreign_path_fails_closed() {
+        // A Windows-shaped value is not project-relative on this host, and
+        // must not become a bogus directory inside the project.
+        assert_eq!(
+            resolve_plans_directory(Path::new("/work/demo"), "C:\\Users\\a\\plans"),
+            None
+        );
+        assert_eq!(
+            resolve_plans_directory(Path::new("/work/demo"), "notes/plans"),
+            Some(PathBuf::from("/work/demo/notes/plans"))
+        );
+        assert_eq!(resolve_plans_directory(Path::new("/work/demo"), "  "), None);
     }
 
     #[test]

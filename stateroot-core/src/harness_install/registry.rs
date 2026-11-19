@@ -372,14 +372,23 @@ impl HarnessQuirk {
 
 use event_support as es;
 
-/// Claude-Code shared event vocabulary (9 events; codex/gemini/devin/grok vary).
+/// Claude-Code event vocabulary (12 events; codex/gemini/devin/grok vary).
+///
+/// `PostToolUseFailure` and `PostCompact` (Claude Code 2.1.x) target canonicals
+/// that already existed, so they add capture with no new dispatch code.
+/// `StopFailure` (2.1.78+) is a turn that ended on an API error: it maps to its
+/// own `stop_failure` canonical, never to `stop`, because the finalize/seal
+/// pipeline keys on `stop` and would seal an errored turn as a clean boundary.
 const CLAUDE_EVENTS: &[(&str, &str)] = &[
     ("SessionStart", "session_start"),
     ("UserPromptSubmit", "user_prompt_submit"),
     ("PreToolUse", "pre_tool_use"),
     ("PostToolUse", "post_tool_use"),
+    ("PostToolUseFailure", "tool_failure"),
     ("PreCompact", "pre_compact"),
+    ("PostCompact", "post_compaction"),
     ("Stop", "stop"),
+    ("StopFailure", "stop_failure"),
     ("SessionEnd", "session_end"),
     ("SubagentStart", "subagent_start"),
     ("SubagentStop", "subagent_stop"),
@@ -452,7 +461,21 @@ const DEVIN_EVENTS: &[(&str, &str)] = &[
     ("SessionEnd", "session_end"),
 ];
 
-const GROK_EVENTS: &[(&str, &str)] = CLAUDE_EVENTS;
+/// Grok shares the Claude-Code payload shape but is pinned to the nine events
+/// we have verified there. Deliberately an explicit copy, not an alias of
+/// `CLAUDE_EVENTS`: adding a Claude event must not silently register a hook
+/// key Grok may not implement.
+const GROK_EVENTS: &[(&str, &str)] = &[
+    ("SessionStart", "session_start"),
+    ("UserPromptSubmit", "user_prompt_submit"),
+    ("PreToolUse", "pre_tool_use"),
+    ("PostToolUse", "post_tool_use"),
+    ("PreCompact", "pre_compact"),
+    ("Stop", "stop"),
+    ("SessionEnd", "session_end"),
+    ("SubagentStart", "subagent_start"),
+    ("SubagentStop", "subagent_stop"),
+];
 
 /// Command Code settings.json hooks: four events only (`SessionStart`,
 /// `PreToolUse`, `PostToolUse`, `Stop`). There is no UserPromptSubmit,
@@ -1119,6 +1142,10 @@ pub const CANONICAL_EVENTS: &[&str] = &[
     "pre_compact",
     "post_compaction",
     "stop",
+    // A turn that ended on an API error. Deliberately distinct from `stop`:
+    // the finalize/seal pipeline keys on `stop`, so folding an errored turn
+    // into it would seal it as a clean session boundary.
+    "stop_failure",
     "session_end",
     "subagent_start",
     "subagent_stop",
@@ -1147,9 +1174,8 @@ pub fn event_kind(canonical: &str) -> Option<EventKind> {
         "pre_tool_use" | "post_tool_use" | "notification" | "subagent_start" | "subagent_stop" => {
             Some(EventKind::Capture)
         }
-        "tool_failure" | "pre_compact" | "post_compaction" | "stop" | "session_end" => {
-            Some(EventKind::Checkpoint)
-        }
+        "tool_failure" | "pre_compact" | "post_compaction" | "stop" | "stop_failure"
+        | "session_end" => Some(EventKind::Checkpoint),
         _ => None,
     }
 }
@@ -1470,6 +1496,21 @@ mod tests {
             normalize_event(claude, "UserPromptSubmit"),
             Some("user_prompt_submit")
         );
+        // Claude Code's native failure and post-compaction events map onto
+        // canonicals that already existed for Kimi Code and CodeBuddy.
+        assert_eq!(
+            normalize_event(claude, "PostToolUseFailure"),
+            Some("tool_failure")
+        );
+        assert_eq!(
+            normalize_event(claude, "PostCompact"),
+            Some("post_compaction")
+        );
+        // An errored turn keeps its own canonical: folding it into `stop`
+        // would seal it through the finalize pipeline.
+        assert_eq!(normalize_event(claude, "StopFailure"), Some("stop_failure"));
+        assert_eq!(event_kind("stop_failure"), Some(EventKind::Checkpoint));
+        assert_eq!(normalize_event(claude, "Stop"), Some("stop"));
         let cursor = quirk("cursor").expect("cursor");
         assert_eq!(
             normalize_event(cursor, "beforeSubmitPrompt"),
@@ -1499,6 +1540,8 @@ mod tests {
         assert_eq!(event_kind("user_prompt_submit"), Some(EventKind::Capture));
         assert_eq!(event_kind("post_tool_use"), Some(EventKind::Capture));
         assert_eq!(event_kind("tool_failure"), Some(EventKind::Checkpoint));
+        assert_eq!(event_kind("stop_failure"), Some(EventKind::Checkpoint));
+        assert_eq!(event_kind("post_compaction"), Some(EventKind::Checkpoint));
         assert_eq!(event_kind("stop"), Some(EventKind::Checkpoint));
         assert_eq!(event_kind("nonsense"), None);
     }

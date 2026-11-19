@@ -359,6 +359,130 @@ pub fn extract_hook_commands(path: &Path, format: HookFormat) -> Vec<String> {
     }
 }
 
+/// Native event names that carry at least one stateroot-owned hook entry.
+///
+/// `None` when the format keeps its events inside generated code rather than
+/// config (Cordis plugin, generated native plugin) — there is nothing honest
+/// to grade there, so callers must skip the coverage check instead of
+/// reporting every event missing.
+///
+/// Used by doctor/install to catch a stale install: a settings file written by
+/// an older CLI still registers the events it knew about, so the registry can
+/// gain an event (a native failure or post-compaction hook) and the user keeps
+/// silently missing it until they re-run `stateroot install`.
+pub fn extract_hook_events(path: &Path, format: HookFormat) -> Option<Vec<String>> {
+    match format {
+        HookFormat::CordisPlugin | HookFormat::NativePlugin => None,
+        HookFormat::TomlHooks => {
+            let text = std::fs::read_to_string(path).ok()?;
+            let doc = toml::from_str::<toml::Value>(&text).ok()?;
+            let mut out = Vec::new();
+            for entry in doc.get("hooks").and_then(toml::Value::as_array)? {
+                let owned = entry
+                    .get("command")
+                    .and_then(toml::Value::as_str)
+                    .is_some_and(is_stateroot_hook_command);
+                if let (true, Some(event)) =
+                    (owned, entry.get("event").and_then(toml::Value::as_str))
+                {
+                    out.push(event.to_string());
+                }
+            }
+            Some(out)
+        }
+        HookFormat::ZeroExecJson => {
+            let text = std::fs::read_to_string(path).ok()?;
+            let doc = serde_json::from_str::<serde_json::Value>(&text).ok()?;
+            let mut out = Vec::new();
+            for entry in doc.get("hooks").and_then(serde_json::Value::as_array)? {
+                let owned = entry.get("command").and_then(serde_json::Value::as_str)
+                    == Some("stateroot")
+                    && entry
+                        .get("args")
+                        .and_then(serde_json::Value::as_array)
+                        .and_then(|args| args.first())
+                        .and_then(serde_json::Value::as_str)
+                        == Some("hook");
+                if let (true, Some(event)) = (
+                    owned,
+                    entry.get("event").and_then(serde_json::Value::as_str),
+                ) {
+                    out.push(event.to_string());
+                }
+            }
+            Some(out)
+        }
+        HookFormat::YamlHooks => {
+            let text = std::fs::read_to_string(path).ok()?;
+            let doc = serde_yaml::from_str::<serde_yaml::Value>(&text).ok()?;
+            let hooks = doc.get("hooks")?.as_mapping()?;
+            let mut out = Vec::new();
+            for (event, entries) in hooks {
+                let Some(event) = event.as_str() else {
+                    continue;
+                };
+                let owned = entries.as_sequence().is_some_and(|entries| {
+                    entries.iter().any(|entry| {
+                        entry
+                            .get("command")
+                            .and_then(|command| command.as_str())
+                            .is_some_and(is_stateroot_hook_command)
+                    })
+                });
+                if owned {
+                    out.push(event.to_string());
+                }
+            }
+            Some(out)
+        }
+        HookFormat::NamedGroupsJson => {
+            let text = std::fs::read_to_string(path).ok()?;
+            let doc = serde_json::from_str::<serde_json::Value>(&text).ok()?;
+            let map = doc.get("stateroot")?.as_object()?;
+            Some(owned_events_in_map(map))
+        }
+        _ => {
+            // NestedJson / FlatJson / CopilotJson / CommandCodeJson:
+            // `{"hooks": {<event>: [entries]}}`; devin's hooks.v1.json IS the
+            // event map.
+            let text = std::fs::read_to_string(path).ok()?;
+            let doc = serde_json::from_str::<serde_json::Value>(&text).ok()?;
+            let map = if path.file_name() == Some("hooks.v1.json".as_ref()) {
+                doc.as_object()?
+            } else {
+                doc.get("hooks").and_then(serde_json::Value::as_object)?
+            };
+            Some(owned_events_in_map(map))
+        }
+    }
+}
+
+/// Event keys of one `event -> [entries]` map that hold a stateroot handler.
+fn owned_events_in_map(map: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
+    let owned = |entry: &serde_json::Value| {
+        entry
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(is_stateroot_hook_command)
+    };
+    let mut out = Vec::new();
+    for (event, value) in map {
+        let Some(entries) = value.as_array() else {
+            continue;
+        };
+        if entries.iter().any(|entry| {
+            owned(entry)
+                || entry
+                    .get("hooks")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|nested| nested.iter().any(owned))
+        }) {
+            out.push(event.clone());
+        }
+    }
+    out
+}
+
 /// Walk one `event -> [entries]` map: an entry's command is `entry.command`
 /// (flat handler) or each `entry.hooks[].command` (nested matcher shape).
 fn collect_event_map_commands(
@@ -524,10 +648,24 @@ fn hooks_component(home: &Path, quirk: &HarnessQuirk) -> ComponentHealth {
     }
     if let Some((path, count)) = found.first() {
         let duplicates = *count > quirk.event_map.len() && !quirk.event_map.is_empty();
+        // Registry events the installed config does not register: an install
+        // written by an older CLI keeps working for the events it knew about,
+        // so a newly mapped native event (tool failure, post-compaction,
+        // stop-failure) stays silently unregistered until `stateroot install`.
+        let missing = extract_hook_events(path, target.format)
+            .map(|installed| {
+                quirk
+                    .event_map
+                    .iter()
+                    .map(|(native, _)| *native)
+                    .filter(|native| !installed.iter().any(|event| event == native))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         ComponentHealth::new(
             ComponentState::Ok,
             format!(
-                "{} · {count} hook entr{}{}",
+                "{} · {count} hook entr{}{}{}",
                 path.display(),
                 if *count == 1 { "y" } else { "ies" },
                 if duplicates {
@@ -538,6 +676,16 @@ fn hooks_component(home: &Path, quirk: &HarnessQuirk) -> ComponentHealth {
                     )
                 } else {
                     String::new()
+                },
+                if missing.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " · {} of {} events not installed ({}) — run `stateroot install`",
+                        missing.len(),
+                        quirk.event_map.len(),
+                        missing.join(", ")
+                    )
                 },
             ),
         )
@@ -1438,6 +1586,48 @@ mod tests {
             ComponentState::Unreadable,
             "{:?}",
             row.hooks
+        );
+    }
+
+    #[test]
+    fn hook_event_coverage_distinguishes_stale_install_from_current() {
+        let home = tempfile::tempdir().expect("home");
+        let path = home.path().join("settings.json");
+        // An install written before the failure/post-compaction/stop-failure
+        // events were mapped: nine entries, all owned by stateroot.
+        let stale = serde_json::json!({
+            "hooks": {
+                "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "stateroot hook session_start --harness claude-code"}]}],
+                "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "stateroot hook stop --harness claude-code"}]}],
+                "Foreign": [{"matcher": "", "hooks": [{"type": "command", "command": "other-tool run"}]}]
+            }
+        });
+        std::fs::write(&path, stale.to_string()).expect("write");
+        let installed =
+            extract_hook_events(&path, HookFormat::NestedJson).expect("nested json graded");
+        assert_eq!(
+            installed,
+            vec!["SessionStart".to_string(), "Stop".to_string()]
+        );
+        assert!(
+            !installed.iter().any(|event| event == "Foreign"),
+            "a foreign hook is not a stateroot registration"
+        );
+
+        // A generated plugin holds its events in code, so it is never graded
+        // (no false 'every event missing').
+        assert!(extract_hook_events(&path, HookFormat::CordisPlugin).is_none());
+
+        // TOML hooks carry the event as a field, not as a key.
+        let toml_path = home.path().join("config.toml");
+        std::fs::write(
+            &toml_path,
+            "[[hooks]]\nevent = \"PostToolUse\"\ncommand = \"stateroot hook post_tool_use --harness kimi-code\"\n",
+        )
+        .expect("write toml");
+        assert_eq!(
+            extract_hook_events(&toml_path, HookFormat::TomlHooks).expect("toml graded"),
+            vec!["PostToolUse".to_string()]
         );
     }
 }

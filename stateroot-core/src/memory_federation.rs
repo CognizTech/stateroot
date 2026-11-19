@@ -159,25 +159,6 @@ fn paths_overlap(a: &str, b: &str) -> bool {
     false
 }
 
-/// Decode a claude project slug back to its cwd: leading `/` became a leading
-/// `-`, every `/` became `-`. Inherently ambiguous for directory names that
-/// contain `-`; matching is tolerant (walk-up/walk-down overlap), never exact.
-fn claude_slug_to_cwd(slug: &str) -> String {
-    let rest = slug.strip_prefix('-').unwrap_or(slug);
-    format!("/{}", rest.replace('-', "/"))
-}
-
-/// Encode an absolute path as a claude project slug (best-effort fallback when
-/// no existing slug dir matches).
-fn claude_slug_encode(path: &str) -> String {
-    let replaced = normalize_for_match(path).replace('/', "-");
-    if replaced.starts_with('-') {
-        replaced
-    } else {
-        format!("-{replaced}")
-    }
-}
-
 /// Sanitize a title into a filesystem-safe page stem.
 fn sanitize_title(title: &str) -> String {
     let mut out: String = title
@@ -261,7 +242,7 @@ fn read_memory_dir(
 /// `~/.claude/projects/` whose decoded cwd overlaps `project_dir` (exact,
 /// walk-up, or walk-down), reading its `memory/*.md`.
 pub fn read_claude(home: &Path, project_dir: &Path) -> Vec<HarnessMemoryNote> {
-    let projects = home.join(".claude").join("projects");
+    let projects = crate::harness_install::paths::claude_projects_root(home);
     let Ok(entries) = std::fs::read_dir(&projects) else {
         return Vec::new();
     };
@@ -274,7 +255,7 @@ pub fn read_claude(home: &Path, project_dir: &Path) -> Vec<HarnessMemoryNote> {
         }
         let slug = entry.file_name().to_string_lossy().to_string();
         if !paths_overlap(
-            &normalize_for_match(&claude_slug_to_cwd(&slug)),
+            &normalize_for_match(&crate::harness_install::paths::claude_slug_to_cwd(&slug)),
             &project_norm,
         ) {
             continue;
@@ -596,7 +577,7 @@ fn write_imported_page(
 /// Compute the claude project dir for push: an existing slug dir whose decoded
 /// cwd overlaps `project_dir`, else the encoded slug (best-effort).
 fn claude_slug_dir(home: &Path, project_dir: &Path) -> PathBuf {
-    let projects = home.join(".claude").join("projects");
+    let projects = crate::harness_install::paths::claude_projects_root(home);
     let project_norm = normalize_for_match(&project_dir.to_string_lossy());
     if let Ok(entries) = std::fs::read_dir(&projects) {
         for entry in entries.flatten() {
@@ -606,19 +587,21 @@ fn claude_slug_dir(home: &Path, project_dir: &Path) -> PathBuf {
             }
             let slug = entry.file_name().to_string_lossy().to_string();
             if paths_overlap(
-                &normalize_for_match(&claude_slug_to_cwd(&slug)),
+                &normalize_for_match(&crate::harness_install::paths::claude_slug_to_cwd(&slug)),
                 &project_norm,
             ) {
                 return path;
             }
         }
     }
-    projects.join(claude_slug_encode(&project_dir.to_string_lossy()))
+    projects.join(crate::harness_install::paths::claude_slug_encode(
+        &project_dir.to_string_lossy(),
+    ))
 }
 
 fn harness_base(home: &Path, harness: &str) -> PathBuf {
     match harness {
-        "claude" => home.join(".claude").join("projects"),
+        "claude" => crate::harness_install::paths::claude_projects_root(home),
         "codex" => home.join(".codex"),
         "codebuddy" => crate::harness_install::paths::codebuddy_root(home),
         _ => home.join(".openclaw").join("workspace"),

@@ -156,6 +156,11 @@ async fn main() -> anyhow::Result<()> {
                 archive.as_deref(),
                 operation_id.as_deref(),
             )?,
+            SessionAction::Restore {
+                archive,
+                operation_id,
+                home,
+            } => commands::session::restore(&ctx, &archive, &operation_id, home.as_deref())?,
             SessionAction::Purge { id, harness, yes } => {
                 commands::session::purge(&ctx, &id, harness.as_deref(), yes)?
             }

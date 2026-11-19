@@ -10,6 +10,7 @@
 //! into roots (same rule as `local/memory.sqlite`). Promotion into synced
 //! state is a later, retention-tiered decision.
 
+pub mod claude_native;
 pub mod codex_native;
 pub mod transfer;
 
@@ -547,6 +548,20 @@ pub fn import_from_readers_filtered(
                 continue;
             };
             if let Some(session) = extract::canonical_from_claude(&events, &file, project_dir) {
+                if !tombstones::contains(&stones, &session.session_id, &session.harness) {
+                    match claude_native::retain(project_dir, home, &file) {
+                        Ok(capture) => match capture.suffix_reason {
+                            Some(reason) => report.native_partial.push(format!(
+                                "{}: archive {}: {reason}",
+                                session.session_id, capture.archive.id
+                            )),
+                            None => report.native_archives += 1,
+                        },
+                        Err(e) => report
+                            .native_unavailable
+                            .push(format!("{}: {e}", session.session_id)),
+                    }
+                }
                 import_one(session, &mut report);
             }
         }

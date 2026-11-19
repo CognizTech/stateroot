@@ -300,7 +300,7 @@ pub enum SessionAction {
     Transfer {
         /// Session id (prefix allowed).
         id: String,
-        /// Target harness store: pi, dsh, or qualified native codex.
+        /// Target harness store: pi, dsh, claude, or qualified native codex.
         #[arg(long)]
         to: String,
         /// Print the plan + fidelity report without writing anything.
@@ -312,6 +312,18 @@ pub enum SessionAction {
         /// Stable UUID for native restore retries, required for --to codex.
         #[arg(long)]
         operation_id: Option<String>,
+    },
+    /// Restore a retained Claude native archive into a new session file.
+    Restore {
+        /// Retained archive digest (`session list` prints them).
+        archive: String,
+        /// Stable UUID for restore retries.
+        #[arg(long)]
+        operation_id: String,
+        /// Claude home to write into. Defaults to the resolved user home;
+        /// point it at a temporary home to preview a restore.
+        #[arg(long)]
+        home: Option<String>,
     },
     /// Tombstone and delete one canonical session (file + derived index only).
     Purge {

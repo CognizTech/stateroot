@@ -693,14 +693,25 @@ archived duplicates).
   outcome. `stateroot session show <id>` — header, first user message, last
   entries (capped for display).
 
-### `stateroot session transfer <id> --to pi|dsh [--dry-run]`
+### `stateroot session transfer <id> --to pi|dsh|claude [--dry-run]`
 
 Transfer translates strings to strings: a canonical session becomes a real,
 resumable session file in the target harness's native store (Pi v3 tree
 with a fresh linear id/parentId spine — branches flatten to the imported
 timeline; DSH v0 event log with contiguous seq and a clean completed/
-interrupted tail). The source session is never mutated, an existing target
-is never clobbered, and the fidelity report is always printed:
+interrupted tail; Claude Code JSONL records with a fresh `uuid`/`parentUuid`
+chain and the minted session id). The source session is never mutated, an
+existing target is never clobbered, and the fidelity report is always printed:
+
+A Claude transfer keeps the whole history. A compaction summary becomes a
+clearly marked user note, a plan is dropped, and any entry with no native
+counterpart is dropped under its native type name. No `version` field is
+invented. The written file is parsed back with the Claude reader before the
+transfer is reported; a file the reader rejects is removed. The resume hint
+carries both keys — the session id and the absolute transcript path, which
+`claude --resume` also accepts. `claude --continue` finds the copy only while
+no newer session exists in that directory, and it skips sessions created with
+`claude -p`.
 
 ```
 transferred session <id> → pi
@@ -711,6 +722,37 @@ transferred session <id> → pi
 
 `--dry-run` prints the same plan with `would write:` and touches nothing.
 Every transfer appends an episodic lineage note.
+
+### Claude Code native archives
+
+`session sync` retains each supported Claude session's **settled prefix** under
+`.stateroot/local/sessions/native-claude/`. The prefix ends at the last
+completed assistant message; a turn still awaiting tool results is an
+unsettled tail and is reported as partial capture through the exact older
+boundary, never as a complete one. The session store is resolved through the
+Claude config root, so a relocated `CLAUDE_CONFIG_DIR` is honored.
+
+`session list` and `session show <id>` list archive ids; selecting one verifies
+the manifest and the retained bytes. Claude record types are undocumented
+internals, so nothing is rewritten or dropped: the archived bytes are the
+source bytes. Archives are local only — capture never writes back into the
+Claude session store.
+
+`session restore <archive> --operation-id <uuid>` materializes one archive as a
+**new** session file in that home's Claude store. The copy gets a fresh session
+id (every record's `sessionId` is rewritten consistently) while `uuid`,
+`parentUuid`, `cwd`, timestamps and version stay verbatim. The file is created
+with no-overwrite semantics and is parsed back with the real Claude reader
+before the operation is recorded; a copy that does not parse as this project's
+session is removed and reported as a failure. The operation id is idempotent —
+repeating it returns the original receipt, and reusing it for another archive
+is refused. `--home <dir>` writes into a different home, so a restore can be
+inspected in a temporary home before the real store is touched.
+
+```text
+restored session <new-id> → <home>/.claude/projects/<slug>/<new-id>.jsonl
+resume with: claude --resume <new-id>
+```
 
 ### Qualified native Codex recovery
 

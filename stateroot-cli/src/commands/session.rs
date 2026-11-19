@@ -104,6 +104,11 @@ pub fn list(ctx: &Ctx, harness: Option<&str>) -> anyhow::Result<()> {
             println!("native archive: {archive}");
         }
     }
+    if harness.is_none_or(|h| h == "claude") {
+        for archive in sessions::claude_native::inventory(&ctx.cwd) {
+            println!("native archive (claude): {archive}");
+        }
+    }
     Ok(())
 }
 
@@ -185,6 +190,14 @@ pub fn show(ctx: &Ctx, id: &str, operation_id: Option<&str>) -> anyhow::Result<(
             println!("native archive: {archive}");
         }
     }
+    if session.harness == "claude" {
+        for archive in sessions::claude_native::inventory(&ctx.cwd)
+            .into_iter()
+            .filter(|a| a["source_session_id"] == session.session_id)
+        {
+            println!("native archive: {archive}");
+        }
+    }
     Ok(())
 }
 
@@ -207,6 +220,40 @@ fn display_line(entry: &sessions::CanonicalEntry) -> String {
         label,
         truncate(content, DISPLAY_CAP)
     )
+}
+
+/// Run `stateroot session restore <archive> --operation-id <uuid> [--home]`.
+///
+/// The archive is the source of truth: a missing or corrupt retained copy is
+/// reported, never replaced by the newer live history. `--home` exists so an
+/// operator can materialize a restore into a temporary home and inspect it
+/// before touching the real Claude store.
+pub fn restore(
+    ctx: &Ctx,
+    archive: &str,
+    operation_id: &str,
+    home: Option<&str>,
+) -> anyhow::Result<()> {
+    ctx.require_project()?;
+    let home = match home {
+        Some(path) => std::path::PathBuf::from(path),
+        None => {
+            stateroot_core::harness_install::home_dir().map_err(|e| anyhow::anyhow!("{e:?}"))?
+        }
+    };
+    let receipt = sessions::claude_native::restore(&ctx.cwd, &home, archive, operation_id)
+        .map_err(anyhow::Error::msg)?;
+    println!("{}", serde_json::to_string_pretty(&receipt)?);
+    println!(
+        "restored session {} → {}",
+        receipt.destination_session_id,
+        receipt.destination_path.display()
+    );
+    println!(
+        "resume with: claude --resume {}",
+        receipt.destination_session_id
+    );
+    Ok(())
 }
 
 /// Run `stateroot session transfer <id> --to pi|dsh [--dry-run]`.
@@ -280,7 +327,10 @@ pub fn transfer(
     let plan = match to {
         "pi" => sessions::transfer::plan_pi(&session, &home, &ctx.cwd, &new_id),
         "dsh" => sessions::transfer::plan_dsh(&session, &home, &ctx.cwd, &new_id),
-        other => anyhow::bail!("unknown transfer target '{other}' — supported: pi, dsh, codex (qualified native archive)"),
+        "claude" => sessions::transfer::plan_claude(&session, &home, &ctx.cwd, &new_id),
+        other => anyhow::bail!(
+            "unknown transfer target '{other}' — supported: pi, dsh, claude, codex (qualified native archive)"
+        ),
     }
     .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -292,6 +342,16 @@ pub fn transfer(
         return Ok(());
     }
     sessions::transfer::write(&plan).map_err(|e| anyhow::anyhow!(e))?;
+    if to == "claude" {
+        // A transferred Claude session is only worth reporting if the Claude
+        // reader accepts it as this project's session with the minted id.
+        if let Err(e) =
+            sessions::claude_native::verify_written(&plan.target_path, &ctx.cwd, &new_id)
+        {
+            let _ = std::fs::remove_file(&plan.target_path);
+            anyhow::bail!("{e}; the written file was removed");
+        }
+    }
     println!("transferred session {} → {to}", session.session_id);
     println!("  entries: {}", plan.fidelity.line());
     println!("  wrote: {}", plan.target_path.display());

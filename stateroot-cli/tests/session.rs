@@ -315,6 +315,141 @@ fn codex_native_archive_dry_run_survives_removed_live_history_and_refuses_corrup
 }
 
 #[test]
+fn claude_native_archive_is_listed_and_survives_removed_live_history() {
+    use serde_json::Value;
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().unwrap();
+    init_project(config_home.path(), user_home.path(), project.path());
+    let cwd = project.path().canonicalize().unwrap();
+    let id = "01900000-0000-7000-8000-000000000021";
+    let source = user_home
+        .path()
+        .join(format!(".claude/projects/test-slug/{id}.jsonl"));
+    let cwd_json = serde_json::to_string(&cwd).unwrap();
+    let lines = vec![
+        format!(
+            r#"{{"type":"user","uuid":"u1","sessionId":"{id}","cwd":{cwd_json},"version":"2.1.281","timestamp":"2026-11-19T00:00:00Z","message":{{"role":"user","content":"hello"}}}}"#
+        ),
+        format!(
+            r#"{{"type":"assistant","uuid":"a1","parentUuid":"u1","sessionId":"{id}","cwd":{cwd_json},"version":"2.1.281","timestamp":"2026-11-19T00:00:01Z","message":{{"role":"assistant","content":[{{"type":"text","text":"done"}}]}}}}"#
+        ),
+    ];
+    write_lines(&source, &lines);
+
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["session", "sync", "--harness", "claude"])
+        .assert()
+        .success();
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["session", "show", id])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let row: Value = serde_json::from_str(
+        stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("native archive: "))
+            .expect("claude archive listed"),
+    )
+    .unwrap();
+    assert_eq!(row["source_session_id"], id);
+    let archive = row["archive_id"].as_str().unwrap().to_string();
+
+    // The live session file is gone; the retained archive is the evidence and
+    // still resolves from the local store.
+    std::fs::remove_file(&source).unwrap();
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["session", "list"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("native archive (claude):") && stdout.contains(&archive),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn claude_native_restore_writes_only_into_the_target_home() {
+    use serde_json::Value;
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().unwrap();
+    init_project(config_home.path(), user_home.path(), project.path());
+    let target_home = tempfile::tempdir().unwrap();
+    let cwd = project.path().canonicalize().unwrap();
+    let id = "01900000-0000-7000-8000-000000000031";
+    let source = user_home
+        .path()
+        .join(format!(".claude/projects/test-slug/{id}.jsonl"));
+    let cwd_json = serde_json::to_string(&cwd).unwrap();
+    write_lines(
+        &source,
+        &[
+            format!(
+                r#"{{"type":"user","uuid":"u1","sessionId":"{id}","cwd":{cwd_json},"version":"2.1.281","timestamp":"2026-11-19T00:00:00Z","message":{{"role":"user","content":"hello"}}}}"#
+            ),
+            format!(
+                r#"{{"type":"assistant","uuid":"a1","parentUuid":"u1","sessionId":"{id}","cwd":{cwd_json},"version":"2.1.281","timestamp":"2026-11-19T00:00:01Z","message":{{"role":"assistant","content":[{{"type":"text","text":"done"}}]}}}}"#
+            ),
+        ],
+    );
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["session", "sync", "--harness", "claude"])
+        .assert()
+        .success();
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["session", "show", id])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let row: Value = serde_json::from_str(
+        stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("native archive: "))
+            .expect("archive listed"),
+    )
+    .unwrap();
+    let archive = row["archive_id"].as_str().unwrap().to_string();
+    let operation = "01900000-0000-7000-8000-000000000032";
+
+    let run = || {
+        stateroot(config_home.path(), user_home.path(), project.path())
+            .args([
+                "session",
+                "restore",
+                &archive,
+                "--operation-id",
+                operation,
+                "--home",
+                target_home.path().to_str().unwrap(),
+            ])
+            .assert()
+            .success()
+    };
+    let out = run();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let mut stream = serde_json::Deserializer::from_str(&stdout).into_iter::<Value>();
+    let parsed = stream.next().expect("receipt json").expect("valid receipt");
+    let destination = parsed["destination_path"].as_str().unwrap().to_string();
+    assert!(destination.starts_with(target_home.path().to_str().unwrap()));
+    assert!(std::path::Path::new(&destination).is_file());
+    assert!(stdout.contains("claude --resume"));
+
+    // Idempotent: the same operation yields the same destination, and the
+    // source home was never written to.
+    let again = run();
+    let again_stdout = String::from_utf8(again.get_output().stdout.clone()).unwrap();
+    assert!(again_stdout.contains(&destination));
+    assert_eq!(
+        std::fs::read_dir(user_home.path().join(".claude/projects/test-slug"))
+            .unwrap()
+            .count(),
+        1,
+        "restore never writes into the source home"
+    );
+}
+
+#[test]
 fn session_transfer_to_pi_and_dsh_with_fidelity() {
     let (config_home, user_home) = homes();
     let project = tempfile::tempdir().expect("project");
@@ -444,6 +579,83 @@ fn session_transfer_to_pi_and_dsh_with_fidelity() {
         .args(["session", "transfer", "nope", "--to", "pi"])
         .assert()
         .failure();
+}
+
+#[test]
+fn session_transfer_to_claude_writes_a_native_session_file() {
+    use serde_json::Value;
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().expect("project");
+    init_project(config_home.path(), user_home.path(), project.path());
+    let cwd = project.path().display().to_string();
+    let pi_agent = pi_fixture(&cwd);
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .env("PI_CODING_AGENT_DIR", pi_agent.path())
+        .args(["session", "sync"])
+        .assert()
+        .success();
+
+    // Dry run prints the plan and writes nothing.
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args([
+            "session",
+            "transfer",
+            "pi-sess-1",
+            "--to",
+            "claude",
+            "--dry-run",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains("would transfer session pi-sess-1 → claude"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        !user_home.path().join(".claude/projects").exists(),
+        "dry-run must not write"
+    );
+
+    // Real transfer lands in the (test) home's Claude session store.
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .args(["session", "transfer", "pi-sess-1", "--to", "claude"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(
+        stdout.contains("transferred session pi-sess-1 → claude"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("resume with: claude --resume "), "{stdout}");
+
+    let written = std::fs::read_dir(user_home.path().join(".claude/projects"))
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .flat_map(|dir| std::fs::read_dir(dir.path()).ok().into_iter().flatten())
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+        .expect("a Claude session file was written");
+    let body = std::fs::read_to_string(&written).expect("written claude session");
+    assert!(body.contains("write the migration"), "content: {body}");
+    let records: Vec<Value> = body
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("record json"))
+        .collect();
+    let session_id = records[0]["sessionId"].as_str().expect("session id");
+    assert!(body.contains(session_id));
+    assert!(records.iter().all(|r| r["sessionId"] == session_id));
+    assert_eq!(
+        records[0]["parentUuid"],
+        Value::Null,
+        "first record starts the chain"
+    );
+    for pair in records.windows(2) {
+        assert_eq!(pair[1]["parentUuid"], pair[0]["uuid"]);
+    }
 }
 
 /// Claude/codex/kimi/openclaw file fixtures plus cursor/hermes sqlite stores,

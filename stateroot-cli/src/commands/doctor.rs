@@ -1142,6 +1142,28 @@ fn continuity_chain_checks(home: &Path, project_dir: &Path) -> Vec<Check> {
             ok = false;
             detail.push("no stateroot hook blocks found".to_string());
         }
+        // Coverage, not just presence: a config written by an older CLI keeps
+        // registering the events it knew about, so a registry that gained a
+        // native event leaves that hook silently absent until reinstall.
+        if let Some(installed) =
+            stateroot_core::harness_install::health::extract_hook_events(&config, target.format)
+        {
+            let missing: Vec<&str> = quirk
+                .event_map
+                .iter()
+                .map(|(native, _)| *native)
+                .filter(|native| !installed.iter().any(|event| event == native))
+                .collect();
+            if !missing.is_empty() {
+                ok = false;
+                detail.push(format!(
+                    "{} of {} hook events not installed ({}) — run `stateroot install`",
+                    missing.len(),
+                    quirk.event_map.len(),
+                    missing.join(", ")
+                ));
+            }
+        }
         match last_by_harness.get(quirk.id) {
             Some(ts) => detail.push(format!("last captured {ts}")),
             None => detail.push("no checkpoints captured yet".into()),

@@ -5,6 +5,40 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- Claude Code captures its native `PostToolUseFailure`, `PostCompact` and
+  `StopFailure` events. A turn that ends on an API error keeps its own
+  `stop_failure` checkpoint kind and is never folded into `stop`, so the
+  finalize pipeline cannot seal a failed turn as a clean boundary. Doctor now
+  reports hook events a stale install is missing instead of reading the
+  integration as healthy.
+
+- Claude Code plan federation honors the documented `plansDirectory` setting
+  (project-local, then shared project, then user settings), reads a project
+  `.claude/plans` directory, and attributes the user-global plans directory by
+  this project's own session activity rather than ingesting every project's
+  plans into whichever project happened to sync.
+
+- Claude Code transcript, plan, memory and todo readers resolve through the
+  Claude config root, so `CLAUDE_CONFIG_DIR` is honored consistently with the
+  installer.
+
+- `session sync` retains Claude Code native session prefixes under
+  `local/sessions/native-claude/` (settled prefix through the last completed
+  assistant message, unsettled tails reported as partial capture), listed by
+  `session list` and `session show`.
+
+- `session restore` writes a retained Claude archive back as a new native
+  session file (fresh session id, no-overwrite creation, parsed back before the
+  operation is recorded, idempotent operation ids). `--home` targets a
+  temporary home so a restore can be inspected before the real store changes.
+
+- `session transfer --to claude` writes a canonical session as a resumable
+  Claude JSONL chain (fresh uuid/parentUuid records, minted session id, whole
+  history, no invented version field). Compaction summaries arrive as marked
+  user notes, plans are dropped, and the copy is parsed back before the
+  transfer is reported. The resume hint names both the session id and the
+  absolute transcript path.
+
 - Preserve working context when Claude Code or Codex would clip a StateRoot
   hook. Fitting digests stay inline, and oversized deliveries provide bounded
   continuation pages tied to the original context.

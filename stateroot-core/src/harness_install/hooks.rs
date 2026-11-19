@@ -2050,6 +2050,51 @@ mod tests {
     }
 
     #[test]
+    fn claude_settings_json_installs_full_event_set() {
+        let home = tempfile::tempdir().expect("home");
+        let q = quirk("claude-code").expect("claude-code");
+        install_hooks(home.path(), q).expect("install");
+        let path = home.path().join(".claude/settings.json");
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+        let hooks = doc["hooks"].as_object().expect("hooks object");
+        // Every mapped event is installed exactly once, including the native
+        // failure and post-compaction events (9 -> 11).
+        for (native, canonical) in q.event_map {
+            let entries = hooks[*native]
+                .as_array()
+                .unwrap_or_else(|| panic!("Claude event {native} missing from settings.json"));
+            assert_eq!(entries.len(), 1, "{native}: exactly one stateroot handler");
+            let command = entries[0]["hooks"][0]["command"]
+                .as_str()
+                .expect("command string");
+            assert!(
+                command.contains(&format!("hook {canonical} --harness claude-code")),
+                "{native}: command must route {canonical} to the claude-code adapter: {command}"
+            );
+            assert_eq!(entries[0]["matcher"], "", "{native}: nested matcher shape");
+        }
+        assert_eq!(hooks.len(), q.event_map.len(), "no unexpected hook keys");
+        // Reinstall is byte-identical (idempotent).
+        install_hooks(home.path(), q).expect("second install");
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+        assert_eq!(doc, after, "second install is byte-identical");
+    }
+
+    #[test]
+    fn grok_event_set_is_pinned_independently_of_claude() {
+        let grok = quirk("grok").expect("grok");
+        let claude = quirk("claude-code").expect("claude-code");
+        assert_eq!(grok.event_map.len(), 9);
+        assert!(
+            !grok.event_map.iter().any(|(_, c)| *c == "tool_failure"),
+            "Grok must not silently inherit Claude's failure event"
+        );
+        assert_eq!(claude.event_map.len(), 12);
+    }
+
+    #[test]
     fn codebuddy_settings_json_install_is_nested_shaped_and_idempotent() {
         let home = tempfile::tempdir().expect("home");
         let q = quirk("codebuddy").expect("codebuddy");

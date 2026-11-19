@@ -525,13 +525,17 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
                 if delegated_child && canonical == "session_end" {
                     return Ok(0);
                 }
-                // Antigravity has no native tool_failure event: for that
-                // harness the canonical name only arises from the failed-
-                // PostToolUse remap above. Capture the full authorized
-                // tool-result/error payload durably BEFORE the immediate
-                // failure checkpoint — the checkpoint lane alone retained
-                // only a label over the prior tail, never the payload.
-                if quirk.id == "antigravity" && canonical == "tool_failure" {
+                // A tool failure is only evidence if its payload lands: the
+                // checkpoint lane alone retains a label over the prior tail.
+                // Antigravity has no native failure event (the canonical only
+                // arises from the failed-PostToolUse remap above) and Claude
+                // Code gained a native PostToolUseFailure — capture the
+                // authorized tool-result/error payload durably for both before
+                // the checkpoint. Other harnesses are deliberately excluded:
+                // full payload capture on every failure is a volume decision,
+                // not a default.
+                if canonical == "tool_failure" && matches!(quirk.id, "antigravity" | "claude-code")
+                {
                     capture_observation(quirk, canonical, project_dir, &payload)?;
                 }
                 let code =

@@ -25,9 +25,10 @@ pub struct ClaudeReader;
 
 /// Every claude session file under the projects store.
 pub(crate) fn session_files(home: &Path) -> Vec<std::path::PathBuf> {
-    walk_files(&home.join(".claude/projects"), &|p| {
-        p.extension().and_then(|e| e.to_str()) == Some("jsonl")
-    })
+    walk_files(
+        &crate::harness_install::paths::claude_projects_root(home),
+        &|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"),
+    )
 }
 
 /// Raw parse of one session file: the event lines as verbatim JSON
@@ -53,7 +54,7 @@ impl TranscriptReader for ClaudeReader {
     }
 
     fn scan(&self, home: &Path, project_dir: &Path) -> Vec<TranscriptSession> {
-        let root = home.join(".claude/projects");
+        let root = crate::harness_install::paths::claude_projects_root(home);
         let files = walk_files(&root, &|p| {
             p.extension().and_then(|e| e.to_str()) == Some("jsonl")
         });
