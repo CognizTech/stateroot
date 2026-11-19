@@ -553,6 +553,9 @@ async fn main() -> anyhow::Result<()> {
                 domain.as_deref(),
             )?,
             LearningsAction::Distill => commands::learnings::distill(&ctx)?,
+            LearningsAction::ImportTaste { dry_run, json } => {
+                commands::learnings::import_taste(&ctx, dry_run, json)?
+            }
         },
         Command::Learn(args) => match args.action {
             LearnAction::Record {

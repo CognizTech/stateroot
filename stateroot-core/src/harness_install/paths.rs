@@ -60,6 +60,12 @@ pub fn codebuddy_root(home: &Path) -> PathBuf {
     codebuddy_root_in(home, std::env::var_os(ENV_CODEBUDDY_CONFIG_DIR))
 }
 
+/// Command Code home (`home/.commandcode`). Command Code documents no
+/// config-dir override, so none is invented here.
+pub fn commandcode_root(home: &Path) -> PathBuf {
+    home.join(".commandcode")
+}
+
 /// Grok config root: `$GROK_HOME` or `home/.grok`.
 pub fn grok_root_in(home: &Path, env: Option<OsString>) -> PathBuf {
     agent_config_home(env).unwrap_or_else(|| home.join(".grok"))

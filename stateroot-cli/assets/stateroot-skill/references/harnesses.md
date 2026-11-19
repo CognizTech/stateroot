@@ -54,6 +54,20 @@ Automatic harnesses inject persona + USER.md + work context onto the first usabl
 - Memory: global and native-session-linked project auto-memory plus project team memory are imported. `--push` writes the managed project brief to `.codebuddy/rules/stateroot.md`, including current learnings.
 - Delegation: `stateroot delegate --to codebuddy --task "…"` uses `codebuddy --print` with the registry's non-interactive permission policy.
 
+## Command Code
+
+- Instruction: `~/.commandcode/AGENTS.md` (user tier) receives the managed one-agent block; project memory is `<project>/AGENTS.md` or `<project>/.commandcode/AGENTS.md` (first existing wins).
+- Hooks: `~/.commandcode/settings.json`, written with **no `matcher` key** — Command Code never matches on `SessionStart`/`Stop`, and an omitted matcher is what matches every tool. Only the four implemented events are registered: `SessionStart`, `PreToolUse`, `PostToolUse`, `Stop`. There is no `UserPromptSubmit`, `PreCompact`, `SessionEnd` or subagent hook, so none is installed.
+- Delivery: `SessionStart` injects the digest through `hookSpecificOutput.additionalContext` (first user turn). Compaction recovery rides the same channel on the next `PostToolUse`, armed from the transcript's own `{"type":"compaction"}` entry (tail-window read, compared against the last delivered FULL). `stateroot resume --harness commandcode` remains the manual fallback.
+- MCP: user scope `~/.commandcode/mcp.json` under `mcpServers` (stdio entries default when `transport` is absent); project scope `<project>/.mcp.json` (shared with CodeBuddy — same root key, deduped by server name).
+- Skills: native `~/.commandcode/skills/` and `.commandcode/skills/` packages participate in discovery and projection alongside the automatically discovered `.agents/skills/`.
+- Sessions: `stateroot session sync --harness commandcode` reads `~/.commandcode/projects/<slug>/<session-id>.jsonl` (header `type:"session"` + tree entries), and explicitly skips the `.checkpoints.jsonl` / `.prompts.jsonl` sidecars that share the extension.
+- Plans and todos: `~/.commandcode/plans/*.md` is a global pile, so a plan enters the central store as a draft only when one of this project's Command Code sessions was active within the attribution window of its mtime. There is no on-disk todo store; `task_create` / `task_update` / `task_stop` / `todo_write` calls are replayed from the transcript into per-session todos without inventing a plan link.
+- Taste: `.commandcode/taste/taste.md` and `.commandcode/taste/<category>/taste.md` (project) plus the user taste store are pulled in as learning **candidates** (`stateroot learnings import-taste`, also run at session start). Pull-only — Command Code owns those files and StateRoot never writes them.
+- Delegation: `stateroot delegate --to commandcode --task "…"` runs `cmd -p --yolo` (headless blocks mutating tools without `--yolo`).
+- Detection: `.commandcode` on disk, or `command-code` / `cmdc` on PATH. Bare `cmd` is deliberately not probed — on Windows `where.exe cmd` resolves the Windows shell.
+- Proof level: format verified against live 0.2.x transcripts and the bundled docs on this machine; install/uninstall, session sync, plan/todo/taste federation, and digest injection are covered by tests and live checks.
+
 ## DeepSeek Harness
 
 - Hooks: no hook config file exists. `stateroot install` writes a dependency-free cordis plugin at `$DSH_HOME/stateroot/hooks.mjs` and merges a marked block into `$DSH_HOME/cordis.patch.yml` — the home-level patch layer applied to every profile. The block inserts the plugin (`stateroot-hooks`) and an `@deepseek-ai/dsh-mcp-client` instance (`stateroot-mcp`).

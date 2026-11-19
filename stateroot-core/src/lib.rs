@@ -50,6 +50,7 @@ pub mod soul;
 pub mod soul_sync;
 pub mod state_exchange;
 pub mod sync_engine;
+pub mod taste_federation;
 pub mod telemetry;
 pub mod todo_federation;
 pub mod tombstones;

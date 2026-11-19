@@ -13,7 +13,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use super::{CanonicalEntry, CanonicalSession};
-use crate::transcripts::{self, codebuddy, codex, copilot, cursor, hermes, openclaw};
+use crate::transcripts::{self, codebuddy, codex, commandcode, copilot, cursor, hermes, openclaw};
 
 fn entry(kind: &str) -> CanonicalEntry {
     CanonicalEntry {
@@ -652,6 +652,182 @@ pub(crate) fn canonical_from_codebuddy(
 }
 
 // ---------------------------------------------------------------------
+// commandcode — ~/.commandcode/projects/<slug>/<session-id>.jsonl
+// ---------------------------------------------------------------------
+
+/// Canonicalize one parsed Command Code session. Content-block types the
+/// reader does not model stay as native metadata instead of disappearing;
+/// tool results keep their `tool_use_id` as the parent link.
+pub(crate) fn canonical_from_commandcode(
+    events: &[Value],
+    source_path: &Path,
+    project_dir: &Path,
+) -> Option<CanonicalSession> {
+    let header = events
+        .iter()
+        .find(|event| event.get("type").and_then(|value| value.as_str()) == Some("session"))?;
+    let cwd = header
+        .get("cwd")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    if !transcripts::cwd_matches(&cwd, project_dir) {
+        return None;
+    }
+    let session_id = header
+        .get("id")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            source_path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("unknown")
+                .to_string()
+        });
+
+    let mut entries = Vec::new();
+    for event in events {
+        let ts = event.get("timestamp").and_then(|value| value.as_str());
+        let native_id = event.get("id").and_then(|value| value.as_str());
+        let native_parent = event.get("parentId").and_then(|value| value.as_str());
+        match event.get("type").and_then(|kind| kind.as_str()) {
+            Some("session") => {
+                let mut e = meta_entry("session header", Some(compact(event)));
+                e.ts = ts.map(str::to_string);
+                e.id = native_id.map(str::to_string);
+                entries.push(e);
+            }
+            Some("message") => {
+                let Some(message) = event.get("message") else {
+                    let mut e = meta_entry("message (missing body)", Some(compact(event)));
+                    e.ts = ts.map(str::to_string);
+                    entries.push(e);
+                    continue;
+                };
+                let role = message
+                    .get("role")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let blocks: Vec<Value> = match message.get("content") {
+                    Some(Value::Array(blocks)) => blocks.clone(),
+                    Some(Value::String(text)) => vec![serde_json::json!({
+                        "type": "text",
+                        "text": text,
+                    })],
+                    _ => Vec::new(),
+                };
+                if blocks.is_empty() {
+                    let mut e = meta_entry("message (non-text)", Some(compact(message)));
+                    e.ts = ts.map(str::to_string);
+                    e.id = native_id.map(str::to_string);
+                    e.parent_id = native_parent.map(str::to_string);
+                    e.role = Some(role.to_string());
+                    entries.push(e);
+                    continue;
+                }
+                for block in blocks {
+                    let kind = block
+                        .get("type")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    let mut e = match kind {
+                        "text" => {
+                            let text = block.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                            if role == "user" && commandcode::is_injected_prompt(text) {
+                                let mut e = entry("message");
+                                e.kind = "meta".into();
+                                e.native_type = Some("injected".into());
+                                e
+                            } else {
+                                entry("message")
+                            }
+                        }
+                        "thinking" => meta_entry("thinking", Some(compact(&block))),
+                        "tool_use" => {
+                            let mut e = entry("tool_call");
+                            e.id = block.get("id").and_then(|v| v.as_str()).map(str::to_string);
+                            e.name = block
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string);
+                            e.content = Some(compact(block.get("input").unwrap_or(&Value::Null)));
+                            e
+                        }
+                        "tool_result" => match commandcode::tool_result_text(&block) {
+                            Some(text) => {
+                                let mut e = entry("tool_result");
+                                e.parent_id = block
+                                    .get("tool_use_id")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_string);
+                                e.content = Some(text);
+                                e
+                            }
+                            None => meta_entry("tool_result (no text part)", Some(compact(&block))),
+                        },
+                        other => {
+                            let label = if other.is_empty() {
+                                "message block (missing type)".to_string()
+                            } else {
+                                format!("message block: {other}")
+                            };
+                            meta_entry(&label, Some(compact(&block)))
+                        }
+                    };
+                    e.ts = ts.map(str::to_string);
+                    if kind != "tool_use" && kind != "tool_result" {
+                        e.id = native_id.map(str::to_string);
+                    }
+                    if e.parent_id.is_none() {
+                        e.parent_id = native_parent.map(str::to_string);
+                    }
+                    e.role = Some(role.to_string());
+                    if e.content.is_none() {
+                        e.content = block
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string);
+                    }
+                    entries.push(e);
+                }
+            }
+            Some("compaction") => {
+                let mut e = entry("compaction");
+                e.ts = ts.map(str::to_string);
+                e.id = native_id.map(str::to_string);
+                e.parent_id = native_parent.map(str::to_string);
+                e.content = event
+                    .get("summary")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                entries.push(e);
+            }
+            Some(other) => {
+                let mut e = meta_entry(other, Some(compact(event)));
+                e.ts = ts.map(str::to_string);
+                e.id = native_id.map(str::to_string);
+                e.parent_id = native_parent.map(str::to_string);
+                entries.push(e);
+            }
+            None => {
+                let mut e = meta_entry("missing native type", Some(compact(event)));
+                e.ts = ts.map(str::to_string);
+                entries.push(e);
+            }
+        }
+    }
+    Some(CanonicalSession {
+        harness: "commandcode".into(),
+        session_id,
+        cwd,
+        source_path: source_path.display().to_string(),
+        entries,
+    })
+}
+
+// ---------------------------------------------------------------------
 // kimi — ~/.kimi-code/sessions/**/wire.jsonl (+ session_index.jsonl cwd)
 // ---------------------------------------------------------------------
 
@@ -1277,6 +1453,60 @@ mod tests {
         assert!(canonical_from_codebuddy(
             &[json!({"type":"message","role":"user","content":[],"cwd":"/elsewhere"})],
             Path::new("/x/other.jsonl"),
+            project.path(),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn commandcode_preserves_blocks_tool_correlation_and_compactions() {
+        let project = tempfile::tempdir().expect("project");
+        let cwd = project.path().to_string_lossy().to_string();
+        let events = vec![
+            json!({"type":"session","version":3,"id":"cc1","timestamp":"2026-11-18T10:00:00.000Z","cwd":cwd}),
+            json!({"type":"message","id":"m1","parentId":null,"timestamp":"2026-11-18T10:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"<system-reminder>repo context</system-reminder>"},{"type":"text","text":"do the thing"}]}}),
+            json!({"type":"message","id":"m2","parentId":"m1","timestamp":"2026-11-18T10:00:02.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm"},{"type":"tool_use","id":"call_1","name":"edit_file","input":{"file_path":"a.rs","old_value":"x","new_value":"y"}}]}}),
+            json!({"type":"message","id":"m3","parentId":"m2","timestamp":"2026-11-18T10:00:03.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":[{"type":"text","text":"ok"}]}]}}),
+            json!({"type":"compaction","id":"c1","parentId":"m3","timestamp":"2026-11-18T10:00:04.000Z","summary":"so far so good"}),
+            json!({"type":"future_entry","id":"f1","parentId":"c1","timestamp":"2026-11-18T10:00:05.000Z","value":1}),
+        ];
+        let session =
+            canonical_from_commandcode(&events, Path::new("/x/cc1.jsonl"), project.path())
+                .expect("session");
+        assert_eq!(session.harness, "commandcode");
+        assert_eq!(session.session_id, "cc1");
+        assert_eq!(
+            kinds(&session),
+            vec![
+                "meta",
+                "meta",
+                "message",
+                "meta",
+                "tool_call",
+                "tool_result",
+                "compaction",
+                "meta"
+            ]
+        );
+        // The injected reminder is a meta entry; the human prompt survives.
+        assert_eq!(session.entries[1].native_type.as_deref(), Some("injected"));
+        assert_eq!(session.entries[2].content.as_deref(), Some("do the thing"));
+        // Tool call keeps its native id; the result links back by tool_use_id.
+        assert_eq!(session.entries[4].id.as_deref(), Some("call_1"));
+        assert_eq!(session.entries[4].name.as_deref(), Some("edit_file"));
+        assert_eq!(session.entries[5].parent_id.as_deref(), Some("call_1"));
+        assert_eq!(session.entries[5].content.as_deref(), Some("ok"));
+        assert_eq!(
+            session.entries[6].content.as_deref(),
+            Some("so far so good")
+        );
+        assert_eq!(
+            session.entries[7].native_type.as_deref(),
+            Some("future_entry")
+        );
+        assert!(canonical_from_commandcode(
+            &[json!({"type":"session","id":"cc2","cwd":"/elsewhere"})],
+            Path::new("/x/cc2.jsonl"),
             project.path(),
         )
         .is_none());

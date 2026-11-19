@@ -501,10 +501,10 @@ pub async fn run(ctx: &Ctx, event: &str, harness: &str) -> anyhow::Result<u8> {
                 let prompt_injects = canonical == "user_prompt_submit"
                     && quirk.delivery().prompt_submit_injects
                     && !delegated_child;
-                let cursor_reanchors = canonical == "post_tool_use"
-                    && quirk.id == "cursor"
-                    && cursor_post_tool_needs_identity(ctx, quirk, project_dir, &payload);
-                if prompt_injects || cursor_reanchors {
+                let post_tool_reanchors = canonical == "post_tool_use"
+                    && post_tool_reanchor_harness(quirk.id)
+                    && post_tool_needs_identity(ctx, quirk, project_dir, &payload);
+                if prompt_injects || post_tool_reanchors {
                     resume_output(ctx, quirk, canonical, project_dir, &payload).await?;
                 }
                 Ok(code)
@@ -703,18 +703,26 @@ fn identity_event_prints(quirk: &registry::HarnessQuirk, canonical: &str) -> boo
     match canonical {
         "session_start" => policy.session_start_prints,
         "user_prompt_submit" => policy.prompt_submit_injects,
-        // Cursor cannot inject on beforeSubmitPrompt or preCompact. Its
-        // postToolUse response does support additional_context, making the
-        // first successful tool after compaction the only native re-anchor.
-        "post_tool_use" => quirk.id == "cursor",
+        // Cursor and Command Code cannot inject on their prompt/compaction
+        // events (Cursor: beforeSubmitPrompt/preCompact; Command Code: no
+        // such events at all). Both DO honor `additionalContext` on the
+        // post-tool result, making the first tool after compaction the only
+        // native re-anchor.
+        "post_tool_use" => post_tool_reanchor_harness(quirk.id),
         _ => false,
     }
 }
 
-/// Cheap preflight for Cursor's high-frequency postToolUse event. Building a
+/// Harnesses whose only post-compaction identity channel is the post-tool
+/// result (`additionalContext` / `additional_context`).
+fn post_tool_reanchor_harness(id: &str) -> bool {
+    matches!(id, "cursor" | "commandcode")
+}
+
+/// Cheap preflight for the high-frequency postToolUse event. Building a
 /// complete digest on every tool would be wasteful; read only the tiny
 /// per-session scheduler record unless a FULL can actually be due.
-fn cursor_post_tool_needs_identity(
+fn post_tool_needs_identity(
     ctx: &Ctx,
     quirk: &registry::HarnessQuirk,
     project_dir: &Path,
@@ -729,6 +737,11 @@ fn cursor_post_tool_needs_identity(
         quirk.id,
         stateroot_core::persona_injection::session_key(project_dir, payload)
     );
+    // Command Code has no PreCompact hook; its transcript records the
+    // compaction entry itself, so arm the re-anchor from that evidence.
+    if quirk.id == "commandcode" {
+        arm_commandcode_compaction(&home, &key, &identity, payload);
+    }
     match stateroot_core::persona_injection::load_state(&home, &key) {
         None => true,
         Some(state) => {
@@ -737,6 +750,73 @@ fn cursor_post_tool_needs_identity(
                 || !state.started
         }
     }
+}
+
+/// Command Code transcript entries carry compaction as
+/// `{"type":"compaction","timestamp":…,"summary":…}`. A compaction newer than
+/// the last delivered FULL means the persona was rewritten out of context:
+/// arm `pending_compaction` through the canonical compaction path so the next
+/// deliverable event carries a FULL. Best-effort; hooks never fail on IO.
+fn arm_commandcode_compaction(home: &Path, key: &str, identity: &str, payload: &Value) {
+    let Some(state) = stateroot_core::persona_injection::load_state(home, key) else {
+        return; // no state yet → the next event delivers a FULL anyway
+    };
+    let Some(compacted_at) = latest_compaction_timestamp(payload) else {
+        return;
+    };
+    let delivered_at = chrono::DateTime::parse_from_rfc3339(&state.last_full_ts)
+        .ok()
+        .map(|t| t.with_timezone(&chrono::Utc));
+    let compacted_at = chrono::DateTime::parse_from_rfc3339(&compacted_at)
+        .ok()
+        .map(|t| t.with_timezone(&chrono::Utc));
+    let (Some(compacted_at), Some(delivered_at)) = (compacted_at, delivered_at) else {
+        return;
+    };
+    if compacted_at <= delivered_at || state.pending_compaction {
+        return;
+    }
+    let _ = stateroot_core::persona_injection::resolve_injection(
+        home,
+        key,
+        "post_compaction",
+        identity,
+        hook_now(),
+        false,
+        false,
+    );
+}
+
+/// Tail-window scan of the hook payload's `transcript_path` for the newest
+/// `type:"compaction"` entry. The entry is appended just before the post-tool
+/// event that follows it, so the tail covers the case with a bounded read.
+fn latest_compaction_timestamp(payload: &Value) -> Option<String> {
+    const TAIL_BYTES: u64 = 128 * 1024;
+    use std::io::{Read, Seek, SeekFrom};
+    let path = payload.get("transcript_path").and_then(|v| v.as_str())?;
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(TAIL_BYTES)))
+        .ok()?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    let mut newest: Option<String> = None;
+    for line in text.lines() {
+        let Ok(entry) = serde_json::from_str::<Value>(line) else {
+            continue; // a partial first line, or a non-JSON record
+        };
+        if entry.get("type").and_then(|v| v.as_str()) != Some("compaction") {
+            continue;
+        }
+        if let Some(ts) = entry.get("timestamp").and_then(|v| v.as_str()) {
+            newest = Some(match newest {
+                Some(prev) if prev.as_str() >= ts => prev,
+                _ => ts.to_string(),
+            });
+        }
+    }
+    newest
 }
 
 /// DECISION (persona scheduling only — no project context is built here):
@@ -818,7 +898,7 @@ fn identity_event_marks(quirk: &registry::HarnessQuirk, canonical: &str) -> bool
     match canonical {
         "session_start" => policy.session_start_marks,
         "user_prompt_submit" => policy.prompt_submit_injects,
-        "post_tool_use" => quirk.id == "cursor",
+        "post_tool_use" => post_tool_reanchor_harness(quirk.id),
         _ => false,
     }
 }
@@ -1114,6 +1194,8 @@ fn hook_event_name(canonical: &str) -> &'static str {
     match canonical {
         "session_start" => "SessionStart",
         "user_prompt_submit" => "UserPromptSubmit",
+        "pre_tool_use" => "PreToolUse",
+        "post_tool_use" => "PostToolUse",
         "pre_compact" => "PreCompact",
         "post_compaction" => "PostCompact",
         _ => "SessionStart",
@@ -1331,6 +1413,15 @@ async fn session_start_maintenance(ctx: &Ctx, project_dir: &Path) {
     if let Ok(home) = stateroot_core::harness_install::home_dir() {
         if let Err(err) = stateroot_core::rules::sync(project_dir, &home) {
             note!("warning: rules sync skipped: {err}");
+        }
+        // Command Code taste → learnings candidates (pull-only; Command Code
+        // owns its taste store). Deduped by statement, so the repeat is cheap.
+        let taste = stateroot_core::taste_federation::pull(project_dir, &home, false);
+        if taste.imported > 0 {
+            note!(
+                "taste: {} Command Code preference(s) imported as candidates",
+                taste.imported
+            );
         }
     }
     // Soul federation: one sync pass per hour of agent activity —
@@ -1831,6 +1922,45 @@ fn spool_tail(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commandcode_compaction_timestamp_reads_the_transcript_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"session","version":3,"id":"s1","timestamp":"2026-11-18T10:00:00.000Z","cwd":"/tmp/x"}"#,
+                "\n",
+                r#"{"type":"compaction","id":"c1","timestamp":"2026-11-18T10:05:00.000Z","summary":"first"}"#,
+                "\n",
+                r#"{"type":"compaction","id":"c2","timestamp":"2026-11-18T10:09:00.000Z","summary":"second"}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let payload = json!({"transcript_path": path});
+        assert_eq!(
+            latest_compaction_timestamp(&payload).as_deref(),
+            Some("2026-11-18T10:09:00.000Z")
+        );
+        // Absent/unknown transcript is simply no evidence.
+        assert_eq!(latest_compaction_timestamp(&json!({})), None);
+        assert_eq!(
+            latest_compaction_timestamp(&json!({"transcript_path": dir.path().join("nope")})),
+            None
+        );
+    }
+
+    #[test]
+    fn post_tool_reanchor_is_commandcode_and_cursor_only() {
+        assert!(post_tool_reanchor_harness("commandcode"));
+        assert!(post_tool_reanchor_harness("cursor"));
+        assert!(!post_tool_reanchor_harness("claude-code"));
+        assert!(!post_tool_reanchor_harness("codebuddy"));
+        // The StdoutJson envelope must label the event it actually fired on.
+        assert_eq!(hook_event_name("post_tool_use"), "PostToolUse");
+    }
 
     #[test]
     fn explicit_file_capture_exclusion_routes_full_payload_to_local_storage() {

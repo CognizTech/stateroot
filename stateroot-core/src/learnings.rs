@@ -282,6 +282,15 @@ pub fn read_scope(project_dir: &Path, home: &Path, scope: &str) -> Vec<Learning>
     out
 }
 
+/// True when an equivalent statement already exists in the scope (read-only
+/// dedupe probe; `append_candidate` uses the same normalization).
+pub fn has_statement(project_dir: &Path, home: &Path, scope: &str, statement: &str) -> bool {
+    let normalized = normalize(statement);
+    read_scope(project_dir, home, scope)
+        .iter()
+        .any(|learning| normalize(&learning.statement) == normalized)
+}
+
 /// Append a candidate learning into `_candidates/<category>.md` (dedupe by
 /// normalized statement across the scope — existing ids are kept).
 pub fn append_candidate(

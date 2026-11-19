@@ -1483,6 +1483,75 @@
         ],
         "project": []
       }
+    },
+    {
+      "id": "commandcode",
+      "display": "Command Code",
+      "aliases": [
+        "commandcode",
+        "command-code",
+        "cmd",
+        "cmdc"
+      ],
+      "framing": "Command Code harness: terminal coding agent with SessionStart/PreToolUse/PostToolUse/Stop hooks injecting hookSpecificOutput.additionalContext; no UserPromptSubmit or PreCompact event exists.",
+      "tier": "A",
+      "detect": [
+        ".commandcode"
+      ],
+      "detect_cmds": [
+        "command-code",
+        "cmdc"
+      ],
+      "skill_source_roots": {
+        "global": [
+          ".commandcode/skills",
+          ".agents/skills"
+        ],
+        "project": [
+          ".commandcode/skills",
+          ".agents/skills"
+        ]
+      },
+      "builtin_policy": "reference_only",
+      "builtin_roots": [],
+      "projection_roots": {
+        "global": [
+          ".agents/skills",
+          ".commandcode/skills"
+        ],
+        "project": [
+          ".agents/skills",
+          ".commandcode/skills"
+        ]
+      },
+      "delegation": {
+        "mode": "cli",
+        "command": "cmd",
+        "pty": false,
+        "print_mode": true,
+        "handoff_only": false,
+        "argv": [
+          "-p",
+          "--yolo",
+          "{prompt}"
+        ]
+      },
+      "reload": "session",
+      "capabilities": [
+        "skills",
+        "hooks",
+        "mcp",
+        "delegation",
+        "native_sessions"
+      ],
+      "mcp_config": {
+        "global": [
+          { "path": ".commandcode/mcp.json", "shape": "mcpServers" }
+        ],
+        "project": [
+          { "path": ".mcp.json", "shape": "mcpServers" }
+        ]
+      }
     }
   ]
 }

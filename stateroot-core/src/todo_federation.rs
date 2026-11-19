@@ -534,7 +534,15 @@ fn cursor_merge_flag(input: &Value) -> bool {
 pub fn harness_has_sources(harness: &str) -> bool {
     matches!(
         harness,
-        "cursor" | "claude" | "claude-code" | "codebuddy" | "kimi" | "kimi-code" | "codex" | "dsh"
+        "cursor"
+            | "claude"
+            | "claude-code"
+            | "codebuddy"
+            | "commandcode"
+            | "kimi"
+            | "kimi-code"
+            | "codex"
+            | "dsh"
     )
 }
 
@@ -545,6 +553,7 @@ pub fn sync_from(home: &Path, project_dir: &Path, harness: &str) -> TodoSyncRepo
         "cursor" => sync_cursor_standalone(home, project_dir),
         "claude" | "claude-code" => sync_claude(home, project_dir),
         "codebuddy" => sync_codebuddy(home, project_dir),
+        "commandcode" => sync_commandcode(home, project_dir),
         "kimi" | "kimi-code" => sync_kimi(home, project_dir),
         "codex" => sync_codex(home, project_dir),
         "dsh" => sync_dsh(home, project_dir),
@@ -943,6 +952,182 @@ fn kimi_items(value: &Value) -> Option<Vec<TodoItem>> {
     } else {
         Some(items)
     }
+}
+
+/// Command Code has no on-disk todo store: `task_create` / `task_update` /
+/// `task_stop` (and `todo_write`) live in the transcript as tool calls. Replay
+/// them per session — creation ids come from the tool result text
+/// (`Task #N created: <subject>`), updates carry `taskId` + `status`. No plan
+/// binding is invented (the same stance as CodeBuddy).
+fn sync_commandcode(home: &Path, project_dir: &Path) -> TodoSyncReport {
+    let mut report = TodoSyncReport::default();
+    for transcript in crate::transcripts::commandcode::session_files(home) {
+        let Some((session_id, _)) =
+            crate::transcripts::commandcode::session_identity(&transcript, project_dir)
+        else {
+            continue;
+        };
+        let Some(events) = crate::transcripts::commandcode::parse_session_file(&transcript) else {
+            continue;
+        };
+        let Some(items) = commandcode_task_items(&events) else {
+            continue;
+        };
+        match replace_list(
+            project_dir,
+            "commandcode",
+            &session_id,
+            items,
+            &transcript.to_string_lossy(),
+            None,
+        ) {
+            Ok(record) => report.written.push(format!(
+                "commandcode/{} ({} items)",
+                record.session_id,
+                record.items.len()
+            )),
+            Err(err) => report.notes.push(err),
+        }
+    }
+    report
+}
+
+/// Replay Command Code's task tool calls into one todo snapshot.
+fn commandcode_task_items(events: &[Value]) -> Option<Vec<TodoItem>> {
+    use std::collections::BTreeMap;
+
+    // tool_use id → (tool name, input) so a result can be attributed.
+    let mut calls: BTreeMap<String, (String, Value)> = BTreeMap::new();
+    // Created tasks: numeric id → subject (creation order).
+    let mut created: BTreeMap<u64, String> = BTreeMap::new();
+    // Latest status per created id.
+    let mut status: BTreeMap<u64, String> = BTreeMap::new();
+    let mut stopped: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+    // `todo_write` carries a complete snapshot; the newest one wins.
+    let mut todo_snapshot: Option<Vec<TodoItem>> = None;
+
+    for event in events {
+        if event.get("type").and_then(Value::as_str) != Some("message") {
+            continue;
+        }
+        let Some(message) = event.get("message") else {
+            continue;
+        };
+        let role = message.get("role").and_then(Value::as_str).unwrap_or("");
+        let Some(blocks) = message.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+        for block in blocks {
+            match block.get("type").and_then(Value::as_str) {
+                Some("tool_use") if role == "assistant" => {
+                    let Some(call_id) = block.get("id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let name = block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let input = block.get("input").cloned().unwrap_or(Value::Null);
+                    match name.as_str() {
+                        "task_update" => {
+                            if let Some(id) = task_id_value(input.get("taskId")) {
+                                if let Some(new_status) =
+                                    input.get("status").and_then(Value::as_str)
+                                {
+                                    status.insert(id, new_status.to_string());
+                                }
+                                if let Some(subject) = input.get("subject").and_then(Value::as_str)
+                                {
+                                    created.insert(id, subject.to_string());
+                                }
+                            }
+                        }
+                        "task_stop" => {
+                            if let Some(id) = task_id_value(input.get("taskId")) {
+                                stopped.insert(id);
+                            }
+                        }
+                        "todo_write" => {
+                            todo_snapshot = todo_write_items(&input);
+                        }
+                        _ => {}
+                    }
+                    calls.insert(call_id.to_string(), (name, input));
+                }
+                Some("tool_result") => {
+                    let Some(call_id) = block.get("tool_use_id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let Some((name, _)) = calls.get(call_id) else {
+                        continue;
+                    };
+                    if name != "task_create" {
+                        continue;
+                    }
+                    let Some(text) = crate::transcripts::commandcode::tool_result_text(block)
+                    else {
+                        continue;
+                    };
+                    if let Some((id, subject)) = parse_task_created(&text) {
+                        created.insert(id, subject);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if created.is_empty() {
+        return todo_snapshot;
+    }
+    let items: Vec<TodoItem> = created
+        .into_iter()
+        .filter(|(id, _)| !stopped.contains(id))
+        .map(|(id, subject)| TodoItem {
+            key: id.to_string(),
+            content: subject,
+            status: normalize_status(status.get(&id).map(String::as_str).unwrap_or("")),
+        })
+        .collect();
+    (!items.is_empty()).then_some(items)
+}
+
+/// Task ids arrive as strings ("1") or numbers in tool input.
+fn task_id_value(value: Option<&Value>) -> Option<u64> {
+    match value? {
+        Value::String(text) => text.trim().parse().ok(),
+        Value::Number(number) => number.as_u64(),
+        _ => None,
+    }
+}
+
+/// `Task #3 created: subject` → (3, "subject").
+fn parse_task_created(text: &str) -> Option<(u64, String)> {
+    let rest = text.trim().strip_prefix("Task #")?;
+    let (id, rest) = rest.split_once(" created:")?;
+    let id = id.trim().parse().ok()?;
+    let subject = rest.trim();
+    (!subject.is_empty()).then(|| (id, subject.to_string()))
+}
+
+fn todo_write_items(input: &Value) -> Option<Vec<TodoItem>> {
+    let todos = input.get("todos")?.as_array()?;
+    let items: Vec<TodoItem> = todos
+        .iter()
+        .filter_map(|todo| {
+            let title = todo
+                .get("content")
+                .or_else(|| todo.get("title"))
+                .and_then(Value::as_str)?;
+            Some(TodoItem {
+                key: title.to_string(),
+                content: title.to_string(),
+                status: normalize_status(todo.get("status").and_then(Value::as_str).unwrap_or("")),
+            })
+        })
+        .collect();
+    (!items.is_empty()).then_some(items)
 }
 
 fn sync_codebuddy(home: &Path, project_dir: &Path) -> TodoSyncReport {
@@ -1609,6 +1794,52 @@ isProject: false
         .expect("closure obligation");
         assert_eq!(closure.plan_id.as_deref(), Some(meta.id.as_str()));
         assert!(!closure.state().is_terminal());
+    }
+
+    #[test]
+    fn commandcode_tasks_are_replayed_from_the_transcript() {
+        let home = tempfile::tempdir().expect("home");
+        let project = project();
+        let dir = home
+            .path()
+            .join(".commandcode/projects")
+            .join(project.path().file_name().expect("slug"));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let cwd = project.path().to_string_lossy();
+        let events = [
+            serde_json::json!({"type":"session","version":3,"id":"cc1","timestamp":"2026-11-18T10:00:00.000Z","cwd":cwd}),
+            serde_json::json!({"type":"message","id":"m1","timestamp":"2026-11-18T10:00:01.000Z","message":{"role":"assistant","content":[
+                {"type":"tool_use","id":"c1","name":"task_create","input":{"subject":"Wire the reader","description":"x"}},
+                {"type":"tool_use","id":"c2","name":"task_create","input":{"subject":"Add tests","description":"y"}}
+            ]}}),
+            serde_json::json!({"type":"message","id":"m2","parentId":"m1","timestamp":"2026-11-18T10:00:02.000Z","message":{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"c1","content":[{"type":"text","text":"Task #1 created: Wire the reader"}]},
+                {"type":"tool_result","tool_use_id":"c2","content":[{"type":"text","text":"Task #2 created: Add tests"}]}
+            ]}}),
+            serde_json::json!({"type":"message","id":"m3","parentId":"m2","timestamp":"2026-11-18T10:00:03.000Z","message":{"role":"assistant","content":[
+                {"type":"tool_use","id":"c3","name":"task_update","input":{"taskId":"1","status":"in_progress"}},
+                {"type":"tool_use","id":"c4","name":"task_update","input":{"taskId":2,"status":"completed"}}
+            ]}}),
+        ];
+        std::fs::write(
+            dir.join("cc1.jsonl"),
+            events
+                .iter()
+                .map(|event| event.to_string())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .expect("transcript");
+
+        let report = sync_from(home.path(), project.path(), "commandcode");
+        assert_eq!(report.written.len(), 1, "{report:?}");
+        let record = load_record(project.path(), "commandcode", "cc1").expect("record");
+        assert_eq!(record.items.len(), 2, "{record:?}");
+        assert_eq!(record.items[0].content, "Wire the reader");
+        assert_eq!(record.items[0].status, "in_progress");
+        assert_eq!(record.items[1].content, "Add tests");
+        assert_eq!(record.items[1].status, "completed");
+        assert!(record.plan_id.is_none(), "no plan binding is invented");
     }
 
     #[test]

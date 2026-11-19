@@ -8,7 +8,7 @@ StateRoot connects the AI agents you already use so they share knowledge, tools 
 
 After setup, you direct the work through your agents. They operate StateRoot through its installed Skill and CLI; the editor workbench lets you inspect progress and results.
 
-Works with Claude Code, Codex, Cursor, Kimi, CodeBuddy, OpenClaw, Hermes and other supported agents.
+Works with Claude Code, Codex, Cursor, Kimi, CodeBuddy, Command Code, OpenClaw, Hermes and other supported agents.
 
 *Persistent, federated meta-harness for AI agents.*
 
@@ -87,7 +87,7 @@ StateRoot surfaces due work, unfinished handoffs and plans needing completion ev
 
 ## Keep the agents you already use
 
-Each agent keeps its own model, interface and strengths. Have one agent plan, others implement, and your coordinating agent review the result. General-purpose agents such as OpenClaw and Hermes can participate alongside Claude Code, Codex, Cursor, Kimi, CodeBuddy and Pi.
+Each agent keeps its own model, interface and strengths. Have one agent plan, others implement, and your coordinating agent review the result. General-purpose agents such as OpenClaw and Hermes can participate alongside Claude Code, Codex, Cursor, Kimi, CodeBuddy, Command Code and Pi.
 
 ### What crosses the boundary
 
@@ -246,7 +246,7 @@ Nightly builds are available from the [rolling preview release](https://github.c
 
 ## Supported harnesses
 
-**Hooks + transcripts:** Claude Code · Codex · Cursor · Kimi Code · CodeBuddy · OpenClaw · Hermes · Pi · DeepSeek Harness
+**Hooks + transcripts:** Claude Code · Codex · Cursor · Kimi Code · CodeBuddy · Command Code · OpenClaw · Hermes · Pi · DeepSeek Harness
 
 **Transcripts / delegation:** OpenCode · others detected at install
 

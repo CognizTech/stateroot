@@ -942,6 +942,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn install_quirk_full_commandcode_writes_block_mcp_and_hooks() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let cc = registry::quirk("commandcode").expect("commandcode");
+        let joined = install_quirk_full(tmp.path(), cc, "BLOCK BODY").join("\n");
+        assert!(
+            joined.contains(".commandcode/AGENTS.md"),
+            "actions: {joined}"
+        );
+        assert!(
+            joined.contains(".commandcode/mcp.json"),
+            "actions: {joined}"
+        );
+        assert!(joined.contains("hooks installed"), "actions: {joined}");
+        assert!(
+            joined.contains("identity delivery: automatic"),
+            "actions: {joined}"
+        );
+
+        let block =
+            std::fs::read_to_string(tmp.path().join(".commandcode/AGENTS.md")).expect("agents.md");
+        assert!(block.contains(BLOCK_BEGIN));
+        assert!(block.contains("BLOCK BODY"));
+        let mcp =
+            std::fs::read_to_string(tmp.path().join(".commandcode/mcp.json")).expect("mcp.json");
+        assert!(mcp.contains("\"mcpServers\""), "mcp: {mcp}");
+        assert!(mcp.contains("mcp-stdio"), "mcp: {mcp}");
+        let settings = std::fs::read_to_string(tmp.path().join(".commandcode/settings.json"))
+            .expect("settings.json");
+        assert!(settings.contains("SessionStart"), "settings: {settings}");
+        assert!(!settings.contains("\"matcher\""), "settings: {settings}");
+        assert!(
+            !settings.contains("UserPromptSubmit"),
+            "settings: {settings}"
+        );
+        // Idempotent on rerun.
+        let rerun = install_quirk_full(tmp.path(), cc, "BLOCK BODY").join("\n");
+        assert!(rerun.contains("block already up to date"), "rerun: {rerun}");
+        assert!(rerun.contains("MCP already registered"), "rerun: {rerun}");
+        assert!(rerun.contains("hooks already up to date"), "rerun: {rerun}");
+    }
+
+    #[test]
     fn block_insert_replace_remove() {
         let tmp = tempfile::tempdir().expect("tmp");
         let file = tmp.path().join("AGENTS.md");

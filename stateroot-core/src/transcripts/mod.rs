@@ -12,6 +12,7 @@ pub mod bundle;
 pub mod claude;
 pub mod codebuddy;
 pub mod codex;
+pub mod commandcode;
 pub mod copilot;
 pub mod cursor;
 pub mod dsh;
@@ -144,6 +145,7 @@ pub fn readers() -> Vec<Box<dyn TranscriptReader>> {
     vec![
         Box::new(codex::CodexReader),
         Box::new(codebuddy::CodeBuddyReader),
+        Box::new(commandcode::CommandCodeReader),
         Box::new(claude::ClaudeReader),
         Box::new(copilot::CopilotReader),
         Box::new(cursor::CursorReader),

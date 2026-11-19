@@ -142,6 +142,77 @@ fn copilot_entries(quirk: &HarnessQuirk) -> Map<String, Value> {
     out
 }
 
+/// Command Code timeout policy (PascalCase event keys). SessionStart carries
+/// the digest first, then federation syncs; the rest are cheap captures.
+fn commandcode_hook_timeout(harness_event: &str) -> u32 {
+    match harness_event {
+        "SessionStart" => 30,
+        _ => 15,
+    }
+}
+
+/// Command Code entries: nested handler shape with **no `matcher` key**.
+/// Command Code's `matcher` never matches on `SessionStart`/`Stop` (a matcher
+/// there drops the hook entirely), and an omitted matcher is what matches
+/// every tool — so the key is omitted everywhere.
+fn commandcode_entries(quirk: &HarnessQuirk) -> Map<String, Value> {
+    let mut out = Map::new();
+    for (harness_event, canonical) in quirk.event_map {
+        out.insert(
+            (*harness_event).to_string(),
+            json!([{
+                "hooks": [{
+                    "type": "command",
+                    "command": command_for(quirk, canonical),
+                    "timeout": commandcode_hook_timeout(harness_event),
+                }],
+            }]),
+        );
+    }
+    out
+}
+
+/// Install an event-keyed nested entry map into a `settings.json`-style file.
+/// `hooks`-wrapped files keep their wrapper; devin's `hooks.v1.json` IS the
+/// event map. Foreign hooks (other events, other handlers under our events)
+/// are preserved by [`overlay`].
+fn install_nested_entries(
+    path: &Path,
+    ours: &Map<String, Value>,
+) -> Result<Vec<String>, HarnessError> {
+    let wrap = path.file_name() != Some("hooks.v1.json".as_ref());
+    let mut doc = read_json_file(path)?;
+    if !doc.is_object() {
+        doc = json!({});
+    }
+    backup_once(path)?;
+    if wrap {
+        let root = doc.as_object_mut().ok_or_else(|| {
+            HarnessError::Invalid(format!("{}: not a JSON object", path.display()))
+        })?;
+        let hooks = root.entry("hooks".to_string()).or_insert_with(|| json!({}));
+        let hooks = hooks.as_object_mut().ok_or_else(|| {
+            HarnessError::Invalid(format!("{}: `hooks` is not an object", path.display()))
+        })?;
+        overlay(hooks, ours);
+    } else {
+        let root = doc.as_object_mut().ok_or_else(|| {
+            HarnessError::Invalid(format!("{}: not a JSON object", path.display()))
+        })?;
+        overlay(root, ours);
+    }
+    let changed = write_json_if_changed(path, &doc)?;
+    Ok(vec![format!(
+        "hooks {} → {}",
+        if changed {
+            "installed"
+        } else {
+            "already up to date"
+        },
+        path.display()
+    )])
+}
+
 /// True when a hook entry (nested or flat) invokes stateroot.
 fn is_stateroot_entry(entry: &Value) -> bool {
     let commands: Vec<&str> = entry
@@ -267,45 +338,12 @@ pub fn install_hooks(home: &Path, quirk: &HarnessQuirk) -> Result<Vec<String>, H
     let path = paths::hook_target_path(home, quirk)
         .ok_or_else(|| HarnessError::Invalid(format!("{}: no hook target path", quirk.id)))?;
     match target.format {
-        HookFormat::NestedJson => {
-            // `settings.json`-style files wrap entries in a top-level `hooks`
-            // object; devin's hooks.v1.json IS the object.
-            let wrap = path.file_name() != Some("hooks.v1.json".as_ref());
-            let mut doc = read_json_file(&path)?;
-            if !doc.is_object() {
-                doc = json!({});
-            }
-            let ours = nested_entries(quirk);
-            backup_once(&path)?;
-            if wrap {
-                let root = doc.as_object_mut().ok_or_else(|| {
-                    HarnessError::Invalid(format!("{}: not a JSON object", path.display()))
-                })?;
-                let hooks = root.entry("hooks".to_string()).or_insert_with(|| json!({}));
-                let hooks = hooks.as_object_mut().ok_or_else(|| {
-                    HarnessError::Invalid(format!("{}: `hooks` is not an object", path.display()))
-                })?;
-                overlay(hooks, &ours);
-            } else {
-                let root = doc.as_object_mut().ok_or_else(|| {
-                    HarnessError::Invalid(format!("{}: not a JSON object", path.display()))
-                })?;
-                overlay(root, &ours);
-            }
-            let changed = write_json_if_changed(&path, &doc)?;
-            Ok(vec![format!(
-                "hooks {} → {}",
-                if changed {
-                    "installed"
-                } else {
-                    "already up to date"
-                },
-                path.display()
-            )])
-        }
+        HookFormat::NestedJson => install_nested_entries(&path, &nested_entries(quirk)),
         HookFormat::FlatJson => install_flat_style(&path, &flat_entries(quirk)),
         // Same `version` + `hooks` envelope as FlatJson, Copilot entry shape.
         HookFormat::CopilotJson => install_flat_style(&path, &copilot_entries(quirk)),
+        // Nested `hooks` object like NestedJson, but matcher-less entries.
+        HookFormat::CommandCodeJson => install_nested_entries(&path, &commandcode_entries(quirk)),
         HookFormat::TomlHooks => install_toml_hooks(&path, quirk),
         HookFormat::ZeroExecJson => install_zero_hooks(&path, quirk),
         HookFormat::NamedGroupsJson => install_named_groups(&path, quirk),
@@ -2051,5 +2089,92 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
         assert_eq!(doc, after, "second install is byte-identical");
         assert!(after.get("allowUntrustedFrontmatterHooks").is_none());
+    }
+
+    #[test]
+    fn commandcode_settings_json_omits_matcher_and_sweeps_cleanly() {
+        let home = tempfile::tempdir().expect("home");
+        let q = quirk("commandcode").expect("commandcode");
+        let path = home.path().join(".commandcode/settings.json");
+        // A pre-existing settings file with a foreign hook and a foreign key.
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "theme": "dark",
+                "hooks": {
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": "./audit.sh"}]}
+                    ],
+                    "Notification": [
+                        {"hooks": [{"type": "command", "command": "./notify.sh"}]}
+                    ]
+                }
+            }))
+            .expect("json"),
+        )
+        .expect("write");
+
+        install_hooks(home.path(), q).expect("install");
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+        let hooks = doc["hooks"].as_object().expect("hooks object");
+        // Exactly the four events Command Code implements — never a dead one.
+        for event in ["SessionStart", "PreToolUse", "PostToolUse", "Stop"] {
+            let entries = hooks[event]
+                .as_array()
+                .unwrap_or_else(|| panic!("Command Code event {event} missing"));
+            let ours = entries
+                .iter()
+                .find(|entry| is_stateroot_entry(entry))
+                .unwrap_or_else(|| panic!("{event}: stateroot handler missing"));
+            let handler = &ours["hooks"][0];
+            let command = handler["command"].as_str().expect("command string");
+            assert!(
+                command.contains("hook ") && command.contains("--harness commandcode"),
+                "{event}: command must route to the commandcode adapter: {command}"
+            );
+            // The matcher key must be absent: Command Code never matches on
+            // SessionStart/Stop, and an omitted matcher matches every tool.
+            assert!(
+                !ours.as_object().expect("object").contains_key("matcher"),
+                "{event}: matcher must be omitted"
+            );
+            let expected = if event == "SessionStart" { 30 } else { 15 };
+            assert_eq!(handler["timeout"], expected, "{event}: timeout");
+        }
+        assert!(
+            !hooks.contains_key("UserPromptSubmit") && !hooks.contains_key("PreCompact"),
+            "events Command Code does not implement must never be registered"
+        );
+        // Foreign content survives: the foreign audit hook, the foreign event,
+        // and the unrelated top-level key.
+        assert_eq!(doc["theme"], "dark");
+        assert!(hooks.contains_key("Notification"));
+        let session_start = hooks["SessionStart"].as_array().expect("array");
+        assert!(
+            session_start
+                .iter()
+                .any(|entry| { entry["hooks"][0]["command"].as_str() == Some("./audit.sh") }),
+            "foreign handler under our event must survive"
+        );
+
+        // Reinstall is byte-identical, and removal strips only our handlers.
+        install_hooks(home.path(), q).expect("second install");
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+        assert_eq!(doc, after, "second install is byte-identical");
+
+        remove_hooks(home.path(), q).expect("remove");
+        let stripped: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+        let stripped_hooks = stripped["hooks"].as_object().expect("hooks object");
+        assert!(!stripped_hooks.contains_key("PreToolUse"));
+        assert!(!stripped_hooks.contains_key("PostToolUse"));
+        assert!(!stripped_hooks.contains_key("Stop"));
+        assert_eq!(stripped["theme"], "dark");
+        let survivors = stripped_hooks["SessionStart"].as_array().expect("array");
+        assert_eq!(survivors.len(), 1, "only the foreign handler survives");
+        assert_eq!(survivors[0]["hooks"][0]["command"], "./audit.sh");
     }
 }

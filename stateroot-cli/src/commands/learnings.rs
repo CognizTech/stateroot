@@ -143,6 +143,42 @@ pub fn edit(
     Ok(())
 }
 
+/// `stateroot learnings import-taste` — pull Command Code's own taste store in
+/// as candidates. Pull-only: `.commandcode/taste/**` is never written.
+pub fn import_taste(ctx: &Ctx, dry_run: bool, json_out: bool) -> Result<()> {
+    ctx.require_project()?;
+    let home = home()?;
+    let report = stateroot_core::taste_federation::pull(&ctx.cwd, &home, dry_run);
+    if json_out {
+        println!(
+            "{}",
+            serde_json::json!({
+                "harness": stateroot_core::taste_federation::HARNESS,
+                "dry_run": dry_run,
+                "imported": report.imported,
+                "unchanged": report.unchanged,
+                "notes": report.notes,
+            })
+        );
+        return Ok(());
+    }
+    for line in &report.notes {
+        println!("{line}");
+    }
+    if dry_run {
+        println!(
+            "import-taste (dry run): {} candidate(s) would be imported, {} already present",
+            report.imported, report.unchanged
+        );
+    } else {
+        println!(
+            "import-taste: {} candidate(s) imported, {} already present — review with `stateroot learnings list --status candidate`",
+            report.imported, report.unchanged
+        );
+    }
+    Ok(())
+}
+
 /// `stateroot learnings distill` — mine episodic + spool into the wiki inbox
 /// (deterministic compile). Does not activate learnings; taste stays on
 /// `learn record`.

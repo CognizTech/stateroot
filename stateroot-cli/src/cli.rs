@@ -254,7 +254,8 @@ pub struct InitArgs {
 
 #[derive(Debug, Args)]
 pub struct ImportArgs {
-    /// Restrict to one harness (codex, claude, cursor, kimi, openclaw, hermes).
+    /// Restrict to one harness (codex, claude, cursor, kimi, codebuddy,
+    /// commandcode, openclaw, hermes).
     #[arg(long)]
     pub harness: Option<String>,
     /// Only import sessions started on/after this date (YYYY-MM-DD).
@@ -423,9 +424,9 @@ pub enum PlanAction {
         /// Plan id (prefix allowed).
         id: String,
     },
-    /// Pull harness-native plans (Cursor, Claude, Kimi, CodeBuddy) into the store as
-    /// drafts. Runs automatically at session boundaries; this is the
-    /// explicit pass.
+    /// Pull harness-native plans (Cursor, Claude, Kimi, CodeBuddy, Command
+    /// Code) into the store as drafts. Runs automatically at session
+    /// boundaries; this is the explicit pass.
     Sync,
 }
 
@@ -1313,6 +1314,15 @@ pub enum LearningsAction {
     },
     /// Mine episodic + spool into the wiki inbox (does not activate learnings).
     Distill,
+    /// Pull Command Code taste (`.commandcode/taste/**`) in as candidates.
+    /// Pull-only: Command Code's own learning store is never written.
+    ImportTaste {
+        /// Report what would be imported without writing.
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Args)]

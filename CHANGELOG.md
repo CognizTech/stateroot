@@ -5,6 +5,35 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- Command Code is a Tier-A harness. `stateroot install` writes a matcher-less
+  `~/.commandcode/settings.json` hooks block with exactly the events Command
+  Code implements (`SessionStart`, `PreToolUse`, `PostToolUse`, `Stop`), the
+  managed instruction block in `~/.commandcode/AGENTS.md`, and the
+  `stateroot` MCP server in `~/.commandcode/mcp.json`. `resume --harness
+  commandcode`, `doctor`, `delegate --to commandcode` (`cmd -p --yolo`) and
+  `install` now resolve.
+
+- Identity delivery injects the digest from `SessionStart` through
+  `hookSpecificOutput.additionalContext`. Command Code has no prompt-submit or
+  pre-compact hook, so compaction recovery is armed from the transcript's own
+  compaction entry and delivered on the next `PostToolUse`.
+
+- Native sessions (`~/.commandcode/projects/<slug>/<id>.jsonl`) import into
+  the canonical store with tool-call/result correlation and compaction
+  summaries; the `.checkpoints.jsonl`/`.prompts.jsonl` sidecars are excluded.
+  `~/.commandcode/plans/*.md` is a global pile, so plans federate only when a
+  project session was active near the plan's mtime. `task_*`/`todo_write`
+  calls replay from the transcript into per-session todos without inventing a
+  plan binding.
+
+- Command Code taste files are pulled in as learning candidates
+  (`stateroot learnings import-taste`, also at session start) and never
+  written back.
+
+- Imported harness rules that share a file name across scopes no longer
+  collapse into one slug, so project memory is visible beside its user-scope
+  counterpart (CodeBuddy was already affected).
+
 ## v0.2.15 — 2026-11-16
 
 - Updated the built-in Skill's lineage-pagination guidance and the bootstrap

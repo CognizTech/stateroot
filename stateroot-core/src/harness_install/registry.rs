@@ -68,6 +68,11 @@ pub enum HookFormat {
     /// `agent/turn-stopping`, `compaction/end` and `session/disposed`, and
     /// shells `stateroot hook …` per boundary.
     CordisPlugin,
+    /// Command Code `settings.json`: nested `{"hooks": {"Event": [{hooks: […]}]}}`
+    /// with **no `matcher` key at all** and a per-event `timeout` (Command
+    /// Code's `matcher` never matches on `SessionStart`/`Stop`, and an omitted
+    /// matcher is what matches every tool).
+    CommandCodeJson,
 }
 
 /// One hook target: home-relative file (or directory for plugins).
@@ -226,6 +231,16 @@ impl DigestDeliveryPolicy {
                 prompt_submit_injects: true,
                 tier: DeliveryTier::Automatic,
                 note: "generated cordis plugin injects the digest via agent/pre-step; the first prompt covers a plugin that mounted late",
+            },
+            "commandcode" => Self {
+                primary_event: "session_start",
+                session_start_prints: true,
+                session_start_marks: true,
+                // Command Code has no UserPromptSubmit hook event; compaction
+                // recovery rides the PostToolUse additionalContext channel.
+                prompt_submit_injects: false,
+                tier: DeliveryTier::Automatic,
+                note: "session-start inject; postToolUse restores identity after compaction",
             },
             "dot" => Self {
                 primary_event: "", session_start_prints: false, session_start_marks: false,
@@ -438,6 +453,17 @@ const DEVIN_EVENTS: &[(&str, &str)] = &[
 ];
 
 const GROK_EVENTS: &[(&str, &str)] = CLAUDE_EVENTS;
+
+/// Command Code settings.json hooks: four events only (`SessionStart`,
+/// `PreToolUse`, `PostToolUse`, `Stop`). There is no UserPromptSubmit,
+/// PreCompact, SessionEnd or subagent hook — never register a dead event.
+/// Payload and `hookSpecificOutput.additionalContext` are Claude-shaped.
+const COMMANDCODE_EVENTS: &[(&str, &str)] = &[
+    ("SessionStart", "session_start"),
+    ("PreToolUse", "pre_tool_use"),
+    ("PostToolUse", "post_tool_use"),
+    ("Stop", "stop"),
+];
 
 /// Hermes shell-hook events (`agent/shell_hooks.py` + the plugin-hook
 /// catalog): `on_session_end` fires at EVERY turn finalization (a turn
@@ -956,6 +982,39 @@ pub const ADAPTERS: &[HarnessQuirk] = &[
         legacy_id: None,
         event_map: DSH_EVENTS,
     },
+    HarnessQuirk {
+        id: "commandcode",
+        display: "Command Code",
+        tier: Tier::A,
+        detect: &[".commandcode"],
+        // `cmd` is deliberately absent: `where.exe cmd` on Windows resolves the
+        // Windows shell, which would read as a false positive on every host.
+        detect_cmds: &["command-code", "cmdc"],
+        // Command Code reads user memory from `~/.commandcode/AGENTS.md` (and
+        // `~/.agents/AGENTS.md`); project memory is `<root>/AGENTS.md` or
+        // `.commandcode/AGENTS.md` (first existing wins).
+        instruction_file: Some(".commandcode/AGENTS.md"),
+        mcp: Some(McpTarget {
+            path: ".commandcode/mcp.json",
+            shape: McpShape::McpServersJson,
+        }),
+        // Four real events only (see COMMANDCODE_EVENTS): the settings.json
+        // hook shape omits `matcher` because it never matches on
+        // SessionStart/Stop and an omitted matcher matches every tool.
+        hooks: Some(HookTarget {
+            path: ".commandcode/settings.json",
+            format: HookFormat::CommandCodeJson,
+        }),
+        injection: Injection::StdoutJson,
+        // No PreCompact hook exists; identity returns through the
+        // PostToolUse `additionalContext` channel instead.
+        compact_injection: false,
+        // There is no PRE_TOOL_USE event bit (pre-tool capture is registered
+        // through `event_map`, like Claude Code and CodeBuddy).
+        events: es::SESSION_START | es::POST_TOOL_USE | es::STOP,
+        legacy_id: None,
+        event_map: COMMANDCODE_EVENTS,
+    },
 ];
 
 /// Look up a quirk by canonical id.
@@ -996,6 +1055,7 @@ pub fn transcript_reader_id(id: &str) -> Option<&'static str> {
         "github_copilot" => Some("copilot"),
         "codex" => Some("codex"),
         "codebuddy" => Some("codebuddy"),
+        "commandcode" => Some("commandcode"),
         "cursor" => Some("cursor"),
         "openclaw" => Some("openclaw"),
         "hermes" => Some("hermes"),
@@ -1020,6 +1080,10 @@ pub fn quiet_housekeeping(id: &str) -> bool {
 pub fn agent_file_target(id: &str) -> Option<&'static str> {
     match id {
         "vscode-copilot" => Some(".copilot/agents/StateRoot.agent.md"),
+        // Command Code's `~/.commandcode/agents/*.md` are SUBAGENT definitions
+        // (`tools` defaults to none), not a main-session persona channel — the
+        // one-agent block in `~/.commandcode/AGENTS.md` plus SessionStart
+        // injection carry identity there.
         _ => None,
     }
 }
@@ -1148,8 +1212,8 @@ mod tests {
     }
 
     #[test]
-    fn registry_has_20_unique_rows() {
-        assert_eq!(ADAPTERS.len(), 20);
+    fn registry_has_21_unique_rows() {
+        assert_eq!(ADAPTERS.len(), 21);
         let mut ids: Vec<&str> = ADAPTERS.iter().map(|q| q.id).collect();
         ids.sort_unstable();
         ids.dedup();
@@ -1223,6 +1287,63 @@ mod tests {
         assert!(
             policy.note.contains("pre_llm_call"),
             "hermes note must name the verified injection event"
+        );
+    }
+
+    #[test]
+    fn commandcode_row_shape_and_event_mapping() {
+        let cc = quirk("commandcode").expect("commandcode row");
+        assert_eq!(cc.display, "Command Code");
+        assert_eq!(cc.tier, Tier::A);
+        assert_eq!(cc.detect, &[".commandcode"]);
+        assert_eq!(cc.detect_cmds, &["command-code", "cmdc"]);
+        assert_eq!(cc.instruction_file, Some(".commandcode/AGENTS.md"));
+        let mcp = cc.mcp.expect("commandcode mcp target");
+        assert_eq!(mcp.path, ".commandcode/mcp.json");
+        assert_eq!(mcp.shape, McpShape::McpServersJson);
+        let hooks = cc.hooks.expect("commandcode hooks target");
+        assert_eq!(hooks.path, ".commandcode/settings.json");
+        assert!(matches!(hooks.format, HookFormat::CommandCodeJson));
+        assert_eq!(cc.injection, Injection::StdoutJson);
+        // No PreCompact event exists on this harness.
+        assert!(!cc.compact_injection);
+        assert_eq!(
+            cc.events,
+            super::es::SESSION_START | super::es::POST_TOOL_USE | super::es::STOP
+        );
+        assert!(cc.legacy_id.is_none());
+        for (harness_event, canonical) in [
+            ("SessionStart", "session_start"),
+            ("PreToolUse", "pre_tool_use"),
+            ("PostToolUse", "post_tool_use"),
+            ("Stop", "stop"),
+        ] {
+            assert_eq!(
+                normalize_event(cc, harness_event),
+                Some(canonical),
+                "Command Code event {harness_event} must normalize to {canonical}"
+            );
+        }
+        // Events Command Code does not implement are never registered as dead
+        // entries; they still normalize through the canonical passthrough.
+        assert_eq!(cc.event_map.len(), 4);
+        let policy = cc.delivery();
+        assert_eq!(policy.tier, DeliveryTier::Automatic);
+        assert_eq!(policy.primary_event, "session_start");
+        assert!(policy.session_start_prints);
+        assert!(policy.session_start_marks);
+        assert!(!policy.prompt_submit_injects);
+        assert!(policy.note.contains("postToolUse"));
+        assert_eq!(transcript_reader_id("commandcode"), Some("commandcode"));
+        // Not a persona channel: those files define tool-less subagents.
+        assert_eq!(agent_file_target("commandcode"), None);
+        assert_eq!(
+            crate::skill_federation::normalize_harness("command-code"),
+            "commandcode"
+        );
+        assert_eq!(
+            crate::skill_federation::normalize_harness("cmdc"),
+            "commandcode"
         );
     }
 
@@ -1468,6 +1589,18 @@ mod tests {
                     assert!(policy.session_start_marks);
                     assert!(policy.prompt_submit_injects);
                     assert_eq!(policy.tier, DeliveryTier::Automatic);
+                }
+                "commandcode" => {
+                    // No UserPromptSubmit/PreCompact event exists here.
+                    assert_eq!(policy.primary_event, "session_start");
+                    assert!(policy.session_start_prints);
+                    assert!(policy.session_start_marks);
+                    assert!(!policy.prompt_submit_injects);
+                    assert_eq!(policy.tier, DeliveryTier::Automatic);
+                    assert!(
+                        policy.note.contains("postToolUse"),
+                        "commandcode note must name the compaction recovery channel"
+                    );
                 }
                 "gemini-cli" | "antigravity" => {
                     assert!(policy.session_start_marks);

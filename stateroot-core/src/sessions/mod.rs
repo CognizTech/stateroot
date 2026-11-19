@@ -25,7 +25,7 @@ use crate::harness_install::paths;
 use crate::local_store::{self, now_rfc3339};
 use crate::tombstones::{self, TombstoneError, TombstonePolicy};
 use crate::transcripts::{
-    self, claude, codebuddy, codex, copilot, cursor, dsh, hermes, kimi, openclaw, pi,
+    self, claude, codebuddy, codex, commandcode, copilot, cursor, dsh, hermes, kimi, openclaw, pi,
 };
 
 /// Schema tag on the header line.
@@ -595,6 +595,18 @@ pub fn import_from_readers_filtered(
                 continue;
             };
             if let Some(session) = extract::canonical_from_codebuddy(&events, &file, project_dir) {
+                import_one(session, &mut report);
+            }
+        }
+    }
+
+    if harness.is_none_or(|h| h == "commandcode") {
+        for file in commandcode::session_files(home) {
+            let Some(events) = commandcode::parse_session_file(&file) else {
+                continue;
+            };
+            if let Some(session) = extract::canonical_from_commandcode(&events, &file, project_dir)
+            {
                 import_one(session, &mut report);
             }
         }

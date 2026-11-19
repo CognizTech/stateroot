@@ -19,7 +19,7 @@ into placeholder/empty slots (user content is never overwritten; re-running
   "observed"`. Empty repo → `nothing to seed` and no handoff.
 - **`--synthesize` (opt-in LLM enrichment)** — asks a backend for a richer
   seed. Auto backend order: local harness CLIs first (`claude`, `codex`,
-  `codebuddy`, `kimi`, `gemini`, `opencode`, `openclaw`, `hermes`, `pi`, `grok`, `zero`,
+  `codebuddy`, `commandcode`, `kimi`, `gemini`, `opencode`, `openclaw`, `hermes`, `pi`, `grok`, `zero`,
   `antigravity`, `omp`, `devin` — first whose registry delegation spec is a
   CLI whose binary is on PATH, run non-interactively with piped stdout), then
   the `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` API path. `--synthesize-with
@@ -653,6 +653,8 @@ Sessions belong to StateRoot: standardized, shared, portable across
 harnesses. `stateroot session sync` canonicalizes sessions from every
 harness store — claude (`~/.claude/projects/**`), codex (rollout + archived
 stores), codebuddy (`$CODEBUDDY_CONFIG_DIR` or `~/.codebuddy/projects/**`),
+commandcode (`~/.commandcode/projects/<slug>/*.jsonl`, excluding the
+`.checkpoints.jsonl`/`.prompts.jsonl` sidecars),
 kimi (wire files + session index — stateroot's own harness,
 dogfooded), openclaw, cursor and hermes (sqlite state stores, opened
 immutable), pi (`$PI_CODING_AGENT_DIR` or `~/.pi/agent/sessions`), and dsh
@@ -796,7 +798,11 @@ in the prompt path (token razor).
   Claude and Kimi plans, plus CodeBuddy plans explicitly linked to a session
   through `planFilePath`, into the store as drafts. CodeBuddy task files
   under `.codebuddy/tasks/<sessionId>/` also federate current status without
-  inventing a plan binding.
+  inventing a plan binding. Command Code plans (`~/.commandcode/plans/*.md`)
+  are a global pile with no project binding, so they are ingested only when
+  one of this project's Command Code sessions was active near the plan's
+  mtime; its `task_*`/`todo_write` calls are replayed from the transcript
+  into per-session todos, again without a plan binding.
 - **Lifecycle** — `draft → approved → active → done`; `abandoned` from any
   non-terminal state. Wrong-state transitions are clear errors (same-state
   included). At most one plan is **active**: `plan activate` demotes the

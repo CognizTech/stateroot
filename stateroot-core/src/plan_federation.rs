@@ -46,6 +46,13 @@ fn plan_dirs(home: &Path, harness: &str) -> Vec<PlanSource> {
             dir: home.join(".claude/plans"),
             suffix: ".md",
         }],
+        // `~/.commandcode/plans/` is a global pile with no project binding —
+        // attribution is by this project's own session activity (below).
+        "commandcode" => vec![PlanSource {
+            harness: "commandcode",
+            dir: crate::harness_install::paths::commandcode_root(home).join("plans"),
+            suffix: ".md",
+        }],
         _ => Vec::new(),
     }
 }
@@ -256,6 +263,27 @@ fn cursor_project_transcript_times(home: &Path, project_dir: &Path) -> Vec<std::
     times
 }
 
+/// Command Code's `~/.commandcode/plans/` is the same kind of global pile as
+/// Cursor's. Its transcripts ARE project-scoped (`projects/<slug>/`), and the
+/// header carries the real cwd, so attribution reads only this project's
+/// session mtimes — no content guessing.
+fn commandcode_project_transcript_times(
+    home: &Path,
+    project_dir: &Path,
+) -> Vec<std::time::SystemTime> {
+    crate::transcripts::commandcode::session_files(home)
+        .into_iter()
+        .filter(|file| {
+            crate::transcripts::commandcode::session_identity(file, project_dir).is_some()
+        })
+        .filter_map(|file| {
+            std::fs::metadata(&file)
+                .and_then(|meta| meta.modified())
+                .ok()
+        })
+        .collect()
+}
+
 /// The first absolute path in the transcript head that resolves (walking up)
 /// to a stateroot project root. Tool inputs carry the workspace explicitly.
 fn transcript_project(head: &str) -> Option<PathBuf> {
@@ -402,6 +430,8 @@ pub fn sync_from(home: &Path, project_dir: &Path, harness: &str) -> PlanSyncRepo
         };
         let session_times = if source.harness == "cursor" {
             cursor_project_transcript_times(home, project_dir)
+        } else if source.harness == "commandcode" {
+            commandcode_project_transcript_times(home, project_dir)
         } else {
             Vec::new()
         };
@@ -425,7 +455,7 @@ pub fn sync_from(home: &Path, project_dir: &Path, harness: &str) -> PlanSyncRepo
                     continue;
                 }
             }
-            if source.harness == "cursor" {
+            if source.harness == "cursor" || source.harness == "commandcode" {
                 // Attribute by session activity: a plan is this project's
                 // only if one of this project's transcripts was active
                 // within the window of the plan's mtime.
@@ -437,7 +467,8 @@ pub fn sync_from(home: &Path, project_dir: &Path, harness: &str) -> PlanSyncRepo
                     .unwrap_or(false);
                 if !attributable {
                     report.notes.push(format!(
-                        "{name}: skipped — no cursor session activity for this project near it"
+                        "{name}: skipped — no {} session activity for this project near it",
+                        source.harness
                     ));
                     continue;
                 }
@@ -772,6 +803,53 @@ mod tests {
         assert_eq!(meta.created_by_harness, "codebuddy");
         let second = sync_from(home.path(), project.path(), "codebuddy");
         assert!(second.ingested.is_empty(), "{second:?}");
+    }
+
+    #[test]
+    fn commandcode_plans_require_this_projects_session_activity() {
+        let home = tempfile::tempdir().expect("home");
+        let project = project();
+        let plans = home.path().join(".commandcode/plans");
+        std::fs::create_dir_all(&plans).expect("plan dir");
+        let plan = plans.join("integration-plan.md");
+        std::fs::write(&plan, PLAN_A).expect("plan");
+        let sessions = home
+            .path()
+            .join(".commandcode/projects")
+            .join(project.path().file_name().expect("slug"));
+        std::fs::create_dir_all(&sessions).expect("session dir");
+        std::fs::write(
+            sessions.join("s1.jsonl"),
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "session",
+                    "version": 3,
+                    "id": "s1",
+                    "timestamp": "2026-11-18T10:00:00.000Z",
+                    "cwd": project.path().to_string_lossy(),
+                })
+            ),
+        )
+        .expect("transcript");
+
+        let report = sync_from(home.path(), project.path(), "commandcode");
+        assert_eq!(report.ingested.len(), 1, "{report:?}");
+        let (meta, _) = crate::plans::current(project.path()).expect("plan");
+        assert_eq!(meta.created_by_harness, "commandcode");
+        assert_eq!(meta.status, "draft");
+        // Second pass: no duplicate.
+        assert!(sync_from(home.path(), project.path(), "commandcode").is_quiet());
+
+        // A different project (no matching session cwd) must not inherit it.
+        let other = tempfile::tempdir().expect("other");
+        crate::local_store::init_skeleton(other.path(), "p2", "n2", "default").expect("init");
+        let other_report = sync_from(home.path(), other.path(), "commandcode");
+        assert!(other_report.ingested.is_empty(), "{other_report:?}");
+        assert!(
+            other_report.notes.iter().any(|n| n.contains("skipped")),
+            "{other_report:?}"
+        );
     }
 
     #[test]

@@ -34,6 +34,7 @@ const GLOBAL_FILES: &[(&str, &str)] = &[
     ("claude-code", ".claude/CLAUDE.md"),
     ("codebuddy", ".codebuddy/CODEBUDDY.md"),
     ("codex", ".codex/AGENTS.md"),
+    ("commandcode", ".commandcode/AGENTS.md"),
     ("cursor", ".cursor/AGENTS.md"),
     ("gemini-cli", ".gemini/GEMINI.md"),
 ];
@@ -47,6 +48,11 @@ const PROJECT_FILES: &[(&str, &str)] = &[
     ("codebuddy", "CODEBUDDY.md"),
     ("codebuddy", ".codebuddy/CODEBUDDY.md"),
     ("codebuddy", "CODEBUDDY.local.md"),
+    // Command Code reads root `AGENTS.md` OR `.commandcode/AGENTS.md` (first
+    // existing wins). Root AGENTS.md is already attributed to codex; importing
+    // it a second time would duplicate the same file under two harnesses, so
+    // only the Command Code-specific path is pulled.
+    ("commandcode", ".commandcode/AGENTS.md"),
     ("claude-code", "CLAUDE.md"),
     ("gemini-cli", "GEMINI.md"),
     ("github-copilot", ".github/copilot-instructions.md"),
@@ -238,6 +244,32 @@ fn write_index(root: &Path, index: &Index) -> Result<(), RulesError> {
 fn upsert_index(root: &Path, rule: Rule) -> Result<(), RulesError> {
     let mut index = read_index(root);
     index.schema_version = SCHEMA_VERSION.into();
+    if let Some(existing) = index.rules.iter_mut().find(|r| r.slug == rule.slug) {
+        *existing = rule;
+    } else {
+        index.rules.push(rule);
+    }
+    write_index(root, &index)
+}
+
+/// Upsert while retiring earlier slugs for the SAME source file. A file can
+/// change slug when a cross-scope collision starts or stops (see
+/// [`import_one`]); the old entry and its body must not linger beside it.
+fn upsert_index_replacing(root: &Path, rule: Rule) -> Result<(), RulesError> {
+    let mut index = read_index(root);
+    index.schema_version = SCHEMA_VERSION.into();
+    let stale: Vec<Rule> = index
+        .rules
+        .iter()
+        .filter(|r| r.origin_path == rule.origin_path && r.slug != rule.slug)
+        .cloned()
+        .collect();
+    for old in &stale {
+        let _ = std::fs::remove_file(file_for(root, old));
+    }
+    index
+        .rules
+        .retain(|r| r.origin_path != rule.origin_path || r.slug == rule.slug);
     if let Some(existing) = index.rules.iter_mut().find(|r| r.slug == rule.slug) {
         *existing = rule;
     } else {
@@ -445,13 +477,33 @@ fn import_one(
     candidate: Candidate,
     report: &mut SyncReport,
 ) -> Result<(), RulesError> {
-    let slug = slug_for(&candidate.harness, &candidate.origin_path);
-    let hash = sha256_hex(candidate.body.as_bytes());
     let root = if candidate.scope == "user" {
         user_root(home)
     } else {
         project_root(project_dir)
     };
+    // A harness can use the same file NAME for its user and project memory
+    // (`~/.codebuddy/CODEBUDDY.md` vs `<project>/CODEBUDDY.md`,
+    // `~/.commandcode/AGENTS.md` vs `<project>/.commandcode/AGENTS.md`).
+    // `slug_for` would collapse them into one slug and `list_all` would let
+    // the user-scope copy shadow the project rules entirely — silent loss.
+    // Qualify the slug with its scope when the other scope already holds it.
+    let other_root = if candidate.scope == "user" {
+        project_root(project_dir)
+    } else {
+        user_root(home)
+    };
+    let base_slug = slug_for(&candidate.harness, &candidate.origin_path);
+    let slug = if read_index(&other_root)
+        .rules
+        .iter()
+        .any(|rule| rule.slug == base_slug)
+    {
+        format!("{base_slug}-{}", candidate.scope)
+    } else {
+        base_slug
+    };
+    let hash = sha256_hex(candidate.body.as_bytes());
     let rule = Rule {
         slug: slug.clone(),
         title: title_of(&candidate.body),
@@ -475,7 +527,7 @@ fn import_one(
         std::fs::write(&dest, candidate.body.as_bytes())?;
         report.imported += 1;
     }
-    upsert_index(&root, rule)?;
+    upsert_index_replacing(&root, rule)?;
     Ok(())
 }
 
@@ -630,6 +682,74 @@ mod tests {
             "the outline carries every heading: {section}"
         );
         assert!(section.contains("Never commit secrets") || section.contains("codex"));
+    }
+
+    #[test]
+    fn commandcode_agents_md_is_imported_without_double_importing_root_agents() {
+        let home = tempfile::tempdir().expect("home");
+        let project = tempfile::tempdir().expect("project");
+        crate::local_store::init_skeleton(project.path(), "p2", "demo", "default").unwrap();
+
+        std::fs::create_dir_all(home.path().join(".commandcode")).unwrap();
+        std::fs::write(
+            home.path().join(".commandcode/AGENTS.md"),
+            "# Command Code user rules\n\nPrefer small diffs.\n\n<!-- stateroot:begin -->\nmanaged\n<!-- stateroot:end -->\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(project.path().join(".commandcode")).unwrap();
+        std::fs::write(
+            project.path().join(".commandcode/AGENTS.md"),
+            "# Command Code project rules\n\nRun the formatter.\n",
+        )
+        .unwrap();
+        // Root AGENTS.md belongs to codex; Command Code must not import it twice.
+        std::fs::write(project.path().join("AGENTS.md"), "# Root project agents\n").unwrap();
+
+        let report = sync(project.path(), home.path()).unwrap();
+        assert!(report.seeded);
+        let all = list_all(project.path(), home.path());
+        let commandcode: Vec<&crate::rules::Rule> = all
+            .iter()
+            .filter(|record| record.origin == "commandcode")
+            .collect();
+        assert_eq!(
+            commandcode.len(),
+            2,
+            "one global + one project rule, no root duplicate: {commandcode:?}"
+        );
+        // Same file name in both scopes: the project copy is scope-qualified
+        // instead of being shadowed by the user copy.
+        assert!(commandcode.iter().any(|record| record.scope == "user"));
+        assert!(
+            commandcode
+                .iter()
+                .any(|record| record.scope == "project"
+                    && record.slug == "commandcode-agents-project"),
+            "project rule must stay visible: {commandcode:?}"
+        );
+        let (_, global) = show(project.path(), home.path(), "commandcode-agents").expect("global");
+        assert!(global.contains("Prefer small diffs"));
+        assert!(!global.contains("stateroot:begin"));
+        let (_, project_rule) =
+            show(project.path(), home.path(), "commandcode-agents-project").expect("project");
+        assert!(project_rule.contains("Run the formatter"));
+        assert!(
+            !all.iter()
+                .any(|record| record.origin == "commandcode" && record.slug == "agents"),
+            "root AGENTS.md must not be attributed to commandcode"
+        );
+        // A second pass converges (no slug churn).
+        sync(project.path(), home.path()).unwrap();
+        let again: Vec<String> = list_all(project.path(), home.path())
+            .into_iter()
+            .filter(|record| record.origin == "commandcode")
+            .map(|record| record.slug)
+            .collect();
+        let mut expected: Vec<String> = commandcode.iter().map(|r| r.slug.clone()).collect();
+        expected.sort();
+        let mut got = again;
+        got.sort();
+        assert_eq!(got, expected, "slugs are stable across syncs");
     }
 
     #[test]
