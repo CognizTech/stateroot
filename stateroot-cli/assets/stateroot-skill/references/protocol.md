@@ -384,6 +384,44 @@ Full bar, examples, and anti-examples: `references/learnings.md`. Short version:
 4. `stateroot status` shows outbox depth and project attachment; `stateroot doctor` diagnoses sync and auth problems.
 5. After reconnecting, run `stateroot resume` to see synced state. If a write reports a conflict or stale revision, re-read with `resume` and retry the write exactly once.
 
+## Claude Code native sessions
+
+`session sync` retains supported Claude Code session prefixes under
+`.stateroot/local/sessions/native-claude/`. The retained prefix ends at the last
+completed **main-thread** assistant message: subagent (sidechain) records never
+close a turn, because a boundary settled inside a subagent exchange produces a
+copy with no main thread that the harness refuses to resume. A live file
+commonly has an unsettled tail (a turn awaiting tool results), which is reported
+as partial capture of the exact older boundary. Every archived line must parse — a corrupt record is reported, never
+silently skipped — and the source prefix is rechecked after metadata reads, so a
+truncate or rewrite cannot change what was retained.
+
+`session show <id>` lists the archive digests for that session. Selecting one
+with `session restore <archive> --operation-id <uuid>` verifies the manifest and
+the retained bytes before writing anything.
+
+Restore writes a **new** session file into the Claude store resolved through
+`CLAUDE_CONFIG_DIR` (falling back to `~/.claude`), preferring an existing slug
+directory for the project. The destination is created with no-overwrite
+semantics, gets a fresh session id, and is parsed back with the Claude reader
+before the operation receipt is recorded; a rejected file is removed. Operation
+ids are idempotent and bound to one archive. `--home <dir>` redirects the write.
+Capture never modifies the live session; restore never edits or replaces an
+existing session file.
+
+`session transfer <id> --to claude` maps the canonical timeline to Claude
+records with a fresh `uuid`/`parentUuid` chain: user and assistant messages
+natively, tool calls as `tool_use` blocks (the original call id is preserved so
+results correlate), tool results as `tool_result` blocks, compaction summaries
+as marked user notes (adapted), and plans or unmatched native types dropped.
+History is never capped; the fidelity report names every adaptation and drop.
+No `version` field is invented. `--dry-run` prints the plan without writing.
+
+Resume with `claude --resume <id>`; the absolute transcript path printed with
+the hint is also accepted by `--resume`. `claude --continue` selects the most
+recent conversation in that directory and skips sessions created with `claude
+-p`, so the copy is reachable there only while nothing newer exists.
+
 ## Qualified native Codex recovery
 
 Existing session import automatically retains supported settled native Codex

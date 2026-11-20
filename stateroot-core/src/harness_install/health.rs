@@ -662,8 +662,16 @@ fn hooks_component(home: &Path, quirk: &HarnessQuirk) -> ComponentHealth {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        // Incomplete coverage is not `Ok`: the workbench decides health from
+        // the row status, which is derived from component states, so an `Ok`
+        // hooks component would suppress both the warning and the repair pass.
+        let state = if missing.is_empty() {
+            ComponentState::Ok
+        } else {
+            ComponentState::Missing
+        };
         ComponentHealth::new(
-            ComponentState::Ok,
+            state,
             format!(
                 "{} · {count} hook entr{}{}{}",
                 path.display(),
@@ -1081,17 +1089,13 @@ mod tests {
     }
 
     fn wire_cursor(home: &Path) {
-        write(
-            &home.join(".cursor/hooks.json"),
-            &serde_json::to_string_pretty(&serde_json::json!({
-                "version": 1,
-                "hooks": {
-                    "sessionStart": [{"type": "command", "command": "stateroot hook session_start --harness cursor", "matcher": ""}],
-                    "stop": [{"type": "command", "command": "stateroot hook stop --harness cursor", "matcher": ""}]
-                }
-            }))
-            .expect("json"),
-        );
+        // Install the registry's full event set: a partial hand-written set is
+        // a stale install now, and health reports it as incomplete coverage.
+        crate::harness_install::hooks::install_hooks(
+            home,
+            crate::harness_install::registry::quirk("cursor").expect("cursor"),
+        )
+        .expect("install");
         write(
             &home.join(".cursor/mcp.json"),
             &serde_json::to_string_pretty(&serde_json::json!({
@@ -1253,11 +1257,20 @@ mod tests {
         wire_cursor(home.path());
         // kimi-code style TomlHooks with a duplicate pile: more hook entries
         // than registered events.
-        let toml = (0..12)
-            .map(|_| {
-                "[[hooks]]\ncommand = \"stateroot hook session_start --harness kimi-code\"\nevent = \"SessionStart\"\n"
-            })
-            .collect::<String>();
+        let mut toml = String::new();
+        for (event, canonical) in crate::harness_install::registry::quirk("kimi-code")
+            .expect("kimi-code")
+            .event_map
+        {
+            toml.push_str(&format!(
+                "[[hooks]]\ncommand = \"stateroot hook {canonical} --harness kimi-code\"\nevent = \"{event}\"\n"
+            ));
+        }
+        for _ in 0..12 {
+            toml.push_str(
+                "[[hooks]]\ncommand = \"stateroot hook session_start --harness kimi-code\"\nevent = \"SessionStart\"\n",
+            );
+        }
         write(&home.path().join(".kimi-code/config.toml"), &toml);
         write(
             &home.path().join(".kimi-code/mcp.json"),
@@ -1290,21 +1303,11 @@ mod tests {
     fn degraded_tier_carries_the_note() {
         let home = tempfile::tempdir().expect("home");
         // zero: hooks installed, but no verified prompt injection — degraded.
-        write(
-            &home.path().join(".config/zero/hooks.json"),
-            &serde_json::to_string_pretty(&serde_json::json!({
-                "enabled": true,
-                "hooks": [{
-                    "id": "stateroot-session_start",
-                    "name": "stateroot session_start",
-                    "event": "sessionStart",
-                    "command": "stateroot",
-                    "args": ["hook", "session_start", "--harness", "zero"],
-                    "enabled": true
-                }]
-            }))
-            .expect("json"),
-        );
+        crate::harness_install::hooks::install_hooks(
+            home.path(),
+            crate::harness_install::registry::quirk("zero").expect("zero"),
+        )
+        .expect("install");
         let prober = StubProber::with(&["zero"]);
         let health = integration_health(home.path(), None, &prober, &[]);
         let row = health
@@ -1328,11 +1331,25 @@ mod tests {
                 "    command: stateroot\n",
                 "    args: [mcp-stdio]\n",
                 "hooks:\n",
+                "  on_session_start:\n",
+                "    - command: stateroot hook session_start --harness hermes\n",
                 "  pre_llm_call:\n",
                 "    - command: ~/.hermes/agent-hooks/foreign.sh\n",
                 "    - command: '\"/home/alice/my bin/stateroot\" hook user_prompt_submit --harness hermes'\n",
+                "  pre_tool_call:\n",
+                "    - command: stateroot hook pre_tool_use --harness hermes\n",
+                "  post_tool_call:\n",
+                "    - command: stateroot hook post_tool_use --harness hermes\n",
+                "  post_compaction:\n",
+                "    - command: stateroot hook post_compaction --harness hermes\n",
                 "  on_session_end:\n",
                 "    - command: stateroot hook stop --harness hermes\n",
+                "  on_session_finalize:\n",
+                "    - command: stateroot hook session_end --harness hermes\n",
+                "  subagent_start:\n",
+                "    - command: stateroot hook subagent_start --harness hermes\n",
+                "  subagent_stop:\n",
+                "    - command: stateroot hook subagent_stop --harness hermes\n",
                 "  outbound:\n",
                 "    - name: ci\n",
                 "      url: https://ci.example/hook\n",
@@ -1342,7 +1359,7 @@ mod tests {
             &home.path().join(".hermes/config.yaml"),
             HookFormat::YamlHooks,
         );
-        assert_eq!(commands.len(), 2, "{commands:?}");
+        assert_eq!(commands.len(), 9, "{commands:?}");
         assert!(commands
             .iter()
             .any(|c| c.contains("hook user_prompt_submit --harness hermes")));
@@ -1586,6 +1603,83 @@ mod tests {
             ComponentState::Unreadable,
             "{:?}",
             row.hooks
+        );
+    }
+
+    #[test]
+    fn stale_hook_install_reports_incomplete_coverage_until_refreshed() {
+        let home = tempfile::tempdir().expect("home");
+        std::fs::create_dir_all(home.path().join(".claude")).expect("marker");
+        let quirk = super::registry::quirk("claude-code").expect("claude-code");
+        // The stable v0.2.15 shape: nine events, missing the failure,
+        // post-compaction and stop-failure events the registry now maps.
+        let mut hooks = serde_json::Map::new();
+        for (native, canonical) in [
+            ("SessionStart", "session_start"),
+            ("UserPromptSubmit", "user_prompt_submit"),
+            ("PreToolUse", "pre_tool_use"),
+            ("PostToolUse", "post_tool_use"),
+            ("PreCompact", "pre_compact"),
+            ("Stop", "stop"),
+            ("SessionEnd", "session_end"),
+            ("SubagentStart", "subagent_start"),
+            ("SubagentStop", "subagent_stop"),
+        ] {
+            hooks.insert(
+                native.into(),
+                serde_json::json!([{
+                    "matcher": "",
+                    "hooks": [{
+                        "type": "command",
+                        "command": format!("stateroot hook {canonical} --harness claude-code"),
+                    }],
+                }]),
+            );
+        }
+        std::fs::write(
+            home.path().join(".claude/settings.json"),
+            serde_json::json!({ "hooks": hooks }).to_string(),
+        )
+        .expect("settings");
+
+        let prober = StubProber::with(&["claude"]);
+        let health = integration_health(home.path(), None, &prober, &["claude-code".to_string()]);
+        let row = health
+            .harnesses
+            .iter()
+            .find(|h| h.harness == "claude-code")
+            .expect("claude-code row");
+        // Not Ok: the workbench derives health from row status, so an Ok
+        // component would hide both the warning and the repair pass.
+        assert_eq!(row.hooks.state, ComponentState::Missing, "{:?}", row.hooks);
+        let problems = row.problems.join(" | ");
+        for event in ["PostToolUseFailure", "PostCompact", "StopFailure"] {
+            assert!(problems.contains(event), "missing {event}: {problems}");
+        }
+        assert!(problems.contains("3 of 12"), "{problems}");
+        assert!(
+            row.repair
+                .iter()
+                .any(|action| action == "stateroot install"),
+            "{:?}",
+            row.repair
+        );
+
+        // Refreshing the hooks clears the coverage warning.
+        crate::harness_install::hooks::install_hooks(home.path(), quirk).expect("install");
+        let health = integration_health(home.path(), None, &prober, &["claude-code".to_string()]);
+        let row = health
+            .harnesses
+            .iter()
+            .find(|h| h.harness == "claude-code")
+            .expect("claude-code row");
+        assert_eq!(row.hooks.state, ComponentState::Ok, "{:?}", row.hooks);
+        assert!(
+            !row.problems
+                .iter()
+                .any(|problem| problem.contains("events not installed")),
+            "{:?}",
+            row.problems
         );
     }
 

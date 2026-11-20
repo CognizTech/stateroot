@@ -129,6 +129,16 @@ struct Settled {
 /// non-empty text. A bare `tool_use` reply is mid-turn (its results are still
 /// pending), so it never ends the prefix.
 fn closes_turn(value: &Value) -> bool {
+    // Subagent (sidechain) traffic never closes a session turn: a boundary
+    // settled inside a subagent exchange yields a "session" with no main
+    // thread, which the native harness then refuses to resume.
+    if value
+        .get("isSidechain")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return false;
+    }
     value.get("type").and_then(Value::as_str) == Some("assistant")
         && value
             .get("message")
@@ -754,6 +764,31 @@ mod tests {
         .expect("source");
         assert_eq!(archived.len(), retained.archive.byte_length);
         assert!(!String::from_utf8_lossy(&archived).contains("tool_use"));
+    }
+
+    #[test]
+    fn a_subagent_message_never_closes_a_turn() {
+        let home = tempfile::tempdir().expect("home");
+        let project = project();
+        let session = "11111111-2222-3333-4444-555555555670";
+        let mut sidechain_user = user_line(session, project.path());
+        sidechain_user["isSidechain"] = serde_json::json!(true);
+        let mut sidechain_assistant = assistant_text(session, project.path(), "subagent done");
+        sidechain_assistant["isSidechain"] = serde_json::json!(true);
+        let source = session_file(home.path(), session, &[sidechain_user, sidechain_assistant]);
+        let retained = retain(project.path(), home.path(), &source).expect("retain");
+        // The whole file is captured, but explicitly not as a settled
+        // boundary: a prefix that ends inside subagent traffic has no main
+        // thread for the native harness to resume.
+        assert_eq!(retained.archive.record_count, 2);
+        assert!(
+            retained
+                .suffix_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("no completed assistant turn")),
+            "{:?}",
+            retained.suffix_reason
+        );
     }
 
     #[test]

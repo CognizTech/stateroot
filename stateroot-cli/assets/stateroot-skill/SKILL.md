@@ -211,8 +211,9 @@ without refreshing it. See the protocol reference for tool names and evidence li
 | `stateroot delegate cancel <id>` | explicitly stop a qualified worker | two-phase cancellation preserves partial work and records its result; no automatic task timeout |
 | `stateroot ext list` | extensions discovered on PATH | any `stateroot-<name>` executable on PATH runs as `stateroot <name>` — you can add commands yourself by writing one |
 | `stateroot projects` / `--json` / `--prune` | every initialized project on this machine | the discovery half of cross-project work: list projects here (name, path, phase, active plan), then work the one requested; same listing via the `projects_list` MCP tool |
-| `stateroot session sync` / `list` / `show` | canonical session store | supported harness sessions → `.stateroot/local/sessions/`; DSH v0 and v4 (including zstd) are read; qualified Codex boundaries retain local native archives automatically |
-| `stateroot session transfer <id> --to pi\|dsh` | resume a session in another harness | writes a real native session file (DSH v0); fidelity report (native/adapted/dropped); `--dry-run` previews |
+| `stateroot session sync` / `list` / `show` | canonical session store | supported harness sessions → `.stateroot/local/sessions/`; DSH v0 and v4 (including zstd) are read; qualified Codex boundaries and settled Claude prefixes retain local native archives automatically |
+| `stateroot session transfer <id> --to pi\|dsh\|claude` | resume a session in another harness | writes a real native session file (DSH v0, Claude JSONL chain); whole history; fidelity report (native/adapted/dropped); `--dry-run` previews |
+| `stateroot session restore <archive> --operation-id <uuid> [--home DIR]` | write a retained Claude archive as a new native session | fresh session id, no-overwrite creation, parsed back before the operation is recorded; idempotent operation UUID; `--home` targets a temporary home for preview |
 | `stateroot session transfer <id> --to codex --archive <digest> --operation-id <uuid>` | qualified native recovery | exact retained boundary → distinct native fork; retry the same UUID; no model prompt is sent. Continue with the returned native Codex resume command; `session show <id> --operation-id <uuid>` observes native output. See [native recovery](references/protocol.md#qualified-native-codex-recovery). |
 | `stateroot plan record` / `list` / `show` / `approve` / `activate` / `verify` / `done` / `abandon` | central plan artifact + lifecycle | plan/implement split: the planner records a draft, the user approves, the executor's digest points at `.stateroot/plans/<id>.md` with a state-aware directive; completion requires `done --evidence`, and `verify` is optional |
 | `stateroot obligation add` / `list` / `show` / `done` / `snooze` / `cancel` | durable future work | explicit due items and completion evidence shared across harnesses |
@@ -254,6 +255,39 @@ Failed identity delivery remains retryable; prompt-hook fallback output is consu
 `mcp sync` projects pooled global tools into separate marked Cordis entries while preserving operator entries and the lifecycle bridge. DSH natively supports stdio and Streamable HTTP; unsupported transports/names are reported rather than rewritten into another protocol. Native `todo/write` snapshots federate as session lists, including explicit clearing; only an existing verified session binding associates them with a plan.
 
 `session sync` reads DSH v0 and v4, including the default zstd artifacts. Native plan-mode plans (`exit_plan_mode`) federate into the central store as drafts from the session log. DSH has no native memory file: sessions reach recall through the canonical store, and shared memories/learnings ride the digest. `delegate --to dsh` runs `dsh --profile headless`, which needs a provider credential DSH can resolve (its credential store, profile config, or `DEEPSEEK_API_KEY` in that process); StateRoot's optional `DEEPSEEK_API_KEY` synthesis key is an unrelated use and is not required for install or setup.
+
+### Claude Code sessions
+
+`session sync` retains each Claude session's settled prefix under
+`.stateroot/local/sessions/native-claude/`: everything through the last
+completed **main-thread** assistant message. Subagent traffic never closes a
+turn — a boundary settled inside a subagent exchange would carry no main thread,
+and the harness refuses to resume such a copy. A trailing turn still awaiting
+tool results is an unsettled tail — reported as partial capture of the exact
+older boundary, never as a complete session. Archives are immutable, content-addressed, local only,
+and the session store follows `CLAUDE_CONFIG_DIR`.
+
+`session restore <archive> --operation-id <uuid>` writes the archive to a
+**new** session file in that home's Claude store. The copy gets a fresh session
+id (every record's `sessionId` rewritten consistently); `uuid`, `parentUuid`,
+`cwd`, timestamps and version stay verbatim. Creation never overwrites an
+existing session, and the file is parsed back with the Claude reader before the
+operation is recorded; a rejected file is removed. Reuse the same operation
+UUID to retry safely (it returns the original receipt); reusing it for another
+archive is refused. `--home <dir>` writes elsewhere — for example a temporary
+home — so a restore can be inspected before the real store changes.
+
+`session transfer <id> --to claude` writes a canonical session as a resumable
+Claude JSONL chain with the whole history. Messages, tool calls and tool
+results map natively; a compaction summary becomes a clearly marked user note;
+a plan and any entry with no Claude counterpart are dropped under their native
+type names. No `version` field is invented. `--dry-run` prints the same
+fidelity report without writing.
+
+Resume the result with `claude --resume <session-id>`. StateRoot prints the id
+and the absolute transcript path, which `--resume` also accepts. `claude
+--continue` only finds the copy while no newer session exists in that
+directory, and it skips sessions created with `claude -p`.
 
 ## Failure Modes
 

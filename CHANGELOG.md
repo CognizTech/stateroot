@@ -5,6 +5,17 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- Claude Code session archives settle only on main-thread assistant turns:
+  subagent traffic no longer closes a turn, so a restored archive is a
+  resumable conversation rather than a copy with no main thread.
+
+- Integration health reports incomplete hook coverage as a problem naming the
+  missing events and the `stateroot install` repair, instead of leaving the
+  hooks component `ok` and the workbench blind to a stale install.
+
+- The built-in Skill documents Claude session archives, restore, transfer
+  fidelity and the resume paths (`--resume <id>` and `--resume <path>`).
+
 - Claude Code captures its native `PostToolUseFailure`, `PostCompact` and
   `StopFailure` events. A turn that ends on an API error keeps its own
   `stop_failure` checkpoint kind and is never folded into `stop`, so the
@@ -55,8 +66,11 @@ StateRoot is pre-1.0 and milestones land as minor versions.
   Code implements (`SessionStart`, `PreToolUse`, `PostToolUse`, `Stop`), the
   managed instruction block in `~/.commandcode/AGENTS.md`, and the
   `stateroot` MCP server in `~/.commandcode/mcp.json`. `resume --harness
-  commandcode`, `doctor`, `delegate --to commandcode` (`cmd -p --yolo`) and
-  `install` now resolve.
+  commandcode`, `doctor` and `install` now resolve. Delegation resolves the
+  launcher in contract order (`command-code`, `cmdc`, `cmd`) and runs the
+  resolved executable with `-p --yolo`; native Windows never launches the
+  `cmd.exe` system shell as the harness, so a host with only the shell reports
+  Command Code as unavailable.
 
 - Identity delivery injects the digest from `SessionStart` through
   `hookSpecificOutput.additionalContext`. Command Code has no prompt-submit or
