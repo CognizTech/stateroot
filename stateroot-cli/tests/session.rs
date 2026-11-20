@@ -201,7 +201,7 @@ fn codex_native_archive_dry_run_survives_removed_live_history_and_refuses_corrup
         .assert()
         .success();
     assert!(!String::from_utf8_lossy(&partial.get_output().stdout)
-        .contains("native Codex boundaries retained locally: 1"));
+        .contains("native boundaries retained locally: 1"));
     let stderr = String::from_utf8_lossy(&partial.get_output().stderr);
     assert!(
         stderr.contains("native capture partial") && stderr.contains("in-progress native turn"),
@@ -224,7 +224,7 @@ fn codex_native_archive_dry_run_survives_removed_live_history_and_refuses_corrup
         .assert()
         .success();
     assert!(String::from_utf8_lossy(&advanced.get_output().stdout)
-        .contains("native Codex boundaries retained locally: 1"));
+        .contains("native boundaries retained locally: 1"));
     assert!(
         !String::from_utf8_lossy(&advanced.get_output().stderr).contains("native capture partial")
     );
@@ -250,7 +250,7 @@ fn codex_native_archive_dry_run_survives_removed_live_history_and_refuses_corrup
         .assert()
         .success();
     assert!(!String::from_utf8_lossy(&unavailable.get_output().stdout)
-        .contains("native Codex boundaries retained locally: 1"));
+        .contains("native boundaries retained locally: 1"));
     assert!(String::from_utf8_lossy(&unavailable.get_output().stderr)
         .contains("raw archive retained but exact native recovery is unavailable"));
     std::fs::remove_file(&source).unwrap();

@@ -73,17 +73,18 @@ pub fn claude_slug_to_cwd(slug: &str) -> String {
 /// Every separator becomes `-`. A Windows drive separator (`c:/…`) keeps the
 /// drive letter and folds the colon too (`c--users-me`), because a slug
 /// containing `:` is not a valid directory name on Windows.
+///
+/// Deliberately *not* routed through `normalize_host_path`: that folds a WSL
+/// path (`/mnt/d/project`) into its Windows spelling (`d:/project`), which
+/// would encode a slug Claude on this side never uses.
 pub fn claude_slug_encode(path: &str) -> String {
-    let normalized = crate::path_identity::normalize_host_path(path);
+    let normalized = path.trim().replace('\\', "/");
     if normalized.len() > 1
         && normalized.as_bytes()[1] == b':'
         && normalized.as_bytes()[0].is_ascii_alphabetic()
     {
-        return format!(
-            "{}{}",
-            &normalized[..1],
-            normalized[1..].replace([':', '/'], "-")
-        );
+        let drive = normalized[..1].to_ascii_lowercase();
+        return format!("{drive}{}", normalized[1..].replace([':', '/'], "-"));
     }
     let replaced = normalized.replace('/', "-");
     if replaced.starts_with('-') {
@@ -462,6 +463,16 @@ mod tests {
         // POSIX shape: a leading `/` becomes a leading `-`.
         assert_eq!(claude_slug_encode("/home/alice"), "-home-alice");
         assert_eq!(claude_slug_to_cwd("-home-alice"), "/home/alice");
+        // WSL keeps its /mnt spelling: Claude on this side never writes the
+        // Windows drive form, so the fallback must not invent it.
+        assert_eq!(
+            claude_slug_encode("/mnt/d/siderai/project"),
+            "-mnt-d-siderai-project"
+        );
+        assert_eq!(
+            claude_slug_to_cwd("-mnt-d-siderai-project"),
+            "/mnt/d/siderai/project"
+        );
         // Windows shape: the drive colon must not survive — `:` is not a
         // valid directory character there.
         let encoded = claude_slug_encode("C:\\Users\\Me\\work");

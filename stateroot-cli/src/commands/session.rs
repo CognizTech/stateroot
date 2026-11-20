@@ -41,7 +41,7 @@ pub fn sync(ctx: &Ctx, harness: Option<&str>) -> anyhow::Result<()> {
     println!("{summary}");
     if report.native_archives > 0 {
         println!(
-            "  native Codex boundaries retained locally: {}",
+            "  native boundaries retained locally: {}",
             report.native_archives
         );
     }
