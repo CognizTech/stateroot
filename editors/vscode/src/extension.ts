@@ -8,6 +8,8 @@ import {
   parseDelegateList,
   type DelegateListReport,
   refreshCliProbe,
+  readDelegationTargets,
+  type DelegationTargets,
   runCliReport,
   runCli,
   useCli,
@@ -20,7 +22,6 @@ import {
   maybeOfferCopilotHooks,
 } from "./copilotAssist";
 import {
-  CLI_MODE_HARNESSES,
   learningFilePath,
   liveStatus,
   listDelegations,
@@ -75,7 +76,7 @@ export function activate(context: vscode.ExtensionContext) {
   const workbench = new WorkbenchPanel(context.extensionUri, (msg) => void onMessage(msg));
 
   let selectedPlanId: string | undefined;
-  let selectedHarness: string | undefined;
+  let delegationTargets: { root: string; report: DelegationTargets } | undefined;
   let selectedTab = "control";
   let selectedLearningId: string | undefined;
   let selectedMemoryIndex: number | undefined;
@@ -114,7 +115,7 @@ export function activate(context: vscode.ExtensionContext) {
     const root = projectRoot();
     return snapshot({
       selectedPlanId,
-      selectedHarness,
+      harnesses: delegationTargets?.root === root ? delegationTargets?.report.available : undefined,
       rootA,
       rootB,
       compareText,
@@ -289,6 +290,7 @@ export function activate(context: vscode.ExtensionContext) {
   const refreshPlanGraph = singleFlight(async () => {
     const root = projectRoot();
     if (!root) return;
+    void refreshDelegationTargets(root).catch(() => undefined);
     try {
       const text = await runCli(["plan", "graph", "--json"], root, 30_000, cliPath());
       planGraph = parsePlanGraph(text);
@@ -298,6 +300,19 @@ export function activate(context: vscode.ExtensionContext) {
     planGraphRoot = root;
     if (projectRoot() === root) push();
   });
+
+  const refreshDelegationTargets = async (root: string): Promise<DelegationTargets> => {
+    try {
+      const report = await readDelegationTargets(root);
+      if (projectRoot() === root) delegationTargets = { root, report };
+      return report;
+    } catch (error) {
+      if (delegationTargets?.root === root) delegationTargets = undefined;
+      throw error;
+    } finally {
+      if (projectRoot() === root) push();
+    }
+  };
 
   const withProject = async (fn: (root: string) => Promise<void>) => {
     const root = projectRoot();
@@ -316,6 +331,18 @@ export function activate(context: vscode.ExtensionContext) {
     }
     if (type === "ready") {
       push();
+      return;
+    }
+    if (type === "inspectBoundary" && typeof msg.id === "string") {
+      const state = currentSnapshot();
+      const item = state.initialized ? state.inbox.find(row => row.id === msg.id) : undefined;
+      if (item?.kind !== "boundary_worker_blocked" && item?.kind !== "boundary_journal_manual") return;
+      await withProject(async (root) => {
+        const selector = item.kind === "boundary_worker_blocked"
+          ? "--summary" : `--job=${item.id.slice("boundary_journal_manual:".length)}`;
+        await runCliReport(["handoff", "inspect", selector], root, output, 20_000, { allowInstall: false });
+        output.show(true);
+      });
       return;
     }
     if (type === "openWorkbench") {
@@ -653,6 +680,33 @@ export function activate(context: vscode.ExtensionContext) {
     }
   };
 
+  const chooseTarget = async (
+    root: string,
+    placeholder: string,
+    options: { selected?: string; boundReassignment?: boolean } = {},
+  ) => {
+    let report: DelegationTargets;
+    try {
+      report = await refreshDelegationTargets(root);
+    } catch (error) {
+      void vscode.window.showErrorMessage(`Could not read delegation targets: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    if (projectRoot() !== root) return;
+    if (report.legacy && options.boundReassignment) {
+      void vscode.window.showWarningMessage("Update the StateRoot CLI to reassign this delegation in its original checkout.");
+      return;
+    }
+    if (!report.available.length) {
+      void vscode.window.showWarningMessage("StateRoot found no runnable delegation targets in this editor environment.");
+      return;
+    }
+    const pick = report.available.find(target => target.id === options.selected) ?? await vscode.window.showQuickPick(
+      report.available.map(target => ({ ...target, label: target.display })), { placeHolder: placeholder }
+    );
+    if (pick && projectRoot() === root) return { id: pick.id, legacy: report.legacy };
+  };
+
   const delegatePlan = async (planId: string, harness?: string) => {
     await withProject(async (root) => {
       const plan = listPlans(root).find((p) => p.id === planId);
@@ -660,15 +714,8 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.window.showErrorMessage("Unknown plan.");
         return;
       }
-      const to =
-        harness ||
-        (await vscode.window.showQuickPick([...CLI_MODE_HARNESSES], {
-          placeHolder: "Assign execution",
-        }));
-      if (!to) {
-        vscode.window.showWarningMessage("Pick a harness before delegating.");
-        return;
-      }
+      const target = await chooseTarget(root, "Assign execution", { selected: harness });
+      if (!target) return;
       if (plan.status === "draft") {
         const ok = await vscode.window.showWarningMessage(
           "Plan is still a draft. Approve and delegate?",
@@ -684,7 +731,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
       }
       const launched = await runCliReport(
-        ["delegate", "--plan", planId, "--to", to, "--json"],
+        ["delegate", "--plan", planId, "--to", target.id, "--json"],
         root,
         output
       );
@@ -697,18 +744,19 @@ export function activate(context: vscode.ExtensionContext) {
 
   const reassign = async (id: string) => {
     await withProject(async (root) => {
-      const rec = listDelegations(root).find((d) => d.id === id || d.id.startsWith(id));
+      const rec = listDelegations(root).find((d) => d.id === id);
       if (!rec) {
         vscode.window.showErrorMessage("Unknown delegation.");
         return;
       }
-      const to = await vscode.window.showQuickPick([...CLI_MODE_HARNESSES], {
-        placeHolder: "Reassign to",
+      const target = await chooseTarget(root, "Reassign to", {
+        boundReassignment: Boolean(rec.plan_id || rec.fork_id || rec.worktree || rec.fork_binding),
       });
-      if (!to) {
-        return;
-      }
-      await runCliReport(["delegate", "--to", to, "--task", rec.task, "--json"], root, output);
+      if (!target) return;
+      const args = target.legacy
+        ? ["delegate", "--to", target.id, "--task", rec.task, "--json"]
+        : ["delegate", "reassign", rec.id, "--to", target.id, "--json"];
+      await runCliReport(args, root, output);
       await refreshLive();
     });
   };

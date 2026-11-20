@@ -14,7 +14,7 @@ Module._load = function(request, parent) {
   };
   return originalLoad.apply(this, arguments);
 };
-const { runCliReport, cliFailureMessage } = require('../out/cli');
+const { runCliReport, cliFailureMessage, readDelegationTargets } = require('../out/cli');
 Module._load = originalLoad;
 
 test('timeout identifies the limit and preserves command output', () => {
@@ -49,5 +49,32 @@ test('background failures log once without popups; manual failures still notify'
     await runCliReport(args, '/fixture', output);
     assert.equal(notices.length, 1);
     assert.match(notices[0], /fixture error/);
+  } finally { cp.execFile = previous; }
+});
+
+test('delegation targets use available CLI rows and fall back only for an older CLI', async () => {
+  const previous = cp.execFile;
+  let error;
+  let stdout = JSON.stringify({schema_version: 'stateroot.delegation-targets.v1', targets: [
+    {id: 'commandcode', display: 'Command Code', available: true},
+    {id: 'claude', display: 'Claude Code', available: false},
+  ]});
+  cp.execFile = (_binary, args, options, callback) => {
+    assert.deepEqual(args, ['delegate', 'targets', '--json']);
+    assert.equal(options.cwd, '/fixture');
+    callback(error && Object.assign(new Error('CLI failed'), {code: 2}), stdout, error || '');
+  };
+  try {
+    assert.deepEqual(await readDelegationTargets('/fixture'), {
+      available: [{id: 'commandcode', display: 'Command Code'}], legacy: false,
+    });
+    stdout = JSON.stringify({schema_version: 'stateroot.delegation-targets.v1', targets: []});
+    assert.deepEqual(await readDelegationTargets('/fixture'), { available: [], legacy: false });
+    error = "error: unrecognized subcommand 'targets'";
+    const legacy = await readDelegationTargets('/fixture');
+    assert.equal(legacy.legacy, true);
+    assert.deepEqual(legacy.available.map(row => row.id), ['claude', 'codex', 'kimi']);
+    error = 'No permissions';
+    await assert.rejects(readDelegationTargets('/fixture'), /No permissions/);
   } finally { cp.execFile = previous; }
 });

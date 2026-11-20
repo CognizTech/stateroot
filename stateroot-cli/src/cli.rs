@@ -676,6 +676,19 @@ pub struct DelegateArgs {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum DelegateAction {
+    /// List CLI delegation targets and whether their executables resolve on this host.
+    Targets {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run a failed delegation with another harness in the same execution checkout.
+    Reassign {
+        id: String,
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// List delegations with live status (running|completed|failed|lost).
     List,
     /// Show one delegation: record + bounded log tail.

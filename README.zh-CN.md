@@ -8,7 +8,7 @@ StateRoot 连接你已经在用的 AI 智能体，让它们跨会话共享知识
 
 设置完成后，你通过与智能体对话来指挥工作。它们按照内置 Skill 使用 StateRoot CLI；你可以通过编辑器工作台查看进度和结果。
 
-支持 Claude Code、Codex、Cursor、Kimi、CodeBuddy、OpenClaw、Hermes 等智能体。
+支持 Claude Code、Codex、Cursor、Kimi、CodeBuddy、Command Code、OpenClaw、Hermes 等智能体。
 
 *面向 AI 智能体的持久化联邦式元框架（meta-harness）。*
 
@@ -87,7 +87,7 @@ StateRoot 会在智能体会话和编辑器工作台中呈现到期事项、尚�
 
 ## 继续使用你已经在用的智能体
 
-每个智能体保留自己的模型、界面和优势。让一个负责规划，其他智能体实施，再由协调者审查结果。OpenClaw、Hermes 等通用智能体可以与 Claude Code、Codex、Cursor、Kimi、CodeBuddy 和 Pi 一起参与。
+每个智能体保留自己的模型、界面和优势。让一个负责规划，其他智能体实施，再由协调者审查结果。OpenClaw、Hermes 等通用智能体可以与 Claude Code、Codex、Cursor、Kimi、CodeBuddy、Command Code 和 Pi 一起参与。
 
 ### 哪些信息可以跨工具流转
 
@@ -102,11 +102,11 @@ StateRoot 会在智能体会话和编辑器工作台中呈现到期事项、尚�
 | **计划与依赖** | 在一个智能体中规划，在另一个中执行，跟踪前置条件、负责人、进度和完成证据。 |
 | **技能与工具** | 复用完整 Skill 包与兼容的 MCP 配置；通过委派使用某个智能体独有的原生能力。 |
 | **经验准则** | 把有用的纠正记录为共享指导，带入后续智能体会话。 |
-| **原生会话** | 将受支持的会话迁移到 Pi 或 DeepSeek Harness。在 nightly 构建中，还可以把会话交给 Claude Code，或将保留的 Claude Code 会话恢复为新的原生会话；在规定范围内恢复已保留的 Codex 会话。 |
+| **原生会话** | 将受支持的会话迁移到 Claude Code、Pi 或 DeepSeek Harness。可将保留的 Claude Code 会话恢复为新的原生会话，也可在规定范围内恢复符合条件的 Codex 会话。 |
 | **可移植项目状态** | 导出并检查包含共享知识和证据的根状态，再在别处导入或应用兼容的项目状态。 |
 | **可扩展命令** | 项目需要额外操作时，由智能体编写可执行 CLI 扩展。 |
 
-Claude Code 的会话迁移与恢复是预览能力：目前随 nightly 构建提供，进入稳定版后结束预览。迁移会写出可由 `claude --resume` 继续的会话记录；恢复会把保留的归档写成具有新会话 id 的新会话。两者都不会修改源会话。
+从 v0.2.16 起，你可以让智能体将受支持的对话迁移到 Claude Code，或将保留的归档恢复为新会话。StateRoot 会保留源会话，并提供继续新会话的命令。
 
 详情：[技能](https://stateroot.dev/docs/features/skills)、[MCP 工具](https://stateroot.dev/docs/features/mcp)、[规则](https://stateroot.dev/docs/features/rules)、[会话](https://stateroot.dev/docs/features/sessions)、[便携交换](https://stateroot.dev/docs/guides/sharing-a-project#portable-local-exchange)和 [CLI 扩展](https://stateroot.dev/docs/features/extensions)。
 
@@ -238,7 +238,7 @@ stateroot doctor
 
 如果设置提示运行环境已配置，请选择 **Yes** 重新配置。保留你正在使用的智能体选项，勾选新检测到的智能体，然后确认。这样可以刷新所选集成，无需重新设置身份或重新初始化项目。完成后，重启编程智能体以加载更新后的配置。
 
-对于下方标注为**仅限 nightly** 的集成，请用以下命令替换上面的第一条更新命令，再执行相同的 setup 和 doctor 命令：
+对于将来标注为**仅限 nightly** 的集成，请用以下命令替换上面的第一条更新命令，再执行相同的 setup 和 doctor 命令：
 
 ```bash
 stateroot self-update --tag nightly
@@ -248,7 +248,7 @@ Nightly 构建可从[滚动预览版](https://github.com/CognizTech/stateroot/re
 
 ## 支持的运行环境
 
-**钩子 + 会话记录：** Claude Code · Codex · Cursor · Kimi Code · CodeBuddy · Command Code（仅限 nightly） · OpenClaw · Hermes · Pi · DeepSeek Harness
+**钩子 + 会话记录：** Claude Code · Codex · Cursor · Kimi Code · CodeBuddy · Command Code · OpenClaw · Hermes · Pi · DeepSeek Harness
 
 **会话记录 / 委派：** OpenCode · 安装时检测到的其他运行环境
 

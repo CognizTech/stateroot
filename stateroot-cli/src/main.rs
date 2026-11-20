@@ -62,6 +62,11 @@ async fn main() -> anyhow::Result<()> {
     if let Command::Dot(args) = &cli.command {
         return commands::dot::run(args);
     }
+    if let Command::Delegate(args) = &cli.command {
+        if let Some(cli::DelegateAction::Targets { json }) = args.action {
+            return commands::delegate::targets(json);
+        }
+    }
     if let Some(project) = &cli.project {
         std::env::set_current_dir(project)
             .map_err(|err| anyhow::anyhow!("cannot select project {}: {err}", project.display()))?;

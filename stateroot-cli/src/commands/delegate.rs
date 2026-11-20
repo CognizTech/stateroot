@@ -98,6 +98,11 @@ fn save_record(path: &Path, record: &Value) -> Result<()> {
 /// Run `stateroot delegate` (spawn by default; `list` / `status` observe).
 pub fn run(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
     match &args.action {
+        Some(DelegateAction::Targets { json }) => {
+            targets(*json)?;
+            Ok(0)
+        }
+        Some(DelegateAction::Reassign { id, to, json }) => reassign(ctx, args, id, to, *json),
         Some(DelegateAction::List) => {
             list(ctx)?;
             Ok(0)
@@ -151,7 +156,6 @@ fn spawn_plan(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
     );
     if let Some((_path, existing)) = load_record(&ctx.cwd, &key) {
         let mut retry = args.clone();
-        retry.plan = None;
         retry.key = Some(key.clone());
         retry.task = existing
             .get("task")
@@ -181,30 +185,67 @@ fn spawn_plan(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
     )
     .map_err(|e| anyhow::anyhow!(e))?;
     let mut launch = args.clone();
-    launch.plan = None;
+    launch.plan = Some(plan.id.clone());
     launch.key = Some(key);
     launch.worktree = Some(worktree.to_string_lossy().to_string());
     launch.task = Some(format!(
         "Execute the plan at .stateroot/plans/{}.md. Read it first. Do not re-plan.",
         plan.id
     ));
-    // `spawn` normally prints the record before this wrapper can attach the
-    // fork metadata. Render the completed envelope ourselves instead.
-    launch.json = false;
-    launch._quiet = true;
-    let result = spawn(ctx, &launch);
-    if result.is_ok() {
-        if let Some((path, mut record)) = load_record(&ctx.cwd, launch.key.as_deref().expect("set"))
-        {
-            record["fork_id"] = json!(fork_id);
-            record["plan_id"] = json!(plan.id);
-            save_record(&path, &record)?;
-            if args.json {
-                println!("{}", serde_json::to_string_pretty(&record)?);
+    spawn(ctx, &launch)
+}
+
+pub fn targets(json_out: bool) -> Result<()> {
+    let registry = load_registry().map_err(anyhow::Error::msg)?;
+    let mut rows = Vec::new();
+    for entry in registry
+        .harnesses
+        .iter()
+        .filter(|entry| entry.delegation.mode == "cli")
+    {
+        let resolved =
+            resolve_delegation_command(&entry.delegation, binary_probe(None), cfg!(windows));
+        if json_out {
+            rows.push(json!({
+                "id": entry.id, "display": entry.display, "available": resolved.is_ok(),
+                "reason": resolved.err().map(|error| error.to_string()),
+            }));
+        } else {
+            match resolved {
+                Ok(_) => println!("{} · {} · available", entry.id, entry.display),
+                Err(error) => println!("{} · {} · {error}", entry.id, entry.display),
             }
         }
     }
-    result
+    if json_out {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "schema_version": "stateroot.delegation-targets.v1", "targets": rows,
+            }))?
+        );
+    }
+    Ok(())
+}
+
+fn reassign(ctx: &Ctx, args: &DelegateArgs, id: &str, to: &str, json_out: bool) -> Result<i32> {
+    ctx.require_project()?;
+    let (_, record) = load_record(&ctx.cwd, id)
+        .ok_or_else(|| anyhow::anyhow!("unknown or ambiguous delegation `{id}`"))?;
+    let mut launch = args.clone();
+    launch.plan = None;
+    launch.to = Some(to.to_string());
+    launch.task = record["task"].as_str().map(str::to_string);
+    launch.key = record["id"].as_str().map(str::to_string);
+    launch.worktree = record["worktree"].as_str().map(str::to_string);
+    launch.json = json_out;
+    anyhow::ensure!(launch.key.is_some(), "delegation has no record identity");
+    let prior_fork = ForkAdmission::from_record(&ctx.cwd, &record)?;
+    anyhow::ensure!(
+        prior_fork.is_none() || launch.worktree.is_some(),
+        "delegation's execution checkout is unavailable; inspect its original fork"
+    );
+    spawn_observed(ctx, &launch, None, Some(&record))
 }
 
 /// Resolve the named harness to (id, command, delegation spec) or a loud
@@ -282,7 +323,7 @@ fn key_lock(dir: &Path, record_id: &str) -> Result<stateroot_core::safe_io::Reso
 /// The spawn path: reserve `starting` with the request fingerprint under
 /// the key lock, launch the detached worker, transition to `running`.
 fn spawn(ctx: &Ctx, args: &DelegateArgs) -> Result<i32> {
-    spawn_observed(ctx, args, None)
+    spawn_observed(ctx, args, None, None)
 }
 
 /// Automatic observations use the SAME key reservation as manual delegation.
@@ -311,6 +352,7 @@ pub(crate) fn spawn_ready(
             project: &ctx.cwd,
             observed,
         }),
+        None,
     )
 }
 
@@ -396,6 +438,7 @@ fn spawn_observed(
     ctx: &Ctx,
     args: &DelegateArgs,
     automatic: Option<AutomaticLaunch<'_>>,
+    reassignment: Option<&Value>,
 ) -> Result<i32> {
     ctx.require_project()?;
     let to = args
@@ -467,12 +510,47 @@ fn spawn_observed(
     // Terminal retries skip the pid check entirely.
     let mut terminal_retry = false;
     let existing = load_record(&ctx.cwd, &record_id);
+    let reassigned_outcome = if let Some(prior) = reassignment {
+        let identity = [
+            "id",
+            "attempt",
+            "harness",
+            "task",
+            "worktree",
+            "plan_id",
+            "fork_binding",
+        ];
+        let current = existing
+            .as_ref()
+            .map(|(_, row)| row)
+            .filter(|row| {
+                identity
+                    .iter()
+                    .all(|field| row.get(*field) == prior.get(*field))
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "delegation changed before reassignment; refresh and inspect its current state"
+                )
+            })?;
+        match stateroot_core::delegation_status::interpret(current) {
+            stateroot_core::delegation_status::DelegationStatus::Terminal(outcome)
+                if matches!(outcome.as_str(), "failed" | "lost" | "timed_out") =>
+            {
+                Some(outcome)
+            }
+            stateroot_core::delegation_status::DelegationStatus::Lost => Some("lost".into()),
+            _ => anyhow::bail!("only a failed, lost or timed-out delegation can be reassigned"),
+        }
+    } else {
+        None
+    };
     if existing.is_none() && dir.join(format!("{record_id}.json")).exists() {
         anyhow::bail!("delegation {record_id} has unreadable or unsupported evidence; preserve and reconcile it before launch");
     }
     if let Some((_path, existing)) = existing {
         let prior = existing.get("fingerprint").cloned().unwrap_or(json!(null));
-        if prior != json!(null) && prior != fingerprint {
+        if reassignment.is_none() && prior != json!(null) && prior != fingerprint {
             anyhow::bail!(
                 "delegation key `{record_id}` exists with a different request — pick a new key"
             );
@@ -483,8 +561,11 @@ fn spawn_observed(
             // never authorizes another attempt, even after service restart.
             return Ok(0);
         }
-        if let Some(outcome) = existing.get("outcome").and_then(Value::as_str) {
-            if !matches!(outcome, "failed" | "lost") {
+        if let Some(outcome) = reassigned_outcome
+            .as_deref()
+            .or_else(|| existing["outcome"].as_str())
+        {
+            if reassigned_outcome.is_none() && !matches!(outcome, "failed" | "lost") {
                 anyhow::bail!(
                     "delegation key `{record_id}` already finished ({outcome}) — pick a new key"
                 );
@@ -497,6 +578,10 @@ fn spawn_observed(
                 .unwrap_or_default();
             retries.push(json!({
                 "attempt": attempt - 1,
+                "harness": existing.get("harness"),
+                "command": existing.get("command"),
+                "readiness_observation": existing.get("readiness_observation"),
+                "plan_revision": existing.get("plan_revision"),
                 "outcome": outcome,
                 "exit_code": existing.get("exit_code").cloned().unwrap_or(Value::Null),
                 "duration_ms": existing.get("duration_ms").cloned().unwrap_or(Value::Null),
@@ -533,6 +618,26 @@ fn spawn_observed(
         .as_ref()
         .map(|fork| fork.acquire(&work_dir))
         .transpose()?;
+    let fork_plan = expected_fork
+        .as_ref()
+        .and_then(|fork| fork.context.plan.as_deref());
+    let prior_plan = reassignment.and_then(|row| row["plan_id"].as_str());
+    if let Some(plan) = prior_plan {
+        anyhow::ensure!(
+            fork_plan.is_none_or(|id| id == plan),
+            "the original fork claims a different plan"
+        );
+        let (current, _) = stateroot_core::plans::load(&work_dir, plan).ok_or_else(|| {
+            anyhow::anyhow!("bound plan {plan} is unavailable in the original checkout")
+        })?;
+        let closed = matches!(current.status.as_str(), "done" | "abandoned")
+            || stateroot_core::plans::load(&ctx.cwd, plan)
+                .is_some_and(|(trunk, _)| matches!(trunk.status.as_str(), "done" | "abandoned"));
+        anyhow::ensure!(
+            !closed,
+            "plan {plan} is closed; its delegation cannot be reassigned"
+        );
+    }
 
     // Recheck the exact graph/source/assignment observation while owning the
     // existing delegation key, immediately before reserving a new attempt.
@@ -604,6 +709,9 @@ fn spawn_observed(
     if let Some(fork) = &expected_fork {
         record["fork_id"] = json!(fork.context.fork);
         record["fork_binding"] = serde_json::to_value(&fork.context)?;
+    }
+    if let Some(plan) = prior_plan.or(args.plan.as_deref()) {
+        record["plan_id"] = json!(plan);
     }
     if !retries.is_empty() {
         record["retries"] = Value::Array(retries);

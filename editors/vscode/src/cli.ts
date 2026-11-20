@@ -8,6 +8,42 @@ import {
 } from "./cliInstall";
 
 const DOCS_URL = "https://stateroot.dev/docs/getting-started/installation";
+const LEGACY_DELEGATION_TARGETS = ["claude", "codex", "kimi"].map(id => ({ id, display: id }));
+
+export interface DelegationTarget {
+  id: string;
+  display: string;
+}
+
+export interface DelegationTargets {
+  available: DelegationTarget[];
+  legacy: boolean;
+}
+
+export async function readDelegationTargets(root: string): Promise<DelegationTargets> {
+  let text: string;
+  try {
+    text = await runCli(["delegate", "targets", "--json"], root, 10_000);
+  } catch (error) {
+    if (error instanceof Error && (error as Error & { code?: number }).code === 2 &&
+        /unrecognized subcommand ['‘]targets['’]/.test(error.message)) {
+      return { available: LEGACY_DELEGATION_TARGETS, legacy: true };
+    }
+    throw error;
+  }
+  const doc = JSON.parse(text);
+  if (doc?.schema_version !== "stateroot.delegation-targets.v1" || !Array.isArray(doc.targets)) {
+    throw new Error("Unsupported delegation target report.");
+  }
+  const available: DelegationTarget[] = [];
+  for (const target of doc.targets) {
+    if (typeof target?.id !== "string" || !target.id || typeof target.display !== "string" || typeof target.available !== "boolean") {
+      throw new Error("Invalid delegation target in the CLI report.");
+    }
+    if (target.available) available.push({ id: target.id, display: target.display });
+  }
+  return { available, legacy: false };
+}
 
 /** Auto-installed path for this extension-host session (never overwrites settings). */
 let sessionCliPath: string | undefined;

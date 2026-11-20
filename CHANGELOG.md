@@ -5,6 +5,15 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+## v0.2.16 — 2026-11-20
+
+- VS Code and Cursor list the delegation targets the installed CLI can launch,
+  including Command Code where available.
+- Reassign a failed delegation in its original checkout while retaining the
+  plan, fork, and previous attempt.
+- Inspect blocked and parked handoff jobs from the workbench's Control tab.
+- Updated the built-in Skill, both CLI READMEs, and the shared editor README.
+
 - Claude Code session archives settle only on main-thread assistant turns:
   subagent traffic no longer closes a turn, so a restored archive is a
   resumable conversation rather than a copy with no main thread.

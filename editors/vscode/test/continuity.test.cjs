@@ -69,6 +69,20 @@ const ADVISORY = {
   source: "synthesis",
 };
 
+test("Control offers direct read-only inspection of boundary attention", () => {
+  const view = loadWorkbench();
+  const id = "boundary_journal_manual:parked-job";
+  const html = view.push({ tab: "control", inbox: [
+    {id, kind: "boundary_journal_manual", title: "Parked handoff job"},
+    {id: "boundary_worker_blocked:worker", kind: "boundary_worker_blocked", title: "Worker blocked"},
+  ] });
+  assert.equal((html.match(/>Inspect<\/button>/g) || []).length, 2);
+  view.panel.listeners.click({ target: { nodeType: 1, closest: () => ({
+    getAttribute: name => name === "data-act" ? "inspectBoundary" : name === "data-id" ? id : null,
+  }) } });
+  assert.deepEqual(JSON.parse(JSON.stringify(view.posted.at(-1))), { type: "inspectBoundary", id });
+});
+
 function tempProject() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "stateroot-continuity-"));
 }

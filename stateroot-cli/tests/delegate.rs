@@ -866,7 +866,27 @@ fn plan_delegation_provisions_one_claimed_fork_worktree() {
         .args(["plan", "approve", &plan_id])
         .assert()
         .success();
-    let (_bin, path) = fake_claude("#!/bin/sh\nwhile [ ! -f .go ]; do sleep 0.2; done\n");
+    let (_bin, path) = fake_isolated_bin(&[
+        (
+            "claude",
+            "#!/bin/sh\nwhile [ ! -f .go ]; do sleep 0.2; done\nexit 1\n",
+        ),
+        (
+            "command-code",
+            "#!/bin/sh\ntest -f .go || exit 1\nprintf 'done\n' > delegated.txt\n",
+        ),
+    ]);
+    let targets = stateroot(config_home.path(), user_home.path(), project.path())
+        .env("PATH", &path)
+        .args(["delegate", "targets", "--json"])
+        .assert()
+        .success();
+    let report: serde_json::Value = serde_json::from_slice(&targets.get_output().stdout).unwrap();
+    assert_eq!(report["schema_version"], "stateroot.delegation-targets.v1");
+    let rows = report["targets"].as_array().unwrap();
+    assert!(rows
+        .iter()
+        .any(|row| row["id"] == "commandcode" && row["available"] == true));
     let out = stateroot(config_home.path(), user_home.path(), project.path())
         .env("PATH", &path)
         .args(["delegate", "--plan", &plan_id, "--to", "claude", "--json"])
@@ -917,8 +937,47 @@ fn plan_delegation_provisions_one_claimed_fork_worktree() {
     )
     .expect("plan json");
     assert_eq!(active["status"], "active");
+    let record_id = record["id"].as_str().unwrap();
+    stateroot(config_home.path(), user_home.path(), project.path())
+        .env("PATH", &path)
+        .args([
+            "delegate",
+            "reassign",
+            record_id,
+            "--to",
+            "commandcode",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "only a failed, lost or timed-out delegation",
+        ));
     std::fs::write(std::path::Path::new(worktree).join(".go"), b"go").expect("release");
+    assert_eq!(wait_for_outcome(project.path(), 60)["outcome"], "failed");
+    let out = stateroot(config_home.path(), user_home.path(), project.path())
+        .env("PATH", &path)
+        .args([
+            "delegate",
+            "reassign",
+            record_id,
+            "--to",
+            "commandcode",
+            "--json",
+        ])
+        .assert()
+        .success();
+    let reassigned: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(reassigned["id"], record_id);
+    assert_eq!(reassigned["harness"], "commandcode");
+    assert_eq!(reassigned["plan_id"], plan_id);
+    assert_eq!(reassigned["fork_binding"], record["fork_binding"]);
+    assert_eq!(reassigned["worktree"], record["worktree"]);
+    assert_eq!(reassigned["retries"][0]["harness"], "claude");
     assert_eq!(wait_for_outcome(project.path(), 60)["outcome"], "completed");
+    assert_eq!(read_records(project.path()).len(), 1);
+    assert!(Path::new(worktree).join("delegated.txt").is_file());
+    assert!(!project.path().join("delegated.txt").exists());
 }
 
 #[cfg(target_os = "linux")]

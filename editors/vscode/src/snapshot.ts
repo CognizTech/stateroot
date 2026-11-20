@@ -1,6 +1,5 @@
 import * as path from "path";
 import {
-  CLI_MODE_HARNESSES,
   currentTodoListsFrom,
   listLearnings,
   listMemory,
@@ -64,8 +63,7 @@ export interface Snapshot {
   planExcerpt?: string;
   planTodos?: TodoItem[];
   todos: TodoRecord[];
-  harnesses: string[];
-  selectedHarness?: string;
+  harnesses: import("./cli").DelegationTarget[];
   delegations: Array<DelegationRecord & { status: string; closedPlan?: boolean }>;
   degradedDelegations: DelegateListReport["degraded"];
   roots: RootManifest[];
@@ -94,7 +92,7 @@ export interface Snapshot {
 
 export function snapshot(opts?: {
   selectedPlanId?: string;
-  selectedHarness?: string;
+  harnesses?: Snapshot["harnesses"];
   rootA?: string;
   rootB?: string;
   compareText?: string;
@@ -220,8 +218,7 @@ export function snapshot(opts?: {
     planExcerpt: selectedPlanId ? planExcerpt(root, selectedPlanId) : "",
     planTodos: selectedTodos?.items,
     todos,
-    harnesses: [...CLI_MODE_HARNESSES],
-    selectedHarness: opts?.selectedHarness,
+    harnesses: opts?.harnesses ?? [],
     delegations,
     degradedDelegations,
     roots,

@@ -102,11 +102,11 @@ Shared project knowledge, useful preferences and saved work carry between connec
 | **Plans and dependencies** | Plan in one agent, implement in another, and track prerequisites, ownership, progress and completion evidence. |
 | **Skills and tools** | Reuse complete Skill packages and compatible MCP configuration. Use a native capability through delegation to the agent that provides it. |
 | **Learnings** | Carry useful corrections into later agent sessions as shared guidance. |
-| **Native sessions** | Transfer supported sessions into Pi or DeepSeek Harness. In nightly builds, also hand a session to Claude Code or restore a retained Claude Code session as a new native session; recover qualified retained Codex sessions with their documented limits. |
+| **Native sessions** | Transfer supported sessions into Claude Code, Pi, or DeepSeek Harness. Restore retained Claude Code sessions as new native sessions or recover qualified Codex sessions within their documented limits. |
 | **Portable project state** | Export and inspect a retained root with shared intelligence and evidence, then import it elsewhere or apply a compatible project state. |
 | **Commands agents can extend** | Add executable CLI extensions when a project needs another operation. |
 
-Claude Code session transfer and restore are preview capabilities, available now in nightly builds until they reach a stable release. A transfer writes a resumable `claude --resume` transcript; a restore writes a retained archive back as a new session with a fresh id. Neither modifies the source session.
+Claude Code session transfer and restore are available from v0.2.16. Ask your agent to transfer a supported conversation into Claude Code or restore a retained archive as a new session. StateRoot keeps the original session and provides a resume command for the new one.
 
 Details: [Skills](https://stateroot.dev/docs/features/skills), [MCP tools](https://stateroot.dev/docs/features/mcp), [rules](https://stateroot.dev/docs/features/rules), [sessions](https://stateroot.dev/docs/features/sessions), [portable exchange](https://stateroot.dev/docs/guides/sharing-a-project#portable-local-exchange) and [CLI extensions](https://stateroot.dev/docs/features/extensions).
 
@@ -238,7 +238,7 @@ stateroot doctor
 
 If setup says the harnesses are already configured, choose **Yes** to reconfigure. Keep the agents you use selected, select the newly detected agent, and confirm. This refreshes the selected integrations without rerunning identity setup or reinitializing your projects. Restart the coding agent to load its updated configuration.
 
-For an integration marked **nightly only** below, use this update command instead of the first command above, then run the same setup and doctor commands:
+For future integrations marked **nightly only**, use this update command instead of the first command above, then run the same setup and doctor commands:
 
 ```bash
 stateroot self-update --tag nightly
@@ -248,7 +248,7 @@ Nightly builds are available from the [rolling preview release](https://github.c
 
 ## Supported harnesses
 
-**Hooks + transcripts:** Claude Code · Codex · Cursor · Kimi Code · CodeBuddy · Command Code (nightly only) · OpenClaw · Hermes · Pi · DeepSeek Harness
+**Hooks + transcripts:** Claude Code · Codex · Cursor · Kimi Code · CodeBuddy · Command Code · OpenClaw · Hermes · Pi · DeepSeek Harness
 
 **Transcripts / delegation:** OpenCode · others detected at install
 

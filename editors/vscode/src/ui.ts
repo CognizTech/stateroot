@@ -640,7 +640,7 @@ export function workbenchHtml(nonceVal: string): string {
 </div>`;
   const script = `
 const vscode = acquireVsCodeApi();
-let state = Object.assign({ tab: 'control', harnesses: ['claude','codex','kimi'] }, vscode.getState() || {});
+let state = Object.assign({ tab: 'control', harnesses: [] }, vscode.getState() || {});
 function saveView() {
   vscode.setState({ tab: state.tab, selectedPlanId: state.selectedPlanId, projectPath: state.projectPath,
     lineageOffset: state.lineageOffset, lineageAnchor: state.lineageAnchor });
@@ -650,7 +650,7 @@ window.addEventListener('message', (e) => {
   const projectChanged = data.initialized === false || (data.projectPath && state.projectPath && data.projectPath !== state.projectPath);
   const pageChanged = data.lineage && data.lineage.pagination &&
     data.lineage.pagination.offset !== (state.lineage && state.lineage.pagination && state.lineage.pagination.offset);
-  if (projectChanged) { state.lineageOffset = 0; state.lineageAnchor = undefined; }
+  if (projectChanged) { state.lineageOffset = 0; state.lineageAnchor = undefined; state.selectedHarness = undefined; }
   state = Object.assign(state, data);
   render(projectChanged || pageChanged);
   if (state.tab) saveView();
@@ -698,7 +698,8 @@ document.getElementById('panel').addEventListener('click', (event) => {
       kind: item.kind
     });
     render();
-  } else if (act === 'selectPlan') { vscode.postMessage({ type: 'selectPlan', id }); }
+  } else if (act === 'inspectBoundary') vscode.postMessage({ type: 'inspectBoundary', id });
+  else if (act === 'selectPlan') { vscode.postMessage({ type: 'selectPlan', id }); }
   else if (act === 'pickHarness') { state.selectedHarness = id; render(); }
   else if (act === 'approve') vscode.postMessage({ type: 'approvePlan', id });
   else if (act === 'delegate') vscode.postMessage({ type: 'delegatePlan', id, harness: state.selectedHarness });
@@ -878,6 +879,9 @@ function intelligencePanel() {
 function inboxActions(item, i) {
   const open = '<button data-act="jump" data-i="' + i + '">' + esc(openLabel(item)) + '</button>';
   const dismiss = '<button class="secondary" data-act="dismiss" data-id="' + esc(item.id) + '">Dismiss</button>';
+  if (item.kind === 'boundary_worker_blocked' || item.kind === 'boundary_journal_manual') {
+    return '<button data-act="inspectBoundary" data-id="' + esc(item.id) + '">Inspect</button>' + dismiss;
+  }
   if (item.kind === 'obligation_due' && item.obligationId) {
     return '<button data-act="obligationDone" data-id="' + esc(item.obligationId) + '">Done</button>' +
       '<button class="secondary" data-act="obligationSnooze" data-id="' + esc(item.obligationId) + '">Snooze 24h</button>' +
@@ -922,7 +926,7 @@ function plans() {
   }).join('') || '<div class="muted">No plans recorded.</div>';
   if (!plan) return '<div class="split"><div class="list">' + left + '</div><div></div></div>';
   const chips = (state.harnesses || []).map(h =>
-    '<button class="chip' + (state.selectedHarness === h ? ' selected' : '') + '" data-act="pickHarness" data-id="' + esc(h) + '">' + esc(h) + '</button>'
+    '<button class="chip' + (state.selectedHarness === h.id ? ' selected' : '') + '" data-act="pickHarness" data-id="' + esc(h.id) + '">' + esc(h.display) + '</button>'
   ).join('');
   const approve = plan.status === 'draft' ? '<button data-act="approve" data-id="' + esc(plan.id) + '">Approve</button>' : '';
   const done = (plan.status === 'approved' || plan.status === 'active') ? '<button data-act="planDoneEvidence" data-id="' + esc(plan.id) + '">Mark done</button>' : '';

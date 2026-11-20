@@ -56,19 +56,26 @@ The CLI also supports [native session transfer and qualified recovery](https://s
 [portable project exchange](https://stateroot.dev/docs/guides/sharing-a-project#portable-local-exchange)
 and [commands agents can extend](https://stateroot.dev/docs/features/extensions).
 Ask your agent to use these capabilities when the task calls for them.
+For example, ask your agent to resume a retained Claude Code conversation or
+to transfer a supported session into Claude Code. The agent can inspect the
+available history and help you open the new session. **Restore** in Lineage
+restores project files from a saved root.
 
 ## What the extension adds
 
 - **Activity bar glance** — the lamp in your sidebar: what's Now, what Needs
   You, the current root, and an Initialize action on empty workspaces.
 - **Workbench** (`StateRoot: Open workbench`) — the full board:
-  - **Control** — inbox and delegation state, handoffs waiting on you.
+  - **Control** — inbox and delegation state, handoffs waiting on you. Use
+    **Inspect** on a blocked or parked handoff job to see the CLI diagnosis.
   - **Plans** — review prerequisites, assigned harness, readiness and blockers, approve, assign a
-    harness, or delegate a plan into another agent.
+    harness, or delegate a plan into another agent. With a current CLI, the
+    picker lists agents that the StateRoot CLI can launch in this editor's environment,
+    including Command Code when installed. This requires StateRoot CLI v0.2.16 or later.
   - **Todos** — federated todo lists from every harness, plan-bound and
     standalone.
   - **Crew** — see parallel-ready and blocked plans from the same CLI graph,
-    reassign failed delegations, and inspect logs.
+    reassign failed delegations in their original checkout, and inspect logs.
   - **Work** — distinguish prepared merges, reconciliation and staged candidates,
     with the next CLI commands for the coordinating agent. A staged candidate
     does not by itself prove that verification passed.

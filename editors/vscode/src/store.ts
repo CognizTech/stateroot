@@ -10,7 +10,6 @@ import {
 import { tsNewer } from "./freshness";
 
 export const STORE = ".stateroot";
-export const CLI_MODE_HARNESSES = ["claude", "codex", "kimi"] as const;
 
 export function readJson<T = Record<string, unknown>>(file: string): T | undefined {
   try {
@@ -55,6 +54,8 @@ export interface DelegationRecord {
   ts?: string;
   fork_id?: string;
   plan_id?: string;
+  worktree?: string;
+  fork_binding?: unknown;
   outcome_root?: string;
   events?: Array<{ event?: string; detail?: string; ts?: string }>;
 }

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.30
+
+- Plans and Crew use the CLI's available delegation targets, including
+  Command Code when detected by the launcher. Older CLIs keep their existing
+  picker choices.
+- Reassignment preserves the original plan and fork along with attempt history.
+- Control opens the CLI diagnosis for blocked and parked handoff jobs.
+- The README describes Claude Code session continuation and Lineage restore.
+
 ## 0.2.29
 
 - Lineage shows 50 roots per page with First, Previous, Next and Last controls.
