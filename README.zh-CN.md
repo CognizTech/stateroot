@@ -102,9 +102,11 @@ StateRoot 会在智能体会话和编辑器工作台中呈现到期事项、尚�
 | **计划与依赖** | 在一个智能体中规划，在另一个中执行，跟踪前置条件、负责人、进度和完成证据。 |
 | **技能与工具** | 复用完整 Skill 包与兼容的 MCP 配置；通过委派使用某个智能体独有的原生能力。 |
 | **经验准则** | 把有用的纠正记录为共享指导，带入后续智能体会话。 |
-| **原生会话** | 将受支持的会话迁移到 Pi 或 DeepSeek Harness；在规定范围内恢复已保留的 Codex 会话。 |
+| **原生会话** | 将受支持的会话迁移到 Pi 或 DeepSeek Harness。在 nightly 构建中，还可以把会话交给 Claude Code，或将保留的 Claude Code 会话恢复为新的原生会话；在规定范围内恢复已保留的 Codex 会话。 |
 | **可移植项目状态** | 导出并检查包含共享知识和证据的根状态，再在别处导入或应用兼容的项目状态。 |
 | **可扩展命令** | 项目需要额外操作时，由智能体编写可执行 CLI 扩展。 |
+
+Claude Code 的会话迁移与恢复是预览能力：目前随 nightly 构建提供，进入稳定版后结束预览。迁移会写出可由 `claude --resume` 继续的会话记录；恢复会把保留的归档写成具有新会话 id 的新会话。两者都不会修改源会话。
 
 详情：[技能](https://stateroot.dev/docs/features/skills)、[MCP 工具](https://stateroot.dev/docs/features/mcp)、[规则](https://stateroot.dev/docs/features/rules)、[会话](https://stateroot.dev/docs/features/sessions)、[便携交换](https://stateroot.dev/docs/guides/sharing-a-project#portable-local-exchange)和 [CLI 扩展](https://stateroot.dev/docs/features/extensions)。
 
@@ -246,7 +248,7 @@ Nightly 构建可从[滚动预览版](https://github.com/CognizTech/stateroot/re
 
 ## 支持的运行环境
 
-**钩子 + 会话记录：** Claude Code · Codex · Cursor · Kimi Code · CodeBuddy · OpenClaw · Hermes · Pi · DeepSeek Harness
+**钩子 + 会话记录：** Claude Code · Codex · Cursor · Kimi Code · CodeBuddy · Command Code（仅限 nightly） · OpenClaw · Hermes · Pi · DeepSeek Harness
 
 **会话记录 / 委派：** OpenCode · 安装时检测到的其他运行环境
 
