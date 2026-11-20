@@ -1526,7 +1526,12 @@
       },
       "delegation": {
         "mode": "cli",
-        "command": "cmd",
+        "command": "command-code",
+        "command_candidates": [
+          "command-code",
+          "cmdc",
+          "cmd"
+        ],
         "pty": false,
         "print_mode": true,
         "handoff_only": false,

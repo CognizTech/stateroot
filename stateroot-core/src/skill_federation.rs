@@ -112,6 +112,12 @@ pub struct DelegationSpec {
     /// Absent/empty → the default `["{prompt}"]` passthrough.
     #[serde(default)]
     pub argv: Vec<String>,
+    /// Executable names to try, in order, when launching. A harness whose
+    /// primary name is shadowed by a system shell (`cmd` on Windows) lists the
+    /// product names first and the ambiguous one last; [`resolve_delegation_command`]
+    /// never launches a Windows system shell as a harness.
+    #[serde(default)]
+    pub command_candidates: Vec<String>,
     /// Harness-specific skill discovery policy for StateRoot-owned launches.
     #[serde(default)]
     pub skill_isolation: SkillIsolationPolicy,
@@ -191,6 +197,78 @@ pub fn binary_probe(allowlist: Option<&[String]>) -> impl Fn(&str) -> bool + '_ 
             cmd,
         ),
     }
+}
+
+/// Why a delegation launch command could not be resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DelegationCommandError {
+    /// Executable names probed, in contract order.
+    pub candidates: Vec<String>,
+    /// True when a Windows system shell resolved but was deliberately refused.
+    pub system_shell_only: bool,
+}
+
+impl std::fmt::Display for DelegationCommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.system_shell_only {
+            write!(
+                f,
+                "only a Windows system shell resolves (tried: {})",
+                self.candidates.join(", ")
+            )
+        } else {
+            write!(
+                f,
+                "no executable found on PATH (tried: {})",
+                self.candidates.join(", ")
+            )
+        }
+    }
+}
+
+impl std::error::Error for DelegationCommandError {}
+
+/// True for the native Windows shell names a harness must never be confused
+/// with. On WSL/Linux `cmd` is the Command Code shim, so this is platform-gated
+/// by the caller, never by the name alone.
+fn is_windows_system_shell(name: &str) -> bool {
+    let lowered = name.trim().to_ascii_lowercase();
+    lowered == "cmd" || lowered == "cmd.exe"
+}
+
+/// Resolve which executable to launch for a delegation spec.
+///
+/// Candidates come from `command_candidates` when declared (product names
+/// first, ambiguous ones last), else the single `command`. The first candidate
+/// that resolves on PATH wins — except a native Windows shell name while
+/// `windows` is true: `cmd.exe` always exists there and launching it would
+/// open a shell instead of the harness, so it is recorded as shell-only and
+/// the next candidate is tried.
+pub fn resolve_delegation_command(
+    spec: &DelegationSpec,
+    probe: impl Fn(&str) -> bool,
+    windows: bool,
+) -> Result<String, DelegationCommandError> {
+    let candidates: Vec<String> = if spec.command_candidates.is_empty() {
+        spec.command.iter().cloned().collect()
+    } else {
+        spec.command_candidates.clone()
+    };
+    let mut system_shell_only = false;
+    for candidate in &candidates {
+        if candidate.trim().is_empty() || !probe(candidate) {
+            continue;
+        }
+        if windows && is_windows_system_shell(candidate) {
+            system_shell_only = true;
+            continue;
+        }
+        return Ok(candidate.clone());
+    }
+    Err(DelegationCommandError {
+        candidates,
+        system_shell_only,
+    })
 }
 
 /// Detection gate (fix round R2 item 1): write configs/dirs ONLY for
@@ -2518,6 +2596,83 @@ pub fn activate_skill(
 mod tests {
     use super::*;
     use std::io::Write;
+
+    fn spec(command: &str, candidates: &[&str]) -> DelegationSpec {
+        DelegationSpec {
+            mode: "cli".into(),
+            command: Some(command.into()),
+            command_candidates: candidates.iter().map(|c| c.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn delegation_command_prefers_the_product_name_over_an_ambiguous_one() {
+        let cc = spec("command-code", &["command-code", "cmdc", "cmd"]);
+        // WSL: all three names resolve; the product name wins.
+        assert_eq!(
+            resolve_delegation_command(
+                &cc,
+                |c| matches!(c, "command-code" | "cmdc" | "cmd"),
+                false
+            )
+            .expect("resolved"),
+            "command-code"
+        );
+        // Only cmdc present: fall back to the alias.
+        assert_eq!(
+            resolve_delegation_command(&cc, |c| c == "cmdc", false).expect("resolved"),
+            "cmdc"
+        );
+        // WSL host with only the `cmd` shim: cmd is NOT a shell there.
+        assert_eq!(
+            resolve_delegation_command(&cc, |c| c == "cmd", false).expect("resolved"),
+            "cmd"
+        );
+    }
+
+    #[test]
+    fn delegation_command_never_launches_the_windows_shell() {
+        let cc = spec("command-code", &["command-code", "cmdc", "cmd"]);
+        // Native Windows with only cmd.exe: unavailable, flagged as shell-only.
+        let error = resolve_delegation_command(&cc, |c| matches!(c, "cmd" | "cmd.exe"), true)
+            .expect_err("system shell must not launch");
+        assert!(error.system_shell_only, "{error:?}");
+        assert_eq!(error.candidates, vec!["command-code", "cmdc", "cmd"]);
+        assert!(
+            error.to_string().contains("Windows system shell"),
+            "{error}"
+        );
+
+        // Native Windows with the real binary present: the shell is skipped.
+        assert_eq!(
+            resolve_delegation_command(&cc, |c| matches!(c, "cmdc" | "cmd"), true)
+                .expect("resolved"),
+            "cmdc"
+        );
+        // `cmd.exe` spelled out is refused the same way.
+        let exe = spec("command-code", &["cmd.exe"]);
+        assert!(
+            resolve_delegation_command(&exe, |_| true, true)
+                .expect_err("shell")
+                .system_shell_only
+        );
+    }
+
+    #[test]
+    fn delegation_command_missing_reports_every_candidate() {
+        let cc = spec("command-code", &["command-code", "cmdc", "cmd"]);
+        let error = resolve_delegation_command(&cc, |_| false, false).expect_err("missing");
+        assert!(!error.system_shell_only);
+        assert_eq!(error.candidates, vec!["command-code", "cmdc", "cmd"]);
+        assert!(error.to_string().contains("command-code, cmdc, cmd"));
+        // Specs without candidates keep the single-command contract.
+        let legacy = spec("claude", &[]);
+        assert_eq!(
+            resolve_delegation_command(&legacy, |c| c == "claude", true).expect("resolved"),
+            "claude"
+        );
+    }
 
     #[test]
     fn registry_loads_and_normalizes_claude() {

@@ -24,17 +24,45 @@ fn stateroot(config_home: &Path, user_home: &Path, cwd: &Path) -> Command {
 /// caller can scope the fixture's lifetime and prepend it to PATH.
 #[cfg(unix)]
 fn fake_claude(body: &str) -> (tempfile::TempDir, String) {
-    let bin = tempfile::tempdir().expect("bin");
-    let fake = bin.path().join("claude");
-    std::fs::write(&fake, body).expect("fake harness");
-    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-        .expect("chmod");
-    let path = format!(
-        "{}:{}",
-        bin.path().display(),
-        std::env::var("PATH").expect("PATH")
-    );
+    fake_bin(&[("claude", body)])
+}
+
+/// Temp `bin/` holding the named executables; returns (dir, PATH) where the
+/// fixture dir is prepended to the host PATH.
+#[cfg(unix)]
+fn fake_bin(files: &[(&str, &str)]) -> (tempfile::TempDir, String) {
+    let (bin, path) = write_fakes(files);
+    let path = format!("{}:{}", bin.path().display(), path);
     (bin, path)
+}
+
+/// Like [`fake_bin`], but the returned PATH holds ONLY the fixture plus the
+/// system tool dirs. Command Code fixtures need this: this machine has the real
+/// `command-code`/`cmdc` installed, which would otherwise satisfy the fixture.
+#[cfg(unix)]
+fn fake_isolated_bin(files: &[(&str, &str)]) -> (tempfile::TempDir, String) {
+    let (bin, _) = write_fakes(files);
+    let path = hermetic_path(bin.path());
+    (bin, path)
+}
+
+#[cfg(unix)]
+fn write_fakes(files: &[(&str, &str)]) -> (tempfile::TempDir, String) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let bin = tempfile::tempdir().expect("bin");
+    for (name, body) in files {
+        let fake = bin.path().join(name);
+        std::fs::write(&fake, body).expect("fake harness");
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    let host = std::env::var("PATH").expect("PATH");
+    (bin, host)
+}
+
+/// PATH with the fixture dir plus the system tool dirs ONLY.
+#[cfg(unix)]
+fn hermetic_path(bin: &Path) -> String {
+    format!("{}:/usr/bin:/bin", bin.display())
 }
 
 fn delegations(project: &Path) -> std::path::PathBuf {
@@ -1123,4 +1151,88 @@ fn direct_native_launch_keeps_unmanaged_command_ownership_until_exit() {
         "parked"
     );
     assert!(!checkout.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn commandcode_delegation_launches_the_product_binary_not_the_cmd_alias() {
+    let (config, user) = homes();
+    let project = tempfile::tempdir().unwrap();
+    init_project(config.path(), user.path(), project.path());
+    // Both names resolve on this host (WSL interop). The launcher must pick the
+    // product name, even though `cmd` sorts earlier on no axis but habit.
+    let body =
+        "#!/bin/sh\nprintf '%s\\n' \"$0 $*\" >> .delegate-launcher\necho 'conclusion: wired'\n";
+    let (_bin, path) = fake_isolated_bin(&[("command-code", body), ("cmd", body)]);
+
+    stateroot(config.path(), user.path(), project.path())
+        .env("PATH", &path)
+        .args([
+            "delegate",
+            "--to",
+            "commandcode",
+            "--task",
+            "launcher probe",
+        ])
+        .assert()
+        .success();
+    let record = wait_for_outcome(project.path(), 20);
+    assert_eq!(record["outcome"], "completed", "{record}");
+    let launcher = std::fs::read_to_string(project.path().join(".delegate-launcher"))
+        .expect("launcher marker");
+    assert!(
+        launcher.contains("/command-code -p --yolo"),
+        "expected the product binary, got: {launcher}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn commandcode_cmd_shim_is_accepted_where_cmd_is_not_a_system_shell() {
+    let (config, user) = homes();
+    let project = tempfile::tempdir().unwrap();
+    init_project(config.path(), user.path(), project.path());
+    // WSL hosts may expose only the `cmd` shim; there it is Command Code.
+    let body =
+        "#!/bin/sh\nprintf '%s\\n' \"$0 $*\" >> .delegate-launcher\necho 'conclusion: shim'\n";
+    let (_bin, path) = fake_isolated_bin(&[("cmd", body)]);
+
+    stateroot(config.path(), user.path(), project.path())
+        .env("PATH", &path)
+        .args(["delegate", "--to", "commandcode", "--task", "shim probe"])
+        .assert()
+        .success();
+    let record = wait_for_outcome(project.path(), 20);
+    assert_eq!(record["outcome"], "completed", "{record}");
+    let launcher = std::fs::read_to_string(project.path().join(".delegate-launcher"))
+        .expect("launcher marker");
+    assert!(launcher.contains("/cmd -p --yolo"), "{launcher}");
+}
+
+#[cfg(unix)]
+#[test]
+fn commandcode_without_any_executable_reports_unavailable() {
+    let (config, user) = homes();
+    let project = tempfile::tempdir().unwrap();
+    init_project(config.path(), user.path(), project.path());
+    // A PATH with no harness executable (system tools only, so probing works).
+    let empty = tempfile::tempdir().unwrap();
+
+    let out = stateroot(config.path(), user.path(), project.path())
+        .env("PATH", hermetic_path(empty.path()))
+        .args(["delegate", "--to", "commandcode", "--task", "nothing"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).expect("utf8");
+    assert!(stderr.contains("unavailable"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("command-code, cmdc, cmd"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        std::fs::read_dir(project.path().join(".stateroot/delegations"))
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(true),
+        "a resolution failure writes no delegation record"
+    );
 }

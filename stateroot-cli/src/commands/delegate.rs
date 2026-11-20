@@ -17,7 +17,9 @@ use anyhow::Result;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use stateroot_core::local_store::{self, now_rfc3339};
-use stateroot_core::skill_federation::{binary_probe, load_registry, normalize_harness};
+use stateroot_core::skill_federation::{
+    binary_probe, load_registry, normalize_harness, resolve_delegation_command,
+};
 
 use super::{harness, harness_cli, truncate, Ctx};
 use crate::cli::{DelegateAction, DelegateArgs};
@@ -229,20 +231,26 @@ fn resolve(
         );
     };
     let spec = &entry.delegation;
-    let Some(command) = spec.command.clone().filter(|_| spec.mode == "cli") else {
+    if spec.mode != "cli" || spec.command.is_none() {
         anyhow::bail!(
             "harness '{id}' has no CLI delegation (mode '{}') — cli-mode harnesses: {}",
             spec.mode,
             cli_mode.join(", ")
         );
-    };
-    if !binary_probe(None)(&command) {
-        anyhow::bail!(
-            "harness '{id}' binary '{command}' not found on PATH — cli-mode harnesses: {}",
-            cli_mode.join(", ")
-        );
     }
-    Ok((id, command, spec.clone()))
+    // Resolve the executable, not the bare contract name: a harness whose
+    // primary name is also a system shell (`cmd` on Windows) must launch its
+    // real binary, and a host with only the shell must read as unavailable.
+    let command =
+        resolve_delegation_command(spec, binary_probe(None), cfg!(windows)).map_err(|error| {
+            anyhow::anyhow!(
+                "harness '{id}' is unavailable: {error} — cli-mode harnesses: {}",
+                cli_mode.join(", ")
+            )
+        })?;
+    let mut resolved = spec.clone();
+    resolved.command = Some(command.clone());
+    Ok((id, command, resolved))
 }
 
 /// Idempotency-key validation (repair Phase 6B): a strict charset makes
