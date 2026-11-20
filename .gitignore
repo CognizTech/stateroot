@@ -4,6 +4,7 @@ temp/
 .claude/
 .agents/
 .cursor/
+.commandcode/
 AGENTS.md
 # Editor extension build outputs (source ships; artifacts are built)
 editors/vscode/node_modules/
