@@ -412,17 +412,28 @@ pub fn claude_extras_candidates(home: &Path) -> Vec<PathBuf> {
     paths
 }
 
-/// Hook command string — absolute `stateroot` path when `current_exe` is the real CLI.
-pub fn hook_command(quirk_id: &str, canonical: &str) -> String {
-    let suffix = format!("hook {canonical} --harness {quirk_id}");
+/// The CLI binary to embed in generated integrations: the absolute path of
+/// the running `stateroot` when this process is the real CLI, else bare
+/// `stateroot` for PATH lookup. A gateway or editor launched outside a login
+/// shell may not carry the user's PATH, so generated files should not rely on
+/// PATH alone.
+pub fn stateroot_binary() -> String {
     if let Ok(exe) = std::env::current_exe() {
         if exe.file_stem().and_then(|s| s.to_str()) == Some("stateroot") {
             if let Ok(abs) = std::fs::canonicalize(&exe) {
-                return format!("{} {suffix}", abs.display());
+                return abs.display().to_string();
             }
         }
     }
-    format!("stateroot {suffix}")
+    "stateroot".to_string()
+}
+
+/// Hook command string — absolute `stateroot` path when `current_exe` is the real CLI.
+pub fn hook_command(quirk_id: &str, canonical: &str) -> String {
+    format!(
+        "{} hook {canonical} --harness {quirk_id}",
+        stateroot_binary()
+    )
 }
 
 #[cfg(test)]

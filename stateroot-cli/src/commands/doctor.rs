@@ -92,22 +92,19 @@ pub async fn run(ctx: &Ctx, json_out: bool) -> anyhow::Result<i32> {
             hard: false,
             repair: (!handoff_valid).then(|| "stateroot handoff repair".to_string()),
         });
-        let auto_skip = root.join("local/automatic-snapshot-skip.json");
-        if let Ok(text) = std::fs::read_to_string(&auto_skip) {
-            if let Ok(value) = serde_json::from_str::<Value>(&text) {
-                let at = value.get("at").and_then(Value::as_str).unwrap_or("");
-                let detail = value
-                    .get("detail")
-                    .and_then(Value::as_str)
-                    .unwrap_or("last automatic snapshot exceeded its scan budget");
-                checks.push(Check {
-                    label: "automatic snapshot".into(),
-                    ok: false,
-                    detail: format!("{detail} (skipped at {at}; clears after the next successful automatic snapshot)"),
-                    hard: false,
-                    repair: None,
-                });
-            }
+        let snapshot_issue = match stateroot_core::roots::pending_snapshot(&ctx.cwd) {
+            Ok(None) => None,
+            Ok(Some(record)) => Some(format!("pending since {}: {}", record.at, record.detail)),
+            Err(err) => Some(format!("pending record unreadable: {err}")),
+        };
+        if let Some(detail) = snapshot_issue {
+            checks.push(Check {
+                label: "automatic snapshot".into(),
+                ok: false,
+                detail: format!("{detail}. The last restorable root may omit recent edits."),
+                hard: false,
+                repair: Some("stateroot snap".into()),
+            });
         }
         // Common generated directories that are large and NOT excluded are
         // the usual cause of a blown automatic-snapshot budget. Entries AND

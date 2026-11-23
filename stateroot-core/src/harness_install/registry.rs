@@ -22,6 +22,9 @@ pub enum McpShape {
     /// `- insert: [{id, name, config}]` patch entry per server, loaded as an
     /// `@deepseek-ai/dsh-mcp-client` plugin instance (stdio or streamable-http).
     CordisPatch,
+    /// OpenClaw: nested `mcp.servers` inside the shared `openclaw.json`
+    /// (same file as plugins/hooks/gateway, so writes are surgical).
+    OpenClawMcpServers,
 }
 
 /// One MCP registration target.
@@ -163,11 +166,13 @@ impl DigestDeliveryPolicy {
             },
             "openclaw" => Self {
                 primary_event: "user_prompt_submit",
-                session_start_prints: true,
+                // The plugin discards session-start stdout outright, so a
+                // print there can only burn the digest build for nothing.
+                session_start_prints: false,
                 session_start_marks: false,
                 prompt_submit_injects: true,
                 tier: DeliveryTier::Automatic,
-                note: "before_prompt_build pulls digest; session_start stdout is discarded",
+                note: "before_prompt_build prepends the digest; the plugin sends the host/launch working directory and session key",
             },
             "grok" => Self {
                 primary_event: "session_start",
@@ -537,7 +542,12 @@ const OPENCLAW_EVENTS: &[(&str, &str)] = &[
     ("before_prompt_build", "user_prompt_submit"),
     ("after_tool_call", "post_tool_use"),
     ("before_compaction", "pre_compact"),
+    // after_compaction is observe-only in the host, so it arms the next
+    // prompt rather than injecting here (`compact_injection` stays false).
+    ("after_compaction", "post_compaction"),
     ("agent_end", "stop"),
+    ("subagent_spawned", "subagent_start"),
+    ("subagent_ended", "subagent_stop"),
 ];
 
 const TIER_B_EVENTS: &[(&str, &str)] = &[
@@ -777,7 +787,10 @@ pub const ADAPTERS: &[HarnessQuirk] = &[
         detect: &[".openclaw"],
         detect_cmds: &["openclaw"],
         instruction_file: None,
-        mcp: None,
+        mcp: Some(McpTarget {
+            path: ".openclaw/openclaw.json",
+            shape: McpShape::OpenClawMcpServers,
+        }),
         hooks: Some(HookTarget {
             // OpenClaw discovers global plugins from ~/.openclaw/extensions/
             // (NOT plugins/ — that path is invisible to the loader).

@@ -976,6 +976,7 @@ fn kimi_text(message: &Value) -> String {
 pub(crate) fn canonical_from_openclaw(
     events: &[Value],
     source_path: &Path,
+    session_id_hint: Option<&str>,
     project_dir: &Path,
 ) -> Option<CanonicalSession> {
     let mut cwd = String::new();
@@ -991,11 +992,15 @@ pub(crate) fn canonical_from_openclaw(
         }
     }
     if session_id.is_empty() {
-        session_id = source_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown")
-            .to_string();
+        session_id = session_id_hint
+            .map(str::to_string)
+            .or_else(|| {
+                source_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "unknown".to_string());
     }
     if !transcripts::cwd_matches(&cwd, project_dir) {
         return None;
@@ -1649,8 +1654,9 @@ mod tests {
             json!({"type":"custom","id":"cu","parentId":"bs","timestamp":"2026-07-10T09:00:07Z","customType":"x","data":{"k":1}}),
             json!({"id":"m5","parentId":"bs","timestamp":"2026-07-10T09:00:08Z","message":{"role":"user","content":"legacy untyped"}}),
         ];
-        let session = canonical_from_openclaw(&events, Path::new("/x/oc-1.jsonl"), project.path())
-            .expect("session");
+        let session =
+            canonical_from_openclaw(&events, Path::new("/x/oc-1.jsonl"), None, project.path())
+                .expect("session");
         assert_eq!(session.session_id, "oc-1");
         assert_eq!(
             kinds(&session),

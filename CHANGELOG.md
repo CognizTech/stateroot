@@ -5,6 +5,23 @@ StateRoot is pre-1.0 and milestones land as minor versions.
 
 ## Unreleased
 
+- OpenClaw integration follows the current host: the generated plugin sends
+  the host or launch working directory explicitly (a general-purpose agent
+  outside a project keeps the identity-only path), forwards the session key
+  so delivery is per-conversation, and carries real tool, compaction,
+  turn-end and subagent payloads. Installation now grants
+  `hooks.allowConversationAccess` and raises the hook budgets a first delivery
+  legitimately needs. OpenClaw session import and summary readers use the
+  SQLite transcript store as well as legacy JSONL. OpenClaw is an MCP
+  federation target: pooled servers live under `mcp.servers` in the shared
+  `openclaw.json`, written surgically so plugins, hooks and gateway settings
+  survive (and `stateroot install` registers its own server there).
+- Preserve learning candidates through failed promotion or rejection writes.
+  Interrupted publication can be retried without duplicating the saved result.
+- Surface pending file snapshots in checkpoint output, status, doctor and the
+  agent digest. The continuity worker retries capture of the current checkout
+  with a longer, bounded scan.
+
 ## v0.2.16 — 2026-11-20
 
 - VS Code and Cursor list the delegation targets the installed CLI can launch,

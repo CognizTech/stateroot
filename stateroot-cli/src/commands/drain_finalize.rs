@@ -25,12 +25,14 @@ pub fn kick(project_dir: &Path) {
     if cfg!(test) || std::env::var_os("STATEROOT_TEST_CMD_PROBES").is_some() {
         return;
     }
-    if journal::due(project_dir).is_empty() {
-        return;
-    }
-    let worker = journal_worker::inspect(project_dir);
-    if worker.blocked() || worker.state == journal_worker::State::Busy {
-        return;
+    if !stateroot_core::roots::has_due_snapshot_retry(project_dir) {
+        if journal::due(project_dir).is_empty() {
+            return;
+        }
+        let worker = journal_worker::inspect(project_dir);
+        if worker.blocked() || worker.state == journal_worker::State::Busy {
+            return;
+        }
     }
     let log = local_store::root(project_dir).join(local_store::FINALIZE_LOG_PATH);
     if let Err(err) = detached::spawn_self(&["_drain-finalize".to_string()], project_dir, &log) {
@@ -63,9 +65,15 @@ pub async fn run(ctx: &Ctx) -> Result<()> {
 /// advance every due job one phase at a time until none are due. Safe to
 /// call from tests.
 pub async fn run_drain(ctx: &Ctx) -> Result<()> {
-    let Some(_lock) = journal_worker::try_claim(&ctx.cwd)? else {
-        tracing::debug!("another worker or lock transition is active");
-        return Ok(());
+    let _lock = match journal_worker::try_claim(&ctx.cwd) {
+        Ok(Some(lock)) => lock,
+        unavailable => {
+            // Current file capture has its own durable claim and uses the
+            // ordinary root publisher. It need not own a historical handoff.
+            catch_up_snapshot(ctx);
+            unavailable?;
+            return Ok(());
+        }
     };
     let mut unsaved = std::collections::BTreeMap::new();
     loop {
@@ -94,6 +102,9 @@ pub async fn run_drain(ctx: &Ctx) -> Result<()> {
             }
         }
     }
+    // A deferred scan describes the checkout as it exists now. Finish the
+    // original boundary jobs first so their receipts keep their own timing.
+    catch_up_snapshot(ctx);
     if let Some((id, error)) = unsaved.first_key_value() {
         anyhow::bail!(
             "{} boundary job(s) could not persist progress; {id}: {error}",
@@ -101,6 +112,15 @@ pub async fn run_drain(ctx: &Ctx) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn catch_up_snapshot(ctx: &Ctx) {
+    if stateroot_core::roots::has_due_snapshot_retry(&ctx.cwd) {
+        if let Err(err) = stateroot_core::roots::retry_pending_snapshot(&ctx.cwd) {
+            tracing::warn!(%err, "deferred snapshot remains pending");
+        }
+        super::reconcile_quiet(ctx);
+    }
 }
 
 /// Explicit recovery advances only the requested retained job.
@@ -166,8 +186,8 @@ async fn advance_one(ctx: &Ctx, job: &mut BoundaryJob) -> Result<()> {
             job.snapshot_timing = format!("delayed automatic snapshot at {}; may include post-boundary edits; boundary_source_root is the prior verified state", now_rfc3339());
             // 1. Snapshot FIRST — the boundary's handoff must reference the
             //    root produced for this boundary. Budget exhaustion skips
-            //    only the automatic root (recorded by the engine and surfaced
-            //    by `doctor`): the boundary still finalizes against the
+            //    only the automatic root (recorded by the engine for later
+            //    recovery): the boundary still finalizes against the
             //    current tip instead of failing the whole finalize job.
             let home = stateroot_core::harness_install::home_dir().map_err(anyhow::Error::msg)?;
             let components = super::roots::integration_environment(ctx, &home);
@@ -188,11 +208,10 @@ async fn advance_one(ctx: &Ctx, job: &mut BoundaryJob) -> Result<()> {
             ) {
                 Ok(stateroot_core::roots::SnapOutcome::Created(manifest, _)) => manifest.id,
                 Ok(stateroot_core::roots::SnapOutcome::Unchanged { root }) => root,
-                Err(stateroot_core::roots::RootsError::SnapshotBudget(_)) => {
-                    job.snapshot_timing.push_str(
-                        "; snapshot skipped: scan budget; root coverage excludes unsnapped edits",
-                    );
-                    job.last_error = Some("automatic snapshot skipped: scan budget".to_string());
+                Err(stateroot_core::roots::RootsError::SnapshotBudget(detail)) => {
+                    job.snapshot_timing
+                        .push_str("; snapshot skipped; root coverage excludes unsnapped edits");
+                    job.last_error = Some(format!("automatic snapshot skipped: {detail}"));
                     stateroot_core::roots::latest_root(&ctx.cwd)?
                         .unwrap_or_else(|| "none".to_string())
                 }

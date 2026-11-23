@@ -354,6 +354,106 @@ pub fn read_named_mcp_servers_json(
         .unwrap_or_default())
 }
 
+/// OpenClaw keeps MCP servers inside the shared `openclaw.json` at
+/// `mcp.servers`. That file also carries plugin, hook and gateway settings,
+/// so this path is surgical-only: a whole-file `.bak` restore on uninstall
+/// would resurrect unrelated settings. Foreign servers and keys survive.
+pub fn merge_openclaw_mcp_entry(
+    path: &Path,
+    server_name: &str,
+    entry: &serde_json::Value,
+) -> Result<bool, HarnessError> {
+    let (mut doc, existed) = if path.is_file() {
+        let text = std::fs::read_to_string(path).map_err(io_err(path))?;
+        if text.trim().is_empty() {
+            (json!({}), true)
+        } else {
+            let parsed: serde_json::Value = match serde_json::from_str(&text) {
+                Ok(parsed) => parsed,
+                Err(source) => {
+                    return Err(HarnessError::Invalid(format!(
+                        "{} is not valid JSON — refusing to modify ({source})",
+                        path.display()
+                    )))
+                }
+            };
+            (parsed, true)
+        }
+    } else {
+        (json!({}), false)
+    };
+
+    if existed {
+        let bak = bak_path(path);
+        if !bak.exists() {
+            std::fs::copy(path, &bak).map_err(io_err(&bak))?;
+        }
+    }
+
+    let root = doc.as_object_mut().ok_or_else(|| {
+        HarnessError::Invalid(format!(
+            "{}: top-level JSON is not an object",
+            path.display()
+        ))
+    })?;
+    let mcp = root.entry("mcp".to_string()).or_insert_with(|| json!({}));
+    let mcp = mcp.as_object_mut().ok_or_else(|| {
+        HarnessError::Invalid(format!("{}: `mcp` is not an object", path.display()))
+    })?;
+    let servers = mcp
+        .entry("servers".to_string())
+        .or_insert_with(|| json!({}));
+    let servers = servers.as_object_mut().ok_or_else(|| {
+        HarnessError::Invalid(format!(
+            "{}: `mcp.servers` is not an object",
+            path.display()
+        ))
+    })?;
+    if servers.get(server_name) == Some(entry) {
+        return Ok(false);
+    }
+    servers.insert(server_name.to_string(), entry.clone());
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(io_err(parent))?;
+    }
+    let text = serde_json::to_string_pretty(&doc)?;
+    std::fs::write(
+        path,
+        format!(
+            "{text}
+"
+        ),
+    )
+    .map_err(io_err(path))?;
+    Ok(true)
+}
+
+/// Read the `mcp.servers` map from `openclaw.json`.
+pub fn read_openclaw_mcp_servers(
+    path: &Path,
+) -> Result<serde_json::Map<String, serde_json::Value>, HarnessError> {
+    if !path.is_file() {
+        return Ok(serde_json::Map::new());
+    }
+    let text = std::fs::read_to_string(path).map_err(io_err(path))?;
+    if text.trim().is_empty() {
+        return Ok(serde_json::Map::new());
+    }
+    let doc: serde_json::Value = serde_json::from_str(&text).map_err(|source| {
+        HarnessError::Invalid(format!(
+            "{} is not valid JSON — refusing to read ({source})",
+            path.display()
+        ))
+    })?;
+    Ok(doc
+        .get("mcp")
+        .and_then(|mcp| mcp.get("servers"))
+        .and_then(|servers| servers.as_object())
+        .cloned()
+        .unwrap_or_default())
+}
+
 /// Merge `entry` into a YAML config under the `mcp_servers` mapping
 /// (hermes `~/.hermes/config.yaml`). Read-modify-write with a `.bak` backup
 /// on first modification; foreign keys are preserved; the file is created
@@ -499,13 +599,33 @@ pub fn install_quirk_mcp(
             }
             Ok(vec![line])
         }
+        registry::McpShape::OpenClawMcpServers => {
+            let pre_existed = path.is_file();
+            let changed = merge_openclaw_mcp_entry(&path, "stateroot", &mcp_entry())?;
+            let mut line = format!(
+                "MCP {} → {} (`mcp.servers`)",
+                if changed {
+                    "registered"
+                } else {
+                    "already registered"
+                },
+                path.display()
+            );
+            if changed && pre_existed {
+                line.push_str(&format!(
+                    " (pristine original at {})",
+                    bak_path(&path).display()
+                ));
+            }
+            Ok(vec![line])
+        }
         registry::McpShape::McpServersJson | registry::McpShape::ServersJson => {
             let root_key = match target.shape {
                 registry::McpShape::McpServersJson => "mcpServers",
                 registry::McpShape::ServersJson => "servers",
-                registry::McpShape::YamlMcpServers | registry::McpShape::CordisPatch => {
-                    unreachable!()
-                }
+                registry::McpShape::YamlMcpServers
+                | registry::McpShape::CordisPatch
+                | registry::McpShape::OpenClawMcpServers => unreachable!(),
             };
             let changed = merge_mcp_entry_at(&path, root_key, &mcp_entry())?;
             Ok(vec![format!(
@@ -674,6 +794,63 @@ fn uninstall_json_mcp_entry_at(path: &Path, root_key: &str) -> Result<bool, Harn
     Ok(removed)
 }
 
+/// Remove only `mcp.servers.stateroot` from `openclaw.json`; prune the empty
+/// containers but leave every other setting (plugins, hooks, gateway, foreign
+/// MCP servers) untouched. No `.bak` restore for this shared file.
+fn uninstall_openclaw_mcp_entry(path: &Path) -> Result<bool, HarnessError> {
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let text = std::fs::read_to_string(path).map_err(io_err(path))?;
+    if text.trim().is_empty() {
+        return Ok(false);
+    }
+    let mut doc: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(doc) => doc,
+        Err(source) => {
+            return Err(HarnessError::Invalid(format!(
+                "{} is not valid JSON — leaving it alone ({source})",
+                path.display()
+            )))
+        }
+    };
+    let removed = doc
+        .get_mut("mcp")
+        .and_then(|mcp| mcp.get_mut("servers"))
+        .and_then(|servers| servers.as_object_mut())
+        .map(|servers| servers.remove("stateroot").is_some())
+        .unwrap_or(false);
+    if !removed {
+        return Ok(false);
+    }
+    // Prune containers this removal emptied; anything still populated stays.
+    if let Some(mcp) = doc.get_mut("mcp").and_then(|m| m.as_object_mut()) {
+        let empty_servers = mcp
+            .get("servers")
+            .and_then(|servers| servers.as_object())
+            .map(|servers| servers.is_empty())
+            .unwrap_or(false);
+        if empty_servers {
+            mcp.remove("servers");
+        }
+        if mcp.is_empty() {
+            if let Some(root) = doc.as_object_mut() {
+                root.remove("mcp");
+            }
+        }
+    }
+    let text = serde_json::to_string_pretty(&doc)?;
+    std::fs::write(
+        path,
+        format!(
+            "{text}
+"
+        ),
+    )
+    .map_err(io_err(path))?;
+    Ok(true)
+}
+
 fn uninstall_yaml_mcp_entry(path: &Path) -> Result<bool, HarnessError> {
     // Surgical-only for the operator-SHARED YAML config: unlike the JSON MCP
     // files, hermes `config.yaml` also carries the shell-hooks block and
@@ -728,6 +905,7 @@ pub fn uninstall_quirk_mcp(
             registry::McpShape::McpServersJson => uninstall_json_mcp_entry_at(&path, "mcpServers"),
             registry::McpShape::ServersJson => uninstall_json_mcp_entry_at(&path, "servers"),
             registry::McpShape::YamlMcpServers => uninstall_yaml_mcp_entry(&path),
+            registry::McpShape::OpenClawMcpServers => uninstall_openclaw_mcp_entry(&path),
             registry::McpShape::CordisPatch => {
                 // The home patch block is a unit: hooks + MCP leave together.
                 // `stateroot uninstall` removes hooks first, so a second call
@@ -1274,5 +1452,53 @@ mod tests {
         let text = std::fs::read_to_string(home.path().join(".copilot/agents/StateRoot.agent.md"))
             .expect("agent file v2");
         assert!(text.contains("V2 Persona"), "{text}");
+    }
+    #[test]
+    fn openclaw_mcp_merge_is_surgical_and_preserves_shared_config() {
+        let home = tempfile::tempdir().expect("home");
+        let path = home.path().join(".openclaw/openclaw.json");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+        std::fs::write(
+            &path,
+            r#"{"plugins":{"entries":{"stateroot":{"enabled":true}}},"gateway":{"port":1234},"mcp":{"servers":{"foreign":{"command":"foreign-mcp"}}}}"#,
+        )
+        .expect("config");
+
+        let entry = json!({"command": "stateroot", "args": ["mcp-stdio"]});
+        assert!(merge_openclaw_mcp_entry(&path, "stateroot", &entry).expect("merge"));
+        assert!(!merge_openclaw_mcp_entry(&path, "stateroot", &entry).expect("idempotent"));
+
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+        assert_eq!(
+            doc["plugins"]["entries"]["stateroot"]["enabled"],
+            json!(true)
+        );
+        assert_eq!(doc["gateway"]["port"], json!(1234));
+        assert_eq!(
+            doc["mcp"]["servers"]["foreign"]["command"],
+            json!("foreign-mcp")
+        );
+        assert_eq!(doc["mcp"]["servers"]["stateroot"], entry.clone());
+
+        let map = read_openclaw_mcp_servers(&path).expect("read servers");
+        assert_eq!(map.len(), 2);
+        assert!(map.contains_key("stateroot"));
+
+        assert!(uninstall_openclaw_mcp_entry(&path).expect("uninstall"));
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read back"))
+                .expect("json back");
+        assert!(doc["mcp"]["servers"].get("stateroot").is_none());
+        assert_eq!(
+            doc["mcp"]["servers"]["foreign"]["command"],
+            json!("foreign-mcp")
+        );
+        assert_eq!(
+            doc["plugins"]["entries"]["stateroot"]["enabled"],
+            json!(true)
+        );
+        assert_eq!(doc["gateway"]["port"], json!(1234));
+        assert!(!uninstall_openclaw_mcp_entry(&path).expect("no-op"));
     }
 }

@@ -210,7 +210,9 @@ fn recent_file_bundle(
             path,
             project,
         ),
-        "openclaw" => crate::sessions::extract::canonical_from_openclaw(&events, path, project),
+        "openclaw" => {
+            crate::sessions::extract::canonical_from_openclaw(&events, path, None, project)
+        }
         _ => None,
     }
     .ok_or_else(|| invalid("native session identity/format unavailable in bounded source"))?;

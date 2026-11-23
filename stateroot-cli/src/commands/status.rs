@@ -130,6 +130,7 @@ pub fn run(ctx: &Ctx, json_out: bool) -> anyhow::Result<()> {
     let queue = stateroot_core::finalize_journal::summary(&jobs);
     let worker = stateroot_core::safe_io::journal_worker::inspect(&ctx.cwd);
     let latest_root = stateroot_core::roots::latest_root(&ctx.cwd).ok().flatten();
+    let pending_snapshot = stateroot_core::roots::pending_snapshot(&ctx.cwd);
     let advisory = assessment
         .as_ref()
         .and_then(|a| stateroot_core::continuity::current_advisory(&ctx.cwd, a));
@@ -151,6 +152,8 @@ pub fn run(ctx: &Ctx, json_out: bool) -> anyhow::Result<()> {
             "generated_at": now_rfc3339(),
             "project": { "name": project.name, "project_id": project.project_id },
             "root": latest_root,
+            "pending_snapshot": pending_snapshot.as_ref().ok().and_then(Option::as_ref),
+            "pending_snapshot_error": pending_snapshot.as_ref().err().map(ToString::to_string),
             "storage_lifecycle": storage_lifecycle,
             "handoff": { "summary": brief.handoff_line, "stale": brief.handoff_stale },
             "plan": { "summary": brief.plan_line, "directive": brief.plan_directive },
@@ -183,6 +186,13 @@ pub fn run(ctx: &Ctx, json_out: bool) -> anyhow::Result<()> {
         }
         if let Some(root) = &latest_root {
             println!("root: {}", &root[..12.min(root.len())]);
+        }
+        if assessment.is_none() {
+            match &pending_snapshot {
+                Ok(Some(record)) => println!("snapshot pending: {}", record.detail),
+                Err(err) => println!("snapshot coverage unknown: {err}"),
+                Ok(None) => {}
+            }
         }
         println!(
             "handoff: {}{}",

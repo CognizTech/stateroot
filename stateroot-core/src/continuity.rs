@@ -869,6 +869,18 @@ pub fn assess(
         }
     }
 
+    let snapshot_issue = match crate::roots::pending_snapshot(project_dir) {
+        Ok(None) => None,
+        Ok(Some(record)) => Some(("Project snapshot pending", record.detail)),
+        Err(err) => Some(("Project snapshot coverage unknown", err.to_string())),
+    };
+    if let Some((title, detail)) = snapshot_issue {
+        let mut item = AttentionItem::new("snapshot_pending", 20, "checkout", title.into());
+        item.detail = format!("The last restorable root may omit recent edits. {detail}");
+        item.action = "stateroot snap (capture the current checkout now)".into();
+        attention.push(item);
+    }
+
     // 7. Boundary-journal jobs parked for manual attention.
     let jobs = crate::finalize_journal::load_all(project_dir);
     let queue = crate::finalize_journal::summary(&jobs);

@@ -420,9 +420,12 @@ export function wikiPagePath(root: string, rel: string): string {
 
 export function listLearnings(root: string): LearningRecord[] {
   const dir = learningsDir(root);
+  const candidates = readLearningDir(path.join(dir, "_candidates"), true);
+  const published = readLearningDir(dir, false);
+  const publishedIds = new Set(published.map(row => row.id));
   const rows = [
-    ...readLearningDir(dir, false),
-    ...readLearningDir(path.join(dir, "_candidates"), true),
+    ...published.filter(row => row.category !== "_rejected"),
+    ...candidates.filter(row => !publishedIds.has(row.id)),
   ].filter((row) => row.scope === "project" || !row.scope);
   rows.sort((a, b) => {
     const rank = learningStatusRank(a.status) - learningStatusRank(b.status);
@@ -448,7 +451,8 @@ function learningStatusRank(status: string): number {
 function readLearningDir(dir: string, candidates: boolean): LearningRecord[] {
   let names: string[] = [];
   try {
-    names = fs.readdirSync(dir).filter((name) => name.endsWith(".md") && !name.startsWith("_"));
+    names = fs.readdirSync(dir).filter(name => name.endsWith(".md") &&
+      (!name.startsWith("_") || (!candidates && name === "_rejected.md")));
   } catch {
     return [];
   }

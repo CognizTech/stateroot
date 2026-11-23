@@ -98,6 +98,12 @@ After completing ANY step that changes project state (files written, decisions m
 2. keep the note specific: what changed, why, and what it unblocks
 3. checkpoint the finished step BEFORE starting the next one; never batch several finished steps into one checkpoint
 
+If a checkpoint reports **snapshot pending**, its note is saved and the last
+restorable root may omit recent edits. Check `stateroot status` or the digest's
+attention section. StateRoot retries the current checkout in the background.
+Use `stateroot snap` when you need a retained root immediately. A later capture
+has its own timing and earlier handoffs keep their original root references.
+
 ### 3) Before additions -> audit and reuse
 
 Before a non-trivial approach, consult retained findings and failed approaches (`scripts/search.sh "failed approach <topic>"` or the current handoff). Explain how a retry differs. Follow the [scoped audit and evidence reuse procedure](references/protocol.md#scoped-audit-and-evidence-reuse): trace existing owners and real producers/consumers before proposing additions; repair causes, remove superseded mechanisms, and evolve tests with the accepted contract. Reuse valid findings after checking their dependencies and assumptions. Scale investigation and checks to the change; record evidence and token/runtime/rework cost through existing checkpoints and handoffs. Preserve product capability and necessary compatibility boundaries.

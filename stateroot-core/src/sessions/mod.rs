@@ -659,11 +659,26 @@ pub fn import_from_readers_filtered(
 
     if harness.is_none_or(|h| h == "openclaw") {
         for root in openclaw::store_roots(home) {
+            // Current store first: OpenClaw persists full session events in
+            // SQLite; legacy JSONL files are history and may lack new turns.
+            for db_path in openclaw::sqlite_stores_in(&root) {
+                for (session_id, events) in openclaw::sessions_from_db(&db_path) {
+                    if let Some(session) = extract::canonical_from_openclaw(
+                        &events,
+                        &db_path,
+                        Some(&session_id),
+                        project_dir,
+                    ) {
+                        import_one(session, &mut report);
+                    }
+                }
+            }
             for file in openclaw::session_files_in(&root) {
                 let Some(events) = openclaw::parse_session_file(&file) else {
                     continue;
                 };
-                if let Some(session) = extract::canonical_from_openclaw(&events, &file, project_dir)
+                if let Some(session) =
+                    extract::canonical_from_openclaw(&events, &file, None, project_dir)
                 {
                     import_one(session, &mut report);
                 }

@@ -63,6 +63,68 @@ fn hook_event(
 }
 
 #[test]
+fn skipped_checkpoint_surfaces_coverage_and_worker_recovers_current_files() {
+    let (config_home, user_home) = homes();
+    let project = tempfile::tempdir().unwrap();
+    let checkout = project.path();
+    init_project(config_home.path(), user_home.path(), checkout);
+    let cli = || stateroot(config_home.path(), user_home.path(), checkout);
+    cli().arg("snap").assert().success();
+    let previous = stateroot_core::roots::latest_root(checkout)
+        .unwrap()
+        .unwrap();
+    std::fs::write(checkout.join("work.txt"), "worker captured this").unwrap();
+    cli()
+        .env("STATEROOT_TEST_AUTO_SNAPSHOT_ENTRY_LIMIT", "1")
+        .args([
+            "checkpoint",
+            "--note",
+            "record despite the foreground scan limit",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("snapshot pending"));
+    let output = cli().args(["status", "--json"]).assert().success();
+    let status: serde_json::Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
+    assert_eq!(status["root"], previous);
+    assert!(status["pending_snapshot"]["detail"].is_string());
+    assert!(status["continuity"]["attention"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["kind"] == "snapshot_pending"));
+
+    // The current checkout can catch up while a different worker owns the
+    // historical handoff queue.
+    let _owner = stateroot_core::safe_io::journal_worker::claim(checkout).unwrap();
+    cli().arg("_drain-finalize").assert().success();
+    let output = cli().args(["status", "--json"]).assert().success();
+    let status: serde_json::Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
+    assert_ne!(status["root"], previous);
+    assert!(status["pending_snapshot"].is_null());
+    assert!(status["continuity"]["attention"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|item| item["kind"] != "snapshot_pending"));
+    let repo = git2::Repository::open(checkout).unwrap();
+    let commit = repo
+        .find_reference("refs/stateroot/latest")
+        .unwrap()
+        .peel_to_commit()
+        .unwrap();
+    let file = commit
+        .tree()
+        .unwrap()
+        .get_path(Path::new("work.txt"))
+        .unwrap();
+    assert_eq!(
+        repo.find_blob(file.id()).unwrap().content(),
+        b"worker captured this"
+    );
+}
+
+#[test]
 fn inspection_lists_every_retained_job_without_advancing_or_rewriting() {
     use stateroot_core::finalize_journal as journal;
     let (config_home, user_home) = homes();

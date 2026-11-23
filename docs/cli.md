@@ -325,6 +325,21 @@ delegation preserves native breakaway behavior and remains unmanaged;
 short-lived command-helper qualification is a separate supported envelope.
 Only observed managed entry points carry these ownership guarantees.
 
+## Checkpoints and pending snapshots
+
+A checkpoint records its note even when automatic file capture runs out of
+time or encounters a filesystem error. In that case it reports **snapshot
+pending**. `status --json` exposes the pending record beside the last retained
+root, and `doctor` and the agent digest explain that the root may omit newer files.
+
+StateRoot's existing background worker retries a bounded scan of the current
+checkout. A scan that reaches its budget keeps the blobs it already validated
+in the local cache. The retry still checks the full tree before publishing.
+Failed background attempts wait five minutes before another retry.
+A successful capture clears the pending record it observed. Run `stateroot snap`
+when an immediate, explicit snapshot is needed. The later capture gets its own
+root and timing, while earlier handoffs retain the roots originally attached to them.
+
 ## `stateroot log` — bounded lineage reads
 
 Without paging flags, `log` and `log --json` retain their complete existing output.

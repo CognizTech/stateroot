@@ -38,7 +38,7 @@ pub fn run_with_actor(
             println!("checkpoint recorded");
         }
         Err(err) => {
-            println!("checkpoint recorded");
+            println!("checkpoint recorded · snapshot pending");
             eprintln!("auto-snap skipped: {err}");
         }
     }
@@ -47,6 +47,7 @@ pub fn run_with_actor(
         println!("{footer}");
     }
     super::reconcile_quiet(ctx);
+    super::drain_finalize::kick(&ctx.cwd);
     Ok(())
 }
 

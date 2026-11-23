@@ -54,6 +54,9 @@ pub const MERGE_CLEANUP_BUDGET: Duration = Duration::from_secs(5);
 pub const AUTO_SNAPSHOT_TIME_BUDGET: Duration = Duration::from_secs(10);
 pub const AUTO_SNAPSHOT_ENTRY_LIMIT: u64 = 100_000;
 pub const AUTO_SNAPSHOT_BYTE_LIMIT: u64 = 512 * 1024 * 1024;
+// Allow time for both the capture and its confirming scan on large checkouts.
+const DEFERRED_SNAPSHOT_TIME_BUDGET: Duration = Duration::from_secs(90);
+const SNAPSHOT_RETRY_DELAY: chrono::TimeDelta = chrono::TimeDelta::minutes(5);
 
 #[cfg(test)]
 thread_local! {
@@ -504,15 +507,17 @@ fn now_stamp() -> (u64, u32) {
 
 struct ScanBudget {
     started: Instant,
+    time_limit: Duration,
     entries: u64,
     bytes: u64,
     top_level: BTreeSet<String>,
 }
 
 impl ScanBudget {
-    fn automatic() -> Self {
+    fn new(started: Instant, time_limit: Duration) -> Self {
         Self {
-            started: Instant::now(),
+            started,
+            time_limit,
             entries: 0,
             bytes: 0,
             top_level: BTreeSet::new(),
@@ -534,13 +539,13 @@ impl ScanBudget {
 
     fn check(&self) -> Result<(), RootsError> {
         let elapsed = self.started.elapsed();
-        if elapsed <= AUTO_SNAPSHOT_TIME_BUDGET
+        if elapsed <= self.time_limit
             && self.entries <= automatic_snapshot_entry_limit()
             && self.bytes <= AUTO_SNAPSHOT_BYTE_LIMIT
         {
             return Ok(());
         }
-        let reason = if elapsed > AUTO_SNAPSHOT_TIME_BUDGET {
+        let reason = if elapsed > self.time_limit {
             format!("{}ms time budget", elapsed.as_millis())
         } else if self.entries > automatic_snapshot_entry_limit() {
             format!("{} visited entries", self.entries)
@@ -581,33 +586,122 @@ fn automatic_snapshot_entry_limit() -> u64 {
     AUTO_SNAPSHOT_ENTRY_LIMIT
 }
 
-/// Build the working tree without limits for an explicit user-requested
-/// snapshot. Automatic checkpoints use [`build_tree_automatic`] instead.
+/// Build the working tree without the automatic scan limits.
 fn build_tree(repo: &Repository, dir: &Path) -> Result<TreeBuild, RootsError> {
     build_tree_with_budget(repo, dir, None, false)
 }
 
-/// Build the working tree for checkpoint/finalization paths. It is allowed to
-/// skip the root but never to make a user-facing operation hang indefinitely.
-fn build_tree_automatic(repo: &Repository, dir: &Path) -> Result<TreeBuild, RootsError> {
-    build_tree_with_budget(repo, dir, Some(&mut ScanBudget::automatic()), false)
+const PENDING_SNAPSHOT_SCHEMA: &str = "stateroot.automatic-snapshot-skip.v1";
+
+/// Checkout-local record of an incomplete snapshot. Older budget-skip records
+/// are still readable and eligible for the background retry.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct PendingSnapshot {
+    schema_version: String,
+    #[serde(default)]
+    generation: String,
+    pub at: String,
+    pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-fn record_automatic_snapshot_skip(project_dir: &Path, detail: &str) {
-    let path = local_store::root(project_dir).join("local/automatic-snapshot-skip.json");
-    let value = json!({
-        "schema_version": "stateroot.automatic-snapshot-skip.v1",
-        "at": now_rfc3339(),
-        "detail": detail,
-    });
-    let _ = crate::safe_io::atomic_replace_json(&path, &value);
+fn pending_snapshot_path(project_dir: &Path) -> PathBuf {
+    local_store::root(project_dir).join("local/automatic-snapshot-skip.json")
 }
 
-/// A later automatic snap that completes clears the skip record: the budget
-/// incident is then historical, and doctor stops showing it.
-fn clear_automatic_snapshot_skip(project_dir: &Path) {
-    let path = local_store::root(project_dir).join("local/automatic-snapshot-skip.json");
-    let _ = std::fs::remove_file(path);
+pub fn pending_snapshot(project_dir: &Path) -> Result<Option<PendingSnapshot>, RootsError> {
+    let bytes = match std::fs::read(pending_snapshot_path(project_dir)) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+    let pending: PendingSnapshot = serde_json::from_slice(&bytes)?;
+    if pending.schema_version != PENDING_SNAPSHOT_SCHEMA {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unsupported pending snapshot record",
+        )
+        .into());
+    }
+    Ok(Some(pending))
+}
+
+fn update_pending_snapshot(
+    project_dir: &Path,
+    edit: impl FnOnce(&mut Option<PendingSnapshot>),
+) -> Result<Option<PendingSnapshot>, RootsError> {
+    let lock = local_store::root(project_dir).join("local/locks/automatic-snapshot-skip.lock");
+    let _guard = crate::safe_io::ResourceLock::acquire(lock).map_err(std::io::Error::other)?;
+    let previous = pending_snapshot(project_dir)?;
+    let mut current = previous.clone();
+    edit(&mut current);
+    if current != previous {
+        let path = pending_snapshot_path(project_dir);
+        if let Some(record) = &current {
+            crate::safe_io::atomic_replace_json(&path, &serde_json::to_value(record)?)?;
+        } else {
+            std::fs::remove_file(path)?;
+        }
+    }
+    Ok(current)
+}
+
+fn clear_observed_snapshot(project_dir: &Path, observed: Option<&PendingSnapshot>) {
+    if let Some(observed) = observed {
+        if let Err(err) = update_pending_snapshot(project_dir, |current| {
+            if current.as_ref() == Some(observed) {
+                *current = None;
+            }
+        }) {
+            tracing::warn!(%err, "could not clear the pending snapshot record");
+        }
+    }
+}
+
+fn snapshot_retry_due(record: &PendingSnapshot) -> bool {
+    record.retry_after.is_none_or(|at| at <= chrono::Utc::now())
+}
+
+/// Cheap due check used by the existing detached continuity worker.
+pub fn has_due_snapshot_retry(project_dir: &Path) -> bool {
+    pending_snapshot(project_dir)
+        .ok()
+        .flatten()
+        .is_some_and(|record| snapshot_retry_due(&record))
+}
+
+/// Attempt a bounded catch-up of current files. The later snapshot carries
+/// its own timing and never rewrites the root attached to an earlier handoff.
+pub fn retry_pending_snapshot(project_dir: &Path) -> Result<(), RootsError> {
+    let mut claimed = false;
+    let observed = update_pending_snapshot(project_dir, |current| {
+        if let Some(record) = current.as_mut().filter(|record| snapshot_retry_due(record)) {
+            record.retry_after = Some(chrono::Utc::now() + SNAPSHOT_RETRY_DELAY);
+            claimed = true;
+        }
+    })?;
+    let Some(observed) = observed.filter(|_| claimed) else {
+        return Ok(());
+    };
+    match snap_if_changed_with_scan(
+        project_dir,
+        "cli",
+        "deferred snapshot of current checkout",
+        None,
+        Some(DEFERRED_SNAPSHOT_TIME_BUDGET),
+    ) {
+        Ok(_) => clear_observed_snapshot(project_dir, Some(&observed)),
+        Err(err) => {
+            update_pending_snapshot(project_dir, |current| {
+                if let Some(record) = current.as_mut().filter(|record| **record == observed) {
+                    record.detail = format!("background retry: {err}");
+                }
+            })?;
+            return Err(err);
+        }
+    }
+    Ok(())
 }
 
 /// Build the working tree; returns the tree, pin count, bytes, and index
@@ -626,6 +720,7 @@ fn build_tree_with_budget(
     } else {
         load_blob_index(dir, &owner)
     };
+    let odb = repo.odb()?;
     let mut next_index = BlobIndex {
         owner,
         written_at: index_written_at,
@@ -636,6 +731,7 @@ fn build_tree_with_budget(
     #[allow(clippy::too_many_arguments)]
     fn walk(
         repo: &Repository,
+        odb: &git2::Odb<'_>,
         root: &Path,
         dir: &Path,
         rules: &IgnoreRules,
@@ -650,9 +746,8 @@ fn build_tree_with_budget(
         let mut builder = repo.treebuilder(None)?;
         let mut any = false;
         let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)?
-            .flatten()
-            .map(|entry| entry.path())
-            .collect();
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<_, _>>()?;
         entries.sort();
         for path in entries {
             let name = match path.file_name().and_then(|n| n.to_str()) {
@@ -671,18 +766,21 @@ fn build_tree_with_budget(
             if let Some(budget) = budget.as_deref_mut() {
                 budget.observe_entry(&rel)?;
             }
-            if path.is_dir() {
-                // `.stateroot/local/` is the quarantine lane (sync state,
-                // machine-local notes) — it NEVER enters roots, and thus
-                // never syncs. (Files-first doctrine.)
-                if rel == ".stateroot/local" || rel.starts_with(".stateroot/local/") {
-                    continue;
-                }
-                if rules.is_ignored(&rel, true) {
-                    continue;
-                }
+            if rel == ".stateroot/local" || rel.starts_with(".stateroot/local/") {
+                continue;
+            }
+            let meta = match std::fs::metadata(&path) {
+                Ok(meta) => meta,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(err.into()),
+            };
+            if rules.is_ignored(&rel, meta.is_dir()) {
+                continue;
+            }
+            if meta.is_dir() {
                 if let Some(sub) = walk(
                     repo,
+                    odb,
                     root,
                     &path,
                     rules,
@@ -697,14 +795,7 @@ fn build_tree_with_budget(
                     builder.insert(&name, sub, 0o040000)?;
                     any = true;
                 }
-            } else if path.is_file() {
-                if rel.starts_with(".stateroot/local/") {
-                    continue;
-                }
-                if rules.is_ignored(&rel, false) {
-                    continue;
-                }
-                let meta = std::fs::metadata(&path)?;
+            } else if meta.is_file() {
                 let len = meta.len();
                 if let Some(budget) = budget.as_deref_mut() {
                     budget.observe_bytes(len)?;
@@ -723,7 +814,11 @@ fn build_tree_with_budget(
                         *stored_mtime == mtime && *stored_len == len && mtime < index.written_at
                     })
                     .and_then(|(_, _, oid)| git2::Oid::from_str(oid).ok())
-                    .filter(|oid| repo.find_blob(*oid).is_ok());
+                    .filter(|oid| {
+                        odb.read_header(*oid).is_ok_and(|(size, kind)| {
+                            kind == git2::ObjectType::Blob && size as u64 == len
+                        })
+                    });
                 let blob = match reused {
                     Some(oid) => {
                         *hits += 1;
@@ -757,8 +852,9 @@ fn build_tree_with_budget(
         }
     }
     let mut pinned = 0i64;
-    let tree = walk(
+    let walked = walk(
         repo,
+        &odb,
         dir,
         dir,
         &rules,
@@ -769,7 +865,19 @@ fn build_tree_with_budget(
         &mut hits,
         &mut misses,
         &mut pinned,
-    )?;
+    );
+    if matches!(&walked, Err(RootsError::SnapshotBudget(_))) && !next_index.entries.is_empty() {
+        // Progress is only a cache. A retry still walks the entire current
+        // tree. Carry forward unvisited blobs only if their original index
+        // already considered them older than its own write timestamp.
+        for (path, cached) in index.entries {
+            if cached.0 < index.written_at {
+                next_index.entries.entry(path).or_insert(cached);
+            }
+        }
+        write_blob_index(dir, &next_index);
+    }
+    let tree = walked?;
     // An empty tree is legal (state_only roots before any project file).
     let tree = match tree {
         Some(oid) => oid,
@@ -1021,9 +1129,10 @@ pub fn create_root(
     snap_ctx: Option<&crate::snap_context::SnapContext>,
 ) -> Result<(RootManifest, Transition), RootsError> {
     lineage_refname_checked(project_dir)?;
+    let pending = pending_snapshot(project_dir).ok().flatten();
     let repo = ensure_repo(project_dir)?;
     let build = build_tree(&repo, project_dir)?;
-    commit_new_root(
+    let result = commit_new_root(
         &repo,
         project_dir,
         build.tree,
@@ -1031,7 +1140,9 @@ pub fn create_root(
         harness,
         reason,
         snap_ctx,
-    )
+    )?;
+    clear_observed_snapshot(project_dir, pending.as_ref());
+    Ok(result)
 }
 
 /// Outcome of an automatic snap attempt (`snap_if_changed`).
@@ -1057,7 +1168,36 @@ pub fn snap_if_changed(
     reason: &str,
     snap_ctx: Option<&crate::snap_context::SnapContext>,
 ) -> Result<SnapOutcome, RootsError> {
-    snap_if_changed_with_scan(project_dir, harness, reason, snap_ctx, true)
+    lineage_refname_checked(project_dir)?;
+    let pending = pending_snapshot(project_dir).ok().flatten();
+    let result = snap_if_changed_with_scan(
+        project_dir,
+        harness,
+        reason,
+        snap_ctx,
+        Some(AUTO_SNAPSHOT_TIME_BUDGET),
+    );
+    match &result {
+        Ok(_) => clear_observed_snapshot(project_dir, pending.as_ref()),
+        Err(err) => {
+            if let Err(write_err) = update_pending_snapshot(project_dir, |current| {
+                let retry_after = current.as_ref().and_then(|record| record.retry_after);
+                let at = current
+                    .as_ref()
+                    .map_or_else(now_rfc3339, |record| record.at.clone());
+                *current = Some(PendingSnapshot {
+                    schema_version: PENDING_SNAPSHOT_SCHEMA.into(),
+                    generation: uuid::Uuid::now_v7().to_string(),
+                    at,
+                    detail: err.to_string(),
+                    retry_after,
+                });
+            }) {
+                tracing::warn!(%write_err, "could not record pending snapshot");
+            }
+        }
+    }
+    result
 }
 
 /// Snapshot for an explicit, evidence-bearing operation. It uses the same
@@ -1069,7 +1209,10 @@ pub fn snap_if_changed_explicit(
     reason: &str,
     snap_ctx: Option<&crate::snap_context::SnapContext>,
 ) -> Result<SnapOutcome, RootsError> {
-    snap_if_changed_with_scan(project_dir, harness, reason, snap_ctx, false)
+    let pending = pending_snapshot(project_dir).ok().flatten();
+    let result = snap_if_changed_with_scan(project_dir, harness, reason, snap_ctx, None)?;
+    clear_observed_snapshot(project_dir, pending.as_ref());
+    Ok(result)
 }
 
 fn snap_if_changed_with_scan(
@@ -1077,32 +1220,24 @@ fn snap_if_changed_with_scan(
     harness: &str,
     reason: &str,
     snap_ctx: Option<&crate::snap_context::SnapContext>,
-    automatic: bool,
+    time_limit: Option<Duration>,
 ) -> Result<SnapOutcome, RootsError> {
     lineage_refname_checked(project_dir)?;
     let repo = ensure_repo(project_dir)?;
+    let started = Instant::now();
+    let scan = || {
+        let mut budget = time_limit.map(|limit| ScanBudget::new(started, limit));
+        build_tree_with_budget(&repo, project_dir, budget.as_mut(), false)
+    };
     // A racing snap can publish a tree built before another racer finished
     // writing.  CAS makes the roots a chain, but does not by itself make the
     // winning tree include that later filesystem state.  Re-read after each
     // publish and append one reconciled root when real project files moved.
     const RECONCILE_RETRIES: usize = 8;
     for attempt in 0..=RECONCILE_RETRIES {
-        let build = match if automatic {
-            build_tree_automatic(&repo, project_dir)
-        } else {
-            build_tree(&repo, project_dir)
-        } {
-            Err(RootsError::SnapshotBudget(detail)) => {
-                record_automatic_snapshot_skip(project_dir, &detail);
-                return Err(RootsError::SnapshotBudget(detail));
-            }
-            other => other?,
-        };
+        let build = scan()?;
         if let Some(parent) = latest_oid_for(&repo, project_dir)? {
             if !project_files_changed(&repo, parent, build.tree)? {
-                if automatic {
-                    clear_automatic_snapshot_skip(project_dir);
-                }
                 return Ok(SnapOutcome::Unchanged {
                     root: parent.to_string(),
                 });
@@ -1118,22 +1253,14 @@ fn snap_if_changed_with_scan(
             snap_ctx,
         )?;
         let published = git2::Oid::from_str(&manifest.id)?;
-        let observed = match if automatic {
-            build_tree_automatic(&repo, project_dir)
-        } else {
-            build_tree(&repo, project_dir)
-        } {
-            Err(RootsError::SnapshotBudget(detail)) => {
-                record_automatic_snapshot_skip(project_dir, &detail);
-                return Err(RootsError::SnapshotBudget(detail));
+        let observed = scan()?;
+        if project_files_changed(&repo, published, observed.tree)? {
+            if attempt < RECONCILE_RETRIES {
+                continue;
             }
-            other => other?,
-        };
-        if attempt < RECONCILE_RETRIES && project_files_changed(&repo, published, observed.tree)? {
-            continue;
-        }
-        if automatic {
-            clear_automatic_snapshot_skip(project_dir);
+            return Err(RootsError::SnapshotBudget(
+                "checkout kept changing during snapshot verification".into(),
+            ));
         }
         return Ok(SnapOutcome::Created(manifest, Box::new(transition)));
     }
@@ -7643,7 +7770,8 @@ mod tests {
         let _limits = TestCleanupHooks;
         let (_tmp, dir) = project();
         write(&dir, "src/main.rs", "fn main() {}\n");
-        create_root(&dir, "cli", "base", None).expect("base root");
+        let (base, _) = create_root(&dir, "cli", "base", None).expect("base root");
+        write(&dir, ".00-early.txt", "new blob from a partial scan\n");
         write(&dir, "generated/one.txt", "one\n");
         write(&dir, "generated/two.txt", "two\n");
         TEST_AUTO_SNAPSHOT_ENTRY_LIMIT.with(|c| c.set(2));
@@ -7655,23 +7783,46 @@ mod tests {
         assert!(err.to_string().contains("visited entries"), "{err}");
         let skip_record = local_store::root(&dir).join("local/automatic-snapshot-skip.json");
         assert!(skip_record.is_file(), "skip is retained for doctor");
-        // Explicit completion still compares and publishes the current tree
-        // despite the automatic budget, without clearing its skip record.
+        assert_eq!(latest_root(&dir).unwrap(), Some(base.id));
+        let repo = ensure_repo(&dir).unwrap();
+        let index = load_blob_index(&dir, &repo.commondir().canonicalize().unwrap());
+        let (_, _, cached) = index
+            .entries
+            .get(".00-early.txt")
+            .expect("partial blob saved");
+        assert_eq!(
+            repo.find_blob(cached.parse().unwrap()).unwrap().content(),
+            b"new blob from a partial scan\n"
+        );
+        // Explicit completion captures the pending changes even though they
+        // exceeded the foreground budget.
         let outcome = snap_if_changed_explicit(&dir, "cli", "completion", None)
             .expect("explicit completion snap");
         assert!(matches!(outcome, SnapOutcome::Created(..)));
         assert!(
-            skip_record.is_file(),
-            "only a healthy auto scan clears the warning"
-        );
-        // A later automatic snap that completes clears the retained skip —
-        // doctor must not report yesterday's incident as today's state.
-        TEST_AUTO_SNAPSHOT_ENTRY_LIMIT.with(|c| c.set(0));
-        snap_if_changed(&dir, "cli", "automatic", None).expect("recovery snap");
-        assert!(
             !skip_record.exists(),
-            "successful automatic snap clears the skip record"
+            "successful explicit snapshot clears the observed skip record"
         );
+    }
+
+    #[test]
+    fn successful_capture_cannot_clear_a_newer_pending_record() {
+        let _limits = TestCleanupHooks;
+        let (_tmp, dir) = project();
+        write(&dir, "changes.txt", "fixture");
+        TEST_AUTO_SNAPSHOT_ENTRY_LIMIT.with(|c| c.set(1));
+        snap_if_changed(&dir, "cli", "first", None).unwrap_err();
+        let first = pending_snapshot(&dir).unwrap().unwrap();
+        snap_if_changed(&dir, "cli", "second", None).unwrap_err();
+        let second = pending_snapshot(&dir).unwrap().unwrap();
+        assert_ne!(first, second);
+        clear_observed_snapshot(&dir, Some(&first));
+        assert_eq!(pending_snapshot(&dir).unwrap(), Some(second));
+        assert!(retry_pending_snapshot(&dir).is_err());
+        assert!(!has_due_snapshot_retry(&dir));
+        let cooling_down = pending_snapshot(&dir).unwrap().unwrap();
+        retry_pending_snapshot(&dir).unwrap();
+        assert_eq!(pending_snapshot(&dir).unwrap(), Some(cooling_down));
     }
 
     #[test]

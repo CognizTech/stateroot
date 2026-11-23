@@ -611,10 +611,17 @@
         "skills",
         "hooks",
         "delegation",
-        "external_llp"
+        "external_llp",
+        "mcp",
+        "native_sessions"
       ],
       "mcp_config": {
-        "global": [],
+        "global": [
+          {
+            "path": ".openclaw/openclaw.json",
+            "shape": "openclaw"
+          }
+        ],
         "project": []
       }
     },

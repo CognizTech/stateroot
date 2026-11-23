@@ -19,7 +19,7 @@ Automatic harnesses inject persona + USER.md + work context onto the first usabl
 | CodeBuddy | Automatic | Session-start and prompt-submit JSON context; PreCompact injects, PostCompact stays observational |
 | Cursor | Automatic | `sessionStart` injects initially; the first successful `postToolUse` restores an armed identity after compaction (`beforeSubmitPrompt` and `preCompact` cannot inject context) |
 | Kimi Code | Automatic | Identity rides UserPromptSubmit |
-| OpenClaw | Automatic | `before_prompt_build` pulls digest stdout |
+| OpenClaw | Automatic | `before_prompt_build` prepends digest stdout; the generated plugin sends the host or launch working directory and the session key, so the hook resolves the agent's own context and delivery is per-conversation |
 | OpenCode, OMP, pi | Automatic | Generated plugin consumes hook stdout on the first prompt |
 | Gemini CLI | Automatic | Session-start only (no prompt-submit fallback) |
 | Antigravity | Automatic | `SessionStart` injects via the `injectSteps`/`systemMessage` envelope; on hosts that never fire `SessionStart`, the first-seen `PreInvocation` delivers once — at any invocation number |
@@ -93,6 +93,14 @@ Automatic harnesses inject persona + USER.md + work context onto the first usabl
 - Hermes gates each (event, command) hook pair behind its own first-use consent prompt — the operator answers it in the harness on first run. The installer never sets `hooks_auto_accept`; that choice belongs to the operator, and StateRoot adds no consent step of its own.
 - A `delegate_task` child is its own agent with its own session: its evidence is captured under its own native session id, and it never consumes its parent's identity digest or finalizes its parent's session.
 - Proof level: fixtures and parser/wire tests. Native Hermes app execution remains unrun.
+
+## OpenClaw
+
+- Hooks: generated native plugin at `~/.openclaw/extensions/stateroot` (`index.ts` + `openclaw.plugin.json`, discovery root must be `extensions/`). `stateroot install` enables `plugins.entries.stateroot` and merges `hooks.allowConversationAccess` plus per-hook budgets (`hooks.timeouts.before_prompt_build` 90s, `agent_end` and `before_compaction` 60s) into `~/.openclaw/openclaw.json`; the plugin embeds the absolute CLI path.
+- Context: `before_prompt_build` prepends the digest (`stateroot hook user_prompt_submit --harness openclaw`). Every hook sends the host or launch working directory and the session key, so the hook resolves the agent's own context, delivery dedupes per conversation, and a general-purpose agent outside a project keeps the identity-only branch. Compaction arms the next prompt; tool, turn-end and subagent events feed captures and boundaries.
+- MCP: nested `mcp.servers` in `~/.openclaw/openclaw.json` — the same file as plugins, hooks and gateway settings, so writes are surgical and never restore a whole-file backup. `stateroot install` registers `stateroot mcp-stdio`; `stateroot mcp sync` pools OpenClaw servers and projects canonical ones back while preserving foreign servers and unrelated config.
+- Sessions: `~/.openclaw/agents/<agent>/agent/*.sqlite` (`transcript_events`) is the live store; legacy JSONL under `agents/*/sessions` is read as history with SQLite taking precedence.
+- Proof level: verified live against OpenClaw 2026.11.7 on WSL — install, digest delivery, per-session dedupe, boundary root, SQLite session read, MCP sync and install.
 
 ## Antigravity
 

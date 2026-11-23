@@ -224,6 +224,10 @@ fn read_servers(path: &Path, shape: &str) -> Result<BTreeMap<String, Value>, Str
     if shape == "cordis" {
         return read_cordis_patch_servers(path);
     }
+    if shape == "openclaw" {
+        let map = harness_install::read_openclaw_mcp_servers(path).map_err(|e| e.to_string())?;
+        return Ok(map.into_iter().collect());
+    }
     if shape == "mcp_servers" {
         let map = read_named_yaml_mcp_servers(path).map_err(|e| e.to_string())?;
         return Ok(map.into_iter().collect());
@@ -314,6 +318,10 @@ fn cordis_config(name: &str, entry: &Value) -> Result<Value, String> {
 fn write_server(path: &Path, shape: &str, name: &str, entry: &Value) -> Result<bool, String> {
     if shape == "cordis" {
         return harness_install::dsh::merge_mcp_server(path, name, &cordis_config(name, entry)?)
+            .map_err(|error| error.to_string());
+    }
+    if shape == "openclaw" {
+        return harness_install::merge_openclaw_mcp_entry(path, name, entry)
             .map_err(|error| error.to_string());
     }
     if shape == "mcp_servers" {
@@ -1729,5 +1737,24 @@ mod detection_gating_tests {
                 .any(|a| a.action == "projected" && !a.detail.contains("statesmith")),
             "no foreign projections expected: {actions:#?}"
         );
+    }
+    #[test]
+    fn openclaw_shape_reads_and_writes_nested_mcp_servers() {
+        let home = tempfile::tempdir().expect("home");
+        let path = home.path().join("openclaw.json");
+        std::fs::write(
+            &path,
+            r#"{"plugins":{"entries":{"x":{"enabled":true}}},"mcp":{"servers":{"foreign":{"url":"https://example.test/mcp"}}}}"#,
+        )
+        .expect("config");
+        let entry = json!({"command": "stateroot", "args": ["mcp-stdio"]});
+        assert!(write_server(&path, "openclaw", "stateroot", &entry).expect("write"));
+        let servers = read_servers(&path, "openclaw").expect("read");
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers["stateroot"], entry);
+        assert!(servers.contains_key("foreign"));
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("doc")).expect("json");
+        assert_eq!(doc["plugins"]["entries"]["x"]["enabled"], json!(true));
     }
 }

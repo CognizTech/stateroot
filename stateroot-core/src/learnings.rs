@@ -13,6 +13,8 @@
 //! Memory notes share the scoping ladder: `memory.md` per scope with
 //! `<!-- visibility: shared|private -->` markers on the note lines.
 
+use std::collections::HashSet;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::local_store;
@@ -272,8 +274,16 @@ fn read_dir(dir: &Path, status_override: Option<&str>) -> Vec<Learning> {
 /// Read all learnings for one scope (active files + candidates).
 pub fn read_scope(project_dir: &Path, home: &Path, scope: &str) -> Vec<Learning> {
     let root = scope_root(project_dir, home, scope);
+    // Read the source first. A move publishes its destination before removing
+    // the source, so an overlapping reader can still see the record.
+    let candidates = read_dir(&root.join(CANDIDATES_DIR), Some("candidate"));
     let mut out = read_dir(&root, None);
-    out.extend(read_dir(&root.join(CANDIDATES_DIR), Some("candidate")));
+    let published: HashSet<_> = out.iter().map(|row| row.id.as_str()).collect();
+    let pending: Vec<_> = candidates
+        .into_iter()
+        .filter(|row| !published.contains(row.id.as_str()))
+        .collect();
+    out.extend(pending);
     out.sort_by(|a, b| {
         b.confidence
             .partial_cmp(&a.confidence)
@@ -311,13 +321,7 @@ pub fn append_candidate(
     let dir = scope_root(project_dir, home, scope).join(CANDIDATES_DIR);
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{}.md", learning.category));
-    let mut body = std::fs::read_to_string(&path).unwrap_or_default();
-    if !body.ends_with('\n') && !body.is_empty() {
-        body.push('\n');
-    }
-    body.push_str(&learning.render_bullet());
-    body.push('\n');
-    std::fs::write(path, body)?;
+    publish_bullet(&path, learning)?;
     Ok(true)
 }
 
@@ -353,13 +357,7 @@ pub fn activate_learning(
     let root = scope_root(project_dir, home, scope);
     std::fs::create_dir_all(&root)?;
     let path = root.join(format!("{}.md", learning.category));
-    let mut body = std::fs::read_to_string(&path).unwrap_or_default();
-    if !body.ends_with('\n') && !body.is_empty() {
-        body.push('\n');
-    }
-    body.push_str(&learning.render_bullet());
-    body.push('\n');
-    std::fs::write(path, body)?;
+    publish_bullet(&path, &learning)?;
     Ok((learning.id, true))
 }
 
@@ -389,20 +387,35 @@ fn promote_locked(
     else {
         return Ok(false);
     };
-    // Remove from candidates file.
     let candidates_path = root
         .join(CANDIDATES_DIR)
         .join(format!("{}.md", learning.category));
-    rewrite_without_id(&candidates_path, &learning.id)?;
-    // Append active bullet.
+    let published = read_dir(&root, None);
+    if published
+        .iter()
+        .any(|row| row.id == learning.id && row.status == "rejected")
+    {
+        return Ok(false);
+    }
     learning.status = "active".into();
     learning.active_at_root = crate::roots::latest_root(project_dir)
         .ok()
         .flatten()
         .unwrap_or_default();
-    // Supersede any prior active learning with the same normalized statement.
+    // A retry after publication uses the committed learning, including any
+    // subsequent edit and its original activation root.
+    if let Some(active) = published
+        .iter()
+        .find(|row| row.id == learning.id && row.status == "active")
+    {
+        learning = active.clone();
+    } else {
+        let active_path = root.join(format!("{}.md", learning.category));
+        publish_bullet(&active_path, &learning)?;
+    }
+    // Keep the prior active learning until its successor is durable.
     let normalized = normalize(&learning.statement);
-    for prior in read_dir(&root, None) {
+    for prior in published {
         if prior.id != learning.id
             && prior.status == "active"
             && normalize(&prior.statement) == normalized
@@ -415,14 +428,7 @@ fn promote_locked(
             )?;
         }
     }
-    let active_path = root.join(format!("{}.md", learning.category));
-    let mut body = std::fs::read_to_string(&active_path).unwrap_or_default();
-    if !body.ends_with('\n') && !body.is_empty() {
-        body.push('\n');
-    }
-    body.push_str(&learning.render_bullet());
-    body.push('\n');
-    std::fs::write(active_path, body)?;
+    rewrite_without_id(&candidates_path, &learning.id)?;
     Ok(true)
 }
 
@@ -445,13 +451,16 @@ pub fn reject(
     let candidates_path = root
         .join(CANDIDATES_DIR)
         .join(format!("{}.md", learning.category));
-    rewrite_without_id(&candidates_path, &learning.id)?;
+    if read_dir(&root, None)
+        .iter()
+        .any(|row| row.id == learning.id && row.status == "active")
+    {
+        return Ok(false);
+    }
     let mut rejected = learning.clone();
     rejected.status = "rejected".into();
-    let mut body = std::fs::read_to_string(root.join(REJECTED_FILE)).unwrap_or_default();
-    body.push_str(&rejected.render_bullet());
-    body.push('\n');
-    std::fs::write(root.join(REJECTED_FILE), body)?;
+    publish_bullet(&root.join(REJECTED_FILE), &rejected)?;
+    rewrite_without_id(&candidates_path, &learning.id)?;
     Ok(true)
 }
 
@@ -491,12 +500,32 @@ pub fn edit(
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                std::fs::write(path, rebuilt + "\n")?;
+                crate::safe_io::atomic_replace(&path, (rebuilt + "\n").as_bytes())?;
                 return Ok(true);
             }
         }
     }
     Ok(false)
+}
+
+fn publish_bullet(path: &Path, learning: &Learning) -> io::Result<()> {
+    let mut body = match std::fs::read_to_string(path) {
+        Ok(body) => body,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err),
+    };
+    if body
+        .lines()
+        .any(|line| parse_bullet(line, &learning.category).is_some_and(|row| row.id == learning.id))
+    {
+        return Ok(());
+    }
+    if !body.ends_with('\n') && !body.is_empty() {
+        body.push('\n');
+    }
+    body.push_str(&learning.render_bullet());
+    body.push('\n');
+    crate::safe_io::atomic_replace(path, body.as_bytes())
 }
 
 fn mark_superseded(path: &Path, id: &str, superseded_by: &str) -> Result<(), LearningsError> {
@@ -505,9 +534,7 @@ fn mark_superseded(path: &Path, id: &str, superseded_by: &str) -> Result<(), Lea
         .and_then(|s| s.to_str())
         .unwrap_or("general")
         .to_string();
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Ok(());
-    };
+    let text = std::fs::read_to_string(path)?;
     let rebuilt: String = text
         .lines()
         .map(|line| {
@@ -521,7 +548,7 @@ fn mark_superseded(path: &Path, id: &str, superseded_by: &str) -> Result<(), Lea
         })
         .collect::<Vec<_>>()
         .join("\n");
-    std::fs::write(path, format!("{rebuilt}\n"))?;
+    crate::safe_io::atomic_replace(path, format!("{rebuilt}\n").as_bytes())?;
     Ok(())
 }
 
@@ -531,8 +558,10 @@ fn rewrite_without_id(path: &Path, id: &str) -> Result<(), LearningsError> {
         .and_then(|s| s.to_str())
         .unwrap_or("general")
         .to_string();
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Ok(());
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err.into()),
     };
     let kept: Vec<&str> = text
         .lines()
@@ -542,7 +571,7 @@ fn rewrite_without_id(path: &Path, id: &str) -> Result<(), LearningsError> {
                 .unwrap_or(true)
         })
         .collect();
-    std::fs::write(path, kept.join("\n") + "\n")?;
+    crate::safe_io::atomic_replace(path, (kept.join("\n") + "\n").as_bytes())?;
     Ok(())
 }
 
@@ -989,6 +1018,37 @@ mod tests {
             .find(|l| l.id == learning.id && l.status == "active")
             .expect("active learning");
         assert!(!promoted.active_at_root.is_empty());
+    }
+
+    #[test]
+    fn promotion_retains_candidate_on_failed_write_and_retries_cleanup() {
+        let (project, home) = dirs();
+        let scope = "project";
+        let candidate =
+            Learning::candidate("Prefer a durable receipt", "checks", 0.8, "fixture", scope);
+        let dir = scope_root(project.path(), home.path(), scope);
+        let active = dir.join("checks.md");
+        append_candidate(project.path(), home.path(), scope, &candidate).unwrap();
+        std::fs::create_dir(&active).unwrap();
+        assert!(promote(project.path(), home.path(), scope, &candidate.id).is_err());
+        assert_eq!(
+            read_scope(project.path(), home.path(), scope).as_slice(),
+            std::slice::from_ref(&candidate)
+        );
+
+        // The destination is visible even if the worker stopped before cleanup.
+        std::fs::remove_dir(&active).unwrap();
+        let mut published = candidate.clone();
+        published.status = "active".into();
+        published.active_at_root = "retained-original-root".into();
+        publish_bullet(&active, &published).unwrap();
+        assert_eq!(
+            read_scope(project.path(), home.path(), scope).as_slice(),
+            std::slice::from_ref(&published)
+        );
+        assert!(promote(project.path(), home.path(), scope, &candidate.id).unwrap());
+        assert_eq!(read_scope(project.path(), home.path(), scope), [published]);
+        assert!(read_dir(&dir.join(CANDIDATES_DIR), Some("candidate")).is_empty());
     }
 
     #[test]

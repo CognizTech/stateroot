@@ -774,10 +774,12 @@ fn mcp_component(home: &Path, quirk: &HarnessQuirk) -> ComponentHealth {
     }
     let root_key = match target.shape {
         super::registry::McpShape::ServersJson => "servers",
+        super::registry::McpShape::OpenClawMcpServers => "mcp.servers",
         _ => "mcpServers",
     };
     let servers = match target.shape {
         super::registry::McpShape::YamlMcpServers => super::read_named_yaml_mcp_servers(&path),
+        super::registry::McpShape::OpenClawMcpServers => super::read_openclaw_mcp_servers(&path),
         _ => super::read_named_mcp_servers_json(&path, root_key),
     };
     match servers {
